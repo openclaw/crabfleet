@@ -41,6 +41,7 @@ const sessionLayoutStorageKey = "crabbox-session-layout-v1";
 const emptyState = {
   cards: [],
   interactiveSessions: [],
+  fleet: null,
   allow: [],
   repos: [],
   workflows: [],
@@ -1214,6 +1215,11 @@ function BoardPage(props) {
 
 function FleetPage(props) {
   const sessions = props.state.interactiveSessions || [];
+  const fleet = props.state.fleet;
+  const totals = fleet?.totals || {};
+  const fleetSessionsById = new Map(
+    (fleet?.sessions || []).map((session) => [session.id, session]),
+  );
   const groups = groupedFleetSessions(sessions);
   const ownerCount = groups.length;
   const repos = props.state.repos?.length || 0;
@@ -1253,10 +1259,11 @@ function FleetPage(props) {
         </div>
       </div>
       <div class="status-strip">
-        <Metric label="Running" value={activeFleetCount(sessions)} />
+        <Metric label="Running" value={totals.active ?? activeFleetCount(sessions)} />
         <Metric label="People" value={ownerCount} />
-        <Metric label="Crabboxes" value={sessions.length} />
+        <Metric label="Crabboxes" value={totals.sessions ?? sessions.length} />
       </div>
+      <FleetControlPanel fleet={fleet} repos={repos} />
       <div class="dashboard-grid">
         <DashboardChart
           title="OPENCLAW QUEUE"
@@ -1283,7 +1290,7 @@ function FleetPage(props) {
                 {items.map((session) => (
                   <FleetBox
                     key={session.id}
-                    session={session}
+                    session={{ ...session, fleet: fleetSessionsById.get(session.id) }}
                     openSessionGrid={props.openSessionGrid}
                   />
                 ))}
@@ -1310,9 +1317,40 @@ function FleetPage(props) {
   );
 }
 
+function FleetControlPanel({ fleet, repos }) {
+  const totals = fleet?.totals || {};
+  const egress = fleet?.egress || {};
+  const registry = fleet?.registryAvailable === false ? "registry unavailable" : "registry online";
+  return (
+    <section class="fleet-control-panel" aria-label="Fleet control plane">
+      <div>
+        <div class="section-kicker">CONTROL PLANE</div>
+        <h2>{fleet?.canonicalUrl || `https://${productDomain}`}</h2>
+        <p>
+          Tracks every visible Codex crabbox, its runtime, log archive, attach state, and redacted
+          sandbox egress policy.
+        </p>
+      </div>
+      <div class="fleet-control-grid">
+        <Metric label="Ready" value={totals.ready ?? 0} />
+        <Metric label="Provisioning" value={totals.provisioning ?? 0} />
+        <Metric label="Archived" value={totals.archived ?? 0} />
+        <Metric label="Policies" value={egress.sessionsWithPolicy ?? 0} />
+      </div>
+      <div class="fleet-control-meta">
+        <span>{registry}</span>
+        <span>{egress.defaultHostCount ?? 0} default egress hosts</span>
+        <span>{repos} allowed repos</span>
+        <a href="/docs/spec-v2">Spec v2</a>
+      </div>
+    </section>
+  );
+}
+
 function FleetBox({ session, openSessionGrid }) {
   const capabilities = runCapabilities(session);
   const archiveCount = session.logArchive?.eventCount || session.logs?.length || 0;
+  const fleetPolicy = session.fleet?.policy;
   return (
     <article class="fleet-box">
       <header class="fleet-box-head">
@@ -1326,6 +1364,7 @@ function FleetBox({ session, openSessionGrid }) {
         <span>{session.runtime || "crabbox"}</span>
         {capabilities.vnc ? <span>webvnc</span> : null}
         {archiveCount ? <span>{archiveCount} logs</span> : null}
+        {fleetPolicy?.present ? <span>{fleetPolicy.allowedHostCount} egress</span> : null}
       </div>
       <p class="fleet-box-event">{session.lastEvent || "Waiting for crabbox"}</p>
       <code>

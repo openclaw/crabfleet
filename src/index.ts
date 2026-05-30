@@ -36,6 +36,7 @@ import {
   terminalSubmittedLine,
   type TerminalInputState,
 } from "./terminal-multiplayer";
+import { buildFleetState, type FleetSandboxPolicySummary, type FleetState } from "./fleet-state";
 import { githubRequestCanUseRepoCredential, matchesAnyHost } from "./sandbox-security";
 import {
   APP_HTML,
@@ -45,6 +46,8 @@ import {
   OG_IMAGE_PNG_BASE64,
   SPEC_HTML,
   SPEC_MARKDOWN,
+  SPEC_V2_HTML,
+  SPEC_V2_MARKDOWN,
 } from "./generated";
 
 type Role = "viewer" | "maintainer" | "owner";
@@ -364,6 +367,7 @@ type InteractiveProvisionResult = {
 
 type SandboxCredentialPolicy = {
   allowedHosts: string[];
+  githubCredentialSource?: "none" | "session" | "worker";
   githubRepo: string;
   githubRepoNodeId?: string;
   githubTokenCiphertext?: string;
@@ -372,6 +376,11 @@ type SandboxCredentialPolicy = {
   owner: string;
   sandboxId: string;
   sessionId: string;
+};
+
+type SandboxFleetPolicyResult = {
+  available: boolean;
+  policies: FleetSandboxPolicySummary[];
 };
 
 type SandboxCheckpoint = {
@@ -944,6 +953,16 @@ export class SessionControlDO extends DurableObject<RuntimeEnv> {
         return json({ ok: true });
       }
 
+      if (request.method === "GET" && url.pathname === "/api/session-control/policies") {
+        const entries = await this.ctx.storage.list<SandboxCredentialPolicy>({
+          prefix: "sandbox:",
+        });
+        const policies = dedupeSandboxPolicies([...entries.values()]).map((policy) =>
+          redactSandboxPolicy(policy, Boolean(this.env.GITHUB_TOKEN)),
+        );
+        return json({ policies });
+      }
+
       const egressMatch = url.pathname.match(/^\/api\/session-control\/egress\/([^/]+)$/);
       if (request.method === "GET" && egressMatch) {
         const sandboxId = decodeURIComponent(egressMatch[1] ?? "");
@@ -1002,6 +1021,65 @@ export class SessionControlDO extends DurableObject<RuntimeEnv> {
   }
 }
 
+function dedupeSandboxPolicies(policies: SandboxCredentialPolicy[]): SandboxCredentialPolicy[] {
+  const seen = new Set<string>();
+  const result: SandboxCredentialPolicy[] = [];
+  for (const policy of policies.sort((a, b) => a.sandboxId.localeCompare(b.sandboxId))) {
+    const key = `${policy.sessionId}:${policy.owner}:${policy.githubRepo}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    result.push(policy);
+  }
+  return result;
+}
+
+function redactSandboxPolicy(
+  policy: SandboxCredentialPolicy,
+  workerCredentialAvailable = false,
+): FleetSandboxPolicySummary {
+  const githubCredentialSource =
+    policy.githubCredentialSource ??
+    (policy.githubTokenCiphertext ? "session" : workerCredentialAvailable ? "worker" : "none");
+  return {
+    allowedHostCount: policy.allowedHosts.length,
+    allowedHosts: [...policy.allowedHosts].sort(),
+    githubCredentialSource,
+    githubRepo: policy.githubRepo,
+    hasGithubRepoNodeId: Boolean(policy.githubRepoNodeId),
+    hasGithubToken: githubCredentialSource !== "none",
+    openAIBaseUrlHost: urlHost(policy.openAIBaseUrl),
+    openAIOrgConfigured: Boolean(policy.openAIOrgId),
+    owner: policy.owner,
+    sandboxId: policy.sandboxId,
+    sessionId: policy.sessionId,
+  };
+}
+
+function urlHost(value: string | undefined): string | null {
+  if (!value) return null;
+  try {
+    return new URL(value).host;
+  } catch {
+    return null;
+  }
+}
+
+async function readSandboxFleetPolicies(env: RuntimeEnv): Promise<SandboxFleetPolicyResult> {
+  const stub = sandboxControlStub(env);
+  if (!stub) return { available: false, policies: [] };
+  try {
+    const response = await stub.fetch("https://crabfleet.internal/api/session-control/policies");
+    if (!response.ok) return { available: false, policies: [] };
+    const body = (await response.json()) as { policies?: FleetSandboxPolicySummary[] };
+    return {
+      available: true,
+      policies: Array.isArray(body.policies) ? body.policies : [],
+    };
+  } catch {
+    return { available: false, policies: [] };
+  }
+}
+
 export default {
   async fetch(request: Request, env: RuntimeEnv): Promise<Response> {
     const url = new URL(request.url);
@@ -1042,6 +1120,18 @@ export default {
 
       if (url.pathname === "/docs/spec.md") {
         return text(SPEC_MARKDOWN, "text/markdown; charset=utf-8");
+      }
+
+      if (url.pathname === "/docs/spec-v2.md") {
+        return text(SPEC_V2_MARKDOWN, "text/markdown; charset=utf-8");
+      }
+
+      if (url.pathname === "/docs/spec-v2" || url.pathname === "/docs/spec-v2/") {
+        if (wantsMarkdown(request)) {
+          return text(SPEC_V2_MARKDOWN, "text/markdown; charset=utf-8", { vary: "Accept" });
+        }
+
+        return text(SPEC_V2_HTML, "text/html; charset=utf-8", { vary: "Accept" });
       }
 
       if (
@@ -1253,6 +1343,11 @@ async function api(request: Request, env: RuntimeEnv): Promise<Response> {
 
   if (request.method === "GET" && url.pathname === "/api/state") {
     return json(await readState(request, env, user));
+  }
+
+  if (request.method === "GET" && url.pathname === "/api/fleet") {
+    requireRole(user, "viewer");
+    return json({ fleet: await readFleetState(env, user) });
   }
 
   if (request.method === "GET" && url.pathname === "/api/github/refs") {
@@ -2100,6 +2195,7 @@ async function readState(
     user.role === "owner" ? readWorkflowSummaries(env) : Promise.resolve([]),
   ]);
   const repoNames = sortRepos(repos.map((row) => row.repo));
+  const fleet = await readFleetState(env, user, interactiveSessions);
 
   return {
     user,
@@ -2113,7 +2209,26 @@ async function readState(
     workflows,
     cards,
     interactiveSessions,
+    fleet,
   };
+}
+
+async function readFleetState(
+  env: RuntimeEnv,
+  user: User,
+  sessions?: InteractiveSession[],
+): Promise<FleetState> {
+  const [interactiveSessions, policyResult] = await Promise.all([
+    sessions ? Promise.resolve(sessions) : readInteractiveSessions(env, user),
+    readSandboxFleetPolicies(env),
+  ]);
+  return buildFleetState(interactiveSessions, policyResult.policies, {
+    canonicalUrl: appCanonicalOrigin,
+    productUrl: "https://clawfleet.ai",
+    defaultEgressHosts: defaultSandboxEgressHosts,
+    generatedAt: Date.now(),
+    registryAvailable: policyResult.available,
+  });
 }
 
 async function createInteractiveSession(
@@ -4172,11 +4287,17 @@ async function registerSandboxCredentialPolicy(
     );
   }
   const effectiveGithubToken = githubToken ?? env.GITHUB_TOKEN;
+  const githubCredentialSource = githubTokenCiphertext
+    ? "session"
+    : env.GITHUB_TOKEN
+      ? "worker"
+      : "none";
   const githubRepoNodeId = effectiveGithubToken
     ? await fetchGithubRepoNodeId(session.repo, effectiveGithubToken)
     : null;
   const policy: SandboxCredentialPolicy = {
     allowedHosts: sandboxBackupAllowedHosts(env),
+    githubCredentialSource,
     githubRepo: session.repo,
     owner: session.owner,
     sandboxId,

@@ -456,11 +456,28 @@ Returns full state. Owner state includes workflow summaries with:
 
 The stored prompt body is not returned in state summaries.
 
+### GET /api/fleet
+
+Returns the redacted fleet registry for the signed-in viewer.
+
+Includes:
+
+- `canonicalUrl`
+- `productUrl`
+- `registryAvailable`
+- `egress`
+- `totals`
+- `sessions`
+
+Secrets, ciphertext, and token values are never returned.
+
 ## Static Routes
 
 - `/` and `/app`: app shell.
 - `/docs`, `/docs/`, `/docs/spec`, `/docs/spec/`: generated docs page, or Markdown when `Accept` includes `text/markdown`.
 - `/docs/spec.md`: Markdown spec.
+- `/docs/spec-v2`, `/docs/spec-v2/`: generated v2 spec page, or Markdown when `Accept` includes `text/markdown`.
+- `/docs/spec-v2.md`: Markdown v2 spec.
 - `/crabbox-logo.png`: logo.
 - `/vendor/ghostty-web.js`: local Ghostty WASM bundle.
 

@@ -15,6 +15,7 @@
       "src/app",
       "src/assets",
       "docs/spec.md",
+      "docs/spec-v2.md",
     ],
   },
   "account_id": "91b59577e757131d68d55a471fe32aca",
