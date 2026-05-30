@@ -735,6 +735,59 @@
         grid-template-columns: repeat(2, minmax(0, 1fr));
         gap: 16px;
       }
+      .fleet-control-panel {
+        display: grid;
+        grid-template-columns: minmax(0, 1.1fr) minmax(280px, 0.9fr);
+        gap: 16px;
+        align-items: start;
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        background: var(--dashboard-surface);
+        padding: 18px;
+      }
+      .fleet-control-panel h2 {
+        margin: 8px 0 0;
+        color: var(--ink);
+        font-size: 20px;
+        font-weight: 720;
+      }
+      .fleet-control-panel p {
+        margin: 7px 0 0;
+        max-width: 620px;
+        color: var(--muted);
+        font-size: 14px;
+        line-height: 1.5;
+      }
+      .fleet-control-grid {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 10px;
+      }
+      .fleet-control-grid .metric {
+        padding: 11px 12px;
+      }
+      .fleet-control-grid .metric strong {
+        font-size: 21px;
+      }
+      .fleet-control-meta {
+        grid-column: 1 / -1;
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px;
+      }
+      .fleet-control-meta span,
+      .fleet-control-meta a {
+        min-height: 26px;
+        border: 1px solid var(--line);
+        border-radius: 6px;
+        padding: 4px 8px;
+        color: var(--muted);
+        font-size: 12px;
+        font-weight: 650;
+      }
+      .fleet-control-meta a {
+        color: var(--primary);
+      }
       .chart-card {
         border: 1px solid var(--line);
         border-radius: 8px;
@@ -1901,6 +1954,9 @@
         .dashboard-grid {
           grid-template-columns: 1fr;
         }
+        .fleet-control-panel {
+          grid-template-columns: 1fr;
+        }
         .board {
           grid-template-columns: repeat(2, minmax(248px, 1fr));
         }
@@ -1955,6 +2011,7 @@
         }
         .toolbar,
         .status-strip,
+        .fleet-control-grid,
         .dev-identity-panel,
         .board,
         .run-layout,

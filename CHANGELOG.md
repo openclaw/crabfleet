@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Add the Crabfleet v2 fleet-control spec, redacted fleet registry API, and dashboard summary for visible Codex crabboxes.
 - Move the OpenClaw app/API canonical URL to `clawfleet.openclaw.ai`, keep legacy app hosts redirecting there, and reserve `clawfleet.ai` for the product page.
 - Route the built-in interactive provision hook in-process and default new sessions to Cloudflare Sandbox so production creates usable Codex terminals without a crabbox adapter.
 - Keep Cloudflare Sandbox model and GitHub credentials in the Worker path, add DO-backed sandbox credential/checkpoint state, and add CLI lifecycle commands for doctor/status/stop/checkpoint/restore.
