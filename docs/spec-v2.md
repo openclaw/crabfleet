@@ -209,10 +209,10 @@ Archived sessions have R2 log archive metadata or archived event counts.
 - [x] Add changelog entry.
 - [x] Run local checks.
 - [x] Run autoreview and fix accepted findings.
-- [ ] Open PR.
-- [ ] Merge PR.
-- [ ] Verify production deployment.
-- [ ] Live test canonical URL and v2 docs/API routes.
+- [x] Open PR.
+- [x] Merge PR.
+- [x] Verify production deployment.
+- [x] Live test canonical URL and v2 docs/API routes.
 
 ## Test Plan
 
@@ -229,6 +229,14 @@ Local result:
 - `pnpm check`: passed.
 - `go test ./...`: passed.
 - `pnpm exec wrangler deploy --dry-run`: passed.
+- PR: <https://github.com/openclaw/crabfleet/pull/15>.
+- Landed: `72f205b`.
+- Deploy workflow: `deploy-worker` run `26694996052` passed.
+- Pages workflow: run `26694996080` passed.
+- Live smoke: `https://clawfleet.openclaw.ai/healthz` returned `200`.
+- Live smoke: `https://clawfleet.openclaw.ai/docs/spec-v2` returned this spec.
+- Live smoke: unauthenticated `https://clawfleet.openclaw.ai/api/fleet` returned `401`.
+- Product split: `https://clawfleet.ai/` stayed the product-page redirect shell.
 
 Autoreview:
 
