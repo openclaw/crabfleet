@@ -38,6 +38,7 @@ import {
 } from "./terminal-multiplayer";
 import { buildFleetState, type FleetSandboxPolicySummary, type FleetState } from "./fleet-state";
 import { githubRequestCanUseRepoCredential, matchesAnyHost } from "./sandbox-security";
+import { githubOAuthRedirectUri } from "./oauth";
 import {
   APP_HTML,
   GHOSTTY_BROWSER_EXTERNAL_JS,
@@ -63,6 +64,7 @@ type RuntimeEnv = Env & {
   CRABBOX_BOOTSTRAP_TOKEN?: string;
   GITHUB_CLIENT_ID?: string;
   GITHUB_CLIENT_SECRET?: string;
+  GITHUB_REDIRECT_URI?: string;
   GITHUB_TOKEN?: string;
   GITHUB_ORG?: string;
   CRABBOX_INTERACTIVE_PROVISION_URL?: string;
@@ -1590,7 +1592,7 @@ async function githubLogin(request: Request, env: RuntimeEnv): Promise<Response>
   }
 
   const url = new URL(request.url);
-  const redirectUri = `${url.origin}/auth/github/callback`;
+  const redirectUri = githubOAuthRedirectUri(url, env.GITHUB_REDIRECT_URI);
   const state = crypto.randomUUID();
   const target = new URL("https://github.com/login/oauth/authorize");
   target.searchParams.set("client_id", env.GITHUB_CLIENT_ID);
@@ -1615,7 +1617,7 @@ async function githubCallback(request: Request, env: RuntimeEnv): Promise<Respon
     return text("Invalid OAuth state.\n", "text/plain; charset=utf-8", {}, 400);
   }
 
-  const redirectUri = `${url.origin}/auth/github/callback`;
+  const redirectUri = githubOAuthRedirectUri(url, env.GITHUB_REDIRECT_URI);
   const tokenResponse = await fetch("https://github.com/login/oauth/access_token", {
     method: "POST",
     headers: {

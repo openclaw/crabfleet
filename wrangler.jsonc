@@ -23,6 +23,7 @@
     "BACKUP_BUCKET_NAME": "crabfleet-session-logs",
     "CLOUDFLARE_ACCOUNT_ID": "91b59577e757131d68d55a471fe32aca",
     "CRABBOX_INTERACTIVE_PROVISION_URL": "https://clawfleet.openclaw.ai/api/provision/interactive",
+    "GITHUB_REDIRECT_URI": "https://crabfleet.ai/auth/github/callback",
   },
   "d1_databases": [
     {

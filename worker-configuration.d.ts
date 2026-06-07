@@ -7,6 +7,7 @@ interface Env {
   CRABBOX_BOOTSTRAP_TOKEN?: string;
   GITHUB_CLIENT_ID?: string;
   GITHUB_CLIENT_SECRET?: string;
+  GITHUB_REDIRECT_URI?: string;
   GITHUB_ORG?: string;
   GITHUB_TOKEN?: string;
   CRABBOX_INTERACTIVE_PROVISION_URL?: string;

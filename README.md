@@ -160,6 +160,7 @@ The Crabbox namespace cutover intentionally has no old-name compatibility. Exist
 - `CRABBOX_BOOTSTRAP_TOKEN` – Optional owner break-glass token for setup/recovery
 - `GITHUB_CLIENT_ID` – GitHub OAuth app client ID (optional)
 - `GITHUB_CLIENT_SECRET` – GitHub OAuth app secret (optional)
+- `GITHUB_REDIRECT_URI` – GitHub OAuth callback URL registered on the app (defaults to the request origin callback)
 - `GITHUB_ORG` – GitHub org for membership check (default: `openclaw`)
 - `GITHUB_TOKEN` – GitHub token for all enabled repo issue/PR previews and private repo `CRABBOX.md` refreshes (optional; public/default repo paths work without it)
 - `CRABBOX_TOKEN_ENCRYPTION_KEY` – Optional encryption key for per-session GitHub OAuth tokens; defaults to `GITHUB_CLIENT_SECRET`
