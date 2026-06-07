@@ -12,10 +12,15 @@ export type FleetRuntime = "crabbox" | "container";
 
 export type FleetSessionInput = {
   id: string;
+  parentSessionId?: string | null;
+  rootSessionId?: string | null;
   repo: string;
   branch: string;
   runtime: FleetRuntime;
   owner: string;
+  createdBy?: string;
+  purpose?: string;
+  summary?: string;
   status: FleetStatus;
   leaseId: string | null;
   attachUrl: string | null;
@@ -53,10 +58,15 @@ export type FleetStateOptions = {
 
 export type FleetSessionSummary = {
   id: string;
+  parentSessionId: string | null;
+  rootSessionId: string | null;
   repo: string;
   branch: string;
   runtime: FleetRuntime;
   owner: string;
+  createdBy: string;
+  purpose: string;
+  summary: string;
   status: FleetStatus;
   active: boolean;
   attachable: boolean;
@@ -177,10 +187,15 @@ export function fleetSessionSummary(
   const archived = Boolean(session.logArchive?.eventCount);
   return {
     id: session.id,
+    parentSessionId: session.parentSessionId ?? null,
+    rootSessionId: session.rootSessionId ?? session.id,
     repo: session.repo,
     branch: session.branch,
     runtime: session.runtime,
     owner: session.owner,
+    createdBy: session.createdBy ?? session.owner,
+    purpose: session.purpose ?? "",
+    summary: session.summary ?? session.purpose ?? session.lastEvent,
     status: session.status,
     active: !inactiveStatuses.has(session.status),
     attachable: Boolean(session.attachUrl) && !inactiveStatuses.has(session.status),

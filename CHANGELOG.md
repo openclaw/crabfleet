@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Add Crabfleet session supervision metadata, owner/session tree listing, transcript retrieval, PTY messaging, and summary updates for Codex-spawned Codex sessions.
 - Fix GitHub OAuth login after the canonical host move by honoring an explicit registered callback URL.
 - Add the Crabfleet v2 fleet-control spec, redacted fleet registry API, and dashboard summary for visible Codex crabboxes.
 - Move the OpenClaw app/API canonical URL to `clawfleet.openclaw.ai`, keep legacy app hosts redirecting there, and reserve `clawfleet.ai` for the product page.

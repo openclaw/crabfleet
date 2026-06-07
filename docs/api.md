@@ -301,9 +301,13 @@ Maintainer+. Creates a standalone Codex CLI workspace request.
 {
   "repo": "openclaw/crabfleet",
   "branch": "main",
-  "runtime": "crabbox",
+  "runtime": "container",
   "command": "codex",
-  "prompt": "Investigate flaky release CI"
+  "prompt": "Investigate flaky release CI",
+  "parentSessionId": "IS-100",
+  "rootSessionId": "IS-100",
+  "purpose": "debug release CI",
+  "summary": "checking the release workflow"
 }
 ```
 
@@ -311,11 +315,32 @@ Fields:
 
 - `repo`: required, enabled repo.
 - `branch`: optional, default `main`.
-- `runtime`: optional `crabbox` or `container`, default `crabbox`.
+- `runtime`: optional `crabbox` or `container`, default `container`.
 - `command`: optional, default `codex`.
 - `prompt`: optional initial context note.
+- `parentSessionId`: optional parent session for supervision trees.
+- `rootSessionId`: optional root session; inferred from the parent when present.
+- `purpose`: optional short mission label.
+- `summary`: optional list/closeout summary.
 
 If `CRABBOX_INTERACTIVE_PROVISION_URL` is configured, the Worker posts the request to that adapter and records returned `status`, `leaseId`, `attachUrl`, `vncUrl`, and `message`. Without an adapter the session is stored as `pending_adapter`.
+
+Built-in Sandbox sessions receive `CRABFLEET_SESSION_ID`, `CRABFLEET_PARENT_SESSION_ID`, `CRABFLEET_ROOT_SESSION_ID`, `CRABFLEET_AGENT_TOKEN`, and `CRABFLEET_API_URL`. The agent token can call the `/api/agent/*` endpoints below for same-owner session discovery, child creation, transcripts, and summary updates.
+
+### GET /api/interactive-sessions/:id/transcript
+
+Viewer+. Returns the Markdown transcript from R2 when archived, or a D1 event-log transcript fallback.
+
+### POST /api/interactive-sessions/:id/summary
+
+Viewer+ with owner/maintainer access. Updates `purpose` and/or `summary`.
+
+```json
+{
+  "purpose": "review sibling fix",
+  "summary": "waiting on CI"
+}
+```
 
 ### POST /api/interactive-sessions/:id/actions
 
@@ -350,7 +375,21 @@ CRABBOX_SSH_GATEWAY_TOKEN`. These endpoints are not browser APIs.
 - `GET /api/ssh/state`: returns the same board/session state for the linked SSH user.
 - `POST /api/ssh/interactive-sessions`: creates an interactive Codex session for the linked SSH user.
 - `GET /api/ssh/interactive-sessions/:id/logs`: returns the D1 event stream plus R2 archive metadata for a visible crabbox session.
+- `GET /api/ssh/interactive-sessions/:id/transcript`: returns the Markdown transcript.
+- `POST /api/ssh/interactive-sessions/:id/summary`: updates `purpose` and/or `summary`.
 - `GET /api/ssh/interactive-sessions/:id/pty`: WebSocket PTY attach for the gateway, scoped by linked key fingerprint.
+
+## Agent Session API
+
+Crabfleet-issued session agents use `Authorization: Bearer <CRABFLEET_AGENT_TOKEN>` plus `X-Crabfleet-Session-ID: <CRABFLEET_SESSION_ID>`. These endpoints mirror the SSH lifecycle subset without requiring an SSH key inside the sandbox.
+
+- `GET /api/agent/state`: returns app/fleet state plus `{ agent: { sessionId, rootSessionId } }`.
+- `POST /api/agent/interactive-sessions`: creates a child session owned by the same user and linked under the current agent session.
+- `GET /api/agent/interactive-sessions/:id`: reads a visible same-owner session.
+- `GET /api/agent/interactive-sessions/:id/logs`: returns event logs.
+- `GET /api/agent/interactive-sessions/:id/transcript`: returns the Markdown transcript.
+- `POST /api/agent/interactive-sessions/:id/summary`: updates `purpose` and/or `summary`.
+- `GET /api/agent/interactive-sessions/:id/pty`: WebSocket PTY attach/input for same-owner steering; the CLI uses this for `crabfleet message`.
 
 ## OpenClaw Service
 

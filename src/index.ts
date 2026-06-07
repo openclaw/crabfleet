@@ -288,12 +288,17 @@ type InteractiveSessionStatus =
 
 type InteractiveSession = {
   id: string;
+  parentSessionId: string | null;
+  rootSessionId: string | null;
   repo: string;
   branch: string;
   runtime: "crabbox" | "container";
   command: string;
   prompt: string;
+  purpose: string;
+  summary: string;
   owner: string;
+  createdBy: string;
   status: InteractiveSessionStatus;
   leaseId: string | null;
   attachUrl: string | null;
@@ -350,12 +355,17 @@ type SandboxRuntimeSession = (InteractiveProvisionRequest | InteractiveSession) 
 
 type InteractiveProvisionRequest = {
   id: string;
+  parentSessionId: string | null;
+  rootSessionId: string | null;
   repo: string;
   branch: string;
   runtime: "crabbox" | "container";
   command: string;
   prompt: string;
+  purpose: string;
+  summary: string;
   owner: string;
+  createdBy: string;
   githubToken?: string;
 };
 
@@ -537,12 +547,17 @@ type RunAttemptTable = {
 
 type InteractiveSessionTable = {
   id: string;
+  parent_session_id: string | null;
+  root_session_id: string | null;
   repo: string;
   branch: string;
   runtime: "crabbox" | "container";
   command: string;
   prompt: string;
+  purpose: string;
+  summary: string;
   owner: string;
+  created_by: string;
   status: InteractiveSessionStatus;
   lease_id: string | null;
   attach_url: string | null;
@@ -561,6 +576,7 @@ type InteractiveSessionTable = {
   control_granted_at: number | null;
   control_expires_at: number | null;
   multiplayer_mode: number;
+  agent_token_hash: string | null;
 };
 
 type RepoWorkflowTable = {
@@ -1226,8 +1242,16 @@ async function api(request: Request, env: RuntimeEnv): Promise<Response> {
     return json(await sshState(request, env));
   }
 
+  if (request.method === "GET" && url.pathname === "/api/agent/state") {
+    return json(await agentState(request, env));
+  }
+
   if (request.method === "POST" && url.pathname === "/api/ssh/interactive-sessions") {
     return json(await sshCreateInteractiveSession(request, env), { status: 201 });
+  }
+
+  if (request.method === "POST" && url.pathname === "/api/agent/interactive-sessions") {
+    return json(await agentCreateInteractiveSession(request, env), { status: 201 });
   }
 
   const sshInteractiveReadMatch = url.pathname.match(/^\/api\/ssh\/interactive-sessions\/([^/]+)$/);
@@ -1237,6 +1261,19 @@ async function api(request: Request, env: RuntimeEnv): Promise<Response> {
     const session = await readInteractiveSession(
       env,
       decodeURIComponent(sshInteractiveReadMatch[1] ?? ""),
+    );
+    if (!session) throw notFound("interactive session not found");
+    return json({ session: decorateInteractiveSession(session, user, env) });
+  }
+
+  const agentInteractiveReadMatch = url.pathname.match(
+    /^\/api\/agent\/interactive-sessions\/([^/]+)$/,
+  );
+  if (request.method === "GET" && agentInteractiveReadMatch) {
+    const { user } = await requireAgentSession(request, env);
+    const session = await readInteractiveSession(
+      env,
+      decodeURIComponent(agentInteractiveReadMatch[1] ?? ""),
     );
     if (!session) throw notFound("interactive session not found");
     return json({ session: decorateInteractiveSession(session, user, env) });
@@ -1305,6 +1342,76 @@ async function api(request: Request, env: RuntimeEnv): Promise<Response> {
     );
   }
 
+  const agentInteractiveLogsMatch = url.pathname.match(
+    /^\/api\/agent\/interactive-sessions\/([^/]+)\/logs$/,
+  );
+  if (request.method === "GET" && agentInteractiveLogsMatch) {
+    const { user } = await requireAgentSession(request, env);
+    return json(
+      await readInteractiveSessionLogBundle(
+        env,
+        user,
+        decodeURIComponent(agentInteractiveLogsMatch[1] ?? ""),
+      ),
+    );
+  }
+
+  const sshInteractiveTranscriptMatch = url.pathname.match(
+    /^\/api\/ssh\/interactive-sessions\/([^/]+)\/transcript$/,
+  );
+  if (request.method === "GET" && sshInteractiveTranscriptMatch) {
+    const user = await requireSshGatewayUser(request, env);
+    requireRole(user, "viewer");
+    return interactiveSessionTranscriptResponse(
+      env,
+      user,
+      decodeURIComponent(sshInteractiveTranscriptMatch[1] ?? ""),
+    );
+  }
+
+  const agentInteractiveTranscriptMatch = url.pathname.match(
+    /^\/api\/agent\/interactive-sessions\/([^/]+)\/transcript$/,
+  );
+  if (request.method === "GET" && agentInteractiveTranscriptMatch) {
+    const { user } = await requireAgentSession(request, env);
+    return interactiveSessionTranscriptResponse(
+      env,
+      user,
+      decodeURIComponent(agentInteractiveTranscriptMatch[1] ?? ""),
+    );
+  }
+
+  const sshInteractiveSummaryMatch = url.pathname.match(
+    /^\/api\/ssh\/interactive-sessions\/([^/]+)\/summary$/,
+  );
+  if (request.method === "POST" && sshInteractiveSummaryMatch) {
+    const user = await requireSshGatewayUser(request, env);
+    requireRole(user, "viewer");
+    return json(
+      await updateInteractiveSessionSummary(
+        request,
+        env,
+        user,
+        decodeURIComponent(sshInteractiveSummaryMatch[1] ?? ""),
+      ),
+    );
+  }
+
+  const agentInteractiveSummaryMatch = url.pathname.match(
+    /^\/api\/agent\/interactive-sessions\/([^/]+)\/summary$/,
+  );
+  if (request.method === "POST" && agentInteractiveSummaryMatch) {
+    const { user } = await requireAgentSession(request, env);
+    return json(
+      await updateInteractiveSessionSummary(
+        request,
+        env,
+        user,
+        decodeURIComponent(agentInteractiveSummaryMatch[1] ?? ""),
+      ),
+    );
+  }
+
   if (request.method === "POST" && url.pathname === "/api/openclaw/crabboxes") {
     return json(await openClawCreateCrabbox(request, env), { status: 201 });
   }
@@ -1319,6 +1426,19 @@ async function api(request: Request, env: RuntimeEnv): Promise<Response> {
       env,
       user,
       decodeURIComponent(sshInteractivePtyMatch[1] ?? ""),
+    );
+  }
+
+  const agentInteractivePtyMatch = url.pathname.match(
+    /^\/api\/agent\/interactive-sessions\/([^/]+)\/pty$/,
+  );
+  if (request.method === "GET" && agentInteractivePtyMatch) {
+    const { user } = await requireAgentSession(request, env);
+    return interactiveSessionPty(
+      request,
+      env,
+      user,
+      decodeURIComponent(agentInteractivePtyMatch[1] ?? ""),
     );
   }
 
@@ -1388,6 +1508,33 @@ async function api(request: Request, env: RuntimeEnv): Promise<Response> {
         env,
         user,
         decodeURIComponent(interactiveSessionLogsMatch[1] ?? ""),
+      ),
+    );
+  }
+
+  const interactiveSessionTranscriptMatch = url.pathname.match(
+    /^\/api\/interactive-sessions\/([^/]+)\/transcript$/,
+  );
+  if (request.method === "GET" && interactiveSessionTranscriptMatch) {
+    const user = await requireUser(request, env);
+    return interactiveSessionTranscriptResponse(
+      env,
+      user,
+      decodeURIComponent(interactiveSessionTranscriptMatch[1] ?? ""),
+    );
+  }
+
+  const interactiveSessionSummaryMatch = url.pathname.match(
+    /^\/api\/interactive-sessions\/([^/]+)\/summary$/,
+  );
+  if (request.method === "POST" && interactiveSessionSummaryMatch) {
+    const user = await requireUser(request, env);
+    return json(
+      await updateInteractiveSessionSummary(
+        request,
+        env,
+        user,
+        decodeURIComponent(interactiveSessionSummaryMatch[1] ?? ""),
       ),
     );
   }
@@ -1971,6 +2118,12 @@ async function sshState(request: Request, env: RuntimeEnv): Promise<Record<strin
   return { ...state, ssh: true };
 }
 
+async function agentState(request: Request, env: RuntimeEnv): Promise<Record<string, unknown>> {
+  const { session, user } = await requireAgentSession(request, env);
+  const state = await readState(request, env, user);
+  return { ...state, agent: { sessionId: session.id, rootSessionId: session.rootSessionId } };
+}
+
 async function sshCreateInteractiveSession(
   request: Request,
   env: RuntimeEnv,
@@ -1987,6 +2140,10 @@ async function sshCreateInteractiveSession(
     runtime?: string;
     command?: string;
     prompt?: string;
+    parentSessionId?: string;
+    rootSessionId?: string;
+    purpose?: string;
+    summary?: string;
   }>(request);
   if (!normalizeRepo(body.repo)) {
     const repo = await database(env)
@@ -2002,6 +2159,38 @@ async function sshCreateInteractiveSession(
   return result;
 }
 
+async function agentCreateInteractiveSession(
+  request: Request,
+  env: RuntimeEnv,
+): Promise<{ session: InteractiveSession }> {
+  const { session: parent, user } = await requireAgentSession(request, env);
+  const body = await readJson<{
+    repo?: string;
+    branch?: string;
+    runtime?: string;
+    command?: string;
+    prompt?: string;
+    parentSessionId?: string;
+    rootSessionId?: string;
+    purpose?: string;
+    summary?: string;
+  }>(request);
+  if (!normalizeRepo(body.repo)) body.repo = parent.repo || preferredRepo;
+  const result = await createInteractiveSessionFromInput(env, user, body, undefined, {
+    createdBy: `session:${parent.id}`,
+    owner: parent.owner,
+    parentSessionId: parent.id,
+    rootSessionId: parent.rootSessionId || parent.id,
+  });
+  await audit(
+    env,
+    user,
+    `agent session ${parent.id} created child ${result.session.id}`,
+    Date.now(),
+  );
+  return result;
+}
+
 async function openClawCreateCrabbox(
   request: Request,
   env: RuntimeEnv,
@@ -2014,6 +2203,10 @@ async function openClawCreateCrabbox(
     command?: string;
     prompt?: string;
     owner?: string;
+    parentSessionId?: string;
+    rootSessionId?: string;
+    purpose?: string;
+    summary?: string;
     githubToken?: string;
   }>(request);
   const owner = openClawOwner(body.owner);
@@ -2031,7 +2224,7 @@ async function openClawCreateCrabbox(
     serviceUser,
     body,
     clean(body.githubToken, 4000) || undefined,
-    { owner },
+    { owner, createdBy: "service:openclaw" },
   );
   await audit(
     env,
@@ -2067,6 +2260,39 @@ async function requireSshGatewayUser(request: Request, env: RuntimeEnv): Promise
   const user = await readSshUser(env, fingerprint);
   if (!user) throw unauthorized();
   return user;
+}
+
+async function requireAgentSession(
+  request: Request,
+  env: RuntimeEnv,
+): Promise<{ session: InteractiveSession; user: User }> {
+  const id = agentSessionId(request);
+  const token = bearerToken(request) || clean(request.headers.get("x-crabfleet-agent-token"), 200);
+  if (!id || !token) throw unauthorized();
+  const row = await database(env)
+    .selectFrom("interactive_sessions")
+    .selectAll()
+    .where("id", "=", id)
+    .executeTakeFirst();
+  if (!row?.agent_token_hash || row.agent_token_hash !== (await sha256(token))) {
+    throw unauthorized();
+  }
+  const session = interactiveSession(row, []);
+  if (deadInteractiveSessionStatuses.includes(session.status)) {
+    throw forbidden("agent session is not active");
+  }
+  return {
+    session,
+    user: {
+      subject: `agent:${session.id}`,
+      login: session.owner,
+      email: null,
+      name: `Codex ${session.id}`,
+      role: "viewer",
+      allowed: true,
+      teams: [],
+    },
+  };
 }
 
 function requireSshGateway(request: Request, env: RuntimeEnv): void {
@@ -2173,6 +2399,21 @@ function sshFingerprint(request: Request): string {
   );
 }
 
+function agentSessionId(request: Request): string {
+  const url = new URL(request.url);
+  return (
+    clean(request.headers.get("x-crabfleet-session-id"), 120) ||
+    clean(request.headers.get("x-crabbox-session-id"), 120) ||
+    clean(url.searchParams.get("sessionId"), 120)
+  );
+}
+
+function bearerToken(request: Request): string {
+  const authorization = request.headers.get("authorization") ?? "";
+  const [scheme, token] = authorization.split(/\s+/, 2);
+  return scheme?.toLowerCase() === "bearer" ? clean(token, 200) : "";
+}
+
 function sshGatewayTokens(env: RuntimeEnv): string[] {
   return [env.CRABFLEET_SSH_GATEWAY_TOKEN, env.CRABBOX_SSH_GATEWAY_TOKEN].filter(
     (token): token is string => Boolean(token),
@@ -2244,6 +2485,10 @@ async function createInteractiveSession(
     runtime?: string;
     command?: string;
     prompt?: string;
+    parentSessionId?: string;
+    rootSessionId?: string;
+    purpose?: string;
+    summary?: string;
   }>(request);
   const githubToken = await sessionGitHubToken(request, env);
   if (user.subject.startsWith("github:") && !githubToken) {
@@ -2261,9 +2506,18 @@ async function createInteractiveSessionFromInput(
     runtime?: string;
     command?: string;
     prompt?: string;
+    parentSessionId?: string;
+    rootSessionId?: string;
+    purpose?: string;
+    summary?: string;
   },
   githubToken?: string,
-  options: { owner?: string } = {},
+  options: {
+    createdBy?: string;
+    owner?: string;
+    parentSessionId?: string | null;
+    rootSessionId?: string | null;
+  } = {},
 ): Promise<{ session: InteractiveSession }> {
   const repo = normalizeRepo(body.repo);
   if (!repo) throw badRequest("repo is required");
@@ -2274,22 +2528,38 @@ async function createInteractiveSessionFromInput(
     | "container";
   const command = interactiveCommand(body.command);
   const prompt = clean(body.prompt, 4000);
+  const purpose = interactiveSessionPurpose(body.purpose, prompt, repo, branch, command);
+  const summary = interactiveSessionSummary(body.summary, purpose, prompt);
   const owner = options.owner || actor(user);
+  const createdBy = options.createdBy || actor(user);
+  const lineage = await resolveInteractiveSessionLineage(
+    env,
+    user,
+    options.parentSessionId ?? (clean(body.parentSessionId, 120) || null),
+    options.rootSessionId ?? (clean(body.rootSessionId, 120) || null),
+  );
   const now = Date.now();
   const db = database(env);
   for (let attempt = 0; attempt < 3; attempt += 1) {
     const id = await nextInteractiveSessionId(env);
+    const rootSessionId = lineage.rootSessionId ?? id;
+    const agentToken = newAgentToken();
     try {
       await db
         .insertInto("interactive_sessions")
         .values({
           id,
+          parent_session_id: lineage.parentSessionId,
+          root_session_id: rootSessionId,
           repo,
           branch,
           runtime,
           command,
           prompt,
+          purpose,
+          summary,
           owner,
+          created_by: createdBy,
           status: "provisioning",
           lease_id: null,
           attach_url: null,
@@ -2308,19 +2578,29 @@ async function createInteractiveSessionFromInput(
           control_granted_at: null,
           control_expires_at: null,
           multiplayer_mode: 0,
+          agent_token_hash: await sha256(agentToken),
         })
         .execute();
       await appendInteractiveSessionEvent(env, id, user, "interactive workspace requested", now);
-      const provisioned = await provisionInteractiveSession(env, {
-        id,
-        repo,
-        branch,
-        runtime,
-        command,
-        prompt,
-        owner,
-        ...(githubToken ? { githubToken } : {}),
-      });
+      const provisioned = await provisionInteractiveSession(
+        env,
+        {
+          id,
+          parentSessionId: lineage.parentSessionId,
+          rootSessionId,
+          repo,
+          branch,
+          runtime,
+          command,
+          prompt,
+          purpose,
+          summary,
+          owner,
+          createdBy,
+          ...(githubToken ? { githubToken } : {}),
+        },
+        agentToken,
+      );
       if (provisioned) {
         await db
           .updateTable("interactive_sessions")
@@ -2371,6 +2651,48 @@ async function createInteractiveSessionFromInput(
     }
   }
   throw new Error("failed to allocate interactive session id");
+}
+
+async function resolveInteractiveSessionLineage(
+  env: RuntimeEnv,
+  user: User,
+  parentSessionId: string | null,
+  rootSessionId: string | null,
+): Promise<{ parentSessionId: string | null; rootSessionId: string | null }> {
+  const parentId = clean(parentSessionId, 120) || null;
+  const rootId = clean(rootSessionId, 120) || null;
+  if (!parentId) return { parentSessionId: null, rootSessionId: rootId };
+
+  const parent = await readInteractiveSession(env, parentId);
+  if (!parent) throw badRequest("parent session not found");
+  if (!canManageInteractiveSession(user, parent)) throw forbidden("parent session is not visible");
+  return {
+    parentSessionId: parent.id,
+    rootSessionId: parent.rootSessionId || parent.id,
+  };
+}
+
+function interactiveSessionPurpose(
+  value: unknown,
+  prompt: string,
+  repo: string,
+  branch: string,
+  command: string,
+): string {
+  const explicit = clean(value, 500);
+  if (explicit) return explicit;
+  if (prompt) return clean(prompt, 500);
+  return clean(`${command} in ${repo}@${branch}`, 500);
+}
+
+function interactiveSessionSummary(value: unknown, purpose: string, prompt: string): string {
+  const explicit = clean(value, 500);
+  if (explicit) return explicit;
+  return clean(purpose || prompt || "interactive Codex session", 500);
+}
+
+function newAgentToken(): string {
+  return `${crypto.randomUUID()}${crypto.randomUUID()}`;
 }
 
 async function cleanupInteractiveSessions(
@@ -4096,8 +4418,11 @@ function closePair(left: WebSocket, right: WebSocket, code: number, reason: stri
 async function provisionInteractiveSession(
   env: RuntimeEnv,
   session: InteractiveProvisionRequest,
+  agentToken?: string,
 ): Promise<InteractiveProvisionResult | null> {
-  if (session.runtime === "container" && env.SANDBOX) return provisionWithSandbox(env, session);
+  if (session.runtime === "container" && env.SANDBOX) {
+    return provisionWithSandbox(env, session, agentToken);
+  }
   if (!env.CRABBOX_INTERACTIVE_PROVISION_URL) return null;
   if (isBuiltInInteractiveProvisionUrl(env.CRABBOX_INTERACTIVE_PROVISION_URL)) {
     return provisionInteractivePayload(env, session);
@@ -4165,6 +4490,8 @@ async function provisionInteractiveEndpoint(
     | "container";
   const command = interactiveCommand(session.command);
   const prompt = clean(session.prompt, 4000);
+  const purpose = interactiveSessionPurpose(session.purpose, prompt, repo, branch, command);
+  const summary = interactiveSessionSummary(session.summary, purpose, prompt);
   const owner = clean(session.owner, 240);
   const githubToken = clean(session.githubToken, 4000) || undefined;
   if (!id || !repo || !owner) {
@@ -4178,7 +4505,12 @@ async function provisionInteractiveEndpoint(
     runtime,
     command,
     prompt,
+    purpose,
+    summary,
     owner,
+    createdBy: clean(session.createdBy, 240) || owner,
+    parentSessionId: clean(session.parentSessionId, 120) || null,
+    rootSessionId: clean(session.rootSessionId, 120) || id,
     ...(githubToken ? { githubToken } : {}),
   };
   return provisionInteractivePayload(env, payload);
@@ -4242,6 +4574,7 @@ function authorizeProvisionEndpoint(request: Request, env: RuntimeEnv): void {
 async function provisionWithSandbox(
   env: RuntimeEnv,
   session: InteractiveProvisionRequest,
+  agentToken?: string,
 ): Promise<InteractiveProvisionResult> {
   if (!env.SANDBOX) {
     return failedProvision("Cloudflare Sandbox binding is not configured");
@@ -4258,7 +4591,14 @@ async function provisionWithSandbox(
   const sandbox = getSandbox(env.SANDBOX, lease.sandboxId);
   try {
     await registerSandboxCredentialPolicy(env, session, lease.sandboxId);
-    await setupSandboxTerminalSession(sandbox, env, session, workdir, lease.terminalSessionId);
+    await setupSandboxTerminalSession(
+      sandbox,
+      env,
+      session,
+      workdir,
+      lease.terminalSessionId,
+      agentToken,
+    );
   } catch (error) {
     await unregisterSandboxCredentialPolicy(env, lease.sandboxId);
     const message = clean(error instanceof Error ? error.message : String(error), 240);
@@ -4475,12 +4815,17 @@ async function ensureCurrentSandboxLease(
   }
   const provisioned = await provisionWithSandbox(env, {
     id: session.id,
+    parentSessionId: session.parentSessionId,
+    rootSessionId: session.rootSessionId ?? session.id,
     repo: session.repo,
     branch: session.branch,
     runtime: session.runtime,
     command: session.command,
     prompt: session.prompt,
+    purpose: session.purpose,
+    summary: session.summary,
     owner: session.owner,
+    createdBy: session.createdBy,
     ...(githubToken ? { githubToken } : {}),
   });
   if (provisioned.status === "failed") {
@@ -4718,6 +5063,7 @@ async function prepareSandboxRuntimeTools(
   session: SandboxRuntimeSession,
   workdir: string,
   commandEnv: Record<string, string | undefined> = {},
+  agentToken?: string,
 ): Promise<void> {
   const autostartScript = sandboxAutostartScriptPath(session.id);
   const terminalShell = sandboxTerminalShellPath(session.id);
@@ -4760,6 +5106,11 @@ export CODEX_HOME="$HOME/.codex"
 export GITHUB_TOKEN=${shellQuote(sandboxPlaceholderGitHubToken)}
 export GH_TOKEN=${shellQuote(sandboxPlaceholderGitHubToken)}
 export CRABBOX_SESSION_ID=${shellQuote(session.id)}
+export CRABFLEET_SESSION_ID=${shellQuote(session.id)}
+export CRABFLEET_PARENT_SESSION_ID=${shellQuote(session.parentSessionId ?? "")}
+export CRABFLEET_ROOT_SESSION_ID=${shellQuote(session.rootSessionId ?? session.id)}
+export CRABFLEET_AGENT_TOKEN=${shellQuote(agentToken ?? "")}
+export CRABFLEET_API_URL=${shellQuote(appCanonicalOrigin)}
 export CRABBOX_REPO=${shellQuote(session.repo)}
 export CRABBOX_BRANCH=${shellQuote(session.branch)}
 export CRABBOX_RUNTIME=${shellQuote(session.runtime)}
@@ -4911,8 +5262,9 @@ async function setupSandboxTerminalSession(
   session: SandboxRuntimeSession,
   workdir: string,
   terminalSessionId: string,
+  agentToken?: string,
 ): Promise<void> {
-  const sessionEnv = sandboxSessionEnv(env, session);
+  const sessionEnv = sandboxSessionEnv(env, session, agentToken);
   const setup = await createSandboxSession(
     sandbox,
     sandboxSetupSessionId(session.id),
@@ -4925,7 +5277,7 @@ async function setupSandboxTerminalSession(
   );
   await runSandboxSetupStep("Codex auth", () => prepareSandboxCodexAuth(setup, env, workdir));
   await runSandboxSetupStep("runtime tools", () =>
-    prepareSandboxRuntimeTools(setup, session, workdir),
+    prepareSandboxRuntimeTools(setup, session, workdir, {}, agentToken),
   );
   await runSandboxSetupStep("terminal session", () =>
     createFreshSandboxSession(sandbox, terminalSessionId, workdir, sessionEnv),
@@ -4950,9 +5302,15 @@ async function recreateSandboxTerminalSession(
 function sandboxSessionEnv(
   env: RuntimeEnv,
   session: SandboxRuntimeSession,
+  agentToken?: string,
 ): Record<string, string | undefined> {
   return {
     CRABBOX_SESSION_ID: session.id,
+    CRABFLEET_SESSION_ID: session.id,
+    CRABFLEET_PARENT_SESSION_ID: session.parentSessionId ?? undefined,
+    CRABFLEET_ROOT_SESSION_ID: session.rootSessionId ?? session.id,
+    CRABFLEET_AGENT_TOKEN: agentToken,
+    CRABFLEET_API_URL: appCanonicalOrigin,
     CRABBOX_REPO: session.repo,
     CRABBOX_BRANCH: session.branch,
     CRABBOX_RUNTIME: session.runtime,
@@ -6021,6 +6379,67 @@ async function readInteractiveSessionLogBundle(
   };
 }
 
+async function interactiveSessionTranscriptResponse(
+  env: RuntimeEnv,
+  user: User,
+  id: string,
+): Promise<Response> {
+  const session = await readInteractiveSession(env, id);
+  if (!session) throw notFound("interactive session not found");
+  if (!canManageInteractiveSession(user, session)) throw forbidden("session is not visible");
+
+  if (env.SESSION_LOGS && session.logArchive?.transcriptKey) {
+    const object = await env.SESSION_LOGS.get(session.logArchive.transcriptKey);
+    if (object?.body) {
+      return new Response(object.body, {
+        headers: securityHeaders("text/markdown; charset=utf-8"),
+      });
+    }
+  }
+
+  const events = await readInteractiveSessionEventRows(env, id, { limit: 10000 });
+  return text(sessionLogTranscript(session, events), "text/markdown; charset=utf-8");
+}
+
+async function updateInteractiveSessionSummary(
+  request: Request,
+  env: RuntimeEnv,
+  user: User,
+  id: string,
+): Promise<{ session: InteractiveSession }> {
+  const session = await readInteractiveSession(env, id);
+  if (!session) throw notFound("interactive session not found");
+  if (!canManageInteractiveSession(user, session)) throw forbidden("session is not visible");
+  const body = await readJson<{ purpose?: string; summary?: string }>(request);
+  const purpose = clean(body.purpose, 500);
+  const summary = clean(body.summary, 500);
+  if (!purpose && !summary) throw badRequest("summary or purpose is required");
+  const now = Date.now();
+  await database(env)
+    .updateTable("interactive_sessions")
+    .set({
+      ...(purpose ? { purpose } : {}),
+      ...(summary ? { summary } : {}),
+      updated_at: now,
+    })
+    .where("id", "=", id)
+    .execute();
+  await appendInteractiveSessionEvent(
+    env,
+    id,
+    user,
+    summary ? "session summary updated" : "session purpose updated",
+    now,
+  );
+  return {
+    session: decorateInteractiveSession(
+      (await readInteractiveSession(env, id)) as InteractiveSession,
+      user,
+      env,
+    ),
+  };
+}
+
 async function readInteractiveSessionLogs(
   env: RuntimeEnv,
   ids: string[],
@@ -6796,12 +7215,17 @@ function interactiveSession(
 ): InteractiveSession {
   return {
     id: row.id,
+    parentSessionId: row.parent_session_id,
+    rootSessionId: row.root_session_id ?? row.id,
     repo: row.repo,
     branch: row.branch,
     runtime: row.runtime,
     command: row.command,
     prompt: row.prompt,
+    purpose: row.purpose,
+    summary: row.summary,
     owner: row.owner,
+    createdBy: row.created_by,
     status: row.status,
     leaseId: row.lease_id,
     attachUrl: row.attach_url,
@@ -6851,9 +7275,14 @@ function sessionLogArchiveBase(id: string): string {
 }
 
 function sessionLogTranscript(
-  session: InteractiveSessionTable,
+  session: InteractiveSession | InteractiveSessionTable,
   events: InteractiveSessionEventRow[],
 ): string {
+  const parentSessionId =
+    "parentSessionId" in session ? session.parentSessionId : session.parent_session_id;
+  const rootSessionId =
+    "rootSessionId" in session ? session.rootSessionId : session.root_session_id;
+  const createdBy = "createdBy" in session ? session.createdBy : session.created_by;
   const lines = [
     `# ${session.id}`,
     "",
@@ -6861,7 +7290,12 @@ function sessionLogTranscript(
     `branch: ${session.branch}`,
     `runtime: ${session.runtime}`,
     `owner: ${session.owner}`,
+    `created_by: ${createdBy}`,
+    `parent: ${parentSessionId ?? "none"}`,
+    `root: ${rootSessionId ?? session.id}`,
     `status: ${session.status}`,
+    `purpose: ${session.purpose}`,
+    `summary: ${session.summary}`,
     "",
     "## Events",
     "",
@@ -6878,10 +7312,15 @@ function sessionLogSummary(
 ): Record<string, unknown> {
   return {
     id: session.id,
+    parentSessionId: session.parent_session_id,
+    rootSessionId: session.root_session_id ?? session.id,
     repo: session.repo,
     branch: session.branch,
     runtime: session.runtime,
     owner: session.owner,
+    createdBy: session.created_by,
+    purpose: session.purpose,
+    summary: session.summary,
     status: session.status,
     eventCount: events.length,
     firstEventAt: events[0]?.created_at ?? null,

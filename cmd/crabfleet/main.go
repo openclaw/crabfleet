@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/alecthomas/kong"
+	"github.com/coder/websocket"
 )
 
 const defaultAPIURL = "https://clawfleet.openclaw.ai"
@@ -29,6 +30,8 @@ type cli struct {
 	SSHHost     string `help:"Crabfleet SSH host." default:"crabd.sh" env:"CRABFLEET_SSH_HOST"`
 	Token       string `help:"Internal API token." env:"CRABFLEET_SSH_GATEWAY_TOKEN"`
 	Fingerprint string `help:"Linked SSH key fingerprint." env:"CRABFLEET_SSH_FINGERPRINT"`
+	AgentToken  string `help:"Scoped Crabfleet agent token." env:"CRABFLEET_AGENT_TOKEN"`
+	AgentID     string `help:"Current Crabfleet session id." env:"CRABFLEET_SESSION_ID"`
 	JSON        bool   `help:"Print JSON output."`
 	Plain       bool   `help:"Print plain output without adornment."`
 	NoInput     bool   `help:"Fail instead of prompting or delegating to SSH."`
@@ -36,7 +39,7 @@ type cli struct {
 
 	Login       loginCmd       `cmd:"" help:"Link this machine through SSH onboarding."`
 	Whoami      whoamiCmd      `cmd:"" help:"Show the linked Crabfleet user."`
-	List        listCmd        `cmd:"" aliases:"ls" help:"List crabboxes grouped by person."`
+	List        listCmd        `cmd:"" aliases:"ls" help:"List crabboxes as an owner/session tree."`
 	New         newCmd         `cmd:"" help:"Create a repo-ready crabbox and attach."`
 	Attach      attachCmd      `cmd:"" help:"Attach to a crabbox terminal."`
 	Status      statusCmd      `cmd:"" help:"Show one crabbox lifecycle state."`
@@ -47,6 +50,9 @@ type cli struct {
 	Restore     restoreCmd     `cmd:"" help:"Restore a sandbox checkpoint."`
 	VNC         vncCmd         `cmd:"" help:"Print or open a crabbox WebVNC URL."`
 	Logs        logsCmd        `cmd:"" help:"Print archived crabbox session events."`
+	Transcript  transcriptCmd  `cmd:"" help:"Print a crabbox Markdown transcript."`
+	Message     messageCmd     `cmd:"" help:"Send text to a crabbox terminal."`
+	Summary     summaryCmd     `cmd:"" help:"Show or update a crabbox summary."`
 	Open        openCmd        `cmd:"" help:"Open the Crabfleet dashboard."`
 }
 
@@ -59,6 +65,10 @@ type newCmd struct {
 	Branch  string   `help:"Git branch to checkout." default:"main"`
 	Runtime string   `help:"Runtime backend." enum:"crabbox,container" default:"crabbox"`
 	Command string   `help:"Command to run after checkout." default:"codex --yolo"`
+	Parent  string   `help:"Parent crabbox session id."`
+	Root    string   `help:"Root crabbox session id."`
+	Purpose string   `help:"Short mission label for list output."`
+	Summary string   `help:"Initial session summary."`
 	Detach  bool     `help:"Create the crabbox without attaching to it."`
 	VNC     bool     `help:"Open WebVNC after creation when available."`
 	Prompt  []string `arg:"" optional:"" help:"Initial prompt for Codex."`
@@ -100,13 +110,31 @@ type logsCmd struct {
 	ID string `arg:"" help:"Crabbox session id."`
 }
 
+type transcriptCmd struct {
+	ID string `arg:"" help:"Crabbox session id."`
+}
+
+type messageCmd struct {
+	ID      string   `arg:"" help:"Crabbox session id."`
+	NoEnter bool     `help:"Do not append Enter after the message."`
+	Text    []string `arg:"" optional:"" help:"Text to send."`
+}
+
+type summaryCmd struct {
+	ID      string   `arg:"" help:"Crabbox session id."`
+	Purpose string   `help:"Update the session purpose."`
+	Text    []string `arg:"" optional:"" help:"New summary text."`
+}
+
 type openCmd struct{}
 
 type apiClient struct {
-	baseURL     string
-	token       string
-	fingerprint string
-	http        *http.Client
+	baseURL        string
+	token          string
+	fingerprint    string
+	agentToken     string
+	agentSessionID string
+	http           *http.Client
 }
 
 type stateResponse struct {
@@ -123,25 +151,34 @@ type user struct {
 }
 
 type interactiveSession struct {
-	ID         string     `json:"id"`
-	Repo       string     `json:"repo"`
-	Branch     string     `json:"branch"`
-	Runtime    string     `json:"runtime"`
-	Status     string     `json:"status"`
-	Owner      string     `json:"owner"`
-	LeaseID    string     `json:"leaseId"`
-	AttachURL  string     `json:"attachUrl"`
-	VNCURL     string     `json:"vncUrl"`
-	LastEvent  string     `json:"lastEvent"`
-	LogArchive logArchive `json:"logArchive"`
+	ID              string     `json:"id"`
+	ParentSessionID string     `json:"parentSessionId"`
+	RootSessionID   string     `json:"rootSessionId"`
+	Repo            string     `json:"repo"`
+	Branch          string     `json:"branch"`
+	Runtime         string     `json:"runtime"`
+	Status          string     `json:"status"`
+	Owner           string     `json:"owner"`
+	CreatedBy       string     `json:"createdBy"`
+	Purpose         string     `json:"purpose"`
+	Summary         string     `json:"summary"`
+	LeaseID         string     `json:"leaseId"`
+	AttachURL       string     `json:"attachUrl"`
+	VNCURL          string     `json:"vncUrl"`
+	LastEvent       string     `json:"lastEvent"`
+	LogArchive      logArchive `json:"logArchive"`
 }
 
 type createSessionRequest struct {
-	Repo    string `json:"repo,omitempty"`
-	Branch  string `json:"branch,omitempty"`
-	Runtime string `json:"runtime,omitempty"`
-	Command string `json:"command,omitempty"`
-	Prompt  string `json:"prompt,omitempty"`
+	Repo            string `json:"repo,omitempty"`
+	Branch          string `json:"branch,omitempty"`
+	Runtime         string `json:"runtime,omitempty"`
+	Command         string `json:"command,omitempty"`
+	Prompt          string `json:"prompt,omitempty"`
+	ParentSessionID string `json:"parentSessionId,omitempty"`
+	RootSessionID   string `json:"rootSessionId,omitempty"`
+	Purpose         string `json:"purpose,omitempty"`
+	Summary         string `json:"summary,omitempty"`
 }
 
 type createSessionResponse struct {
@@ -211,10 +248,12 @@ func main() {
 
 func (c *cli) apiClient() *apiClient {
 	return &apiClient{
-		baseURL:     strings.TrimRight(c.API, "/"),
-		token:       c.Token,
-		fingerprint: c.Fingerprint,
-		http:        &http.Client{Timeout: 2 * time.Minute},
+		baseURL:        strings.TrimRight(c.API, "/"),
+		token:          c.Token,
+		fingerprint:    c.Fingerprint,
+		agentToken:     c.AgentToken,
+		agentSessionID: c.AgentID,
+		http:           &http.Client{Timeout: 2 * time.Minute},
 	}
 }
 
@@ -261,12 +300,24 @@ func (listCmd) Run(app *cli, api *apiClient) error {
 
 func (cmd newCmd) Run(app *cli, api *apiClient) error {
 	prompt := strings.Join(cmd.Prompt, " ")
+	parent := cmd.Parent
+	if parent == "" {
+		parent = app.AgentID
+	}
+	root := cmd.Root
+	if root == "" {
+		root = os.Getenv("CRABFLEET_ROOT_SESSION_ID")
+	}
 	req := createSessionRequest{
-		Repo:    cmd.Repo,
-		Branch:  cmd.Branch,
-		Runtime: cmd.Runtime,
-		Command: cmd.Command,
-		Prompt:  prompt,
+		Repo:            cmd.Repo,
+		Branch:          cmd.Branch,
+		Runtime:         cmd.Runtime,
+		Command:         cmd.Command,
+		Prompt:          prompt,
+		ParentSessionID: parent,
+		RootSessionID:   root,
+		Purpose:         cmd.Purpose,
+		Summary:         cmd.Summary,
 	}
 	session, err := api.createSession(context.Background(), req)
 	if err != nil {
@@ -279,6 +330,18 @@ func (cmd newCmd) Run(app *cli, api *apiClient) error {
 		}
 		if cmd.Command != "codex --yolo" {
 			args = append(args, "--command", cmd.Command)
+		}
+		if parent != "" {
+			args = append(args, "--parent", parent)
+		}
+		if root != "" {
+			args = append(args, "--root", root)
+		}
+		if cmd.Purpose != "" {
+			args = append(args, "--purpose", cmd.Purpose)
+		}
+		if cmd.Summary != "" {
+			args = append(args, "--summary", cmd.Summary)
 		}
 		if cmd.Detach {
 			args = append(args, "--detach")
@@ -308,6 +371,15 @@ func (cmd newCmd) Run(app *cli, api *apiClient) error {
 		return json.NewEncoder(os.Stdout).Encode(session)
 	}
 	fmt.Fprintf(os.Stdout, "session: %s\nrepo: %s\nstatus: %s\n", session.ID, session.Repo, session.Status)
+	if session.ParentSessionID != "" {
+		fmt.Fprintf(os.Stdout, "parent: %s\n", terminalSafe(session.ParentSessionID))
+	}
+	if session.RootSessionID != "" && session.RootSessionID != session.ID {
+		fmt.Fprintf(os.Stdout, "root: %s\n", terminalSafe(session.RootSessionID))
+	}
+	if session.Summary != "" {
+		fmt.Fprintf(os.Stdout, "summary: %s\n", terminalSafe(session.Summary))
+	}
 	fmt.Fprintf(os.Stdout, "attach: crabfleet attach %s\n", session.ID)
 	if session.VNCURL != "" {
 		fmt.Fprintf(os.Stdout, "vnc: %s\n", session.VNCURL)
@@ -494,6 +566,97 @@ func (cmd logsCmd) Run(app *cli, api *apiClient) error {
 	return nil
 }
 
+func (cmd transcriptCmd) Run(app *cli, api *apiClient) error {
+	transcript, err := api.transcript(context.Background(), cmd.ID)
+	if err != nil {
+		if app.NoInput || app.JSON {
+			return err
+		}
+		return runSSH(app, "transcript", cmd.ID)
+	}
+	if app.JSON {
+		return json.NewEncoder(os.Stdout).Encode(map[string]string{
+			"session":    cmd.ID,
+			"transcript": transcript,
+		})
+	}
+	fmt.Fprint(os.Stdout, transcript)
+	if !strings.HasSuffix(transcript, "\n") {
+		fmt.Fprintln(os.Stdout)
+	}
+	return nil
+}
+
+func (cmd messageCmd) Run(app *cli, api *apiClient) error {
+	message := strings.Join(cmd.Text, " ")
+	if message == "" && !isTerminal(os.Stdin) {
+		data, err := io.ReadAll(io.LimitReader(os.Stdin, 64*1024))
+		if err != nil {
+			return err
+		}
+		message = strings.TrimRight(string(data), "\r\n")
+	}
+	if message == "" {
+		return errors.New("message text is required")
+	}
+	if err := api.message(context.Background(), cmd.ID, message, !cmd.NoEnter); err != nil {
+		if app.NoInput || app.JSON {
+			return err
+		}
+		args := []string{"message", cmd.ID}
+		if cmd.NoEnter {
+			args = append(args, "--no-enter")
+		}
+		args = append(args, message)
+		return runSSHCommand(app, args...)
+	}
+	if app.JSON {
+		return json.NewEncoder(os.Stdout).Encode(map[string]any{
+			"session": cmd.ID,
+			"sent":    true,
+		})
+	}
+	fmt.Fprintf(os.Stdout, "sent: %s\n", terminalSafe(cmd.ID))
+	return nil
+}
+
+func (cmd summaryCmd) Run(app *cli, api *apiClient) error {
+	summary := strings.Join(cmd.Text, " ")
+	if summary == "" && cmd.Purpose == "" {
+		session, err := api.session(context.Background(), cmd.ID)
+		if err != nil {
+			if app.NoInput || app.JSON {
+				return err
+			}
+			return runSSH(app, "summary", cmd.ID)
+		}
+		if app.JSON {
+			return json.NewEncoder(os.Stdout).Encode(session)
+		}
+		printSessionSummary(os.Stdout, session)
+		return nil
+	}
+	session, err := api.updateSummary(context.Background(), cmd.ID, summary, cmd.Purpose)
+	if err != nil {
+		if app.NoInput || app.JSON {
+			return err
+		}
+		args := []string{"summary", cmd.ID}
+		if cmd.Purpose != "" {
+			args = append(args, "--purpose", cmd.Purpose)
+		}
+		if summary != "" {
+			args = append(args, summary)
+		}
+		return runSSHCommand(app, args...)
+	}
+	if app.JSON {
+		return json.NewEncoder(os.Stdout).Encode(session)
+	}
+	printSessionSummary(os.Stdout, session)
+	return nil
+}
+
 func (openCmd) Run(app *cli, _ *apiClient) error {
 	return openURL(app.API + "/app/")
 }
@@ -574,29 +737,57 @@ func (c *apiClient) logs(ctx context.Context, id string) (sessionLogResponse, er
 	return out, err
 }
 
-func (c *apiClient) do(ctx context.Context, method string, path string, body any, out any) error {
-	if c.token == "" || c.fingerprint == "" {
-		return errors.New("CRABFLEET_SSH_GATEWAY_TOKEN and CRABFLEET_SSH_FINGERPRINT are required for API mode")
-	}
-	var reader io.Reader
-	if body != nil {
-		payload, err := json.Marshal(body)
-		if err != nil {
-			return err
-		}
-		reader = bytes.NewReader(payload)
-	}
-	req, err := http.NewRequestWithContext(ctx, method, c.baseURL+path, reader)
+func (c *apiClient) transcript(ctx context.Context, id string) (string, error) {
+	return c.text(ctx, http.MethodGet, "/api/ssh/interactive-sessions/"+url.PathEscape(id)+"/transcript", nil)
+}
+
+func (c *apiClient) message(ctx context.Context, id string, message string, enter bool) error {
+	path := "/api/ssh/interactive-sessions/" + url.PathEscape(id) + "/pty"
+	apiPath, authMode, err := c.authenticatedPath(path)
 	if err != nil {
 		return err
 	}
-	req.Header.Set("Accept", "application/json")
-	req.Header.Set("Authorization", "Bearer "+c.token)
-	req.Header.Set("X-Crabfleet-SSH-Fingerprint", c.fingerprint)
-	if body != nil {
-		req.Header.Set("Content-Type", "application/json")
+	u, err := url.Parse(c.baseURL)
+	if err != nil {
+		return err
 	}
-	resp, err := c.http.Do(req)
+	switch u.Scheme {
+	case "https":
+		u.Scheme = "wss"
+	default:
+		u.Scheme = "ws"
+	}
+	u.Path = apiPath
+	q := u.Query()
+	q.Set("cols", "120")
+	q.Set("rows", "34")
+	u.RawQuery = q.Encode()
+
+	headers := http.Header{}
+	c.setAuthHeaders(headers, authMode)
+	ws, _, err := websocket.Dial(ctx, u.String(), &websocket.DialOptions{HTTPHeader: headers})
+	if err != nil {
+		return err
+	}
+	defer ws.Close(websocket.StatusNormalClosure, "")
+	payload := message
+	if enter {
+		payload += "\n"
+	}
+	return ws.Write(ctx, websocket.MessageBinary, []byte(payload))
+}
+
+func (c *apiClient) updateSummary(ctx context.Context, id string, summary string, purpose string) (interactiveSession, error) {
+	var out sessionResponse
+	err := c.do(ctx, http.MethodPost, "/api/ssh/interactive-sessions/"+url.PathEscape(id)+"/summary", map[string]string{
+		"summary": summary,
+		"purpose": purpose,
+	}, &out)
+	return out.Session, err
+}
+
+func (c *apiClient) do(ctx context.Context, method string, path string, body any, out any) error {
+	resp, err := c.request(ctx, method, path, body, "application/json")
 	if err != nil {
 		return err
 	}
@@ -609,6 +800,70 @@ func (c *apiClient) do(ctx context.Context, method string, path string, body any
 		return nil
 	}
 	return json.NewDecoder(resp.Body).Decode(out)
+}
+
+func (c *apiClient) text(ctx context.Context, method string, path string, body any) (string, error) {
+	resp, err := c.request(ctx, method, path, body, "text/markdown")
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	data, readErr := io.ReadAll(io.LimitReader(resp.Body, 4*1024*1024))
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		if readErr != nil {
+			return "", readErr
+		}
+		return "", fmt.Errorf("api %s: %s", resp.Status, strings.TrimSpace(string(data)))
+	}
+	if readErr != nil {
+		return "", readErr
+	}
+	return string(data), nil
+}
+
+func (c *apiClient) request(ctx context.Context, method string, path string, body any, accept string) (*http.Response, error) {
+	apiPath, authMode, err := c.authenticatedPath(path)
+	if err != nil {
+		return nil, err
+	}
+	var reader io.Reader
+	if body != nil {
+		payload, err := json.Marshal(body)
+		if err != nil {
+			return nil, err
+		}
+		reader = bytes.NewReader(payload)
+	}
+	req, err := http.NewRequestWithContext(ctx, method, c.baseURL+apiPath, reader)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Accept", accept)
+	c.setAuthHeaders(req.Header, authMode)
+	if body != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
+	return c.http.Do(req)
+}
+
+func (c *apiClient) setAuthHeaders(headers http.Header, authMode string) {
+	if authMode == "ssh" {
+		headers.Set("Authorization", "Bearer "+c.token)
+		headers.Set("X-Crabfleet-SSH-Fingerprint", c.fingerprint)
+		return
+	}
+	headers.Set("Authorization", "Bearer "+c.agentToken)
+	headers.Set("X-Crabfleet-Session-ID", c.agentSessionID)
+}
+
+func (c *apiClient) authenticatedPath(path string) (string, string, error) {
+	if c.token != "" && c.fingerprint != "" {
+		return path, "ssh", nil
+	}
+	if c.agentToken != "" && c.agentSessionID != "" {
+		return strings.Replace(path, "/api/ssh/", "/api/agent/", 1), "agent", nil
+	}
+	return "", "", errors.New("API mode requires CRABFLEET_SSH_GATEWAY_TOKEN + CRABFLEET_SSH_FINGERPRINT or CRABFLEET_AGENT_TOKEN + CRABFLEET_SESSION_ID")
 }
 
 func printFleet(out io.Writer, sessions []interactiveSession) {
@@ -630,11 +885,75 @@ func printFleet(out io.Writer, sessions []interactiveSession) {
 		return
 	}
 	for _, owner := range owners {
-		fmt.Fprintf(out, "%s:\n", owner)
-		for _, session := range groups[owner] {
-			fmt.Fprintf(out, "  %s  %s  %s  %s\n", session.ID, session.Status, session.Runtime, session.Repo)
+		fmt.Fprintf(out, "%s:\n", terminalSafe(owner))
+		printSessionTree(out, groups[owner], "  ")
+	}
+}
+
+func printSessionTree(out io.Writer, sessions []interactiveSession, indent string) {
+	byParent := map[string][]interactiveSession{}
+	known := map[string]bool{}
+	seen := map[string]bool{}
+	for _, session := range sessions {
+		known[session.ID] = true
+		byParent[session.ParentSessionID] = append(byParent[session.ParentSessionID], session)
+	}
+	for parent := range byParent {
+		sort.SliceStable(byParent[parent], func(i, j int) bool {
+			return byParent[parent][i].ID < byParent[parent][j].ID
+		})
+	}
+	var roots []interactiveSession
+	for _, session := range sessions {
+		if session.ParentSessionID == "" || !known[session.ParentSessionID] {
+			roots = append(roots, session)
 		}
 	}
+	sort.SliceStable(roots, func(i, j int) bool {
+		return roots[i].ID < roots[j].ID
+	})
+	var walk func(interactiveSession, string)
+	walk = func(session interactiveSession, prefix string) {
+		if seen[session.ID] {
+			return
+		}
+		seen[session.ID] = true
+		fmt.Fprintf(out, "%s%s\n", prefix, sessionLine(session))
+		for _, child := range byParent[session.ID] {
+			walk(child, prefix+"  ")
+		}
+	}
+	for _, root := range roots {
+		walk(root, indent)
+	}
+	for _, session := range sessions {
+		if !seen[session.ID] {
+			walk(session, indent)
+		}
+	}
+}
+
+func sessionLine(session interactiveSession) string {
+	parts := []string{
+		terminalSafe(session.ID),
+		terminalSafe(session.Status),
+		terminalSafe(session.Runtime),
+		terminalSafe(session.Repo),
+	}
+	if summary := sessionSummary(session); summary != "" {
+		parts = append(parts, "- "+terminalSafe(summary))
+	}
+	return strings.Join(parts, "  ")
+}
+
+func sessionSummary(session interactiveSession) string {
+	if session.Summary != "" {
+		return session.Summary
+	}
+	if session.Purpose != "" {
+		return session.Purpose
+	}
+	return session.LastEvent
 }
 
 func printSessionLogs(out io.Writer, logs sessionLogResponse) {
@@ -670,6 +989,21 @@ func printSessionStatus(out io.Writer, session interactiveSession) {
 	if session.LeaseID != "" {
 		fmt.Fprintf(out, "lease: %s\n", terminalSafe(session.LeaseID))
 	}
+	if session.ParentSessionID != "" {
+		fmt.Fprintf(out, "parent: %s\n", terminalSafe(session.ParentSessionID))
+	}
+	if session.RootSessionID != "" {
+		fmt.Fprintf(out, "root: %s\n", terminalSafe(session.RootSessionID))
+	}
+	if session.CreatedBy != "" {
+		fmt.Fprintf(out, "created-by: %s\n", terminalSafe(session.CreatedBy))
+	}
+	if session.Purpose != "" {
+		fmt.Fprintf(out, "purpose: %s\n", terminalSafe(session.Purpose))
+	}
+	if session.Summary != "" {
+		fmt.Fprintf(out, "summary: %s\n", terminalSafe(session.Summary))
+	}
 	if session.AttachURL != "" {
 		fmt.Fprintf(out, "attach: %s\n", terminalSafe(session.AttachURL))
 	}
@@ -678,6 +1012,16 @@ func printSessionStatus(out io.Writer, session interactiveSession) {
 	}
 	if session.LastEvent != "" {
 		fmt.Fprintf(out, "event: %s\n", terminalSafe(session.LastEvent))
+	}
+}
+
+func printSessionSummary(out io.Writer, session interactiveSession) {
+	fmt.Fprintf(out, "session: %s\n", terminalSafe(session.ID))
+	if session.Purpose != "" {
+		fmt.Fprintf(out, "purpose: %s\n", terminalSafe(session.Purpose))
+	}
+	if session.Summary != "" {
+		fmt.Fprintf(out, "summary: %s\n", terminalSafe(session.Summary))
 	}
 }
 

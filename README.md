@@ -74,6 +74,7 @@ Add users/teams to the allowlist and enable repos:
 - Default runtime is Cloudflare Sandbox; choose Crabbox only when a VNC/desktop adapter is configured
 - Without `CRABBOX_INTERACTIVE_PROVISION_URL`, sessions are stored as `pending_adapter` and still visible in the grid
 - Install or build the Go CLI, then run `crabfleet new --repo openclaw/crabfleet "fix the failing check"`
+- Inside a Crabfleet sandbox, the CLI uses `CRABFLEET_SESSION_ID` and `CRABFLEET_AGENT_TOKEN` automatically so Codex can run `crabfleet list`, spawn child sessions with `crabfleet new --purpose ...`, send `crabfleet message <id> "..."`, read `crabfleet transcript <id>`, and update `crabfleet summary <id> "..."`
 
 ## Features
 

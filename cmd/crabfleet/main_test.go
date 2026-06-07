@@ -1,6 +1,10 @@
 package main
 
-import "testing"
+import (
+	"bytes"
+	"strings"
+	"testing"
+)
 
 func TestVersionIsSet(t *testing.T) {
 	if version == "" {
@@ -48,6 +52,40 @@ func TestAttachableRequiresReadySessionWithAttachURL(t *testing.T) {
 	}
 	if !attachable(interactiveSession{Status: "ready", LeaseID: "sandbox:test"}) {
 		t.Fatal("sandbox lease should be attachable")
+	}
+}
+
+func TestPrintFleetShowsOwnerSessionTreeAndSummaries(t *testing.T) {
+	var out bytes.Buffer
+	printFleet(&out, []interactiveSession{
+		{
+			ID:              "IS-2",
+			Owner:           "steipete",
+			Repo:            "openclaw/crabfleet",
+			Runtime:         "container",
+			Status:          "ready",
+			Summary:         "child mission",
+			ParentSessionID: "IS-1",
+		},
+		{
+			ID:      "IS-1",
+			Owner:   "steipete",
+			Repo:    "openclaw/crabfleet",
+			Runtime: "container",
+			Status:  "ready",
+			Purpose: "root mission",
+		},
+	})
+
+	text := out.String()
+	for _, want := range []string{
+		"steipete:",
+		"  IS-1  ready  container  openclaw/crabfleet  - root mission",
+		"    IS-2  ready  container  openclaw/crabfleet  - child mission",
+	} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("output missing %q:\n%s", want, text)
+		}
 	}
 }
 

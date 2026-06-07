@@ -4,10 +4,15 @@ import { buildFleetState, sandboxIdFromLeaseId } from "../src/fleet-state.ts";
 
 const baseSession = {
   id: "s1",
+  parentSessionId: null,
+  rootSessionId: "s1",
   repo: "openclaw/crabfleet",
   branch: "main",
   runtime: "container" as const,
   owner: "github:steipete",
+  createdBy: "github:steipete",
+  purpose: "supervise Crabfleet",
+  summary: "tracking fleet visibility",
   status: "ready" as const,
   leaseId: "sandbox:crabbox-s1-abcd1234:terminal-s1-abcd1234:autostart-v4",
   attachUrl: "/api/interactive-sessions/s1/pty",
@@ -72,6 +77,10 @@ test("fleet state aggregates sessions and redacted sandbox policies", () => {
   assert.equal(fleet.egress.sessionsWithPolicy, 1);
   assert.equal(fleet.sessions[0]?.id, "s2");
   assert.equal(fleet.sessions[1]?.sandboxId, "crabbox-s1-abcd1234");
+  assert.equal(fleet.sessions[1]?.rootSessionId, "s1");
+  assert.equal(fleet.sessions[1]?.createdBy, "github:steipete");
+  assert.equal(fleet.sessions[1]?.purpose, "supervise Crabfleet");
+  assert.equal(fleet.sessions[1]?.summary, "tracking fleet visibility");
   assert.equal(fleet.sessions[1]?.policy.present, true);
   assert.equal(fleet.sessions[1]?.policy.hasGithubToken, true);
   assert.equal(fleet.sessions[1]?.policy.githubCredentialSource, "worker");
