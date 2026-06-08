@@ -29,8 +29,8 @@
     "@preact/preset-vite": "^2.10.5",
     "@typescript/native-preview": "7.0.0-dev.20260517.1",
     "oxfmt": "^0.50.0",
-    "oxlint": "^1.65.0",
-    "vite": "^8.0.13",
+    "oxlint": "^1.69.0",
+    "vite": "^8.0.16",
     "wrangler": "^4.92.0"
   },
   "packageManager": "pnpm@10.23.0"
