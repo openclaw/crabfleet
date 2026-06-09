@@ -52,7 +52,7 @@ INSERT OR IGNORE INTO repos (repo, enabled, created_at, updated_at) VALUES
   ('openclaw/maintainers', 1, unixepoch() * 1000, unixepoch() * 1000),
   ('openclaw/mcporter', 1, unixepoch() * 1000, unixepoch() * 1000),
   ('openclaw/moltbench', 1, unixepoch() * 1000, unixepoch() * 1000),
-  ('openclaw/multipass', 1, unixepoch() * 1000, unixepoch() * 1000),
+  ('openclaw/crabline', 1, unixepoch() * 1000, unixepoch() * 1000),
   ('openclaw/nix-openclaw', 1, unixepoch() * 1000, unixepoch() * 1000),
   ('openclaw/nix-openclaw-tools', 1, unixepoch() * 1000, unixepoch() * 1000),
   ('openclaw/notcrawl', 1, unixepoch() * 1000, unixepoch() * 1000),
