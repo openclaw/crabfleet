@@ -6,9 +6,3 @@ SELECT
   unixepoch() * 1000
 FROM repos
 WHERE repo = 'openclaw/multipass';
-
-UPDATE repos
-SET
-  enabled = 0,
-  updated_at = unixepoch() * 1000
-WHERE repo = 'openclaw/multipass';
