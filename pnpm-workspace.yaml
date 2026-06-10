@@ -5,3 +5,16 @@ preferWorkspacePackages: true
 preferOffline: true
 pmOnFail: ignore
 verifyDepsBeforeRun: false
+minimumReleaseAgeExclude:
+  - "@typescript/native-preview-darwin-arm64@7.0.0-dev.20260609.1"
+  - "@typescript/native-preview-darwin-x64@7.0.0-dev.20260609.1"
+  - "@typescript/native-preview-linux-arm64@7.0.0-dev.20260609.1"
+  - "@typescript/native-preview-linux-arm@7.0.0-dev.20260609.1"
+  - "@typescript/native-preview-linux-x64@7.0.0-dev.20260609.1"
+  - "@typescript/native-preview-win32-arm64@7.0.0-dev.20260609.1"
+  - "@typescript/native-preview-win32-x64@7.0.0-dev.20260609.1"
+  - "@typescript/native-preview@7.0.0-dev.20260609.1"
+  - miniflare@4.20260609.0
+  - wrangler@4.99.0
+onlyBuiltDependencies:
+  - workerd
