@@ -20,13 +20,13 @@ import (
 	"github.com/coder/websocket"
 )
 
-const defaultAPIURL = "https://clawfleet.openclaw.ai"
+const defaultAPIURL = "https://crabfleet.openclaw.ai"
 const defaultSSHHost = "crabd.sh"
 
 var version = "dev"
 
 type cli struct {
-	API         string `help:"Crabfleet API URL." default:"https://clawfleet.openclaw.ai" env:"CRABFLEET_API_URL"`
+	API         string `help:"Crabfleet API URL." default:"https://crabfleet.openclaw.ai" env:"CRABFLEET_API_URL"`
 	SSHHost     string `help:"Crabfleet SSH host." default:"crabd.sh" env:"CRABFLEET_SSH_HOST"`
 	Token       string `help:"Internal API token." env:"CRABFLEET_SSH_GATEWAY_TOKEN"`
 	Fingerprint string `help:"Linked SSH key fingerprint." env:"CRABFLEET_SSH_FINGERPRINT"`

@@ -2,9 +2,9 @@
 
 Status: implementation plan plus shipped v2 slice.
 
-Canonical app/API URL: <https://clawfleet.openclaw.ai>
+Canonical app/API URL: <https://crabfleet.openclaw.ai>
 
-Product page URL: <https://clawfleet.ai>
+Product page URL: <https://crabfleet.ai>
 
 ## Goal
 
@@ -49,8 +49,8 @@ Fleet state shape:
 
 ```json
 {
-  "canonicalUrl": "https://clawfleet.openclaw.ai",
-  "productUrl": "https://clawfleet.ai",
+  "canonicalUrl": "https://crabfleet.openclaw.ai",
+  "productUrl": "https://crabfleet.ai",
   "generatedAt": 1770000000000,
   "registryAvailable": true,
   "egress": {
@@ -233,10 +233,10 @@ Local result:
 - Landed: `72f205b`.
 - Deploy workflow: `deploy-worker` run `26694996052` passed.
 - Pages workflow: run `26694996080` passed.
-- Live smoke: `https://clawfleet.openclaw.ai/healthz` returned `200`.
-- Live smoke: `https://clawfleet.openclaw.ai/docs/spec-v2` returned this spec.
-- Live smoke: unauthenticated `https://clawfleet.openclaw.ai/api/fleet` returned `401`.
-- Product split: `https://clawfleet.ai/` stayed the product-page redirect shell.
+- Live smoke: `https://crabfleet.openclaw.ai/healthz` returned `200`.
+- Live smoke: `https://crabfleet.openclaw.ai/docs/spec-v2` returned this spec.
+- Live smoke: unauthenticated `https://crabfleet.openclaw.ai/api/fleet` returned `401`.
+- Product split: `https://crabfleet.ai/` stayed independent as the product-page host.
 
 Autoreview:
 
@@ -254,11 +254,11 @@ PR:
 Deploy:
 
 - Confirm Worker deploy workflow for merged commit.
-- Confirm `https://clawfleet.openclaw.ai/healthz` returns `200`.
-- Confirm `https://clawfleet.openclaw.ai/docs/spec-v2` returns HTML.
-- Confirm `https://clawfleet.openclaw.ai/docs/spec-v2.md` returns Markdown.
-- Confirm unauthenticated `https://clawfleet.openclaw.ai/api/fleet` is rejected.
-- Confirm `https://clawfleet.ai` stays product-page host, not the app/API host.
+- Confirm `https://crabfleet.openclaw.ai/healthz` returns `200`.
+- Confirm `https://crabfleet.openclaw.ai/docs/spec-v2` returns HTML.
+- Confirm `https://crabfleet.openclaw.ai/docs/spec-v2.md` returns Markdown.
+- Confirm unauthenticated `https://crabfleet.openclaw.ai/api/fleet` is rejected.
+- Confirm `https://crabfleet.ai` stays product-page host, not the app/API host.
 
 ## Future Work
 

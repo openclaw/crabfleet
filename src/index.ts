@@ -50,6 +50,13 @@ import {
   SPEC_V2_HTML,
   SPEC_V2_MARKDOWN,
 } from "./generated";
+import {
+  appCanonicalHost,
+  appCanonicalOrigin,
+  appRedirectHosts,
+  canonicalAppRedirect,
+  productHostResponse,
+} from "./canonical-host";
 
 type Role = "viewer" | "maintainer" | "owner";
 
@@ -680,15 +687,6 @@ const sshLinkSeconds = 5 * 60;
 const terminalClipboardMaxBytes = 10 * 1024 * 1024;
 const lanes = ["Todo", "Running", "Human Review", "Done"];
 const preferredRepo = "openclaw/crabfleet";
-const appCanonicalHost = "clawfleet.openclaw.ai";
-const appCanonicalOrigin = `https://${appCanonicalHost}`;
-const appRedirectHosts = new Set([
-  "crabfleet.ai",
-  "www.crabfleet.ai",
-  "crabfleet.openclaw.ai",
-  "crabyard.openclaw.ai",
-  "crabbox-ai.services-91b.workers.dev",
-]);
 const sandboxLeasePrefix = "sandbox:";
 const sandboxLeaseProfile = "autostart-v4";
 const activeRunStatuses: readonly RunStatus[] = ["queued", "leasing", "running"];
@@ -1103,6 +1101,9 @@ export default {
     const url = new URL(request.url);
 
     try {
+      const productResponse = await productHostResponse(request);
+      if (productResponse) return productResponse;
+
       const canonicalRedirect = canonicalAppRedirect(url);
       if (canonicalRedirect) return canonicalRedirect;
 
@@ -2467,7 +2468,7 @@ async function readFleetState(
   ]);
   return buildFleetState(interactiveSessions, policyResult.policies, {
     canonicalUrl: appCanonicalOrigin,
-    productUrl: "https://clawfleet.ai",
+    productUrl: "https://crabfleet.ai",
     defaultEgressHosts: defaultSandboxEgressHosts,
     generatedAt: Date.now(),
     registryAvailable: policyResult.available,
@@ -8067,14 +8068,6 @@ function isConstraintError(error: unknown): boolean {
 function wantsMarkdown(request: Request): boolean {
   const accept = request.headers.get("accept") ?? "";
   return accept.includes("text/markdown");
-}
-
-function canonicalAppRedirect(url: URL): Response | null {
-  if (!appRedirectHosts.has(url.hostname)) return null;
-  const target = new URL(appCanonicalOrigin);
-  target.pathname = url.pathname;
-  target.search = url.search;
-  return Response.redirect(target.toString(), 308);
 }
 
 function text(

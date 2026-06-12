@@ -4,7 +4,7 @@
 
 **Mission control for Agent runs.**
 
-Crabfleet gives OpenClaw maintainers a fleet dashboard where every Codex crabbox is visible by operator, repo, terminal, and WebVNC state. The OpenClaw app/API canonical URL is `https://clawfleet.openclaw.ai`; `https://clawfleet.ai` is reserved for the public product page.
+Crabfleet gives OpenClaw maintainers a fleet dashboard where every Codex crabbox is visible by operator, repo, terminal, and WebVNC state. The OpenClaw app/API canonical URL is `https://crabfleet.openclaw.ai`; `https://crabfleet.ai` is the public product site.
 
 ## What It Does
 
@@ -125,7 +125,7 @@ merge:
 ### Prerequisites
 
 - Cloudflare account
-- `clawfleet.openclaw.ai` route in Cloudflare; legacy app hosts redirect here
+- `crabfleet.openclaw.ai` route in Cloudflare; legacy OpenClaw app hosts redirect here
 - GitHub OAuth app (optional but recommended)
 - Bootstrap token secret
 
@@ -134,10 +134,11 @@ merge:
 Pushes to `main` run `.github/workflows/deploy-worker.yml`, which checks, tests, builds,
 applies remote D1 migrations, and deploys the Worker. Configure the repository secret
 `CLOUDFLARE_API_TOKEN` with permissions for Workers deploys and D1 migrations.
-`clawfleet.openclaw.ai` and `crabd.sh` DNS/route convergence is handled by
-`scripts/ensure-cloudflare-domains.mjs`; set `CLOUDFLARE_DNS_API_TOKEN` when CI should
-manage those records. Without that DNS-scoped token, CI skips domain convergence and
-deploys to the already configured route.
+`crabfleet.ai` product routing, `crabfleet.openclaw.ai`, and `crabd.sh` DNS/route
+convergence is handled by `scripts/ensure-cloudflare-domains.mjs`; set
+`CLOUDFLARE_DNS_API_TOKEN` when CI should manage those records. Without that
+DNS-scoped token, CI skips domain convergence. The app Worker still proxies the generic
+product site for `crabfleet.ai` as a defensive fallback, never the authenticated app.
 
 Manual deploy is still available:
 
@@ -188,10 +189,10 @@ The Crabbox namespace cutover intentionally has no old-name compatibility. Exist
 ### Verify Deployment
 
 ```bash
-curl -I https://clawfleet.openclaw.ai/healthz
+curl -I https://crabfleet.openclaw.ai/healthz
 # Should return: 200 OK
 
-curl https://clawfleet.openclaw.ai/docs/spec
+curl https://crabfleet.openclaw.ai/docs/spec
 # Should return: HTML spec document
 ```
 
@@ -241,7 +242,7 @@ The Worker exposes an internal SSH onboarding API guarded by `CRABFLEET_SSH_GATE
 Run the Go gateway next to a host that can accept raw SSH:
 
 ```bash
-CRABFLEET_API_URL=https://clawfleet.openclaw.ai \
+CRABFLEET_API_URL=https://crabfleet.openclaw.ai \
 CRABFLEET_SSH_GATEWAY_TOKEN=... \
 CRABFLEET_SSH_HOST_KEY=/var/lib/crabfleet/ssh_host_ed25519_key \
 CRABFLEET_SSH_ADDR=:2222 \
@@ -287,7 +288,7 @@ The release workflow builds macOS, Linux, and Windows archives, then updates `op
 OpenClaw can create repo-ready crabboxes for Discord-triggered work through the internal service endpoint:
 
 ```bash
-curl -fsS https://clawfleet.openclaw.ai/api/openclaw/crabboxes \
+curl -fsS https://crabfleet.openclaw.ai/api/openclaw/crabboxes \
   -H "authorization: Bearer $CRABBOX_OPENCLAW_TOKEN" \
   -H "content-type: application/json" \
   -d '{"owner":"@steipete","repo":"openclaw/crabfleet","prompt":"prep the meeting follow-up"}'

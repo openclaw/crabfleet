@@ -1,6 +1,17 @@
 export const lanes = ["Todo", "Running", "Human Review", "Done"];
 export const preferredRepo = "openclaw/crabfleet";
 
+const activeInteractiveStatuses = new Set([
+  "provisioning",
+  "pending_adapter",
+  "ready",
+  "attached",
+  "detached",
+]);
+const deadInteractiveStatuses = new Set(["stopped", "expired", "failed", "unavailable"]);
+const provisioningInteractiveStatuses = new Set(["provisioning", "pending_adapter"]);
+const terminalReadyInteractiveStatuses = new Set(["ready", "attached", "detached"]);
+
 export function roleRank(role) {
   return { viewer: 1, maintainer: 2, owner: 3 }[role] || 0;
 }
@@ -86,9 +97,7 @@ export function hasRunCapability(session, name) {
 export function isActiveRun(session) {
   if (session.routePlaceholder) return true;
   if (session.kind === "interactive") {
-    return ["provisioning", "pending_adapter", "ready", "attached", "detached"].includes(
-      session.status,
-    );
+    return activeInteractiveStatuses.has(session.status);
   }
   return ["queued", "leasing", "running"].includes(session.run?.status);
 }
@@ -97,8 +106,58 @@ export function isProvisioningInteractiveSession(session) {
   return (
     session?.kind === "interactive" &&
     ((session.routePlaceholder && session.status === "loading") ||
-      ["provisioning", "pending_adapter"].includes(session.status))
+      provisioningInteractiveStatuses.has(session.status))
   );
+}
+
+export function isDeadInteractiveSession(session) {
+  return (
+    session &&
+    (session.kind === undefined || session.kind === "interactive") &&
+    deadInteractiveStatuses.has(session.status)
+  );
+}
+
+export function isTerminalReadyInteractiveSession(session) {
+  return (
+    session &&
+    (session.kind === undefined || session.kind === "interactive") &&
+    terminalReadyInteractiveStatuses.has(session.status)
+  );
+}
+
+export function humanStatus(value) {
+  return String(value || "")
+    .replace(/[_-]+/g, " ")
+    .replace(/\b\w/g, (letter) => letter.toUpperCase());
+}
+
+export function interactiveSessionStatus(session) {
+  if (session.routePlaceholder && session.status === "loading") {
+    return { label: "Loading", tone: "provisioning" };
+  }
+  if (session.routePlaceholder && session.status === "unavailable") {
+    return { label: "Unavailable", tone: "failed" };
+  }
+  if (session.status === "failed") return { label: "Failed", tone: "failed" };
+  if (session.status === "stopped" || session.status === "expired") {
+    return { label: "Stopped", tone: "stopped" };
+  }
+  if (provisioningInteractiveStatuses.has(session.status)) {
+    return { label: "Provisioning", tone: "provisioning" };
+  }
+  if (session.shareMode === "link_read" || session.sharedReadOnly) {
+    return { label: "Shared", tone: "shared" };
+  }
+  if (session.multiplayerMode) return { label: "Multiplayer", tone: "shared" };
+  if (terminalReadyInteractiveStatuses.has(session.status)) {
+    return { label: "Live", tone: "live" };
+  }
+  return { label: humanStatus(session.status), tone: "" };
+}
+
+export function sessionLogsUrl(id) {
+  return `/api/interactive-sessions/${encodeURIComponent(id)}/logs`;
 }
 
 export function runtimeCapabilityLabel(session) {

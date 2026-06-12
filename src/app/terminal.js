@@ -7,7 +7,7 @@ import {
   encodeSubscribePayload,
   encodeTerminalFrame,
 } from "../terminal-protocol.ts";
-import { clipboardName, terminalText } from "./utils.js";
+import { clipboardName, isTerminalReadyInteractiveSession, terminalText } from "./utils.js";
 
 const terminalTheme = {
   background: "#101827",
@@ -246,20 +246,18 @@ export function disposeTerminal(id) {
 
 function shouldConnectLiveTerminal(session) {
   return (
-    session.kind === "interactive" &&
+    isTerminalReadyInteractiveSession(session) &&
     (session.canControl === true ||
       session.sharedReadOnly === true ||
-      (terminalHubOptions.sharedToken && session.id === terminalHubOptions.sharedSessionId)) &&
-    ["ready", "attached", "detached"].includes(session.status)
+      (terminalHubOptions.sharedToken && session.id === terminalHubOptions.sharedSessionId))
   );
 }
 
 function canSendTerminalInput(session) {
   return (
-    session.kind === "interactive" &&
+    isTerminalReadyInteractiveSession(session) &&
     session.canControl === true &&
-    session.sharedReadOnly !== true &&
-    ["ready", "attached", "detached"].includes(session.status)
+    session.sharedReadOnly !== true
   );
 }
 

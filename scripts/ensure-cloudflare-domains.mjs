@@ -1,14 +1,13 @@
 const token = process.env.CLOUDFLARE_API_TOKEN;
-const workerScript = "crabbox-ai";
-const appHost = "clawfleet.openclaw.ai";
+const appHost = "crabfleet.openclaw.ai";
+const productWorkerScript = "crabfleet-canonical-router";
 // OpenClaw app hosts are Worker Custom Domains in wrangler.jsonc; this script
 // only removes stale classic routes for them and keeps other aliases tidy.
 const openClawCustomDomainHosts = new Set([
   appHost,
-  "crabfleet.openclaw.ai",
+  "clawfleet.openclaw.ai",
   "crabyard.openclaw.ai",
 ]);
-const legacyCrabfleetHosts = new Set(["crabfleet.ai", "www.crabfleet.ai"]);
 
 if (!token) {
   throw new Error("CLOUDFLARE_API_TOKEN is required");
@@ -42,7 +41,7 @@ async function zone(name) {
   return selected;
 }
 
-async function ensureWorkerHost(zoneName, host) {
+async function ensureProductHost(zoneName, host) {
   const targetZone = await zone(zoneName);
   const dns = await request(`/zones/${targetZone.id}/dns_records?name=${encodeURIComponent(host)}`);
   for (const record of dns.filter((entry) => entry.type === "AAAA" || entry.type === "CNAME")) {
@@ -83,16 +82,16 @@ async function ensureWorkerHost(zoneName, host) {
   const pattern = `${host}/*`;
   const routes = await request(`/zones/${targetZone.id}/workers/routes`);
   for (const route of routes.filter(
-    (entry) => entry.pattern === pattern && entry.script !== workerScript,
+    (entry) => entry.pattern === pattern && entry.script !== productWorkerScript,
   )) {
     await request(`/zones/${targetZone.id}/workers/routes/${route.id}`, { method: "DELETE" });
     console.log(`deleted stale ${host} route ${route.id}`);
   }
   const current = await request(`/zones/${targetZone.id}/workers/routes`);
-  if (!current.some((route) => route.pattern === pattern && route.script === workerScript)) {
+  if (!current.some((route) => route.pattern === pattern && route.script === productWorkerScript)) {
     const route = await request(`/zones/${targetZone.id}/workers/routes`, {
       method: "POST",
-      body: JSON.stringify({ pattern, script: workerScript }),
+      body: JSON.stringify({ pattern, script: productWorkerScript }),
     });
     console.log(`created ${host} route ${route.id}`);
   } else {
@@ -204,8 +203,8 @@ async function ensureCrabdSshRecord() {
 }
 
 await removeOpenClawClassicRoutes();
-for (const host of legacyCrabfleetHosts) {
-  await ensureWorkerHost("crabfleet.ai", host);
+for (const host of ["crabfleet.ai", "www.crabfleet.ai"]) {
+  await ensureProductHost("crabfleet.ai", host);
 }
 await ensureCrabfleetDocsRecord();
 await ensureCrabdSshRecord();
