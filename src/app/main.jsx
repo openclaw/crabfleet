@@ -99,6 +99,7 @@ function App() {
   const [theme, setThemeState] = useState(
     document.documentElement.dataset.theme === "light" ? "light" : "dark",
   );
+  const [dialog, setDialog] = useState(null);
   const [sessionLayout, setSessionLayout] = useState(loadSessionLayout);
   const [terminalStatus, setTerminalStatus] = useState({});
   const stateRef = useRef(state);
@@ -113,6 +114,7 @@ function App() {
   const refPreviewSeq = useRef(0);
   const draggedSessionId = useRef(null);
   const autoLoginStarted = useRef(false);
+  const dialogSequence = useRef(0);
 
   const allSessionItems = useMemo(() => sessionItems(state), [state]);
   const sessionItemById = useMemo(
@@ -481,6 +483,42 @@ function App() {
     setThemeState(value === "light" ? "light" : "dark");
   }
 
+  function openActionDialog(options) {
+    dialogSequence.current += 1;
+    setDialog({
+      id: dialogSequence.current,
+      pending: false,
+      error: "",
+      ...options,
+    });
+  }
+
+  function closeActionDialog() {
+    setDialog((current) => (current?.pending ? current : null));
+  }
+
+  async function confirmActionDialog() {
+    const current = dialog;
+    if (!current?.action || current.pending) return;
+    setDialog((value) =>
+      value?.id === current.id ? { ...value, pending: true, error: "" } : value,
+    );
+    try {
+      await current.action();
+      setDialog((value) => (value?.id === current.id ? null : value));
+    } catch (error) {
+      setDialog((value) =>
+        value?.id === current.id
+          ? {
+              ...value,
+              pending: false,
+              error: error?.message || "The action could not be completed.",
+            }
+          : value,
+      );
+    }
+  }
+
   async function beginLogin() {
     try {
       sessionStorage.removeItem(skipAutoGithubLoginKey);
@@ -599,11 +637,18 @@ function App() {
     return result;
   }
 
-  async function closeInteractiveSession(id) {
+  function closeInteractiveSession(id) {
     const session = findInteractiveSession(id);
     const label = session ? `${session.repo} (${session.id})` : id;
-    if (!window.confirm(`End Codex session ${label}?`)) return null;
-    return interactiveSessionAction(id, "stop");
+    openActionDialog({
+      kind: "danger",
+      eyebrow: "Live session",
+      title: "End Codex session?",
+      description: "This stops the terminal. Its final status and logs stay visible in Crabfleet.",
+      subject: label,
+      confirmLabel: "End session",
+      action: () => interactiveSessionAction(id, "stop"),
+    });
   }
 
   async function cleanupInteractiveSessions(ids) {
@@ -621,28 +666,45 @@ function App() {
     return result;
   }
 
-  async function cleanupInteractiveSession(id) {
+  function cleanupInteractiveSession(id) {
     const session = findInteractiveSession(id);
     const label = session ? `${session.repo} (${session.id})` : id;
-    if (!window.confirm(`Clean up dead Codex session ${label}?`)) return null;
-    if (session?.routePlaceholder) {
-      removeInteractiveSession(id);
-      if (focusedSessionIdRef.current === id) setFocusedSessionId(null);
-      if (!sharedToken) setSessionUrl(null, { grid: true });
-      return { removedIds: [id] };
-    }
-    return cleanupInteractiveSessions([id]);
+    openActionDialog({
+      kind: "danger",
+      eyebrow: "Dead session",
+      title: "Clean up Codex session?",
+      description:
+        "This permanently removes the session record, event history, and archived logs from Crabfleet.",
+      subject: label,
+      confirmLabel: "Clean up",
+      action: async () => {
+        if (session?.routePlaceholder) {
+          removeInteractiveSession(id);
+          if (focusedSessionIdRef.current === id) setFocusedSessionId(null);
+          if (!sharedToken) setSessionUrl(null, { grid: true });
+          return;
+        }
+        await cleanupInteractiveSessions([id]);
+      },
+    });
   }
 
-  async function cleanupDeadInteractiveSessions() {
+  function cleanupDeadInteractiveSessions() {
     const user = stateRef.current.user;
     const ids = (stateRef.current.interactiveSessions || [])
       .filter((session) => canCleanInteractiveSession(session, user))
       .map((session) => session.id);
     if (!ids.length) return null;
-    if (!window.confirm(`Clean up ${ids.length} dead Codex session${ids.length === 1 ? "" : "s"}?`))
-      return null;
-    return cleanupInteractiveSessions(ids);
+    openActionDialog({
+      kind: "danger",
+      eyebrow: "Fleet cleanup",
+      title: `Clean up ${ids.length} dead Codex session${ids.length === 1 ? "" : "s"}?`,
+      description:
+        "This permanently removes their session records, event history, and archived logs from Crabfleet.",
+      subject: ids.length === 1 ? ids[0] : `${ids.length} stopped or failed sessions`,
+      confirmLabel: `Clean up ${ids.length}`,
+      action: () => cleanupInteractiveSessions(ids),
+    });
   }
 
   async function shareInteractiveSession(id) {
@@ -655,7 +717,15 @@ function App() {
         copied = true;
       }
     } catch {}
-    if (!copied) window.prompt("Copy share link", result.shareUrl);
+    if (!copied) {
+      openActionDialog({
+        kind: "share",
+        eyebrow: "Read-only access",
+        title: "Share link ready",
+        description: "Clipboard access is unavailable. Copy this link manually.",
+        value: result.shareUrl,
+      });
+    }
   }
 
   async function openRunDetails(id) {
@@ -834,6 +904,7 @@ function App() {
     showSessionGrid,
     refPreview,
     theme,
+    dialog,
     terminalStatus,
     sessionLayout,
     setSessionLayout: updateSessionLayout,
@@ -850,6 +921,8 @@ function App() {
     devIdentityLogin,
     logout,
     setTheme,
+    closeActionDialog,
+    confirmActionDialog,
     cardAction,
     attachCard,
     interactiveSessionAction,
@@ -902,6 +975,11 @@ function CrabfleetApp(props) {
       <RunDrawer {...props} />
       <SessionsDrawer {...props} />
       <AdminDrawer {...props} />
+      <ActionDialog
+        dialog={props.dialog}
+        onCancel={props.closeActionDialog}
+        onConfirm={props.confirmActionDialog}
+      />
     </>
   );
 }
@@ -2501,6 +2579,114 @@ function Drawer({ id, open, title, wide, onClose, children }) {
         <div class="panel-body">{children}</div>
       </section>
     </div>
+  );
+}
+
+function ActionDialog({ dialog, onCancel, onConfirm }) {
+  const elementRef = useRef(null);
+  const cancelRef = useRef(null);
+  const valueRef = useRef(null);
+  const [copied, setCopied] = useState(false);
+
+  useLayoutEffect(() => {
+    if (!dialog) return;
+    const element = elementRef.current;
+    const previousFocus = document.activeElement;
+    setCopied(false);
+    if (element && !element.open) element.showModal();
+    const focusTarget = dialog.kind === "share" ? valueRef.current : cancelRef.current;
+    focusTarget?.focus();
+    if (dialog.kind === "share") focusTarget?.select();
+    return () => {
+      if (element?.open) element.close();
+      previousFocus?.focus?.();
+    };
+  }, [dialog?.id]);
+
+  if (!dialog) return null;
+  const titleId = `action-dialog-title-${dialog.id}`;
+  const descriptionId = `action-dialog-description-${dialog.id}`;
+
+  async function copyValue() {
+    const value = dialog.value || "";
+    let success = false;
+    try {
+      await navigator.clipboard?.writeText(value);
+      success = Boolean(navigator.clipboard);
+    } catch {}
+    if (!success && valueRef.current) {
+      valueRef.current.select();
+      success = Boolean(document.execCommand?.("copy"));
+    }
+    setCopied(success);
+  }
+
+  return (
+    <dialog
+      ref={elementRef}
+      class={`action-dialog ${dialog.kind === "danger" ? "danger" : ""}`}
+      aria-labelledby={titleId}
+      aria-describedby={descriptionId}
+      onCancel={(event) => {
+        event.preventDefault();
+        if (!dialog.pending) onCancel();
+      }}
+      onClick={(event) => {
+        if (event.target === event.currentTarget && !dialog.pending) onCancel();
+      }}
+      onKeyDown={(event) => event.stopPropagation()}
+    >
+      <section class="action-dialog-surface">
+        <div class="action-dialog-content">
+          <div class="action-dialog-icon" aria-hidden="true">
+            <Icon name={dialog.kind === "danger" ? "triangle-alert" : "link-2"} />
+          </div>
+          <div class="action-dialog-copy">
+            <span class="action-dialog-eyebrow">{dialog.eyebrow}</span>
+            <h2 id={titleId}>{dialog.title}</h2>
+            <p id={descriptionId}>{dialog.description}</p>
+          </div>
+          {dialog.subject ? <code class="action-dialog-subject">{dialog.subject}</code> : null}
+          {dialog.kind === "share" ? (
+            <label class="action-dialog-value">
+              Share URL
+              <input ref={valueRef} readonly value={dialog.value || ""} />
+            </label>
+          ) : null}
+          {dialog.error ? (
+            <div class="action-dialog-error" role="alert">
+              {dialog.error}
+            </div>
+          ) : null}
+        </div>
+        <div class="action-dialog-actions">
+          {dialog.kind === "share" ? (
+            <>
+              <button ref={cancelRef} onClick={onCancel}>
+                Done
+              </button>
+              <button class="primary" onClick={() => void copyValue()}>
+                <Icon name={copied ? "check" : "copy"} />
+                {copied ? "Copied" : "Copy link"}
+              </button>
+            </>
+          ) : (
+            <>
+              <button ref={cancelRef} disabled={dialog.pending} onClick={onCancel}>
+                Cancel
+              </button>
+              <button
+                class="action-dialog-danger"
+                disabled={dialog.pending}
+                onClick={() => void onConfirm()}
+              >
+                {dialog.pending ? "Working..." : dialog.confirmLabel}
+              </button>
+            </>
+          )}
+        </div>
+      </section>
+    </dialog>
   );
 }
 

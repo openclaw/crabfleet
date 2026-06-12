@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Replace native browser confirms and prompts with accessible Crabfleet dialogs for session cleanup, shutdown, and share-link fallback.
 - Sharpen the app visual system with flatter controls, tighter surfaces, and restrained overlay elevation.
 - Add Crabfleet session supervision metadata, owner/session tree listing, transcript retrieval, PTY messaging, and summary updates for Codex-spawned Codex sessions.
 - Redesign Fleet as an operational command view with real readiness data, compact connection paths, clearer operator groups, and denser session cards.
