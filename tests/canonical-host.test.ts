@@ -1,6 +1,10 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { canonicalAppRedirect, productHostResponse } from "../src/canonical-host.ts";
+import {
+  canonicalAppRedirect,
+  productHostResponse,
+  routeProductRequest,
+} from "../src/canonical-host.ts";
 
 test("product hosts never fall through to the app worker", async () => {
   let upstreamRequest: Request | undefined;
@@ -30,6 +34,13 @@ test("product www host redirects to the product apex", async () => {
 
   assert.equal(response?.status, 308);
   assert.equal(response?.headers.get("location"), "https://crabfleet.ai/docs?mode=full");
+});
+
+test("product aliases redirect to the product apex", async () => {
+  const response = await routeProductRequest(new Request("https://crabfleet.app/docs?mode=full"));
+
+  assert.equal(response.status, 308);
+  assert.equal(response.headers.get("location"), "https://crabfleet.ai/docs?mode=full");
 });
 
 test("legacy app pages redirect to the canonical host", () => {

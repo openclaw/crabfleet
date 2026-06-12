@@ -1,6 +1,7 @@
 export const appCanonicalHost = "crabfleet.openclaw.ai";
 export const appCanonicalOrigin = `https://${appCanonicalHost}`;
 const productCanonicalHost = "crabfleet.ai";
+const productCanonicalOrigin = `https://${productCanonicalHost}`;
 const productOriginHost = "crabbox.sh";
 const productHosts = new Set([productCanonicalHost, `www.${productCanonicalHost}`]);
 export const appRedirectHosts = new Set([
@@ -60,6 +61,20 @@ export async function productHostResponse(
     statusText: upstream.statusText,
     headers,
   });
+}
+
+export async function routeProductRequest(
+  request: Request,
+  fetcher: typeof fetch = fetch,
+): Promise<Response> {
+  const productResponse = await productHostResponse(request, fetcher);
+  if (productResponse) return productResponse;
+
+  const source = new URL(request.url);
+  const target = new URL(productCanonicalOrigin);
+  target.pathname = source.pathname;
+  target.search = source.search;
+  return Response.redirect(target.toString(), 308);
 }
 
 export function canonicalAppRedirect(url: URL): Response | null {

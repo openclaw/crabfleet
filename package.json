@@ -5,7 +5,8 @@
   "scripts": {
     "build": "node scripts/generate-assets.mjs && tsgo --noEmit",
     "build:static": "node scripts/generate-assets.mjs --static",
-    "deploy": "pnpm build && wrangler d1 migrations apply DB --remote && wrangler deploy",
+    "deploy": "pnpm build && pnpm deploy:product && wrangler d1 migrations apply DB --remote && wrangler deploy",
+    "deploy:product": "wrangler deploy --config wrangler.product.jsonc",
     "test": "node --test --experimental-strip-types tests/*.test.ts",
     "lint": "oxlint --ignore-pattern node_modules --ignore-pattern src/generated.ts .",
     "format": "oxfmt --check .",

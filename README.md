@@ -132,19 +132,25 @@ merge:
 ### Deploy
 
 Pushes to `main` run `.github/workflows/deploy-worker.yml`, which checks, tests, builds,
-applies remote D1 migrations, and deploys the Worker. Configure the repository secret
-`CLOUDFLARE_API_TOKEN` with permissions for Workers deploys and D1 migrations.
+deploys the generic product router, applies remote D1 migrations, and deploys the app
+Worker. Configure the repository secret `CLOUDFLARE_API_TOKEN` with permissions for
+Workers deploys and D1 migrations.
 `crabfleet.ai` product routing, `crabfleet.openclaw.ai`, and `crabd.sh` DNS/route
 convergence is handled by `scripts/ensure-cloudflare-domains.mjs`; set
 `CLOUDFLARE_DNS_API_TOKEN` when CI should manage those records. Without that
 DNS-scoped token, CI skips domain convergence. The app Worker still proxies the generic
 product site for `crabfleet.ai` as a defensive fallback, never the authenticated app.
+The product router source and deploy configuration live in `src/product-router.ts` and
+`wrangler.product.jsonc`.
 
 Manual deploy is still available:
 
 ```bash
 # Build assets
 pnpm build
+
+# Deploy the generic product router
+pnpm deploy:product
 
 # Apply migrations
 wrangler d1 migrations apply DB --remote
