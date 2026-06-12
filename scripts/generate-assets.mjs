@@ -24,7 +24,7 @@ const generatedPath = new URL("../src/generated.ts", import.meta.url);
 const distRoot = new URL("../dist/", import.meta.url);
 const distApp = new URL("../dist/app/", import.meta.url);
 const distDocs = new URL("../dist/docs/", import.meta.url);
-const appOrigin = "https://clawfleet.openclaw.ai";
+const appOrigin = "https://crabfleet.openclaw.ai";
 
 await run(process.execPath, [
   new URL("../node_modules/vite/bin/vite.js", import.meta.url).pathname,

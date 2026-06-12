@@ -3,9 +3,11 @@
 ## Unreleased
 
 - Add Crabfleet session supervision metadata, owner/session tree listing, transcript retrieval, PTY messaging, and summary updates for Codex-spawned Codex sessions.
-- Fix GitHub OAuth login after the canonical host move by honoring an explicit registered callback URL.
+- Redesign Fleet as an operational command view with real readiness data, compact connection paths, clearer operator groups, and denser session cards.
+- De-duplicate interactive lifecycle, status, terminal-ready, log URL, icon, and copy-command behavior across the app.
+- Fix GitHub OAuth login after the canonical host move by honoring the registered `crabfleet.openclaw.ai` callback URL.
 - Add the Crabfleet v2 fleet-control spec, redacted fleet registry API, and dashboard summary for visible Codex crabboxes.
-- Move the OpenClaw app/API canonical URL to `clawfleet.openclaw.ai`, keep legacy app hosts redirecting there, and reserve `clawfleet.ai` for the product page.
+- Make `crabfleet.openclaw.ai` the OpenClaw app/API canonical URL, redirect old OpenClaw aliases there, and keep `crabfleet.ai` independent as the public product site.
 - Route the built-in interactive provision hook in-process and default new sessions to Cloudflare Sandbox so production creates usable Codex terminals without a crabbox adapter.
 - Keep Cloudflare Sandbox model and GitHub credentials in the Worker path, add DO-backed sandbox credential/checkpoint state, and add CLI lifecycle commands for doctor/status/stop/checkpoint/restore.
 - Show failed and expired Codex sessions as stable log replays instead of remounting Ghostty terminals.
@@ -15,8 +17,7 @@
 - Split Fleet and Board into separate app pages, with Fleet as the default grouped view of every visible crabbox by person.
 - Tighten the login SSH command width for `crabd.sh` and tuck bootstrap-token login behind a recovery disclosure.
 - Redesign the Crabfleet logo and favicon around a single fleet node-grid mark, and serve a real 1200×630 social card instead of stretching the 96px logo.
-- Serve the app/API on `crabfleet.ai` and redirect the old `crabfleet.ai` host.
-- Route `crabfleet.ai` to the Crabbox Worker and move SSH onboarding defaults to `crabd.sh`, with deploy-time domain enforcement.
+- Move SSH onboarding defaults to `crabd.sh`, with deploy-time domain enforcement.
 
 ## 0.1.0 - 2026-05-24
 

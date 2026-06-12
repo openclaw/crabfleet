@@ -2,7 +2,7 @@
   "$schema": "node_modules/wrangler/config-schema.json",
   "name": "crabbox-ai",
   "main": "src/index.ts",
-  "compatibility_date": "2026-05-17",
+  "compatibility_date": "2026-06-11",
   "compatibility_flags": ["nodejs_compat"],
   "build": {
     "command": "node scripts/generate-assets.mjs",
@@ -22,8 +22,8 @@
   "vars": {
     "BACKUP_BUCKET_NAME": "crabfleet-session-logs",
     "CLOUDFLARE_ACCOUNT_ID": "91b59577e757131d68d55a471fe32aca",
-    "CRABBOX_INTERACTIVE_PROVISION_URL": "https://clawfleet.openclaw.ai/api/provision/interactive",
-    "GITHUB_REDIRECT_URI": "https://crabfleet.ai/auth/github/callback",
+    "CRABBOX_INTERACTIVE_PROVISION_URL": "https://crabfleet.openclaw.ai/api/provision/interactive",
+    "GITHUB_REDIRECT_URI": "https://crabfleet.openclaw.ai/auth/github/callback",
   },
   "d1_databases": [
     {
@@ -73,11 +73,11 @@
     },
   ],
   "workers_dev": true,
-  // The canonical app/API host is deployed as a Worker Custom Domain so the
-  // normal deploy token can converge DNS without the separate DNS token.
+  // The canonical app/API host and legacy OpenClaw aliases are Worker Custom
+  // Domains. The public crabfleet.ai product site is managed separately.
   "routes": [
-    { "pattern": "clawfleet.openclaw.ai", "custom_domain": true },
     { "pattern": "crabfleet.openclaw.ai", "custom_domain": true },
+    { "pattern": "clawfleet.openclaw.ai", "custom_domain": true },
     { "pattern": "crabyard.openclaw.ai", "custom_domain": true },
   ],
   "observability": {

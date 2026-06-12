@@ -319,7 +319,7 @@ Recommended for production.
 **Setup:**
 
 1. Create GitHub OAuth app in your org
-2. Callback URL: the Worker `GITHUB_REDIRECT_URI` value, currently `https://crabfleet.ai/auth/github/callback`
+2. Callback URL: the Worker `GITHUB_REDIRECT_URI` value, currently `https://crabfleet.openclaw.ai/auth/github/callback`
 3. Scopes: `read:user`, `read:org`
 4. Add secrets to Cloudflare Worker:
    - `GITHUB_CLIENT_ID`

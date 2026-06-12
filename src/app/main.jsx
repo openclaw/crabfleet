@@ -1,14 +1,19 @@
 import { render } from "preact";
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "preact/hooks";
 import { api } from "./api.js";
+import { CopyCommand, Icon } from "./components.jsx";
+import { FleetPage } from "./fleet.jsx";
 import {
   canMaintain,
   canOwn,
   elapsed,
   hasRunCapability,
+  humanStatus,
   issueNumber,
   isActiveRun,
+  isDeadInteractiveSession,
   isProvisioningInteractiveSession,
+  interactiveSessionStatus,
   lanes,
   linkedInteractiveSessionPlaceholder,
   optimisticInteractiveSession,
@@ -16,6 +21,7 @@ import {
   preferredRepos,
   runCapabilities,
   runtimeCapabilityLabel,
+  sessionLogsUrl,
   sessionItems,
   statusLabel,
   terminalText,
@@ -32,7 +38,7 @@ import {
 
 const logo = "__CRABBOX_LOGO__";
 const productName = "Crabfleet";
-const productDomain = "clawfleet.openclaw.ai";
+const productDomain = "crabfleet.openclaw.ai";
 const sshHost = "crabd.sh";
 const loginReturnKey = "crabbox-login-return";
 const skipAutoGithubLoginKey = "crabbox-skip-auto-github-login";
@@ -49,8 +55,6 @@ const emptyState = {
   retention: "30",
   merge: "guarded",
 };
-const deadInteractiveStatuses = new Set(["stopped", "expired", "failed", "unavailable"]);
-
 function initialState(initialSessionLink) {
   if (!initialSessionLink.id) return emptyState;
   return {
@@ -960,6 +964,7 @@ function LoginScreen({ hidden, authMethods, message, onGithub, onToken, onDevIde
                 Bootstrap token
                 <input
                   type="password"
+                  name="bootstrap-token"
                   autocomplete="current-password"
                   disabled={!authMethods.token}
                   value={token}
@@ -1092,7 +1097,12 @@ function AppShell(props) {
         >
           <Icon name={props.theme === "dark" ? "sun" : "moon"} />
         </button>
-        <button title="Spec" aria-label="Spec" onClick={() => (location.href = "/docs/spec")}>
+        <button
+          class="spec-link"
+          title="Spec"
+          aria-label="Spec"
+          onClick={() => (location.href = "/docs/spec")}
+        >
           <Icon name="book-open" />
         </button>
       </aside>
@@ -1135,38 +1145,6 @@ function AppShell(props) {
   );
 }
 
-function sessionOwner(session) {
-  return session.owner || session.operator || "unassigned";
-}
-
-function sessionOwnerLabel(owner) {
-  return String(owner || "unassigned").replace(/^github:/, "@");
-}
-
-function groupedFleetSessions(sessions) {
-  const groups = new Map();
-  for (const session of sessions) {
-    const owner = sessionOwner(session);
-    if (!groups.has(owner)) groups.set(owner, []);
-    groups.get(owner).push(session);
-  }
-  return [...groups.entries()]
-    .map(([owner, items]) => [
-      owner,
-      [...items].sort(
-        (a, b) => Number(b.updatedAt || b.createdAt || 0) - Number(a.updatedAt || a.createdAt || 0),
-      ),
-    ])
-    .sort((a, b) => {
-      const activeDelta = activeFleetCount(b[1]) - activeFleetCount(a[1]);
-      return activeDelta || sessionOwnerLabel(a[0]).localeCompare(sessionOwnerLabel(b[0]));
-    });
-}
-
-function activeFleetCount(sessions) {
-  return sessions.filter((session) => !isDeadInteractiveSession(session)).length;
-}
-
 function BoardPage(props) {
   return (
     <section class="board-page" aria-label="Crabfleet board page">
@@ -1174,6 +1152,7 @@ function BoardPage(props) {
         <div class="search-wrap">
           <input
             type="search"
+            name="board-search"
             placeholder="Search cards, repos, runs, #76552"
             value={props.search}
             onInput={(event) => props.setSearch(event.currentTarget.value)}
@@ -1210,229 +1189,6 @@ function BoardPage(props) {
       </section>
       <Board {...props} />
     </section>
-  );
-}
-
-function FleetPage(props) {
-  const sessions = props.state.interactiveSessions || [];
-  const fleet = props.state.fleet;
-  const totals = fleet?.totals || {};
-  const fleetSessionsById = new Map(
-    (fleet?.sessions || []).map((session) => [session.id, session]),
-  );
-  const groups = groupedFleetSessions(sessions);
-  const ownerCount = groups.length;
-  const repos = props.state.repos?.length || 0;
-  const sessionLabel = props.cli ? `${props.cli} attachable` : "none attached";
-  return (
-    <section class="dashboard" aria-label="Crabfleet dashboard">
-      <div class="setup-stack">
-        <DashboardAction
-          icon="git-pull-request"
-          title="GitHub access"
-          text={`Repos, pull requests, and gh credentials are scoped to ${props.userLabel}.`}
-          action={props.signedIn ? "Connected" : "Connect"}
-          disabled={props.signedIn}
-          onClick={props.beginLogin}
-        />
-        <div class="setup-card">
-          <div>
-            <h2>
-              <Icon name="terminal" />
-              Connect over SSH
-            </h2>
-            <p>Link a public key once, then create, list, attach, and open VNC for crabboxes.</p>
-          </div>
-          <CopyCommand value={`ssh link@${sshHost}`} />
-        </div>
-        <div class="setup-card">
-          <div>
-            <h2>
-              <Icon name="square-terminal" />
-              Start a Crabbox
-            </h2>
-            <p>Crabboxes boot with the repo prepared and Codex ready for OpenClaw supervision.</p>
-          </div>
-          <CopyCommand
-            value={`ssh ${sshHost} new --repo openclaw/crabfleet "fix the failing check"`}
-          />
-        </div>
-      </div>
-      <div class="status-strip">
-        <Metric label="Running" value={totals.active ?? activeFleetCount(sessions)} />
-        <Metric label="People" value={ownerCount} />
-        <Metric label="Crabboxes" value={totals.sessions ?? sessions.length} />
-      </div>
-      <FleetControlPanel fleet={fleet} repos={repos} />
-      <div class="dashboard-grid">
-        <DashboardChart
-          title="OPENCLAW QUEUE"
-          value={`${props.active}/${props.state.cap}`}
-          meta={`${props.queue} queued`}
-        />
-        <DashboardChart
-          title="CRABBOX FLEET"
-          value={sessionLabel}
-          meta={`${repos} repos`}
-          secondary
-        />
-      </div>
-      <section class="vm-list">
-        <div class="section-kicker">ALL CRABBOXES BY PERSON</div>
-        {groups.length ? (
-          groups.map(([owner, items]) => (
-            <section class="fleet-owner" key={owner}>
-              <header class="fleet-owner-head">
-                <strong>{sessionOwnerLabel(owner)}</strong>
-                <span>{activeFleetCount(items)} active</span>
-              </header>
-              <div class="fleet-box-grid">
-                {items.map((session) => (
-                  <FleetBox
-                    key={session.id}
-                    session={{ ...session, fleet: fleetSessionsById.get(session.id) }}
-                    openSessionGrid={props.openSessionGrid}
-                  />
-                ))}
-              </div>
-            </section>
-          ))
-        ) : (
-          <div class="vm-row empty-row">
-            <div>
-              <strong>No crabboxes yet</strong>
-              <code>ssh {sshHost} new --repo openclaw/crabfleet</code>
-              <span>Create one from SSH, the Go CLI, or the app.</span>
-            </div>
-            <button
-              onClick={() => props.openDrawer("interactive")}
-              disabled={!canMaintain(props.state.user)}
-            >
-              New crabbox
-            </button>
-          </div>
-        )}
-      </section>
-    </section>
-  );
-}
-
-function FleetControlPanel({ fleet, repos }) {
-  const totals = fleet?.totals || {};
-  const egress = fleet?.egress || {};
-  const registry = fleet?.registryAvailable === false ? "registry unavailable" : "registry online";
-  return (
-    <section class="fleet-control-panel" aria-label="Fleet control plane">
-      <div>
-        <div class="section-kicker">CONTROL PLANE</div>
-        <h2>{fleet?.canonicalUrl || `https://${productDomain}`}</h2>
-        <p>
-          Tracks every visible Codex crabbox, its runtime, log archive, attach state, and redacted
-          sandbox egress policy.
-        </p>
-      </div>
-      <div class="fleet-control-grid">
-        <Metric label="Ready" value={totals.ready ?? 0} />
-        <Metric label="Provisioning" value={totals.provisioning ?? 0} />
-        <Metric label="Archived" value={totals.archived ?? 0} />
-        <Metric label="Policies" value={egress.sessionsWithPolicy ?? 0} />
-      </div>
-      <div class="fleet-control-meta">
-        <span>{registry}</span>
-        <span>{egress.defaultHostCount ?? 0} default egress hosts</span>
-        <span>{repos} allowed repos</span>
-        <a href="/docs/spec-v2">Spec v2</a>
-      </div>
-    </section>
-  );
-}
-
-function FleetBox({ session, openSessionGrid }) {
-  const capabilities = runCapabilities(session);
-  const archiveCount = session.logArchive?.eventCount || session.logs?.length || 0;
-  const fleetPolicy = session.fleet?.policy;
-  return (
-    <article class="fleet-box">
-      <header class="fleet-box-head">
-        <strong>{session.repo || session.title || session.id}</strong>
-        <span class={`state-pill ${session.status || "pending"}`}>
-          {session.status || "pending"}
-        </span>
-      </header>
-      <div class="fleet-box-meta">
-        <span>{session.branch || "main"}</span>
-        <span>{session.runtime || "crabbox"}</span>
-        {capabilities.vnc ? <span>webvnc</span> : null}
-        {archiveCount ? <span>{archiveCount} logs</span> : null}
-        {fleetPolicy?.present ? <span>{fleetPolicy.allowedHostCount} egress</span> : null}
-      </div>
-      <p class="fleet-box-event">{session.lastEvent || "Waiting for crabbox"}</p>
-      <code>
-        ssh {sshHost} attach {session.id}
-      </code>
-      <div class="fleet-box-actions">
-        <button onClick={() => openSessionGrid(session.id)}>Terminal</button>
-        {session.vncUrl ? (
-          <button onClick={() => window.open(session.vncUrl, "_blank", "noopener")}>VNC</button>
-        ) : capabilities.vnc ? (
-          <button
-            class="pending-vnc"
-            disabled
-            title="WebVNC URL appears after crabbox provisioning"
-          >
-            VNC pending
-          </button>
-        ) : null}
-        {!session.sharedReadOnly ? (
-          <button onClick={() => window.open(sessionLogsUrl(session.id), "_blank", "noopener")}>
-            Logs
-          </button>
-        ) : null}
-      </div>
-    </article>
-  );
-}
-
-function sessionLogsUrl(id) {
-  return `/api/interactive-sessions/${encodeURIComponent(id)}/logs`;
-}
-
-function DashboardAction({ icon, title, text, action, disabled, onClick }) {
-  return (
-    <div class="setup-card">
-      <div>
-        <h2>
-          <Icon name={icon} />
-          {title}
-        </h2>
-        <p>{text}</p>
-      </div>
-      <button onClick={onClick} disabled={disabled}>
-        {action}
-      </button>
-    </div>
-  );
-}
-
-function DashboardChart({ title, value, meta, secondary }) {
-  const path = secondary
-    ? "M8 82 C 40 74, 52 76, 78 58 S 130 50, 158 42 S 214 32, 250 34"
-    : "M8 84 C 28 72, 42 78, 58 64 S 92 62, 112 50 S 140 72, 158 46 S 210 38, 250 28";
-  return (
-    <article class="chart-card">
-      <div class="chart-head">
-        <span>{title}</span>
-        <strong>{value}</strong>
-      </div>
-      <svg viewBox="0 0 260 96" role="img" aria-label={`${title} ${value}`}>
-        <path class="chart-grid" d="M8 24 H252 M8 54 H252 M8 84 H252" />
-        <path class="chart-line" d={path} />
-      </svg>
-      <div class="chart-foot">
-        <span class="dot" />
-        {meta}
-      </div>
-    </article>
   );
 }
 
@@ -1480,15 +1236,29 @@ function DevIdentityPanel({ hidden, user, onDevIdentity }) {
       </div>
       <label>
         ID
-        <input value={id} onInput={(event) => setId(event.currentTarget.value)} />
+        <input
+          name="dev-identity-id"
+          autocomplete="username"
+          value={id}
+          onInput={(event) => setId(event.currentTarget.value)}
+        />
       </label>
       <label>
         Name
-        <input value={name} onInput={(event) => setName(event.currentTarget.value)} />
+        <input
+          name="dev-identity-name"
+          autocomplete="name"
+          value={name}
+          onInput={(event) => setName(event.currentTarget.value)}
+        />
       </label>
       <label>
         Role
-        <select value={role} onInput={(event) => setRole(event.currentTarget.value)}>
+        <select
+          name="dev-identity-role"
+          value={role}
+          onInput={(event) => setRole(event.currentTarget.value)}
+        >
           <option value="owner">Owner</option>
           <option value="maintainer">Maintainer</option>
           <option value="viewer">Viewer</option>
@@ -1498,28 +1268,6 @@ function DevIdentityPanel({ hidden, user, onDevIdentity }) {
         Apply
       </button>
     </div>
-  );
-}
-
-function Metric({ label, value }) {
-  return (
-    <div class="metric">
-      <span>{label}</span>
-      <strong>{value}</strong>
-    </div>
-  );
-}
-
-function CopyCommand({ value }) {
-  async function copy() {
-    if (!navigator.clipboard) return;
-    await navigator.clipboard.writeText(value);
-  }
-  return (
-    <button class="terminal-command" type="button" onClick={() => void copy()} title="Copy command">
-      <code>{value}</code>
-      <Icon name="copy" />
-    </button>
   );
 }
 
@@ -2016,6 +1764,7 @@ function SessionTools({
       <label class="session-columns-field">
         <span>Columns</span>
         <select
+          name="session-columns"
           value={focused ? "1" : sessionLayout.columns}
           disabled={focused}
           onChange={(event) =>
@@ -2308,14 +2057,6 @@ function InteractiveSessionActions(props) {
   );
 }
 
-function isDeadInteractiveSession(session) {
-  return (
-    session &&
-    (session.kind === undefined || session.kind === "interactive") &&
-    deadInteractiveStatuses.has(session.status)
-  );
-}
-
 function canCleanInteractiveSession(session, user) {
   return isDeadInteractiveSession(session) && (session.canManage || canMaintain(user));
 }
@@ -2332,28 +2073,7 @@ function SessionStatus({ session }) {
 
 function sessionStatus(session) {
   if (session.kind === "interactive") {
-    if (session.routePlaceholder && session.status === "loading") {
-      return { label: "Loading", tone: "provisioning" };
-    }
-    if (session.routePlaceholder && session.status === "unavailable") {
-      return { label: "Unavailable", tone: "failed" };
-    }
-    if (["failed"].includes(session.status)) return { label: "Failed", tone: "failed" };
-    if (["stopped", "expired"].includes(session.status))
-      return { label: "Stopped", tone: "stopped" };
-    if (session.status === "provisioning" || session.status === "pending_adapter") {
-      return { label: "Provisioning", tone: "provisioning" };
-    }
-    if (session.shareMode === "link_read" || session.sharedReadOnly) {
-      return { label: "Shared", tone: "shared" };
-    }
-    if (session.multiplayerMode) {
-      return { label: "Multiplayer", tone: "shared" };
-    }
-    if (["ready", "attached", "detached"].includes(session.status)) {
-      return { label: "Live", tone: "live" };
-    }
-    return { label: humanStatus(session.status), tone: "" };
+    return interactiveSessionStatus(session);
   }
   if (session.run?.status === "failed" || session.lane === "Human Review") {
     return { label: humanStatus(session.run?.status || session.lane), tone: "failed" };
@@ -2382,12 +2102,6 @@ function sessionFooterSummary(session) {
   if (session.run?.status) parts.push(humanStatus(session.run.status));
   if (session.run?.runtime || session.runtime) parts.push(session.run?.runtime || session.runtime);
   return parts.join(" · ");
-}
-
-function humanStatus(value) {
-  return String(value || "")
-    .replace(/[_-]+/g, " ")
-    .replace(/\b\w/g, (letter) => letter.toUpperCase());
 }
 
 function TerminalMount({ session, focused, singleSession, drawerOpen }) {
@@ -2593,6 +2307,7 @@ function AdminList({ title, placeholder, disabled, select, rows, onAdd, onRemove
       <div class="form-grid">
         <input
           class="full"
+          name="admin-entry"
           placeholder={placeholder}
           value={value}
           disabled={disabled}
@@ -2601,6 +2316,7 @@ function AdminList({ title, placeholder, disabled, select, rows, onAdd, onRemove
         {select ? (
           <select
             class="full"
+            name="admin-role"
             value={role}
             disabled={disabled}
             onChange={(event) => setRole(event.currentTarget.value)}
@@ -2657,6 +2373,7 @@ function PolicyBox({ disabled, state, updatePolicy }) {
         Concurrent cap
         <input
           type="number"
+          name="concurrent-cap"
           min="1"
           max="200"
           value={cap}
@@ -2667,6 +2384,7 @@ function PolicyBox({ disabled, state, updatePolicy }) {
       <label>
         Direct merge
         <select
+          name="merge-policy"
           value={merge}
           disabled={disabled}
           onChange={(event) => setMerge(event.currentTarget.value)}
@@ -2679,6 +2397,7 @@ function PolicyBox({ disabled, state, updatePolicy }) {
       <label>
         Log retention
         <select
+          name="log-retention"
           value={retention}
           disabled={disabled}
           onChange={(event) => setRetention(event.currentTarget.value)}
@@ -2722,6 +2441,7 @@ function WorkflowBox({ disabled, workflows, refreshWorkflow }) {
       <div class="form-grid">
         <input
           class="full"
+          name="workflow-repo"
           placeholder={preferredRepo}
           value={repo}
           disabled={disabled}
@@ -2781,30 +2501,6 @@ function Drawer({ id, open, title, wide, onClose, children }) {
         <div class="panel-body">{children}</div>
       </section>
     </div>
-  );
-}
-
-function Icon({ name }) {
-  const nodes = globalThis.lucideIconNodes?.[name];
-  if (!nodes) return null;
-  return (
-    <svg
-      xmlns="http://www.w3.org/2000/svg"
-      width="24"
-      height="24"
-      viewBox="0 0 24 24"
-      fill="none"
-      stroke="currentColor"
-      stroke-width="2"
-      stroke-linecap="round"
-      stroke-linejoin="round"
-      aria-hidden="true"
-    >
-      {nodes.map(([tag, attrs], index) => {
-        const Tag = tag;
-        return <Tag key={`${tag}-${index}`} {...attrs} />;
-      })}
-    </svg>
   );
 }
 

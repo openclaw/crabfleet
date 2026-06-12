@@ -13,11 +13,11 @@ This gets you from login to a real D1-backed crabbox, card, and run attempt.
 
 - OpenClaw GitHub org membership.
 - GitHub OAuth configured for browser access, or an SSH key to link through `crabd.sh`.
-- Access to `https://clawfleet.openclaw.ai/app/`.
+- Access to `https://crabfleet.openclaw.ai/app/`.
 
 ## 1. Log In
 
-Open `https://clawfleet.openclaw.ai/app/`.
+Open `https://crabfleet.openclaw.ai/app/`.
 
 - Use GitHub OAuth if configured.
 - Use `ssh link@crabd.sh` when you want terminal-first onboarding.

@@ -57,10 +57,10 @@ test("fleet state aggregates sessions and redacted sandbox policies", () => {
       },
     ],
     {
-      canonicalUrl: "https://clawfleet.openclaw.ai",
+      canonicalUrl: "https://crabfleet.openclaw.ai",
       defaultEgressHosts: ["github.com", "api.github.com"],
       generatedAt: 100,
-      productUrl: "https://clawfleet.ai",
+      productUrl: "https://crabfleet.ai",
     },
   );
 

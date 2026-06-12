@@ -26,7 +26,7 @@ crabfleet new --repo openclaw/crabfleet "fix the failing check"
 crabfleet vnc <session-id>
 ```
 
-The web app at [clawfleet.openclaw.ai/app](https://clawfleet.openclaw.ai/app/) exposes the same control plane: GitHub OAuth, repo-gated cards, runtime policy, live session tiles, WebVNC links, and admin allowlists.
+The web app at [crabfleet.openclaw.ai/app](https://crabfleet.openclaw.ai/app/) exposes the same control plane: GitHub OAuth, repo-gated cards, runtime policy, live session tiles, WebVNC links, and admin allowlists.
 
 ## What Crabfleet Does
 

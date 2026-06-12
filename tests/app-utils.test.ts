@@ -1,7 +1,11 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
+  humanStatus,
   isActiveRun,
+  isDeadInteractiveSession,
+  isTerminalReadyInteractiveSession,
+  interactiveSessionStatus,
   interactiveCommand,
   linkedInteractiveSessionPlaceholder,
   optimisticInteractiveSession,
@@ -102,4 +106,23 @@ test("linked session placeholders render a best-effort Codex card", () => {
   assert.equal(isActiveRun(session), true);
   assert.match(terminalText(session), /^Preparing Codex\r\n/);
   assert.match(terminalText(session), /Loading session/);
+});
+
+test("interactive lifecycle helpers keep UI and terminal state aligned", () => {
+  const live = { kind: "interactive", status: "attached" };
+  const rawLive = { status: "ready" };
+  const provisioning = { kind: "interactive", status: "pending_adapter" };
+  const failed = { kind: "interactive", status: "failed" };
+
+  assert.equal(isActiveRun(live), true);
+  assert.equal(isTerminalReadyInteractiveSession(live), true);
+  assert.equal(isTerminalReadyInteractiveSession(rawLive), true);
+  assert.deepEqual(interactiveSessionStatus(live), { label: "Live", tone: "live" });
+  assert.deepEqual(interactiveSessionStatus(provisioning), {
+    label: "Provisioning",
+    tone: "provisioning",
+  });
+  assert.equal(isDeadInteractiveSession(failed), true);
+  assert.deepEqual(interactiveSessionStatus(failed), { label: "Failed", tone: "failed" });
+  assert.equal(humanStatus("pending_adapter"), "Pending Adapter");
 });
