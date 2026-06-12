@@ -5,8 +5,11 @@
   "scripts": {
     "build": "node scripts/generate-assets.mjs && tsgo --noEmit",
     "build:static": "node scripts/generate-assets.mjs --static",
-    "deploy": "pnpm build && pnpm deploy:product && wrangler d1 migrations apply DB --remote && wrangler deploy",
-    "deploy:product": "wrangler deploy --config wrangler.product.jsonc",
+    "deploy": "pnpm build && pnpm deploy:product:worker && wrangler d1 migrations apply DB --remote && wrangler deploy && pnpm deploy:domains",
+    "deploy:product": "pnpm deploy:product:worker && pnpm deploy:domains:product",
+    "deploy:product:worker": "wrangler deploy --config wrangler.product.jsonc",
+    "deploy:domains": "node scripts/ensure-cloudflare-domains.mjs",
+    "deploy:domains:product": "node scripts/ensure-cloudflare-domains.mjs --product-only",
     "test": "node --test --experimental-strip-types tests/*.test.ts",
     "lint": "oxlint --ignore-pattern node_modules --ignore-pattern src/generated.ts .",
     "format": "oxfmt --check .",

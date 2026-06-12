@@ -137,27 +137,23 @@ Worker. Configure the repository secret `CLOUDFLARE_API_TOKEN` with permissions 
 Workers deploys and D1 migrations.
 `crabfleet.ai` product routing, `crabfleet.openclaw.ai`, and `crabd.sh` DNS/route
 convergence is handled by `scripts/ensure-cloudflare-domains.mjs`; set
-`CLOUDFLARE_DNS_API_TOKEN` when CI should manage those records. Without that
-DNS-scoped token, CI skips domain convergence. The app Worker still proxies the generic
-product site for `crabfleet.ai` as a defensive fallback, never the authenticated app.
+`CLOUDFLARE_DNS_API_TOKEN` for manual deploys and when CI should manage those
+records. Without that DNS-scoped repository secret, CI skips domain convergence. The
+app Worker still proxies the generic product site for `crabfleet.ai` as a defensive
+fallback, never the authenticated app.
 The product router source and deploy configuration live in `src/product-router.ts` and
 `wrangler.product.jsonc`.
 
-Manual deploy is still available:
+Manual deploy, including domain convergence, is still available:
 
 ```bash
-# Build assets
-pnpm build
-
-# Deploy the generic product router
-pnpm deploy:product
-
-# Apply migrations
-wrangler d1 migrations apply DB --remote
-
-# Deploy to Cloudflare
-wrangler deploy
+CLOUDFLARE_API_TOKEN=... \
+CLOUDFLARE_DNS_API_TOKEN=... \
+pnpm run deploy
 ```
+
+`pnpm deploy:product` deploys only the generic product Worker and its two public
+routes. Use `pnpm deploy:product:worker` only when route convergence runs separately.
 
 ### Environment Variables
 

@@ -1,4 +1,5 @@
-const token = process.env.CLOUDFLARE_API_TOKEN;
+const token = process.env.CLOUDFLARE_DNS_API_TOKEN || process.env.CLOUDFLARE_API_TOKEN;
+const productOnly = process.argv.includes("--product-only");
 const appHost = "crabfleet.openclaw.ai";
 const productWorkerScript = "crabfleet-canonical-router";
 // OpenClaw app hosts are Worker Custom Domains in wrangler.jsonc; this script
@@ -10,7 +11,7 @@ const openClawCustomDomainHosts = new Set([
 ]);
 
 if (!token) {
-  throw new Error("CLOUDFLARE_API_TOKEN is required");
+  throw new Error("CLOUDFLARE_DNS_API_TOKEN or CLOUDFLARE_API_TOKEN is required");
 }
 
 async function request(path, init = {}) {
@@ -202,9 +203,13 @@ async function ensureCrabdSshRecord() {
   }
 }
 
-await removeOpenClawClassicRoutes();
+if (!productOnly) {
+  await removeOpenClawClassicRoutes();
+}
 for (const host of ["crabfleet.ai", "www.crabfleet.ai"]) {
   await ensureProductHost("crabfleet.ai", host);
 }
-await ensureCrabfleetDocsRecord();
-await ensureCrabdSshRecord();
+if (!productOnly) {
+  await ensureCrabfleetDocsRecord();
+  await ensureCrabdSshRecord();
+}
