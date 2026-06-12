@@ -53,6 +53,16 @@ jobs:
       - name: Build
         run: pnpm build
 
+      - name: Deploy product router
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: |
+          for attempt in 1 2 3; do
+            pnpm deploy:product && exit 0
+            sleep $((attempt * 5))
+          done
+          pnpm deploy:product
+
       - name: Apply D1 migrations
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}

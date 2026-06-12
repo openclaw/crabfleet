@@ -8,6 +8,7 @@
 - Fix GitHub OAuth login after the canonical host move by honoring the registered `crabfleet.openclaw.ai` callback URL.
 - Add the Crabfleet v2 fleet-control spec, redacted fleet registry API, and dashboard summary for visible Codex crabboxes.
 - Make `crabfleet.openclaw.ai` the OpenClaw app/API canonical URL, redirect old OpenClaw aliases there, and keep `crabfleet.ai` independent as the public product site.
+- Deploy the source-controlled `crabfleet.ai` product router before the app Worker so product traffic cannot drift back to an app redirect.
 - Route the built-in interactive provision hook in-process and default new sessions to Cloudflare Sandbox so production creates usable Codex terminals without a crabbox adapter.
 - Keep Cloudflare Sandbox model and GitHub credentials in the Worker path, add DO-backed sandbox credential/checkpoint state, and add CLI lifecycle commands for doctor/status/stop/checkpoint/restore.
 - Show failed and expired Codex sessions as stable log replays instead of remounting Ghostty terminals.
