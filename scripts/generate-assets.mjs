@@ -135,14 +135,17 @@ function viteAssetUrl(path) {
 function buildLucideIconScript(iconNodes) {
   const names = [
     "book-open",
+    "check",
     "copy",
     "git-pull-request",
     "layout-grid",
+    "link-2",
     "moon",
     "settings",
     "square-terminal",
     "sun",
     "terminal",
+    "triangle-alert",
     "x",
   ];
   const selected = Object.fromEntries(names.map((name) => [name, iconNodes[name]]));

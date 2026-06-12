@@ -52,6 +52,9 @@
         --accent: #0ea5e9;
         --success: #10b981;
         --warning: #f59e0b;
+        --danger: #dc465f;
+        --danger-dark: #c43750;
+        --danger-ink: #ffffff;
         --nav-surface: rgb(255 255 255 / 0.86);
         --dashboard-surface: linear-gradient(180deg, #ffffff, #f9fafb);
         --command-bg: #f9fafb;
@@ -93,6 +96,9 @@
         --accent: #3b82f6;
         --success: #34d399;
         --warning: #fbbf24;
+        --danger: #f05a70;
+        --danger-dark: #d94b62;
+        --danger-ink: #17090c;
         --nav-surface: rgb(7 10 16 / 0.82);
         --dashboard-surface: linear-gradient(180deg, rgb(17 11 15 / 0.92), rgb(14 10 13 / 0.96));
         --command-bg: rgb(15 15 20 / 0.78);
@@ -2089,6 +2095,147 @@
         animation: slideInRight 0.3s cubic-bezier(0.4, 0, 0.2, 1);
       }
 
+      .action-dialog {
+        width: min(480px, calc(100vw - 32px));
+        max-height: calc(100vh - 32px);
+        margin: auto;
+        padding: 0;
+        overflow: hidden;
+        border: 1px solid var(--line-strong);
+        border-radius: var(--radius-large);
+        background: var(--panel);
+        color: var(--ink);
+        box-shadow: var(--elevation-popover);
+        animation: dialogEnter 0.18s cubic-bezier(0.2, 0.8, 0.2, 1);
+      }
+      .action-dialog::backdrop {
+        background: rgb(2 4 8 / 0.74);
+        backdrop-filter: blur(4px);
+        animation: fadeIn 0.16s ease;
+      }
+      .action-dialog-surface {
+        display: grid;
+        grid-template-rows: minmax(0, 1fr) auto;
+        max-height: calc(100vh - 32px);
+      }
+      .action-dialog-content {
+        display: grid;
+        grid-template-columns: 40px minmax(0, 1fr);
+        gap: 0 14px;
+        padding: 24px;
+        overflow: auto;
+      }
+      .action-dialog-icon {
+        width: 40px;
+        height: 40px;
+        display: grid;
+        place-items: center;
+        border: 1px solid var(--line);
+        border-radius: var(--radius-control);
+        background: var(--panel-2);
+        color: var(--primary);
+      }
+      .action-dialog.danger .action-dialog-icon {
+        border-color: color-mix(in srgb, var(--danger) 35%, var(--line));
+        background: color-mix(in srgb, var(--danger) 10%, var(--panel));
+        color: var(--danger);
+      }
+      .action-dialog-icon svg {
+        width: 18px;
+        height: 18px;
+      }
+      .action-dialog-copy {
+        min-width: 0;
+      }
+      .action-dialog-eyebrow {
+        display: block;
+        margin: 0 0 3px;
+        color: var(--muted);
+        font-size: 11px;
+        font-weight: 700;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+      }
+      .action-dialog h2 {
+        margin: 0;
+        font-size: 19px;
+        line-height: 1.3;
+        letter-spacing: -0.02em;
+      }
+      .action-dialog p {
+        margin: 8px 0 0;
+        color: var(--muted);
+        font-size: 13px;
+        line-height: 1.55;
+      }
+      .action-dialog-subject,
+      .action-dialog-value,
+      .action-dialog-error {
+        grid-column: 1 / -1;
+        margin-top: 18px;
+      }
+      .action-dialog-subject {
+        display: block;
+        min-width: 0;
+        overflow: hidden;
+        padding: 9px 11px;
+        border: 1px solid var(--line);
+        border-radius: var(--radius-control);
+        background: var(--panel-2);
+        color: var(--ink);
+        font-family: ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;
+        font-size: 12px;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      .action-dialog-value input {
+        font-family: ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;
+        font-size: 12px;
+      }
+      .action-dialog-error {
+        padding: 9px 11px;
+        border: 1px solid color-mix(in srgb, var(--danger) 35%, var(--line));
+        border-radius: var(--radius-control);
+        background: color-mix(in srgb, var(--danger) 9%, var(--panel));
+        color: var(--danger);
+        font-size: 12px;
+      }
+      .action-dialog-actions {
+        display: flex;
+        justify-content: flex-end;
+        gap: 8px;
+        padding: 14px 16px;
+        border-top: 1px solid var(--line);
+        background: var(--panel-2);
+      }
+      .action-dialog-actions button {
+        min-width: 94px;
+      }
+      .action-dialog-actions button svg {
+        margin-right: 6px;
+        vertical-align: -3px;
+      }
+      button.action-dialog-danger {
+        border-color: var(--danger);
+        background: var(--danger);
+        color: var(--danger-ink);
+        font-weight: 600;
+      }
+      button.action-dialog-danger:hover {
+        border-color: var(--danger-dark);
+        background: var(--danger-dark);
+      }
+      @keyframes dialogEnter {
+        from {
+          opacity: 0;
+          transform: translateY(8px) scale(0.985);
+        }
+        to {
+          opacity: 1;
+          transform: translateY(0) scale(1);
+        }
+      }
+
       @media (max-width: 1320px) {
         .top {
           grid-template-columns: 1fr;
@@ -2218,6 +2365,17 @@
         }
         .drawer {
           padding: 8px;
+        }
+        .action-dialog {
+          width: calc(100vw - 20px);
+          max-height: calc(100vh - 20px);
+        }
+        .action-dialog-content {
+          padding: 20px;
+        }
+        .action-dialog-actions {
+          display: grid;
+          grid-template-columns: 1fr 1fr;
         }
       }
     </style>
