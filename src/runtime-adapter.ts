@@ -169,6 +169,18 @@ export function runtimeAdapterControlPlaneIdentity(value: unknown): string | nul
   return url.toString();
 }
 
+export function runtimeAdapterTerminalOriginMatches(
+  controlPlane: string,
+  attachUrl: string,
+): boolean {
+  const terminalValue = safeWebSocketUrl(attachUrl);
+  const controlPlaneValue = runtimeAdapterControlPlaneIdentity(controlPlane);
+  if (!terminalValue || !controlPlaneValue) return false;
+  const terminal = new URL(terminalValue);
+  terminal.protocol = terminal.protocol === "wss:" ? "https:" : "http:";
+  return terminal.origin === new URL(controlPlaneValue).origin;
+}
+
 export function runtimeAdapterWorkspaceUrl(base: string, adapterWorkspaceId: string): string {
   return joinAdapterUrl(base, `/v1/workspaces/${encodeURIComponent(adapterWorkspaceId)}`);
 }

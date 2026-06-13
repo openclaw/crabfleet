@@ -26,6 +26,7 @@ import {
   retainedRuntimeAdapterFailureMessage,
   runtimeAdapterStopOutcome,
   runtimeAdapterTerminalFailureStatus,
+  runtimeAdapterTerminalOriginMatches,
   runtimeAdapterWorkspaceUrl,
   resolveCreateAfterStopRace,
   safeDesktopUrl,
@@ -1565,17 +1566,16 @@ test("terminal endpoints enforce current runtime capabilities", async () => {
   assert.match(source, /runtimeCapabilities\(row\.runtime, row\.capabilities_json\)\.terminal/);
   assert.match(source, /runtimeAdapterTerminalFailureStatus\(existing\.adapter\) === "detached"/);
   assert.match(source, /attachUrl: capabilities\.terminal \? row\.attach_url : null/);
+  assert.match(decorateSource, /const routeKind = interactivePtyRouteKind\(env, session\)/);
+  assert.match(decorateSource, /interactiveTerminalTarget\(env, session, routeKind\)/);
+  assert.match(decorateSource, /routeAvailable/);
   assert.match(
     decorateSource,
-    /session\.runtime === githubActionsRuntime \|\| Boolean\(interactivePtyRouteKind\(env, session\)\)/,
+    /const proxyManagedTerminal =[\s\S]*session\.runtime === githubActionsRuntime \|\|[\s\S]*session\.adapter === runtimeAdapterName/,
   );
   assert.match(
     decorateSource,
-    /ptyAvailable &&[\s\S]*session\.runtime === githubActionsRuntime \|\|[\s\S]*session\.adapter === runtimeAdapterName/,
-  );
-  assert.match(
-    decorateSource,
-    /`\/api\/interactive-sessions\/\$\{encodeURIComponent\(session\.id\)\}\/pty`/,
+    /const attachUrl = proxyManagedTerminal[\s\S]*\? ptyAvailable[\s\S]*`\/api\/interactive-sessions\/\$\{encodeURIComponent\(session\.id\)\}\/pty`[\s\S]*: null/,
   );
   assert.match(directPtySource, /session\.runtime === githubActionsRuntime/);
   assert.match(directPtySource, /openInteractiveTerminalUpstream\(/);
@@ -1805,6 +1805,60 @@ test("desktop mint revalidates current ownership before redirect", async () => {
   assert.match(vncSource, /current\.capabilities\.desktop/);
   assert.match(vncSource, /canControlInteractiveSession/);
   assert.match(vncSource, /desktop authorization changed; retry/);
+});
+
+test("runtime adapter terminals use the server-side adapter bearer", async () => {
+  const source = await readFile(new URL("../src/index.ts", import.meta.url), "utf8");
+  const targetStart = source.indexOf("function interactiveTerminalTarget");
+  const targetEnd = source.indexOf("function interactivePtyRouteKind", targetStart);
+  const targetSource = source.slice(targetStart, targetEnd);
+
+  assert.match(targetSource, /session\.adapter === runtimeAdapterName/);
+  assert.match(targetSource, /session\[interactiveSessionAdapterControlPlane\]/);
+  assert.match(targetSource, /runtimeAdapterTerminalAuthorization/);
+  assert.match(targetSource, /requireRegisteredRuntimeAdapterControlPlane/);
+  assert.match(targetSource, /runtimeAdapterTerminalOriginMatches\(controlPlane, attachUrl\)/);
+  assert.match(targetSource, /bearer\(runtimeAdapterToken\(env\)\)/);
+  assert.doesNotMatch(targetSource, /searchParams\.set\([^)]*(?:token|ticket)/u);
+  const decorateStart = source.indexOf("function decorateInteractiveSession");
+  const decorateEnd = source.indexOf(
+    "function canChangeInteractiveSessionMultiplayer",
+    decorateStart,
+  );
+  const decorateSource = source.slice(decorateStart, decorateEnd);
+  assert.match(decorateSource, /interactiveTerminalTarget\(env, session, routeKind\)/);
+  assert.match(decorateSource, /routeAvailable/);
+});
+
+test("runtime adapter terminal bearer stays on the registered origin", () => {
+  assert.equal(
+    runtimeAdapterTerminalOriginMatches(
+      "https://controller.example/adapter",
+      "wss://controller.example/v1/workspaces/fleet-is-101/terminal",
+    ),
+    true,
+  );
+  assert.equal(
+    runtimeAdapterTerminalOriginMatches(
+      "http://127.0.0.1:8788/adapter",
+      "ws://127.0.0.1:8788/v1/workspaces/fleet-is-101/terminal",
+    ),
+    true,
+  );
+  assert.equal(
+    runtimeAdapterTerminalOriginMatches(
+      "https://controller.example/adapter",
+      "wss://terminal.example/v1/workspaces/fleet-is-101/terminal",
+    ),
+    false,
+  );
+  assert.equal(
+    runtimeAdapterTerminalOriginMatches(
+      "https://controller.example/adapter",
+      "wss://controller.example:8443/v1/workspaces/fleet-is-101/terminal",
+    ),
+    false,
+  );
 });
 
 test("desktop redirects require HTTPS or literal loopback HTTP", () => {

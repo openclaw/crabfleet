@@ -109,6 +109,7 @@ import {
   retainedRuntimeAdapterFailureMessage,
   runtimeAdapterStopOutcome,
   runtimeAdapterTerminalFailureStatus,
+  runtimeAdapterTerminalOriginMatches,
   runtimeAdapterWorkspaceUrl,
   resolveCreateAfterStopRace,
   safeDesktopUrl,
@@ -405,7 +406,10 @@ type InteractiveSessionStatus =
   | "expired"
   | "failed";
 
+const interactiveSessionAdapterControlPlane = Symbol("interactiveSessionAdapterControlPlane");
+
 type InteractiveSession = {
+  [interactiveSessionAdapterControlPlane]: string | null;
   id: string;
   parentSessionId: string | null;
   rootSessionId: string | null;
@@ -8181,7 +8185,18 @@ function interactiveTerminalTarget(
 
   const attachUrl = routeKind === "attach" ? safeWebSocketUrl(session.attachUrl) : null;
   if (attachUrl) {
-    return { url: attachUrl, authorization: null };
+    if (session.adapter === runtimeAdapterName) {
+      const authorization = runtimeAdapterTerminalAuthorization(
+        env,
+        session[interactiveSessionAdapterControlPlane],
+        attachUrl,
+      );
+      return authorization ? { url: attachUrl, authorization } : null;
+    }
+    return {
+      url: attachUrl,
+      authorization: null,
+    };
   }
 
   const leaseId = legacyInteractiveSessionLeaseId(session);
@@ -8205,6 +8220,20 @@ function interactiveTerminalTarget(
   }
 
   return null;
+}
+
+function runtimeAdapterTerminalAuthorization(
+  env: RuntimeEnv,
+  registeredControlPlane: string | null,
+  attachUrl: string,
+): string | null {
+  try {
+    const controlPlane = requireRegisteredRuntimeAdapterControlPlane(env, registeredControlPlane);
+    if (!runtimeAdapterTerminalOriginMatches(controlPlane, attachUrl)) return null;
+    return bearer(runtimeAdapterToken(env));
+  } catch {
+    return null;
+  }
 }
 
 function interactivePtyRouteKind(
@@ -14143,6 +14172,7 @@ function interactiveSession(
 ): InteractiveSession {
   const capabilities = runtimeCapabilities(row.runtime, row.capabilities_json);
   return {
+    [interactiveSessionAdapterControlPlane]: row.adapter_control_plane,
     id: row.id,
     parentSessionId: row.parent_session_id,
     rootSessionId: row.root_session_id ?? row.id,
@@ -14330,18 +14360,26 @@ function decorateInteractiveSession(
     session.adapter === runtimeAdapterName &&
     (session.capabilities.vnc || session.capabilities.desktop);
   const legacyDesktopUrl = desktopActive ? safeDesktopUrl(session.vncUrl) : null;
+  const routeKind = interactivePtyRouteKind(env, session);
+  const routeAvailable =
+    session.runtime === githubActionsRuntime ||
+    (routeKind === "sandbox"
+      ? Boolean(env.SANDBOX)
+      : Boolean(interactiveTerminalTarget(env, session, routeKind)));
   const ptyAvailable =
     canControl &&
     session.capabilities.terminal &&
     ["ready", "attached", "detached"].includes(session.status) &&
-    (session.runtime === githubActionsRuntime || Boolean(interactivePtyRouteKind(env, session)));
-  const attachUrl =
-    ptyAvailable &&
-    (session.runtime === githubActionsRuntime || session.adapter === runtimeAdapterName)
+    routeAvailable;
+  const proxyManagedTerminal =
+    session.runtime === githubActionsRuntime || session.adapter === runtimeAdapterName;
+  const attachUrl = proxyManagedTerminal
+    ? ptyAvailable
       ? `/api/interactive-sessions/${encodeURIComponent(session.id)}/pty`
-      : canControl && session.capabilities.terminal
-        ? session.attachUrl
-        : null;
+      : null
+    : canControl && session.capabilities.terminal
+      ? session.attachUrl
+      : null;
   return {
     ...session,
     adapter: canControl ? session.adapter : null,

@@ -24,6 +24,8 @@
     "CLOUDFLARE_ACCOUNT_ID": "91b59577e757131d68d55a471fe32aca",
     "CRABFLEET_DEV_LOGIN_ENABLED": "false",
     "CRABBOX_INTERACTIVE_PROVISION_URL": "https://crabfleet.openclaw.ai/api/provision/interactive",
+    "CRABBOX_RUNTIME_ADAPTER_NAMESPACE": "openclaw",
+    "CRABBOX_RUNTIME_ADAPTER_URL": "https://crabbox.openclaw.ai",
     "GITHUB_REDIRECT_URI": "https://crabfleet.openclaw.ai/auth/github/callback",
   },
   "d1_databases": [
