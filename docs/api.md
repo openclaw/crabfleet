@@ -335,6 +335,9 @@ Both multiplex and legacy direct PTY routes append terminal `cols` and `rows` on
 
 Internal OpenClaw service endpoint authenticated with `Authorization: Bearer CRABBOX_OPENCLAW_TOKEN`. Registers or resumes one durable `github_actions` session per `workKey`. Re-registration returns the same logical session and rotates its scoped agent token.
 
+See [GitHub Actions Sessions](/github-actions-sessions/) for the complete
+integration lifecycle and operational invariants.
+
 Request:
 
 ```json

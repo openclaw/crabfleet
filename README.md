@@ -101,6 +101,10 @@ process.stdin.on("data", (chunk) => terminal.send(chunk));
 
 The runner reports heartbeat and durable progress with bearer `agentToken` to `POST /api/agent/interactive-sessions/:id/work-state`. Terminal states are `completed`, `blocked`, `failed`, and `canceled`; active work uses `registered` or `running` plus a specific `phase`.
 
+The full registration, relay, resumption, steering, heartbeat, completion,
+cancellation, authentication, archive, and troubleshooting contract is in
+[`docs/github-actions-sessions.md`](docs/github-actions-sessions.md).
+
 ## Features
 
 ### Board Management

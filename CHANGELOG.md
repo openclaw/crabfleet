@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Add comprehensive documentation for durable GitHub Actions sessions, including registration, runner and viewer relay, work-state heartbeats, Codex steering, resumption, completion, cancellation, authentication, archives, and troubleshooting.
 - Keep GitHub Actions sessions out of legacy workspace-stop reconciliation and give them a dedicated cancel lifecycle.
 - Add durable steerable GitHub Actions sessions with service registration, scoped runner URLs, work-state heartbeats, Fleet metadata, and a SessionControlDO PTY relay.
 - Add a tenant-namespaced versioned runtime lifecycle adapter with replayable idempotent create, monotonic workspace identities, CAS reconciliation, durable terminal finalization, confirmed provider release before failure/stop, presence-aware capability/expiry tracking, authenticated transient VNC redirects, and deployment-neutral configuration.

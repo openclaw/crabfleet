@@ -136,6 +136,10 @@ GitHub Actions PTY contract:
 - Browser viewers attach through the existing `/api/terminal/ws` hub. Service and agent credentials are never included in viewer responses.
 - The runner updates `state`, `phase`, `summary`, Codex thread/turn IDs, and heartbeat through the agent work-state endpoint. `completed`, `blocked`, `failed`, and `canceled` are terminal.
 
+See [GitHub Actions Sessions](/github-actions-sessions/) for the full lifecycle,
+authentication, resumption, steering, cancellation, archive, and operational
+verification contract.
+
 Session sharing:
 
 - `Share` creates a public read-only URL at `/app/sessions/:id?token=...`.
