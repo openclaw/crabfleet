@@ -319,13 +319,13 @@ Recommended for production.
 **Setup:**
 
 1. Create GitHub OAuth app in your org
-2. Callback URL: the Worker `GITHUB_REDIRECT_URI` value, currently `https://crabfleet.openclaw.ai/auth/github/callback`
+2. Callback URL: the optional Worker `GITHUB_REDIRECT_URI` value, or the request-origin `/auth/github/callback` URL when the binding is absent
 3. Scopes: `read:user`, `read:org`
 4. Add secrets to Cloudflare Worker:
    - `GITHUB_CLIENT_ID`
    - `GITHUB_CLIENT_SECRET`
    - `GITHUB_TOKEN` for all enabled repo previews and private repo `CRABBOX.md` refreshes (optional; public/default repo paths work without it)
-5. Set `GITHUB_REDIRECT_URI` and `GITHUB_ORG` vars (`GITHUB_ORG` defaults to `openclaw`)
+5. Set `GITHUB_ORG` (`openclaw` by default). For deployments with aliases, proxies, or a fixed OAuth app callback, set `GITHUB_REDIRECT_URI` to the authoritative absolute HTTPS URL with the exact `/auth/github/callback` path and no credentials, query, or fragment.
 
 **Session lifetime:**
 

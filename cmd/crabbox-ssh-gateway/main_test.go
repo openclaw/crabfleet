@@ -76,6 +76,57 @@ func TestParseMessageKeepsNoEnterAndText(t *testing.T) {
 	}
 }
 
+func TestParseCreateLeavesRuntimeToDeploymentDefault(t *testing.T) {
+	create := parseCreate([]string{"--repo", "openclaw/crabfleet", "fix it"}, nil, "")
+	if create.request.Runtime != "" {
+		t.Fatalf("runtime = %q, want deployment default", create.request.Runtime)
+	}
+
+	create = parseCreate(
+		[]string{"--repo", "openclaw/crabfleet", "--runtime", "container", "fix it"},
+		nil,
+		"",
+	)
+	if create.request.Runtime != "container" {
+		t.Fatalf("runtime = %q, want explicit override", create.request.Runtime)
+	}
+}
+
+func TestTerminalCapabilityWithdrawalSuppressesAttach(t *testing.T) {
+	if !terminalCapable(interactiveSession{}) {
+		t.Fatal("legacy session without capabilities should remain attachable")
+	}
+	if terminalCapable(interactiveSession{
+		Capabilities: &sessionCapabilities{Terminal: false},
+	}) {
+		t.Fatal("explicit terminal capability withdrawal should suppress attach")
+	}
+}
+
+func TestCreateAutoAttachRequiresReadyResolvablePTY(t *testing.T) {
+	available := true
+	if attachable(interactiveSession{Status: "provisioning", PtyAvailable: &available}) {
+		t.Fatal("provisioning create must succeed without auto-attach")
+	}
+	available = false
+	if attachable(interactiveSession{Status: "ready", PtyAvailable: &available}) {
+		t.Fatal("ready session without a PTY route must not auto-attach")
+	}
+	available = true
+	if !attachable(interactiveSession{Status: "ready", PtyAvailable: &available}) {
+		t.Fatal("ready session with a PTY route should auto-attach")
+	}
+	if !attachable(interactiveSession{
+		Status:    "detached",
+		AttachURL: "/api/interactive-sessions/IS-1/pty",
+	}) {
+		t.Fatal("legacy API PTY routes should remain attachable")
+	}
+	if attachable(interactiveSession{Status: "ready", AttachURL: "ws://example.com/terminal"}) {
+		t.Fatal("insecure remote websocket should not auto-attach")
+	}
+}
+
 func TestPrintListShowsOwnersAndSessionTree(t *testing.T) {
 	var out bytes.Buffer
 	printList(&out, stateResponse{

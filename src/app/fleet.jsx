@@ -3,15 +3,18 @@ import {
   canMaintain,
   elapsed,
   interactiveSessionStatus,
+  isFleetSessionAttachable,
   isTerminalReadyInteractiveSession,
   runCapabilities,
   sessionLogsUrl,
 } from "./utils.js";
 
 const productDomain = "crabfleet.openclaw.ai";
-const sshHost = "crabd.sh";
 
 export function FleetPage(props) {
+  const deployment = props.state.deployment || {};
+  const sshHost = deployment.sshHost || "crabd.sh";
+  const preferredRepo = deployment.preferredRepo || "openclaw/crabfleet";
   const sessions = props.state.interactiveSessions || [];
   const fleet = props.state.fleet;
   const totals = fleet?.totals || {};
@@ -32,7 +35,7 @@ export function FleetPage(props) {
     <section class="dashboard fleet-dashboard" aria-label="Crabfleet dashboard">
       <section class="fleet-hero">
         <div class="fleet-hero-copy">
-          <div class="section-kicker">OPENCLAW / FLEET COMMAND</div>
+          <div class="section-kicker">{deployment.label || "Crabfleet"} / FLEET COMMAND</div>
           <h2>
             <strong>{readyCount}</strong> crabboxes live
           </h2>
@@ -74,12 +77,14 @@ export function FleetPage(props) {
             queue: props.queue,
             review: props.review,
           }}
-          cli={props.cli}
+          cli={totals.attachable ?? props.cli}
         />
         <ConnectionDeck
           signedIn={props.signedIn}
           userLabel={props.userLabel}
           beginLogin={props.beginLogin}
+          sshHost={sshHost}
+          preferredRepo={preferredRepo}
         />
       </div>
 
@@ -114,6 +119,7 @@ export function FleetPage(props) {
                       key={session.id}
                       session={{ ...session, fleet: fleetSessionsById.get(session.id) }}
                       openSessionGrid={props.openSessionGrid}
+                      sshHost={sshHost}
                     />
                   ))}
                 </div>
@@ -126,7 +132,7 @@ export function FleetPage(props) {
             <div>
               <strong>No crabboxes on the board</strong>
               <p>Create one from SSH, the Go CLI, or the app.</p>
-              <CopyCommand value={`ssh ${sshHost} new --repo openclaw/crabfleet`} />
+              <CopyCommand value={`ssh ${sshHost} new --repo ${preferredRepo}`} />
             </div>
             <button
               class="primary"
@@ -218,7 +224,7 @@ function ReadinessPanel({
   );
 }
 
-function ConnectionDeck({ signedIn, userLabel, beginLogin }) {
+function ConnectionDeck({ signedIn, userLabel, beginLogin, sshHost, preferredRepo }) {
   return (
     <section class="connection-deck" aria-label="Connect to Crabfleet">
       <header>
@@ -249,20 +255,20 @@ function ConnectionDeck({ signedIn, userLabel, beginLogin }) {
           <strong>Launch work</strong>
           <p>Start with a prepared repo and Codex ready.</p>
         </div>
-        <CopyCommand
-          value={`ssh ${sshHost} new --repo openclaw/crabfleet "fix the failing check"`}
-        />
+        <CopyCommand value={`ssh ${sshHost} new --repo ${preferredRepo} "fix the failing check"`} />
       </div>
     </section>
   );
 }
 
-function FleetBox({ session, openSessionGrid }) {
+function FleetBox({ session, openSessionGrid, sshHost }) {
   const capabilities = runCapabilities(session);
+  const attachable = isFleetSessionAttachable(session);
   const archiveCount = session.logArchive?.eventCount || session.logs?.length || 0;
   const fleetPolicy = session.fleet?.policy;
   const status = interactiveSessionStatus(session);
   const seen = session.lastSeenAt || session.updatedAt || session.createdAt;
+  const desktopEligible = !["stopping", "stopped", "expired", "failed"].includes(session.status);
   return (
     <article class={`fleet-box ${status.tone || "idle"}`}>
       <header class="fleet-box-head">
@@ -280,19 +286,23 @@ function FleetBox({ session, openSessionGrid }) {
         {fleetPolicy?.present ? <span>{fleetPolicy.allowedHostCount} egress</span> : null}
       </div>
       <p class="fleet-box-event">{session.lastEvent || "Waiting for crabbox"}</p>
-      <div class="fleet-box-command">
-        <code>
-          ssh {sshHost} attach {session.id}
-        </code>
-        <span>{seen ? `seen ${elapsed(seen)}` : "no heartbeat"}</span>
-      </div>
+      {attachable ? (
+        <div class="fleet-box-command">
+          <code>
+            ssh {sshHost} attach {session.id}
+          </code>
+          <span>{seen ? `seen ${elapsed(seen)}` : "no heartbeat"}</span>
+        </div>
+      ) : null}
       <div class="fleet-box-actions">
-        <button class="primary" onClick={() => openSessionGrid(session.id)}>
-          Terminal
-        </button>
+        {attachable ? (
+          <button class="primary" onClick={() => openSessionGrid(session.id)}>
+            Terminal
+          </button>
+        ) : null}
         {session.vncUrl ? (
           <button onClick={() => window.open(session.vncUrl, "_blank", "noopener")}>VNC</button>
-        ) : capabilities.vnc ? (
+        ) : desktopEligible && session.adapter === "runtime-v1" && capabilities.vnc ? (
           <button
             class="pending-vnc"
             disabled

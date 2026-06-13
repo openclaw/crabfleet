@@ -24,10 +24,10 @@ export function canOwn(user) {
   return roleRank(user?.role) >= roleRank("owner");
 }
 
-export function preferredRepos(repos = []) {
+export function preferredRepos(repos = [], preferred = preferredRepo) {
   return [...repos].sort((left, right) => {
-    if (left === preferredRepo) return -1;
-    if (right === preferredRepo) return 1;
+    if (left === preferred) return -1;
+    if (right === preferred) return 1;
     return left.localeCompare(right);
   });
 }
@@ -65,9 +65,12 @@ export function runRuntime(session) {
 }
 
 export function runCapabilities(session) {
-  if (session.kind === "interactive") {
+  if (session.kind !== "interactive" && session.run?.capabilities) {
+    return session.run.capabilities;
+  }
+  if (session.kind === "interactive" || session.capabilities) {
     const crabbox = session.runtime === "crabbox";
-    return {
+    const defaults = {
       terminal: true,
       takeover: false,
       vnc: crabbox,
@@ -75,8 +78,8 @@ export function runCapabilities(session) {
       logs: true,
       artifacts: false,
     };
+    return { ...defaults, ...session.capabilities };
   }
-  if (session.run?.capabilities) return session.run.capabilities;
   const crabbox = runRuntime(session) === "crabbox";
   return {
     terminal: true,
@@ -119,11 +122,21 @@ export function isDeadInteractiveSession(session) {
 }
 
 export function isTerminalReadyInteractiveSession(session) {
-  return (
+  const lifecycleReady =
     session &&
     (session.kind === undefined || session.kind === "interactive") &&
-    terminalReadyInteractiveStatuses.has(session.status)
-  );
+    terminalReadyInteractiveStatuses.has(session.status) &&
+    (session.capabilities?.terminal ?? runCapabilities(session).terminal);
+  if (!lifecycleReady) return false;
+  if (session.sharedReadOnly === true) return true;
+  if (session.canControl === true) return session.ptyAvailable === true;
+  return true;
+}
+
+export function isFleetSessionAttachable(session) {
+  if (!runCapabilities(session).terminal) return false;
+  if (typeof session?.fleet?.attachable === "boolean") return session.fleet.attachable;
+  return isTerminalReadyInteractiveSession(session) && Boolean(session.attachUrl);
 }
 
 export function humanStatus(value) {
@@ -140,6 +153,7 @@ export function interactiveSessionStatus(session) {
     return { label: "Unavailable", tone: "failed" };
   }
   if (session.status === "failed") return { label: "Failed", tone: "failed" };
+  if (session.status === "stopping") return { label: "Stopping", tone: "provisioning" };
   if (session.status === "stopped" || session.status === "expired") {
     return { label: "Stopped", tone: "stopped" };
   }
@@ -283,12 +297,22 @@ export function optimisticInteractiveSession(data, owner) {
   const repo = String(data.get("repo") || preferredRepo);
   const branch = String(data.get("branch") || "main");
   const runtime = String(data.get("runtime") || "container");
+  const profile = String(data.get("profile") || "default");
   const runtimeLabel = runtime === "crabbox" ? "Crabbox" : "Cloudflare Sandbox";
   return {
     id: `LOCAL-${now}`,
     repo,
     branch,
     runtime,
+    profile,
+    capabilities: {
+      terminal: true,
+      takeover: false,
+      vnc: runtime === "crabbox",
+      desktop: runtime === "crabbox",
+      logs: true,
+      artifacts: false,
+    },
     command: interactiveCommand(data.get("command")),
     prompt: String(data.get("prompt") || ""),
     owner: owner || "local",
@@ -335,6 +359,15 @@ export function linkedInteractiveSessionPlaceholder(id, options = {}) {
     repo: "Codex session",
     branch: "",
     runtime: "crabbox",
+    profile: "default",
+    capabilities: {
+      terminal: true,
+      takeover: false,
+      vnc: true,
+      desktop: true,
+      logs: true,
+      artifacts: false,
+    },
     command: "codex",
     prompt: "",
     owner: "unknown",

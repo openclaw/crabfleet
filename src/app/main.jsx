@@ -12,6 +12,7 @@ import {
   issueNumber,
   isActiveRun,
   isDeadInteractiveSession,
+  isFleetSessionAttachable,
   isProvisioningInteractiveSession,
   interactiveSessionStatus,
   lanes,
@@ -40,6 +41,15 @@ const logo = "__CRABBOX_LOGO__";
 const productName = "Crabfleet";
 const productDomain = "crabfleet.openclaw.ai";
 const sshHost = "crabd.sh";
+const defaultDeployment = {
+  label: productName,
+  canonicalUrl: `https://${productDomain}`,
+  productUrl: "https://crabfleet.ai",
+  sshHost,
+  preferredRepo,
+  defaultRuntime: "container",
+  defaultProfile: "default",
+};
 const loginReturnKey = "crabbox-login-return";
 const skipAutoGithubLoginKey = "crabbox-skip-auto-github-login";
 const githubAutoLoginReadyKey = "crabbox-github-auto-login-ready";
@@ -54,6 +64,7 @@ const emptyState = {
   cap: 20,
   retention: "30",
   merge: "guarded",
+  deployment: defaultDeployment,
 };
 function initialState(initialSessionLink) {
   if (!initialSessionLink.id) return emptyState;
@@ -269,6 +280,7 @@ function App() {
       workflows: [],
       cards: [],
       interactiveSessions: [result.session],
+      deployment: stateRef.current.deployment || defaultDeployment,
     });
     setSignedIn(false);
     setFocusedSessionId(result.session.id);
@@ -302,6 +314,9 @@ function App() {
     try {
       const result = await api("/api/auth", { authOptional: true });
       const methods = result.auth || authMethodsRef.current;
+      if (result.deployment) {
+        setState((current) => ({ ...current, deployment: result.deployment }));
+      }
       setAuthMethods(methods);
       return methods;
     } catch {
@@ -827,6 +842,7 @@ function App() {
           repo: data.get("repo"),
           branch: data.get("branch"),
           runtime: data.get("runtime"),
+          profile: data.get("profile"),
           command: data.get("command"),
           prompt: data.get("prompt"),
         },
@@ -964,6 +980,7 @@ function CrabfleetApp(props) {
           (props.state.user?.subject === "shared" && !props.loginMessage)
         }
         authMethods={props.authMethods}
+        deployment={props.state.deployment || defaultDeployment}
         message={props.loginMessage}
         onGithub={props.beginLogin}
         onToken={props.tokenLogin}
@@ -991,7 +1008,15 @@ const devIdentityPresets = [
   { id: "user-2", name: "User 2", role: "viewer" },
 ];
 
-function LoginScreen({ hidden, authMethods, message, onGithub, onToken, onDevIdentity }) {
+function LoginScreen({
+  hidden,
+  authMethods,
+  deployment = defaultDeployment,
+  message,
+  onGithub,
+  onToken,
+  onDevIdentity,
+}) {
   const [token, setToken] = useState("");
   return (
     <section class="login-screen" hidden={hidden}>
@@ -1011,9 +1036,9 @@ function LoginScreen({ hidden, authMethods, message, onGithub, onToken, onDevIde
           <div class="mark">
             <img src={logo} alt="" />
           </div>
-          <h1>{productName}</h1>
+          <h1>{deployment.label}</h1>
         </div>
-        <p>OpenClaw crabboxes, SSH-first.</p>
+        <p>Managed crabboxes, SSH-first.</p>
         <div class="login-actions">
           <button
             class="primary github-login"
@@ -1027,7 +1052,7 @@ function LoginScreen({ hidden, authMethods, message, onGithub, onToken, onDevIde
           </button>
           <div class="command-row">
             <span>Or connect via</span>
-            <CopyCommand value={`ssh link@${sshHost}`} />
+            <CopyCommand value={`ssh link@${deployment.sshHost}`} />
           </div>
           <details
             class="bootstrap-login"
@@ -1107,12 +1132,13 @@ function InfrastructureField() {
 }
 
 function AppShell(props) {
+  const deployment = props.state.deployment || defaultDeployment;
   const active = props.state.cards.filter((card) => card.lane === "Running").length;
   const queue = props.state.cards.filter((card) => card.lane === "Todo").length;
   const review = props.state.cards.filter((card) => card.lane === "Human Review").length;
-  const cli = (props.state.interactiveSessions || []).filter((session) =>
-    ["provisioning", "pending_adapter", "ready", "attached", "detached"].includes(session.status),
-  ).length;
+  const cli =
+    props.state.fleet?.totals?.attachable ??
+    (props.state.interactiveSessions || []).filter(isFleetSessionAttachable).length;
   const user = props.state.user;
   const userLabel =
     !props.signedIn && user?.subject === "shared"
@@ -1123,11 +1149,11 @@ function AppShell(props) {
   return (
     <div class="app">
       <aside class="rail" aria-label="Primary">
-        <div class="brand-lockup" title={productDomain}>
+        <div class="brand-lockup" title={deployment.canonicalUrl}>
           <div class="mark">
             <img src={logo} alt="" />
           </div>
-          <span>crabfleet</span>
+          <span>{deployment.label}</span>
         </div>
         <div class="nav-actions">
           <button
@@ -1187,11 +1213,11 @@ function AppShell(props) {
       <main class="shell">
         <section class="top">
           <div class="title">
-            <h1>{props.appView === "board" ? "Board" : productName}</h1>
+            <h1>{props.appView === "board" ? "Board" : deployment.label}</h1>
             <p>
               {props.appView === "board"
                 ? "Prompt cards and run attempts, separated from the live crabbox fleet."
-                : "All visible Codex crabboxes grouped by person, with SSH, WebVNC, and OpenClaw supervision."}
+                : "All visible Codex crabboxes grouped by person, with SSH, WebVNC, and session supervision."}
             </p>
           </div>
           <button
@@ -1537,7 +1563,7 @@ function CardDrawer({ drawers, closeDrawer, createCard, state }) {
             <option>PR</option>
           </select>
         </label>
-        <RepoSelect repos={state.repos} name="repo" />
+        <RepoSelect repos={state.repos} name="repo" preferred={state.deployment?.preferredRepo} />
         <label class="full">
           Title (optional)
           <input name="title" placeholder="Generated from prompt if blank" />
@@ -1598,18 +1624,23 @@ function InteractiveDrawer({ drawers, closeDrawer, createInteractiveSession, sta
           }
         }}
       >
-        <RepoSelect repos={state.repos} name="repo" />
+        <RepoSelect repos={state.repos} name="repo" preferred={state.deployment?.preferredRepo} />
         <label>
           Branch
           <input name="branch" defaultValue="main" placeholder="main" />
         </label>
         <label>
           Runtime
-          <select name="runtime">
+          <select
+            key={state.deployment?.defaultRuntime || "container"}
+            name="runtime"
+            defaultValue={state.deployment?.defaultRuntime || "container"}
+          >
             <option value="container">Cloudflare Sandbox</option>
             <option value="crabbox">Crabbox</option>
           </select>
         </label>
+        <input type="hidden" name="profile" value={state.deployment?.defaultProfile || "default"} />
         <label>
           Command
           <input name="command" defaultValue="codex --yolo" placeholder="codex --yolo" />
@@ -1631,12 +1662,12 @@ function InteractiveDrawer({ drawers, closeDrawer, createInteractiveSession, sta
   );
 }
 
-function RepoSelect({ repos, name }) {
-  const values = preferredRepos(repos);
+function RepoSelect({ repos, name, preferred = preferredRepo }) {
+  const values = preferredRepos(repos, preferred);
   return (
     <label>
       Repo
-      <select name={name} defaultValue={values.includes(preferredRepo) ? preferredRepo : values[0]}>
+      <select name={name} defaultValue={values.includes(preferred) ? preferred : values[0]}>
         {values.map((repo) => (
           <option>{repo}</option>
         ))}
@@ -2370,6 +2401,7 @@ function AdminDrawer(props) {
           disabled={!owner}
           workflows={props.state.workflows || []}
           refreshWorkflow={props.refreshWorkflow}
+          preferred={props.state.deployment?.preferredRepo}
         />
       </div>
     </Drawer>
@@ -2511,8 +2543,9 @@ function PolicyBox({ disabled, state, updatePolicy }) {
   );
 }
 
-function WorkflowBox({ disabled, workflows, refreshWorkflow }) {
-  const [repo, setRepo] = useState(preferredRepo);
+function WorkflowBox({ disabled, workflows, refreshWorkflow, preferred = preferredRepo }) {
+  const [repo, setRepo] = useState(preferred);
+  useEffect(() => setRepo(preferred), [preferred]);
   return (
     <section class="admin-box">
       <h3>Workflows</h3>
@@ -2520,7 +2553,7 @@ function WorkflowBox({ disabled, workflows, refreshWorkflow }) {
         <input
           class="full"
           name="workflow-repo"
-          placeholder={preferredRepo}
+          placeholder={preferred}
           value={repo}
           disabled={disabled}
           onInput={(event) => setRepo(event.currentTarget.value)}

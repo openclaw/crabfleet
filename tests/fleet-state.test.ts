@@ -61,6 +61,7 @@ test("fleet state aggregates sessions and redacted sandbox policies", () => {
       defaultEgressHosts: ["github.com", "api.github.com"],
       generatedAt: 100,
       productUrl: "https://crabfleet.ai",
+      sandboxAvailable: true,
     },
   );
 
@@ -94,4 +95,161 @@ test("sandbox lease parser ignores non-sandbox leases", () => {
   );
   assert.equal(sandboxIdFromLeaseId("crabbox:external"), null);
   assert.equal(sandboxIdFromLeaseId(null), null);
+});
+
+test("fleet VNC availability follows adapter capabilities without persisting a URL", () => {
+  const fleet = buildFleetState(
+    [
+      {
+        ...baseSession,
+        runtime: "crabbox",
+        adapter: "runtime-v1",
+        leaseId: "provider/resource",
+        vncUrl: null,
+        capabilities: { terminal: true, desktop: true, vnc: true },
+      },
+    ],
+    [],
+    {
+      canonicalUrl: "https://fleet.example",
+      defaultEgressHosts: [],
+      generatedAt: 100,
+      productUrl: "https://product.example",
+    },
+  );
+
+  assert.equal(fleet.totals.vnc, 1);
+  assert.equal(fleet.sessions[0]?.vnc, true);
+});
+
+test("stopping sessions are inactive and not attachable", () => {
+  const fleet = buildFleetState(
+    [
+      {
+        ...baseSession,
+        status: "stopping",
+        attachUrl: "wss://terminal.example/session",
+        capabilities: { desktop: true, vnc: true },
+      },
+    ],
+    [],
+    {
+      canonicalUrl: "https://fleet.example",
+      defaultEgressHosts: [],
+      generatedAt: 100,
+      productUrl: "https://product.example",
+    },
+  );
+
+  assert.equal(fleet.totals.active, 0);
+  assert.equal(fleet.totals.attachable, 0);
+  assert.equal(fleet.totals.vnc, 0);
+  assert.equal(fleet.sessions[0]?.active, false);
+});
+
+test("withdrawn terminal capability suppresses fleet attachability", () => {
+  const fleet = buildFleetState(
+    [
+      {
+        ...baseSession,
+        adapter: "runtime-v1",
+        attachUrl: "wss://terminal.example/session",
+        capabilities: { terminal: false },
+      },
+    ],
+    [],
+    {
+      canonicalUrl: "https://fleet.example",
+      defaultEgressHosts: [],
+      generatedAt: 100,
+      productUrl: "https://product.example",
+    },
+  );
+
+  assert.equal(fleet.totals.attachable, 0);
+  assert.equal(fleet.sessions[0]?.attachable, false);
+});
+
+test("fleet attachability follows resolvable PTY routes", () => {
+  const options = {
+    canonicalUrl: "https://fleet.example",
+    defaultEgressHosts: [],
+    generatedAt: 100,
+    productUrl: "https://product.example",
+  };
+  const summary = (
+    session: Parameters<typeof buildFleetState>[0][number],
+    routing: Partial<Parameters<typeof buildFleetState>[2]> = {},
+  ) => buildFleetState([session], [], { ...options, ...routing }).sessions[0]?.attachable;
+
+  assert.equal(
+    summary({ ...baseSession, leaseId: null, attachUrl: "wss://terminal.example/session" }),
+    true,
+  );
+  assert.equal(
+    summary({
+      ...baseSession,
+      status: "provisioning",
+      leaseId: null,
+      attachUrl: "wss://terminal.example/session",
+    }),
+    false,
+  );
+  assert.equal(
+    summary({ ...baseSession, leaseId: null, attachUrl: "https://terminal.example/console" }),
+    false,
+  );
+  assert.equal(
+    summary({ ...baseSession, leaseId: null, attachUrl: "ws://terminal.example/session" }),
+    false,
+  );
+  assert.equal(
+    summary({ ...baseSession, leaseId: null, attachUrl: "ws://127.0.0.1:9000/session" }),
+    true,
+  );
+  assert.equal(
+    summary(
+      { ...baseSession, leaseId: "cloudflare:workspace-1", attachUrl: null },
+      { cloudflareRunnerUrl: "https://runner.example" },
+    ),
+    true,
+  );
+  assert.equal(
+    summary(
+      { ...baseSession, leaseId: null, attachUrl: null },
+      { ptyBridgeUrl: "https://bridge.example/pty/{id}" },
+    ),
+    true,
+  );
+  assert.equal(
+    summary(
+      { ...baseSession, leaseId: null, attachUrl: null, canControl: false },
+      { ptyBridgeUrl: "https://bridge.example/pty/{id}" },
+    ),
+    false,
+  );
+});
+
+test("legacy sessions require an actual VNC URL", () => {
+  const fleet = buildFleetState(
+    [
+      {
+        ...baseSession,
+        runtime: "crabbox",
+        adapter: null,
+        vncUrl: null,
+        capabilities: { desktop: true, vnc: true },
+      },
+    ],
+    [],
+    {
+      canonicalUrl: "https://fleet.example",
+      defaultEgressHosts: [],
+      generatedAt: 100,
+      productUrl: "https://product.example",
+    },
+  );
+
+  assert.equal(fleet.totals.vnc, 0);
+  assert.equal(fleet.sessions[0]?.vnc, false);
 });

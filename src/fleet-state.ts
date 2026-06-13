@@ -4,6 +4,7 @@ export type FleetStatus =
   | "ready"
   | "attached"
   | "detached"
+  | "stopping"
   | "stopped"
   | "expired"
   | "failed";
@@ -17,6 +18,7 @@ export type FleetSessionInput = {
   repo: string;
   branch: string;
   runtime: FleetRuntime;
+  adapter?: string | null;
   owner: string;
   createdBy?: string;
   purpose?: string;
@@ -25,6 +27,9 @@ export type FleetSessionInput = {
   leaseId: string | null;
   attachUrl: string | null;
   vncUrl: string | null;
+  capabilities?: { vnc?: boolean; desktop?: boolean; terminal?: boolean };
+  canControl?: boolean;
+  ptyAvailable?: boolean;
   lastEvent: string;
   createdAt: number;
   updatedAt: number;
@@ -54,6 +59,9 @@ export type FleetStateOptions = {
   generatedAt: number;
   productUrl: string;
   registryAvailable?: boolean;
+  sandboxAvailable?: boolean | undefined;
+  ptyBridgeUrl?: string | null | undefined;
+  cloudflareRunnerUrl?: string | null | undefined;
 };
 
 export type FleetSessionSummary = {
@@ -116,18 +124,34 @@ export type FleetState = {
   sessions: FleetSessionSummary[];
 };
 
+export type PtyRouteKind = "sandbox" | "bridge" | "attach" | "cloudflare";
+
+export type PtyRouteSession = {
+  adapter?: string | null;
+  leaseId: string | null;
+  attachUrl: string | null;
+};
+
+export type PtyRouteConfig = {
+  sandboxAvailable?: boolean | undefined;
+  bridgeUrl?: string | null | undefined;
+  cloudflareRunnerUrl?: string | null | undefined;
+};
+
 const allStatuses: FleetStatus[] = [
   "provisioning",
   "pending_adapter",
   "ready",
   "attached",
   "detached",
+  "stopping",
   "stopped",
   "expired",
   "failed",
 ];
 
-const inactiveStatuses = new Set<FleetStatus>(["stopped", "expired", "failed"]);
+const inactiveStatuses = new Set<FleetStatus>(["stopping", "stopped", "expired", "failed"]);
+const ptyReadyStatuses = new Set<FleetStatus>(["ready", "attached", "detached"]);
 
 export function buildFleetState(
   sessions: FleetSessionInput[],
@@ -139,7 +163,9 @@ export function buildFleetState(
     if (!policiesBySession.has(policy.sessionId)) policiesBySession.set(policy.sessionId, policy);
   }
   const sessionSummaries = sessions
-    .map((session) => fleetSessionSummary(session, policiesBySession.get(session.id) ?? null))
+    .map((session) =>
+      fleetSessionSummary(session, policiesBySession.get(session.id) ?? null, options),
+    )
     .sort((a, b) => b.updatedAt - a.updatedAt || a.id.localeCompare(b.id));
 
   const byStatus = Object.fromEntries(allStatuses.map((status) => [status, 0])) as Record<
@@ -182,9 +208,16 @@ export function buildFleetState(
 export function fleetSessionSummary(
   session: FleetSessionInput,
   policy: FleetSandboxPolicySummary | null,
+  options: Pick<
+    FleetStateOptions,
+    "sandboxAvailable" | "ptyBridgeUrl" | "cloudflareRunnerUrl"
+  > = {},
 ): FleetSessionSummary {
   const sandboxId = sandboxIdFromLeaseId(session.leaseId);
   const archived = Boolean(session.logArchive?.eventCount);
+  const terminalCapable =
+    session.capabilities?.terminal === true ||
+    (session.adapter !== "runtime-v1" && session.capabilities?.terminal !== false);
   return {
     id: session.id,
     parentSessionId: session.parentSessionId ?? null,
@@ -198,8 +231,25 @@ export function fleetSessionSummary(
     summary: session.summary ?? session.purpose ?? session.lastEvent,
     status: session.status,
     active: !inactiveStatuses.has(session.status),
-    attachable: Boolean(session.attachUrl) && !inactiveStatuses.has(session.status),
-    vnc: Boolean(session.vncUrl),
+    attachable:
+      terminalCapable &&
+      session.canControl !== false &&
+      (session.ptyAvailable ??
+        Boolean(
+          ptyRouteKind(session, {
+            sandboxAvailable: options.sandboxAvailable,
+            bridgeUrl: options.ptyBridgeUrl,
+            cloudflareRunnerUrl: options.cloudflareRunnerUrl,
+          }),
+        )) &&
+      ptyReadyStatuses.has(session.status),
+    vnc:
+      !inactiveStatuses.has(session.status) &&
+      Boolean(
+        session.vncUrl ||
+        (session.adapter === "runtime-v1" &&
+          (session.capabilities?.vnc || session.capabilities?.desktop)),
+      ),
     archived,
     logEvents: session.logArchive?.eventCount ?? session.logs?.length ?? 0,
     leaseId: session.leaseId,
@@ -224,4 +274,67 @@ export function sandboxIdFromLeaseId(leaseId: string | null | undefined): string
   if (!leaseId?.startsWith("sandbox:")) return null;
   const [sandboxId] = leaseId.slice("sandbox:".length).split(":");
   return sandboxId || null;
+}
+
+export function ptyRouteKind(
+  session: PtyRouteSession,
+  config: PtyRouteConfig,
+): PtyRouteKind | null {
+  const leaseId = session.adapter === "runtime-v1" ? null : session.leaseId;
+  if (config.sandboxAvailable && leaseId?.startsWith("sandbox:")) return "sandbox";
+  if (configuredBridgeWebSocketUrl(config.bridgeUrl)) return "bridge";
+  if (safePtyWebSocketUrl(session.attachUrl)) return "attach";
+  if (leaseId?.startsWith("cloudflare:") && safePtyHttpUrl(config.cloudflareRunnerUrl ?? null)) {
+    return "cloudflare";
+  }
+  return null;
+}
+
+function configuredBridgeWebSocketUrl(value: string | null | undefined): string | null {
+  const candidate = String(value ?? "")
+    .trim()
+    .replaceAll(/\{(?:id|leaseId|repo|branch|runtime)\}/g, "route-value");
+  if (!candidate) return null;
+  try {
+    const url = new URL(candidate);
+    if (url.protocol === "https:") url.protocol = "wss:";
+    if (url.protocol === "http:") url.protocol = "ws:";
+    return safePtyWebSocketUrl(url.toString());
+  } catch {
+    return null;
+  }
+}
+
+function safePtyWebSocketUrl(value: string | null | undefined): string | null {
+  return safePtyUrl(value, "wss:", "ws:");
+}
+
+function safePtyHttpUrl(value: string | null | undefined): string | null {
+  return safePtyUrl(value, "https:", "http:");
+}
+
+function safePtyUrl(
+  value: string | null | undefined,
+  secureProtocol: string,
+  loopbackProtocol: string,
+): string | null {
+  if (!value) return null;
+  try {
+    const url = new URL(value);
+    if (url.username || url.password) return null;
+    if (url.protocol === secureProtocol) return url.toString();
+    if (url.protocol !== loopbackProtocol || !isPtyLoopbackHostname(url.hostname)) return null;
+    return url.toString();
+  } catch {
+    return null;
+  }
+}
+
+function isPtyLoopbackHostname(hostname: string): boolean {
+  return (
+    hostname === "localhost" ||
+    hostname === "127.0.0.1" ||
+    hostname === "::1" ||
+    hostname === "[::1]"
+  );
 }
