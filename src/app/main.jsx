@@ -250,6 +250,7 @@ function App() {
         const methods = await loadAuthMethods();
         finishGithubLoginCallback(false);
         if (error.status === 401 && (await maybeAutoGithubLogin(methods))) return;
+        closeAllDrawers();
         setSignedIn(false);
         setLoginMessage(error.message === "unauthorized" ? "" : error.message);
         return;
@@ -297,6 +298,7 @@ function App() {
 
   async function showSharedLinkError(error) {
     await loadAuthMethods();
+    closeAllDrawers();
     setSharedSessionId(null);
     setSharedToken(null);
     setFocusedSessionId(null);
@@ -2603,18 +2605,50 @@ function WorkflowBox({ disabled, workflows, refreshWorkflow, preferred = preferr
 }
 
 function Drawer({ id, open, title, wide, onClose, children }) {
+  const elementRef = useRef(null);
+  const titleId = `${id}-title`;
+
+  useLayoutEffect(() => {
+    const element = elementRef.current;
+    if (!open || !element) return;
+    const previousFocus = document.activeElement;
+    if (!element.open) element.showModal();
+    element
+      .querySelector(
+        ".panel-body input, .panel-body select, .panel-body textarea, .panel-body button",
+      )
+      ?.focus();
+    return () => {
+      if (element.open) element.close();
+      previousFocus?.focus?.();
+    };
+  }, [open]);
+
   return (
-    <div class={`drawer ${open ? "open" : ""}`} id={id} aria-hidden={open ? "false" : "true"}>
+    <dialog
+      ref={elementRef}
+      class={`drawer ${open ? "open" : ""}`}
+      id={id}
+      aria-labelledby={titleId}
+      onCancel={(event) => {
+        event.preventDefault();
+        onClose();
+      }}
+      onClick={(event) => {
+        if (event.target === event.currentTarget) onClose();
+      }}
+      onKeyDown={(event) => event.stopPropagation()}
+    >
       <section class={`panel ${wide ? "wide" : ""}`}>
         <div class="panel-head">
-          <h2>{title}</h2>
+          <h2 id={titleId}>{title}</h2>
           <button class="icon" aria-label={`Close ${title}`} onClick={onClose}>
             <Icon name="x" />
           </button>
         </div>
         <div class="panel-body">{children}</div>
       </section>
-    </div>
+    </dialog>
   );
 }
 

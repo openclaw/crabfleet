@@ -1449,9 +1449,19 @@
         inset: 0;
         z-index: 20;
         display: none;
+        width: 100%;
+        max-width: none;
+        height: 100%;
+        max-height: none;
+        margin: 0;
+        border: 0;
         background: rgb(0 0 0 / 0.5);
+        color: var(--ink);
         backdrop-filter: blur(2px);
         padding: 0;
+      }
+      dialog.drawer::backdrop {
+        background: transparent;
       }
       #sessions-drawer {
         z-index: 20;
