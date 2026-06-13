@@ -7,41 +7,69 @@ import {
   routeProductRequest,
 } from "../src/canonical-host.ts";
 
-test("product hosts never fall through to the app worker", async () => {
-  let upstreamRequest: Request | undefined;
-  const response = await productHostResponse(
-    new Request("https://crabfleet.ai/docs?mode=full", {
-      headers: { accept: "text/html", authorization: "Bearer private" },
-    }),
-    async (input, init) => {
-      upstreamRequest = new Request(input, init);
-      return new Response("<title>CrabFleet</title>", {
-        headers: { "content-type": "text/html; charset=utf-8" },
-      });
-    },
-  );
-
-  assert.equal(response?.status, 200);
-  assert.equal(await response?.text(), "<title>CrabFleet</title>");
-  assert.equal(upstreamRequest?.url, "https://crabbox.sh/docs?mode=full");
-  assert.equal(upstreamRequest?.headers.get("accept"), "text/html");
-  assert.equal(upstreamRequest?.headers.has("authorization"), false);
-});
-
-test("product www host redirects to the product apex", async () => {
-  const response = await productHostResponse(
-    new Request("https://www.crabfleet.ai/docs?mode=full"),
-  );
+test("product apex redirects to the canonical docs host", () => {
+  const response = productHostResponse(new Request("https://crabfleet.ai/quickstart?mode=full"));
 
   assert.equal(response?.status, 308);
-  assert.equal(response?.headers.get("location"), "https://crabfleet.ai/docs?mode=full");
+  assert.equal(response?.headers.get("location"), "https://docs.crabfleet.ai/quickstart?mode=full");
 });
 
-test("product aliases redirect to the product apex", async () => {
-  const response = await routeProductRequest(new Request("https://crabfleet.app/docs?mode=full"));
+test("product www host redirects to the canonical docs host", () => {
+  const response = productHostResponse(new Request("https://www.crabfleet.ai/docs?mode=full"));
+
+  assert.equal(response?.status, 308);
+  assert.equal(response?.headers.get("location"), "https://docs.crabfleet.ai/?mode=full");
+});
+
+test("legacy product docs paths map to generated docs routes", () => {
+  const response = productHostResponse(new Request("https://crabfleet.ai/docs/spec-v2?mode=full"));
+
+  assert.equal(response?.status, 308);
+  assert.equal(response?.headers.get("location"), "https://docs.crabfleet.ai/spec-v2?mode=full");
+});
+
+test("legacy Markdown docs paths map to existing HTML routes", () => {
+  const spec = productHostResponse(new Request("https://crabfleet.ai/docs/spec.md"));
+  const specV2 = routeProductRequest(new Request("https://crabfleet.app/docs/spec-v2.md"));
+
+  assert.equal(spec?.headers.get("location"), "https://docs.crabfleet.ai/spec");
+  assert.equal(specV2.headers.get("location"), "https://docs.crabfleet.ai/spec-v2");
+});
+
+test("product hosts reject methods whose bodies a 308 would replay", () => {
+  const response = productHostResponse(
+    new Request("https://crabfleet.ai/webhook", { method: "POST", body: "private" }),
+  );
+
+  assert.equal(response?.status, 405);
+  assert.equal(response?.headers.get("allow"), "GET, HEAD");
+});
+
+test("product aliases redirect to the canonical docs host", () => {
+  const response = routeProductRequest(new Request("https://crabfleet.app/docs?mode=full"));
 
   assert.equal(response.status, 308);
-  assert.equal(response.headers.get("location"), "https://crabfleet.ai/docs?mode=full");
+  assert.equal(response.headers.get("location"), "https://docs.crabfleet.ai/?mode=full");
+});
+
+test("product aliases reject methods whose bodies a 308 would replay", () => {
+  const response = routeProductRequest(
+    new Request("https://crabfleet.app/webhook", { method: "POST", body: "private" }),
+  );
+
+  assert.equal(response.status, 405);
+  assert.equal(response.headers.get("allow"), "GET, HEAD");
+});
+
+test("product redirects never forward credentials to GitHub Pages", () => {
+  for (const header of ["authorization", "proxy-authorization", "cookie"]) {
+    const response = routeProductRequest(
+      new Request("https://crabfleet.ai/docs", { headers: { [header]: "private" } }),
+    );
+
+    assert.equal(response.status, 400);
+    assert.equal(response.headers.has("location"), false);
+  }
 });
 
 test("product deployment converges its hosts as Worker Custom Domains", async () => {
@@ -69,6 +97,7 @@ test("product deployment converges its hosts as Worker Custom Domains", async ()
   );
   assert.match(productSource, /workers\/routes\/\$\{route\.id\}/);
   assert.doesNotMatch(productSource, /192\.0\.2\.1|method: "POST"/);
+  assert.match(convergence, /await ensureCrabfleetDocsRecord\(\);\nif \(!productOnly\)/);
 });
 
 test("legacy app pages redirect to the canonical host", () => {

@@ -175,7 +175,7 @@ if (!productOnly) {
   await removeOpenClawClassicRoutes();
 }
 await ensureProductHosts("crabfleet.ai", ["crabfleet.ai", "www.crabfleet.ai"]);
+await ensureCrabfleetDocsRecord();
 if (!productOnly) {
-  await ensureCrabfleetDocsRecord();
   await ensureCrabdSshRecord();
 }

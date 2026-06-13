@@ -1,7 +1,7 @@
 import { routeProductRequest } from "./canonical-host";
 
 export default {
-  async fetch(request: Request): Promise<Response> {
+  fetch(request: Request): Response {
     return routeProductRequest(request);
   },
 };
