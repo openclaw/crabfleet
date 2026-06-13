@@ -7542,6 +7542,28 @@ async function interactiveSessionPty(
   ) {
     throw forbidden("terminal control has not been granted");
   }
+  if (session.runtime === githubActionsRuntime) {
+    const upstreamConnection = await openInteractiveTerminalUpstream(
+      request,
+      env,
+      user,
+      session,
+      terminalSize(request, "cols", 120),
+      terminalSize(request, "rows", 34),
+    );
+    const pair = new WebSocketPair();
+    const client = pair[0];
+    const server = pair[1];
+    server.accept();
+    bridgeWebSockets(
+      server,
+      upstreamConnection.socket,
+      terminalInputGrant(env, user, session),
+      terminalSubscriptionReconciler(env, id),
+    );
+    await upstreamConnection.markConnected();
+    return new Response(null, { status: 101, webSocket: client });
+  }
   const routeKind = interactivePtyRouteKind(env, session);
   if (routeKind === "sandbox" && env.SANDBOX) {
     return interactiveSandboxTerminal(
@@ -14237,9 +14259,10 @@ function decorateInteractiveSession(
     canControl &&
     session.capabilities.terminal &&
     ["ready", "attached", "detached"].includes(session.status) &&
-    Boolean(interactivePtyRouteKind(env, session));
+    (session.runtime === githubActionsRuntime || Boolean(interactivePtyRouteKind(env, session)));
   const attachUrl =
-    ptyAvailable && session.adapter === runtimeAdapterName
+    ptyAvailable &&
+    (session.runtime === githubActionsRuntime || session.adapter === runtimeAdapterName)
       ? `/api/interactive-sessions/${encodeURIComponent(session.id)}/pty`
       : canControl && session.capabilities.terminal
         ? session.attachUrl

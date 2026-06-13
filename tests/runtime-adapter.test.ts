@@ -1549,17 +1549,29 @@ test("terminal endpoints enforce current runtime capabilities", async () => {
     decorateStart,
   );
   const decorateSource = source.slice(decorateStart, decorateEnd);
+  const directPtyStart = source.indexOf("async function interactiveSessionPty");
+  const directPtyEnd = source.indexOf("async function interactiveSandboxTerminal", directPtyStart);
+  const directPtySource = source.slice(directPtyStart, directPtyEnd);
 
   assert.match(source, /type InteractiveSession = \{[\s\S]*ptyAvailable\?: boolean;/);
   assert.match(source, /if \(!session\.capabilities\.terminal\)/);
   assert.match(source, /runtimeCapabilities\(row\.runtime, row\.capabilities_json\)\.terminal/);
   assert.match(source, /runtimeAdapterTerminalFailureStatus\(existing\.adapter\) === "detached"/);
   assert.match(source, /attachUrl: capabilities\.terminal \? row\.attach_url : null/);
-  assert.match(decorateSource, /ptyAvailable && session\.adapter === runtimeAdapterName/);
+  assert.match(
+    decorateSource,
+    /session\.runtime === githubActionsRuntime \|\| Boolean\(interactivePtyRouteKind\(env, session\)\)/,
+  );
+  assert.match(
+    decorateSource,
+    /ptyAvailable &&[\s\S]*session\.runtime === githubActionsRuntime \|\|[\s\S]*session\.adapter === runtimeAdapterName/,
+  );
   assert.match(
     decorateSource,
     /`\/api\/interactive-sessions\/\$\{encodeURIComponent\(session\.id\)\}\/pty`/,
   );
+  assert.match(directPtySource, /session\.runtime === githubActionsRuntime/);
+  assert.match(directPtySource, /openInteractiveTerminalUpstream\(/);
   assert.match(decorateSource, /attachUrl,/);
   assert.doesNotMatch(
     decorateSource,
