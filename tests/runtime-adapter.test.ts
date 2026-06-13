@@ -27,6 +27,7 @@ import {
   runtimeAdapterStopOutcome,
   runtimeAdapterTerminalFailureStatus,
   runtimeAdapterTerminalOriginMatches,
+  runtimeAdapterWorkspaceIdConflict,
   runtimeAdapterWorkspaceUrl,
   resolveCreateAfterStopRace,
   safeDesktopUrl,
@@ -110,7 +111,16 @@ test("adapter workspace id stays distinct from provider resource id", () => {
     providerResourceId: "cloud/project/box-42",
     status: "ready",
     attachUrl: "wss://controller.example/terminal/is-101",
-    capabilities: { desktop: true, browser: true, code: true },
+    capabilities: {
+      terminal: true,
+      takeover: false,
+      vnc: true,
+      desktop: true,
+      logs: false,
+      artifacts: false,
+      browser: true,
+      code: true,
+    },
     expiresAt: "2026-06-12T12:00:00Z",
     message: "cloud/project/box-42 is ready as fleet-a-is-101",
   });
@@ -122,7 +132,7 @@ test("adapter workspace id stays distinct from provider resource id", () => {
   assert.equal(result?.capabilities?.terminal, true);
   assert.equal(result?.capabilities?.desktop, true);
   assert.equal(result?.capabilities?.vnc, true);
-  assert.equal(result?.terminalCapabilityInferred, true);
+  assert.equal(result?.terminalCapabilityInferred, false);
   assert.equal(result?.message, "[workspace] is ready as [workspace]");
   assert.deepEqual(
     effectiveAdapterCapabilities(
@@ -137,11 +147,11 @@ test("adapter workspace id stays distinct from provider resource id", () => {
     ),
     {
       terminal: true,
-      takeover: true,
+      takeover: false,
       vnc: true,
       desktop: true,
-      logs: true,
-      artifacts: true,
+      logs: false,
+      artifacts: false,
     },
   );
 
@@ -153,6 +163,14 @@ test("adapter workspace id stays distinct from provider resource id", () => {
   });
   assert.equal(explicitlyDisabled?.capabilities?.terminal, false);
   assert.equal(explicitlyDisabled?.terminalCapabilityInferred, false);
+  assert.equal(
+    effectiveAdapterCapabilities(
+      explicitlyDisabled!,
+      { ...clearedAdapterCapabilities, terminal: true, takeover: true, artifacts: true },
+      true,
+    )?.terminal,
+    false,
+  );
 
   const explicitlyNull = parseAdapterWorkspaceResult({
     id: "fleet-a-is-102-null",
@@ -851,6 +869,41 @@ test("runtime adapter requests reject redirects with edge-supported fetch semant
   assert.doesNotMatch(fetchSource, /redirect: "error"/);
 });
 
+test("pending runtime adapter creates replay before any inspect", async () => {
+  const source = await readFile(new URL("../src/index.ts", import.meta.url), "utf8");
+  const inspectStart = source.indexOf("async function inspectRuntimeAdapterWorkspace");
+  const inspectEnd = source.indexOf(
+    "async function reconcileStoppingRuntimeAdapterWorkspace",
+    inspectStart,
+  );
+  const inspectSource = source.slice(inspectStart, inspectEnd);
+  const provisionStart = source.indexOf("async function provisionWithRuntimeAdapter");
+  const provisionEnd = source.indexOf("function persistedRuntimeAdapterSeconds", provisionStart);
+  const provisionSource = source.slice(provisionStart, provisionEnd);
+  const replayIndex = inspectSource.indexOf(
+    "shouldReplayRuntimeAdapterCreate(session.status, session.adapter_create_pending === 1)",
+  );
+  const inspectFetchIndex = inspectSource.indexOf("const response = await runtimeAdapterFetch(");
+  const missingIndex = inspectSource.indexOf("if (response.status === 404)");
+  const missingSource = inspectSource.slice(missingIndex);
+
+  assert.ok(replayIndex >= 0);
+  assert.ok(inspectFetchIndex >= 0);
+  assert.ok(replayIndex < inspectFetchIndex);
+  assert.match(
+    inspectSource,
+    /runtimeAdapterReplayRequest\(runtimeAdapterRecord\(session\)\)/,
+  );
+  assert.ok(missingIndex >= 0);
+  assert.doesNotMatch(missingSource, /provisionWithRuntimeAdapter/);
+  assert.match(provisionSource, /const replayingPendingCreate = reconciliationOwner !== undefined/);
+  assert.match(
+    provisionSource,
+    /!replayingPendingCreate && definitiveRuntimeAdapterCreateFailure\(response\.status\)/,
+  );
+  assert.match(provisionSource, /runtime adapter create replay blocked/);
+});
+
 test("stopping create replay owns the exact persisted lifecycle", async () => {
   const source = await readFile(new URL("../src/index.ts", import.meta.url), "utf8");
   const reconcileStart = source.indexOf("async function reconcileStoppingRuntimeAdapterWorkspace");
@@ -858,20 +911,48 @@ test("stopping create replay owns the exact persisted lifecycle", async () => {
   const replayEnd = source.indexOf("async function stopRuntimeAdapterWorkspace(", replayStart);
   const reconcileSource = source.slice(reconcileStart, replayStart);
   const replaySource = source.slice(replayStart, replayEnd);
+  const unresolvedIndex = reconcileSource.indexOf("if (!replay.resolved)");
+  const deleteIndex = reconcileSource.indexOf("stopRuntimeAdapterWorkspace(");
 
-  assert.match(reconcileSource, /replayStoppingRuntimeAdapterCreate\(env, session\)/);
+  assert.match(reconcileSource, /replayStoppingRuntimeAdapterCreate\([\s\S]*env,[\s\S]*session,/);
   assert.doesNotMatch(reconcileSource, /provisionWithRuntimeAdapter/);
+  assert.ok(unresolvedIndex >= 0);
+  assert.ok(deleteIndex >= 0);
+  assert.ok(unresolvedIndex < deleteIndex);
+  assert.match(reconcileSource, /reconcileError: replay\.message/);
+  assert.match(reconcileSource, /createPending: true/);
   assert.match(replaySource, /AND adapter_control_plane = \$\{controlPlane\}/);
   assert.match(replaySource, /AND adapter_create_payload_json = \$\{createPayloadJson\}/);
   assert.match(replaySource, /AND adapter_create_pending = 1/);
   assert.match(replaySource, /AND status = 'stopping'/);
   assert.match(replaySource, /AND updated_at = \$\{session\.updated_at\}/);
+  assert.match(replaySource, /AND last_reconciled_at = \$\{reconciliationClaimAt\}/);
   assert.match(replaySource, /runtimeAdapterCollectionUrl\(controlPlane\)/);
   assert.match(replaySource, /idempotency-key": adapterWorkspaceId/);
   assert.match(replaySource, /adapter_create_pending: 0/);
   assert.match(replaySource, /reconcile_error: message/);
   assert.match(replaySource, /INSERT INTO interactive_session_events/);
   assert.match(replaySource, /env\.DB\.batch/);
+});
+
+test("every session-bound adapter delete waits for create ambiguity to clear", async () => {
+  const source = await readFile(new URL("../src/index.ts", import.meta.url), "utf8");
+  const releaseStart = source.indexOf("async function stopRuntimeAdapterWorkspaceForSession");
+  const releaseEnd = source.indexOf("async function runtimeAdapterFetch", releaseStart);
+  const releaseSource = source.slice(releaseStart, releaseEnd);
+  const pendingGateIndex = releaseSource.indexOf(
+    "if (registration?.adapter_create_pending !== 0)",
+  );
+  const providerDeleteIndex = releaseSource.indexOf(
+    "stopRuntimeAdapterWorkspace(env, controlPlane, adapterWorkspaceId)",
+  );
+
+  assert.match(releaseSource, /select\(\["adapter_control_plane", "adapter_create_pending"\]\)/);
+  assert.ok(pendingGateIndex >= 0);
+  assert.ok(providerDeleteIndex >= 0);
+  assert.ok(pendingGateIndex < providerDeleteIndex);
+  assert.match(releaseSource, /status: "stopping"/);
+  assert.match(releaseSource, /runtime adapter stop waiting for create resolution/);
 });
 
 test("stateless Sandbox provision hook acquires durable standalone ownership", async () => {
@@ -1267,8 +1348,9 @@ test("Sandbox cleanup and legacy stops use durable terminal transitions", async 
   assert.match(scheduledSource, /completeLegacyInteractiveSessionStop/);
   assert.match(completeSource, /if \(owner\.runtime === githubActionsRuntime\) return false/);
   assert.match(completeSource, /async function stopGitHubActionsSession/);
-  assert.match(completeSource, /work_state: "canceled"/);
-  assert.match(completeSource, /completion_reason: "stopped from Crabfleet"/);
+  assert.match(completeSource, /work_state: ""/);
+  assert.match(completeSource, /work_phase: "session_ended"/);
+  assert.match(completeSource, /workflow run not canceled/);
   assert.match(stopSource, /session\.runtime === githubActionsRuntime/);
   assert.match(stopSource, /stopGitHubActionsSession\(env, session, userActor, now\)/);
   assert.match(stopSource, /interactive session lifecycle changed; retry stop/);
@@ -1610,6 +1692,73 @@ test("non-retryable adapter client errors do not enter ambiguous replay", () => 
   assert.equal(definitiveRuntimeAdapterCreateFailure(503), false);
 });
 
+test("explicit workspace id conflicts are distinct from retryable 409 responses", () => {
+  assert.equal(
+    runtimeAdapterWorkspaceIdConflict(409, {
+      error: { code: "workspace_id_conflict", message: "workspace id is already owned" },
+    }),
+    true,
+  );
+  assert.equal(runtimeAdapterWorkspaceIdConflict(409, { error: { code: "busy" } }), false);
+  assert.equal(
+    runtimeAdapterWorkspaceIdConflict(422, { error: { code: "workspace_id_conflict" } }),
+    false,
+  );
+});
+
+test("workspace id conflicts detach without adopting or deleting the existing workspace", async () => {
+  const source = await readFile(new URL("../src/index.ts", import.meta.url), "utf8");
+  const createStart = source.indexOf("async function provisionWithRuntimeAdapter");
+  const createEnd = source.indexOf("function persistedRuntimeAdapterSeconds", createStart);
+  const createSource = source.slice(createStart, createEnd);
+  const conflictStart = source.indexOf("async function failRuntimeAdapterWorkspaceIdConflict");
+  const conflictEnd = source.indexOf(
+    "async function releaseFailedRuntimeAdapterProvision",
+    conflictStart,
+  );
+  const conflictSource = source.slice(conflictStart, conflictEnd);
+  const stageStart = source.indexOf("async function stageRuntimeAdapterProvision");
+  const stageEnd = source.indexOf("function ambiguousRuntimeAdapterProvision", stageStart);
+  const stageSource = source.slice(stageStart, stageEnd);
+  const stoppingReplayStart = source.indexOf("async function replayStoppingRuntimeAdapterCreate");
+  const stoppingReplayEnd = source.indexOf(
+    "async function stopRuntimeAdapterWorkspace(",
+    stoppingReplayStart,
+  );
+  const stoppingReplaySource = source.slice(stoppingReplayStart, stoppingReplayEnd);
+
+  assert.ok(
+    createSource.indexOf("runtimeAdapterWorkspaceIdConflict") <
+      createSource.indexOf("definitiveRuntimeAdapterCreateFailure"),
+  );
+  assert.match(createSource, /failRuntimeAdapterWorkspaceIdConflict/);
+  assert.match(createSource, /throw conflict\("runtime adapter workspace conflict response is stale"\)/);
+  assert.match(stageSource, /updated_at: sql<number>`MAX\(updated_at \+ 1, \$\{stageAt\}\)`/);
+  assert.match(
+    stageSource,
+    /returning\(\["status", "updated_at", "last_reconciled_at", "terminal_status"\]\)/,
+  );
+  assert.match(stageSource, /last_reconciled_at", "=", reconciliationOwner\.lastReconciledAt/);
+  assert.match(conflictSource, /adapter: null/);
+  assert.match(conflictSource, /adapter_workspace_id: null/);
+  assert.match(conflictSource, /adapter_control_plane: null/);
+  assert.match(conflictSource, /adapter_create_payload_json: null/);
+  assert.match(conflictSource, /adapter_create_pending: 0/);
+  assert.match(conflictSource, /AND adapter_create_pending = 1/);
+  assert.match(conflictSource, /AND status = \$\{createAttempt\.status\}/);
+  assert.match(conflictSource, /AND updated_at = \$\{createAttempt\.updatedAt\}/);
+  assert.match(conflictSource, /AND \$\{lastReconciledOwner\}/);
+  assert.match(conflictSource, /AND \$\{terminalStatusOwner\}/);
+  assert.match(conflictSource, /if \(!results\.at\(-1\)\?\.results\.length\) return null/);
+  assert.match(conflictSource, /terminal_finalize_pending: 1/);
+  assert.match(conflictSource, /env\.DB\.batch/);
+  assert.match(conflictSource, /finalizeTerminalInteractiveSession\(env, session\.id, "failed", now\)/);
+  assert.doesNotMatch(conflictSource, /stopRuntimeAdapterWorkspace/);
+  assert.match(stoppingReplaySource, /runtimeAdapterWorkspaceIdConflict/);
+  assert.match(stoppingReplaySource, /terminalResult/);
+  assert.doesNotMatch(stoppingReplaySource, /definitiveRuntimeAdapterCreateFailure/);
+});
+
 test("definitive adapter create errors retain a redacted provider reason before release", async () => {
   const source = await readFile(new URL("../src/index.ts", import.meta.url), "utf8");
   const createStart = source.indexOf("async function provisionWithRuntimeAdapter");
@@ -1817,6 +1966,7 @@ test("desktop mint revalidates current ownership before redirect", async () => {
   assert.match(vncSource, /current\.capabilities\.desktop/);
   assert.match(vncSource, /canControlInteractiveSession/);
   assert.match(vncSource, /desktop authorization changed; retry/);
+  assert.doesNotMatch(vncSource, /body:\s*JSON\.stringify\(\{\}\)/);
 });
 
 test("runtime adapter terminals use the server-side adapter bearer", async () => {

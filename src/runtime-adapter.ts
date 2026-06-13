@@ -373,6 +373,13 @@ export function definitiveRuntimeAdapterCreateFailure(status: number): boolean {
   return status >= 400 && status < 500 && ![408, 409, 423, 425, 429].includes(status);
 }
 
+export function runtimeAdapterWorkspaceIdConflict(status: number, value: unknown): boolean {
+  if (status !== 409) return false;
+  const body = objectValue(value);
+  const error = objectValue(body.error);
+  return error.code === "workspace_id_conflict";
+}
+
 export function effectiveAdapterCapabilities(
   result: Pick<
     AdapterWorkspaceResult,

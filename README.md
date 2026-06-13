@@ -28,7 +28,7 @@ Crabfleet gives OpenClaw maintainers a fleet dashboard where every Codex crabbox
 - **Ghostty WebAssembly** for the fullscreen attach grid and run log replay.
 - **Cloudflare Sandbox containers** for standalone interactive Codex CLI workspaces with live PTY attach.
 - **Runtime adapter descriptors** for Container and Crabbox selection, capability display, interactive lifecycle handoff, and guarded takeover.
-- **Versioned lifecycle adapter** for idempotent external workspace creation, bounded status reconciliation, provider-backed stop, terminal attachment, and authenticated transient desktop connections.
+- **Versioned lifecycle adapter** for idempotent external workspace creation, bounded status reconciliation, provider-backed deletion, terminal attachment, and authenticated transient desktop connections.
 - **Provision endpoint** at `/api/provision/interactive` that can use the built-in Sandbox backend or retain a legacy create-only adapter or ClawFleet integration, with durable ownership and a bearer-authenticated standalone PTY route.
 - **SessionControlDO relay** for one outbound GitHub Actions runner and multiple authenticated Ghostty viewers per action session.
 - **R2 session archives** for crabbox event NDJSON, transcripts, and summaries.
@@ -300,8 +300,9 @@ go run ./cmd/crabbox-ssh-gateway
 ```
 
 Unknown public keys get a short GitHub OAuth link through `ssh link@host`. Linked keys can
-run `whoami`, `list`, `new`, and `attach SESSION_ID`; `new` creates an interactive Codex
-session and attaches.
+run `whoami`, `list`, `new`, `attach SESSION_ID`, and `delete SESSION_ID`; `new` creates an
+interactive Codex session and attaches. Delete confirms runtime release for versioned lifecycle
+adapters; legacy create-only and ClawFleet sessions stop locally and may need provider cleanup.
 
 Production should expose the gateway at `crabd.sh` as a DNS-only `A` record.
 Use `ssh link@crabd.sh` once to connect a GitHub-backed SSH key, then run
@@ -319,8 +320,11 @@ go run ./cmd/crabfleet login
 go run ./cmd/crabfleet list
 go run ./cmd/crabfleet new --repo openclaw/crabfleet "start on the release checklist"
 go run ./cmd/crabfleet attach <session-id>
+go run ./cmd/crabfleet delete <session-id>
 go run ./cmd/crabfleet vnc --open <session-id>
 ```
+
+`crabfleet stop <session-id>` remains a compatibility alias for `delete`.
 
 ### CLI Release
 

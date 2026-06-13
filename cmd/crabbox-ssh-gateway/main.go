@@ -55,6 +55,7 @@ type interactiveSession struct {
 	Repo            string               `json:"repo"`
 	Branch          string               `json:"branch"`
 	Runtime         string               `json:"runtime"`
+	Adapter         string               `json:"adapter"`
 	Status          string               `json:"status"`
 	Owner           string               `json:"owner"`
 	CreatedBy       string               `json:"createdBy"`
@@ -67,6 +68,28 @@ type interactiveSession struct {
 	VNCURL          string               `json:"vncUrl"`
 	LastEvent       string               `json:"lastEvent"`
 	LogArchive      logArchive           `json:"logArchive"`
+}
+
+func legacyProviderCleanupMayBeRequired(session interactiveSession) bool {
+	if session.Adapter == "runtime-v1" || session.Runtime == "github_actions" {
+		return false
+	}
+	switch session.Status {
+	case "stopping", "stopped", "expired":
+		return true
+	default:
+		return false
+	}
+}
+
+func lifecycleStopNote(session interactiveSession) string {
+	if session.Runtime == "github_actions" && session.Status == "stopped" {
+		return "GitHub Actions workflow run was not canceled and may continue on GitHub"
+	}
+	if legacyProviderCleanupMayBeRequired(session) {
+		return "provider deletion was not confirmed; legacy runtimes may require separate cleanup"
+	}
+	return ""
 }
 
 type sessionCapabilities struct {
@@ -399,6 +422,21 @@ func runCommand(ctx context.Context, out io.ReadWriter, perms *ssh.Permissions, 
 		}
 		fmt.Fprintf(out, "session %s not found\n", terminalSafe(args[1]))
 		return 1
+	case "delete", "stop":
+		if len(args) != 2 {
+			fmt.Fprintln(out, "usage: delete SESSION_ID")
+			return 2
+		}
+		session, err := client.action(ctx, auth.fingerprint, args[1], "stop")
+		if err != nil {
+			fmt.Fprintf(out, "error: %v\n", err)
+			return 1
+		}
+		fmt.Fprintf(out, "session: %s\nstatus: %s\n", terminalSafe(session.ID), terminalSafe(session.Status))
+		if note := lifecycleStopNote(session); note != "" {
+			fmt.Fprintf(out, "note: %s\n", note)
+		}
+		return 0
 	case "logs":
 		if len(args) < 2 {
 			fmt.Fprintln(out, "usage: logs SESSION_ID")
@@ -527,6 +565,7 @@ func printHelp(out io.Writer, user user) {
 	fmt.Fprintln(out, "      --runtime overrides the deployment default")
 	fmt.Fprintln(out, "  attach SESSION_ID")
 	fmt.Fprintln(out, "  vnc SESSION_ID")
+	fmt.Fprintln(out, "  delete SESSION_ID")
 	fmt.Fprintln(out, "  logs SESSION_ID")
 	fmt.Fprintln(out, "  transcript SESSION_ID")
 	fmt.Fprintln(out, "  message SESSION_ID [--no-enter] TEXT")
@@ -871,6 +910,19 @@ func (c *apiClient) state(ctx context.Context, fingerprint string) (stateRespons
 func (c *apiClient) createSession(ctx context.Context, fingerprint string, request createSessionRequest) (interactiveSession, error) {
 	var response createSessionResponse
 	err := c.do(ctx, http.MethodPost, "/api/ssh/interactive-sessions", fingerprint, request, &response)
+	return response.Session, err
+}
+
+func (c *apiClient) action(ctx context.Context, fingerprint string, id string, action string) (interactiveSession, error) {
+	var response sessionResponse
+	err := c.do(
+		ctx,
+		http.MethodPost,
+		"/api/ssh/interactive-sessions/"+url.PathEscape(id)+"/actions",
+		fingerprint,
+		map[string]string{"action": action},
+		&response,
+	)
 	return response.Session, err
 }
 

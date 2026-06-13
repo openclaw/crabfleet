@@ -203,7 +203,7 @@ ClawSweeper include:
 - `plan_complete`
 - `gates_passed`
 - `action_failed`
-- `stopped from Crabfleet`
+- `workflow_canceled`
 
 CrabFleet records the state transition as a session event and exposes the
 latest state in Fleet, Sessions, API, CLI, and logs.
@@ -346,27 +346,33 @@ For ClawSweeper:
 - `completed / done / gates_passed` means repair and all configured
   deterministic gates passed.
 - `blocked / action_failed` means required workflow gates did not complete.
-- `canceled / stopped from Crabfleet` means an authorized operator canceled the
-  session.
+- A user-ended Crabfleet terminal session does not claim a terminal workflow
+  state. The GitHub run remains authoritative and may continue.
 
 CrabFleet completion is status evidence, not GitHub mutation authority. The
 ClawSweeper result ledger and target repository state describe what was
 actually changed.
 
-## Cancellation
+## Ending the Crabfleet terminal session
 
-GitHub Actions sessions use a dedicated cancel lifecycle.
+GitHub Actions sessions use a dedicated terminal-session end lifecycle. This
+does not call GitHub's workflow-cancellation API.
 
-An authorized stop:
+An authorized End action:
 
-1. Atomically appends the cancellation event and updates the session.
+1. Atomically appends the terminal-session event and updates the session.
 2. Sets `status = stopped`.
-3. Sets `workState = canceled`.
-4. Sets `workPhase = canceled`.
-5. Records `completionReason = stopped from Crabfleet`.
+3. Clears Crabfleet's synthetic work state instead of claiming the workflow was
+   canceled.
+4. Sets `workPhase = session_ended`.
+5. Records that the Crabfleet terminal ended without canceling the workflow.
 6. Clears the agent token, attach URL, and control state.
 7. Disconnects the current runner.
 8. Archives and finalizes terminal logs.
+
+The browser, CLI, and SSH surfaces warn that the GitHub Actions workflow run
+may continue. Cancel the run in GitHub when provider-side cancellation is
+required.
 
 `github_actions` sessions are excluded from the legacy workspace-stop
 reconciler. They do not have a provider workspace lease for that reconciler to

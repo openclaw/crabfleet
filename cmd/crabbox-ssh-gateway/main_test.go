@@ -2,9 +2,15 @@ package main
 
 import (
 	"bytes"
+	"context"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"reflect"
 	"strings"
 	"testing"
+
+	"golang.org/x/crypto/ssh"
 )
 
 func TestSplitCommandKeepsQuotedValues(t *testing.T) {
@@ -124,6 +130,98 @@ func TestCreateAutoAttachRequiresReadyResolvablePTY(t *testing.T) {
 	}
 	if attachable(interactiveSession{Status: "ready", AttachURL: "ws://example.com/terminal"}) {
 		t.Fatal("insecure remote websocket should not auto-attach")
+	}
+}
+
+func TestDeleteCommandAndStopAliasUseWorkspaceStopAction(t *testing.T) {
+	var action string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/api/ssh/interactive-sessions/IS-7/actions" {
+			t.Errorf("request = %s %s", r.Method, r.URL.Path)
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		if got := r.Header.Get("X-Crabfleet-SSH-Fingerprint"); got != "SHA256:test" {
+			t.Errorf("fingerprint = %q", got)
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		var body map[string]string
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Error(err)
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		action = body["action"]
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"session":{"id":"IS-7","status":"stopping"}}`))
+	}))
+	defer server.Close()
+
+	client := &apiClient{baseURL: server.URL, token: "gateway-token", client: server.Client()}
+	permissions := &ssh.Permissions{Extensions: map[string]string{
+		"authorized":  "true",
+		"fingerprint": "SHA256:test",
+		"login":       "operator",
+		"role":        "owner",
+	}}
+	for _, command := range []string{"delete IS-7", "stop IS-7"} {
+		action = ""
+		var output bytes.Buffer
+		if exit := runCommand(context.Background(), &output, permissions, client, command, sessionPTY{}); exit != 0 {
+			t.Fatalf("command=%q exit=%d output=%q", command, exit, output.String())
+		}
+		if action != "stop" {
+			t.Fatalf("command=%q action=%q, want stop", command, action)
+		}
+		if !strings.Contains(output.String(), "provider deletion was not confirmed") {
+			t.Fatalf("command=%q missing legacy cleanup warning: %q", command, output.String())
+		}
+		if got := output.String(); !strings.Contains(got, "session: IS-7\nstatus: stopping\n") {
+			t.Fatalf("command=%q output=%q", command, got)
+		}
+	}
+	for _, command := range []string{"delete", "delete IS-7 extra", "stop", "stop IS-7 extra"} {
+		action = ""
+		var output bytes.Buffer
+		if exit := runCommand(context.Background(), &output, permissions, client, command, sessionPTY{}); exit != 2 {
+			t.Fatalf("command=%q exit=%d output=%q", command, exit, output.String())
+		}
+		if action != "" {
+			t.Fatalf("command=%q unexpectedly submitted action=%q", command, action)
+		}
+		if got := output.String(); got != "usage: delete SESSION_ID\n" {
+			t.Fatalf("command=%q output=%q", command, got)
+		}
+	}
+}
+
+func TestHelpNamesDeleteAsCanonicalCommand(t *testing.T) {
+	var output bytes.Buffer
+	printHelp(&output, user{Login: "operator", Role: "owner"})
+	if got := output.String(); !strings.Contains(got, "delete SESSION_ID") || strings.Contains(got, "stop SESSION_ID") {
+		t.Fatalf("help = %q", got)
+	}
+}
+
+func TestLegacyProviderCleanupWarningRequiresConfirmedLegacyStop(t *testing.T) {
+	if !legacyProviderCleanupMayBeRequired(interactiveSession{Status: "stopped"}) {
+		t.Fatal("confirmed legacy stop should retain the cleanup warning")
+	}
+	for _, session := range []interactiveSession{
+		{Status: "failed"},
+		{Status: "stopped", Adapter: "runtime-v1"},
+		{Status: "stopped", Runtime: "github_actions"},
+	} {
+		if legacyProviderCleanupMayBeRequired(session) {
+			t.Fatalf("session %#v must not recommend provider cleanup", session)
+		}
+	}
+	if got := lifecycleStopNote(interactiveSession{Status: "stopped", Runtime: "github_actions"}); !strings.Contains(got, "not canceled") {
+		t.Fatalf("GitHub Actions note = %q", got)
+	}
+	if got := lifecycleStopNote(interactiveSession{Status: "failed"}); got != "" {
+		t.Fatalf("failed unowned workspace note = %q", got)
 	}
 }
 

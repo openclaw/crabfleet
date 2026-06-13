@@ -23,3 +23,23 @@ test("fleet terminal affordances require attachable session state", async () => 
   assert.match(source, /\{attachable \? \(/);
   assert.match(source, /cli=\{totals\.attachable \?\? props\.cli\}/);
 });
+
+test("workspace deletion is explicit and available from Fleet", async () => {
+  const app = await readFile(new URL("../src/app/main.jsx", import.meta.url), "utf8");
+  const fleet = await readFile(new URL("../src/app/fleet.jsx", import.meta.url), "utf8");
+
+  assert.match(
+    app,
+    /deletesWorkspace[\s\S]*"Delete Crabbox workspace\?"[\s\S]*"Stop Crabbox session\?"/,
+  );
+  assert.match(app, /"End GitHub Actions terminal session\?"/);
+  assert.match(app, /It does not cancel the GitHub Actions workflow run/);
+  assert.match(app, /endsWorkflowSession[\s\S]*"End session"/);
+  assert.match(app, /legacy backend does not expose provider deletion/);
+  assert.match(app, /action: \(\) => interactiveSessionAction\(id, "stop"\)/);
+  assert.doesNotMatch(app, /This stops the terminal/);
+  assert.match(fleet, /!String\(session\.id\)\.startsWith\("LOCAL-"\)/);
+  assert.match(fleet, /canManage && actionable/);
+  assert.match(fleet, /const endLabel = ending/);
+  assert.match(fleet, /deleteInteractiveSession\(session\.id\)/);
+});
