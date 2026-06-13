@@ -63,7 +63,7 @@ test("interactive session ids remain monotonic after cleanup", () => {
     "INSERT INTO interactive_sessions(id, runtime, status, lease_id, attach_url, vnc_url, agent_token_hash, control_requested_by, control_requested_at, controller, control_granted_at, control_expires_at) VALUES ('IS-106', 'container', 'expired', 'sandbox:legacy', 'wss://terminal', 'https://desktop', 'agent-hash', 'requester', 2, 'controller', 3, 4)",
   );
   database.exec(
-    "INSERT INTO interactive_sessions(id, runtime, status, lease_id, agent_token_hash) VALUES ('IS-105', 'container', 'ready', 'sandbox:active:terminal', 'active-agent-hash')",
+    "INSERT INTO interactive_sessions(id, runtime, status, lease_id) VALUES ('IS-105', 'container', 'ready', 'sandbox:active:terminal')",
   );
   database.exec(
     "INSERT INTO interactive_sessions(id, runtime, status) VALUES ('IS-104', 'container', 'failed')",
@@ -211,7 +211,7 @@ test("interactive session ids remain monotonic after cleanup", () => {
     { ...migratedActivePolicy },
     {
       credential_cleanup_terminal_status: null,
-      agent_token_hash: "active-agent-hash",
+      agent_token_hash: null,
     },
   );
   assert.equal(

@@ -5873,12 +5873,12 @@ function credentialPolicyScanRequiresCleanup(row: CredentialPolicyScanRow, now: 
     now,
   );
   if (
-    row.session_agent_token_hash !== null &&
     sandboxExpected &&
     (row.session_status === "ready" ||
       row.session_status === "attached" ||
       row.session_status === "detached")
   ) {
+    // Migrated live sessions can predate agent tokens; the durable lease/refresh fence owns policy.
     return false;
   }
   if (registrationAbandoned) return true;

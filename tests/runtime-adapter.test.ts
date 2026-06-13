@@ -1491,7 +1491,8 @@ test("sandbox credential cleanup is durably staged and retried", async () => {
     scanDecisionSource.indexOf("sandboxExpected") <
       scanDecisionSource.indexOf("if (registrationAbandoned) return true"),
   );
-  assert.match(scanDecisionSource, /row\.session_agent_token_hash !== null/);
+  assert.doesNotMatch(scanDecisionSource, /row\.session_agent_token_hash !== null/);
+  assert.match(scanDecisionSource, /sandboxExpected &&[\s\S]*row\.session_status === "ready"/);
   assert.match(controlSource, /sandboxPolicyTombstoneKey/);
   assert.match(controlSource, /credentialPolicyRegistrationAccepted/);
   assert.match(controlSource, /credentialPolicyCleanupMatches/);
