@@ -25,6 +25,7 @@ test("opaque direct terminal URLs pass through the multiplex hub unchanged", asy
   const directEnd = source.indexOf("function sendTerminalJson", directStart);
   const directSource = source.slice(directStart, directEnd);
   assert.match(directSource, /const targetUrl = sizedTerminalTargetUrl\(/);
+  assert.match(directSource, /const targetUrl = sizedTerminalTargetUrl\(\s*target\.url,/);
   assert.match(directSource, /terminalSize\(request, "cols", 120\)/);
   assert.match(directSource, /terminalSize\(request, "rows", 34\)/);
   assert.match(directSource, /upstreamResponse = await fetch\(targetUrl/);

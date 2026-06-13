@@ -3,9 +3,11 @@ import { test } from "node:test";
 import {
   TerminalMessageType,
   TerminalSubscribeFlags,
+  decodeAckPayload,
   decodeResizePayload,
   decodeSubscribePayload,
   decodeTerminalFrame,
+  encodeAckPayload,
   encodeJsonPayload,
   encodeResizePayload,
   encodeSubscribePayload,
@@ -38,13 +40,19 @@ test("terminal decoder rejects truncated and wrong-version frames", () => {
 test("terminal subscribe and resize payloads use stable little-endian fields", () => {
   const subscribe = decodeSubscribePayload(
     encodeSubscribePayload({
-      flags: TerminalSubscribeFlags.Output | TerminalSubscribeFlags.Events,
+      flags:
+        TerminalSubscribeFlags.Output |
+        TerminalSubscribeFlags.Events |
+        TerminalSubscribeFlags.OutputAcknowledgements,
       snapshotMinIntervalMs: 100,
       snapshotMaxIntervalMs: 500,
     }),
   );
   assert.deepEqual(subscribe, {
-    flags: TerminalSubscribeFlags.Output | TerminalSubscribeFlags.Events,
+    flags:
+      TerminalSubscribeFlags.Output |
+      TerminalSubscribeFlags.Events |
+      TerminalSubscribeFlags.OutputAcknowledgements,
     snapshotMinIntervalMs: 100,
     snapshotMaxIntervalMs: 500,
     cols: null,
@@ -52,6 +60,7 @@ test("terminal subscribe and resize payloads use stable little-endian fields", (
   });
 
   assert.deepEqual(decodeResizePayload(encodeResizePayload(132, 43)), { cols: 132, rows: 43 });
+  assert.equal(decodeAckPayload(encodeAckPayload(65_535)), 65_535);
 });
 
 test("terminal subscribe payloads can carry initial PTY size", () => {

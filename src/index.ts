@@ -26,6 +26,8 @@ import {
 import { DurableObject } from "cloudflare:workers";
 import {
   TerminalMessageType,
+  TerminalSubscribeFlags,
+  decodeAckPayload,
   decodeTerminalFrame,
   decodeResizePayload,
   decodeSubscribePayload,
@@ -628,6 +630,8 @@ type TerminalHubSubscription = {
   viewCheck: ReturnType<typeof setInterval> | null;
   cols: number;
   rows: number;
+  outputAcknowledgements: boolean;
+  outputAcknowledgementBytes: number;
 };
 
 type PendingTerminalSubscription = {
@@ -637,6 +641,7 @@ type PendingTerminalSubscription = {
 type TerminalUpstream = {
   socket: WebSocket;
   markConnected: () => Promise<void>;
+  outputAcknowledgements: boolean;
 };
 
 type StandaloneSandboxTerminalOwnership = {
@@ -6959,6 +6964,19 @@ async function interactiveTerminalHub(
           });
           return;
         }
+        if (frame.type === TerminalMessageType.Ack) {
+          const bytes = decodeAckPayload(frame.payload);
+          if (
+            bytes &&
+            subscription.outputAcknowledgements &&
+            bytes <= subscription.outputAcknowledgementBytes &&
+            subscription.upstream.readyState === WebSocket.OPEN
+          ) {
+            subscription.outputAcknowledgementBytes -= bytes;
+            sendTerminalOutputAcknowledgement(subscription.upstream, bytes);
+          }
+          return;
+        }
         if (frame.type === TerminalMessageType.Stop) {
           closeSubscription(frame.sessionId, 1000, "stopped by client");
         }
@@ -7071,6 +7089,9 @@ async function subscribeTerminalHubSession(
     const reconcileSubscription = terminalSubscriptionReconciler(env, id);
     const cols = canInputNow ? terminalDimension(subscription.cols, 120) : 120;
     const rows = canInputNow ? terminalDimension(subscription.rows, 34) : 34;
+    const outputAcknowledgements = Boolean(
+      subscription.flags & TerminalSubscribeFlags.OutputAcknowledgements,
+    );
     let closingReason: string | undefined;
     const markClosing = (reason: string) => {
       closingReason = reason;
@@ -7137,7 +7158,7 @@ async function subscribeTerminalHubSession(
         })
         .catch(() => revokeView());
     }, 5000);
-    subscriptions.set(id, {
+    const activeSubscription: TerminalHubSubscription = {
       session,
       upstream,
       canView,
@@ -7146,7 +7167,10 @@ async function subscribeTerminalHubSession(
       viewCheck,
       cols,
       rows,
-    });
+      outputAcknowledgements: outputAcknowledgements && upstreamConnection.outputAcknowledgements,
+      outputAcknowledgementBytes: 0,
+    };
+    subscriptions.set(id, activeSubscription);
     let outputQueue = Promise.resolve();
     sendTerminalJson(client, TerminalMessageType.Event, id, {
       type: "subscribed",
@@ -7166,10 +7190,22 @@ async function subscribeTerminalHubSession(
               sendTerminalJson(client, TerminalMessageType.Event, id, parsed);
               return;
             }
-            sendTerminalFrame(client, TerminalMessageType.Output, id, encoder.encode(data));
+            const output = encoder.encode(data);
+            sendTerminalFrame(client, TerminalMessageType.Output, id, output);
+            if (activeSubscription.outputAcknowledgements) {
+              activeSubscription.outputAcknowledgementBytes += output.byteLength;
+            } else if (upstreamConnection.outputAcknowledgements) {
+              sendTerminalOutputAcknowledgement(upstream, output.byteLength);
+            }
             return;
           }
-          sendTerminalFrame(client, TerminalMessageType.Output, id, new Uint8Array(data));
+          const output = new Uint8Array(data);
+          sendTerminalFrame(client, TerminalMessageType.Output, id, output);
+          if (activeSubscription.outputAcknowledgements) {
+            activeSubscription.outputAcknowledgementBytes += output.byteLength;
+          } else if (upstreamConnection.outputAcknowledgements) {
+            sendTerminalOutputAcknowledgement(upstream, output.byteLength);
+          }
         });
     });
     upstream.addEventListener("close", (event) => {
@@ -7255,6 +7291,7 @@ async function openInteractiveTerminalUpstream(
     upstream.accept();
     return {
       socket: upstream,
+      outputAcknowledgements: false,
       markConnected: () =>
         markInteractiveTerminalConnected(
           env,
@@ -7289,6 +7326,7 @@ async function openInteractiveTerminalUpstream(
     upstream.accept();
     return {
       socket: upstream,
+      outputAcknowledgements: false,
       markConnected: () =>
         markInteractiveTerminalConnected(
           env,
@@ -7312,6 +7350,7 @@ async function openInteractiveTerminalUpstream(
   upstream.accept();
   return {
     socket: upstream,
+    outputAcknowledgements: terminalOutputAcknowledgements(target.url),
     markConnected: () =>
       markInteractiveTerminalConnected(env, user, session.id, now, "PTY terminal connected"),
   };
@@ -7657,6 +7696,8 @@ async function interactiveSessionPty(
 
   const target = interactiveTerminalTarget(env, session, routeKind);
   if (!target) throw serviceUnavailable("PTY bridge is not configured for this session");
+  const upstreamOutputAcknowledgements = terminalOutputAcknowledgements(target.url);
+  const downstreamOutputAcknowledgements = terminalOutputAcknowledgements(request.url);
   const targetUrl = sizedTerminalTargetUrl(
     target.url,
     routeKind,
@@ -7703,6 +7744,9 @@ async function interactiveSessionPty(
     upstream,
     terminalInputGrant(env, user, session),
     terminalSubscriptionReconciler(env, id),
+    "terminal control revoked",
+    upstreamOutputAcknowledgements && downstreamOutputAcknowledgements,
+    upstreamOutputAcknowledgements && !downstreamOutputAcknowledgements,
   );
 
   const now = Date.now();
@@ -8343,12 +8387,15 @@ function bridgeWebSockets(
   canSendLeft?: () => Promise<boolean>,
   reconcileSubscription?: () => void,
   deniedReason = "terminal control revoked",
+  forwardRightOutputAcknowledgements = false,
+  acknowledgeRightOutputImmediately = false,
 ): void {
   let leftInputQueue = Promise.resolve();
   let rightOutputQueue = Promise.resolve();
   let controlCheckTimer: ReturnType<typeof setInterval> | undefined;
   let controlCheckInFlight: Promise<void> | undefined;
   let leftCanSend = true;
+  let rightOutputAcknowledgementBytes = 0;
   const stopControlCheck = () => {
     if (controlCheckTimer !== undefined) clearInterval(controlCheckTimer);
     controlCheckTimer = undefined;
@@ -8388,7 +8435,18 @@ function bridgeWebSockets(
           closePair(left, right, 1008, deniedReason);
           return;
         }
-        right.send(await webSocketMessageData(data));
+        const forwarded = await webSocketMessageData(data);
+        const acknowledgedBytes = forwardRightOutputAcknowledgements
+          ? terminalOutputAcknowledgement(forwarded)
+          : null;
+        if (acknowledgedBytes !== null) {
+          if (acknowledgedBytes <= rightOutputAcknowledgementBytes) {
+            rightOutputAcknowledgementBytes -= acknowledgedBytes;
+            sendTerminalOutputAcknowledgement(right, acknowledgedBytes);
+          }
+          return;
+        }
+        right.send(forwarded);
       });
   });
   right.addEventListener("message", (event) => {
@@ -8397,7 +8455,13 @@ function bridgeWebSockets(
       .catch(() => undefined)
       .then(async () => {
         if (left.readyState !== WebSocket.OPEN || right.readyState !== WebSocket.OPEN) return;
-        left.send(await webSocketMessageData(data));
+        const forwarded = await webSocketMessageData(data);
+        left.send(forwarded);
+        if (forwardRightOutputAcknowledgements) {
+          rightOutputAcknowledgementBytes += terminalMessageByteLength(forwarded);
+        } else if (acknowledgeRightOutputImmediately) {
+          sendTerminalOutputAcknowledgement(right, terminalMessageByteLength(forwarded));
+        }
       });
   });
   left.addEventListener("close", (event) => {
@@ -8416,6 +8480,40 @@ function bridgeWebSockets(
     stopControlCheck();
     closePair(right, left, 1011, "peer error");
   });
+}
+
+function terminalOutputAcknowledgements(value: string): boolean {
+  try {
+    return new URL(value).searchParams.get("flow") === "ack-v1";
+  } catch {
+    return false;
+  }
+}
+
+function terminalOutputAcknowledgement(value: string | ArrayBuffer): number | null {
+  if (typeof value !== "string" || !value.startsWith("{") || value.length > 100) return null;
+  try {
+    const parsed = JSON.parse(value) as Record<string, unknown>;
+    const bytes = parsed.bytes;
+    return parsed.type === "ack" &&
+      Number.isInteger(bytes) &&
+      Number(bytes) > 0 &&
+      Number(bytes) <= 1024 * 1024
+      ? Number(bytes)
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+function terminalMessageByteLength(value: string | ArrayBuffer): number {
+  return typeof value === "string" ? encoder.encode(value).byteLength : value.byteLength;
+}
+
+function sendTerminalOutputAcknowledgement(socket: WebSocket, bytes: number): void {
+  if (bytes > 0 && socket.readyState === WebSocket.OPEN) {
+    socket.send(JSON.stringify({ type: "ack", bytes }));
+  }
 }
 
 async function webSocketMessageData(data: unknown): Promise<string | ArrayBuffer> {

@@ -1830,6 +1830,20 @@ test("runtime adapter terminals use the server-side adapter bearer", async () =>
   assert.match(decorateSource, /routeAvailable/);
 });
 
+test("runtime adapter terminal flow control stays explicit and end-to-end", async () => {
+  const source = await readFile(new URL("../src/index.ts", import.meta.url), "utf8");
+
+  assert.match(source, /frame\.type === TerminalMessageType\.Ack/);
+  assert.match(source, /subscription\.outputAcknowledgements/);
+  assert.match(source, /bytes <= subscription\.outputAcknowledgementBytes/);
+  assert.match(source, /acknowledgedBytes <= rightOutputAcknowledgementBytes/);
+  assert.match(source, /TerminalSubscribeFlags\.OutputAcknowledgements/);
+  assert.match(source, /searchParams\.get\("flow"\) === "ack-v1"/);
+  assert.match(source, /JSON\.stringify\(\{ type: "ack", bytes \}\)/);
+  assert.match(source, /terminalOutputAcknowledgement\(forwarded\)/);
+  assert.match(source, /else if \(upstreamConnection\.outputAcknowledgements\)/);
+});
+
 test("runtime adapter terminal bearer stays on the registered origin", () => {
   assert.equal(
     runtimeAdapterTerminalOriginMatches(

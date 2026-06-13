@@ -20,6 +20,7 @@ export const TerminalMessageType = {
   ControlRevoked: 53,
   Ping: 60,
   Pong: 61,
+  Ack: 62,
 } as const;
 
 export type TerminalMessageType = (typeof TerminalMessageType)[keyof typeof TerminalMessageType];
@@ -28,6 +29,7 @@ export const TerminalSubscribeFlags = {
   Output: 1 << 0,
   Snapshot: 1 << 1,
   Events: 1 << 2,
+  OutputAcknowledgements: 1 << 3,
 } as const;
 
 export type TerminalFrame = {
@@ -142,6 +144,17 @@ export function decodeResizePayload(payload: Uint8Array): { cols: number; rows: 
   if (payload.byteLength < 8) return null;
   const view = new DataView(payload.buffer, payload.byteOffset, payload.byteLength);
   return { cols: view.getUint32(0, true), rows: view.getUint32(4, true) };
+}
+
+export function encodeAckPayload(bytes: number): Uint8Array {
+  const payload = new Uint8Array(4);
+  new DataView(payload.buffer).setUint32(0, bytes >>> 0, true);
+  return payload;
+}
+
+export function decodeAckPayload(payload: Uint8Array): number | null {
+  if (payload.byteLength < 4) return null;
+  return new DataView(payload.buffer, payload.byteOffset, payload.byteLength).getUint32(0, true);
 }
 
 export function encodeJsonPayload(value: unknown): Uint8Array {

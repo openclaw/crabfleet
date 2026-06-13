@@ -3,6 +3,7 @@ import {
   TerminalSubscribeFlags,
   decodeJsonPayload,
   decodeTerminalFrame,
+  encodeAckPayload,
   encodeResizePayload,
   encodeSubscribePayload,
   encodeTerminalFrame,
@@ -344,7 +345,10 @@ function subscribeTerminalHost(session, host, term) {
   if (!terminalHubSocket || terminalHubSocket.readyState !== WebSocket.OPEN) return;
   host.subscribed = true;
   const flags =
-    TerminalSubscribeFlags.Output | TerminalSubscribeFlags.Snapshot | TerminalSubscribeFlags.Events;
+    TerminalSubscribeFlags.Output |
+    TerminalSubscribeFlags.Snapshot |
+    TerminalSubscribeFlags.Events |
+    TerminalSubscribeFlags.OutputAcknowledgements;
   sendTerminalFrame(
     session.id,
     TerminalMessageType.Subscribe,
@@ -367,6 +371,11 @@ function handleTerminalHubFrame(frame) {
   if (frame.type === TerminalMessageType.Output) {
     sendTerminalColorQueryResponses(host, frame.payload);
     host.term?.write(frame.payload);
+    sendTerminalFrame(
+      frame.sessionId,
+      TerminalMessageType.Ack,
+      encodeAckPayload(frame.payload.byteLength),
+    );
     return;
   }
   const event = decodeJsonPayload(frame.payload);
