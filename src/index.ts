@@ -11427,9 +11427,7 @@ async function stageRuntimeAdapterProvision(
       adapter_create_payload_json: createPayloadJson,
       adapter_create_pending: 1,
       reconcile_error: "runtime adapter create pending",
-      ...(reconciliationOwner
-        ? {}
-        : { updated_at: sql<number>`MAX(updated_at + 1, ${stageAt})` }),
+      ...(reconciliationOwner ? {} : { updated_at: sql<number>`MAX(updated_at + 1, ${stageAt})` }),
     })
     .where("id", "=", session.id)
     .where("adapter_control_plane", "=", adapterControlPlane)
@@ -11438,12 +11436,14 @@ async function stageRuntimeAdapterProvision(
     stage = stage
       .where("status", "=", reconciliationOwner.status)
       .where("updated_at", "=", reconciliationOwner.updatedAt);
-    stage = reconciliationOwner.lastReconciledAt === null
-      ? stage.where("last_reconciled_at", "is", null)
-      : stage.where("last_reconciled_at", "=", reconciliationOwner.lastReconciledAt);
-    stage = reconciliationOwner.terminalStatus === null
-      ? stage.where("terminal_status", "is", null)
-      : stage.where("terminal_status", "=", reconciliationOwner.terminalStatus);
+    stage =
+      reconciliationOwner.lastReconciledAt === null
+        ? stage.where("last_reconciled_at", "is", null)
+        : stage.where("last_reconciled_at", "=", reconciliationOwner.lastReconciledAt);
+    stage =
+      reconciliationOwner.terminalStatus === null
+        ? stage.where("terminal_status", "is", null)
+        : stage.where("terminal_status", "=", reconciliationOwner.terminalStatus);
   } else {
     stage = stage.where("status", "in", ["provisioning", "pending_adapter"]);
   }
@@ -11530,12 +11530,14 @@ async function failRuntimeAdapterWorkspaceIdConflict(
 ): Promise<InteractiveProvisionResult | null> {
   const now = Date.now();
   const failureMessage = clean(message, 500);
-  const lastReconciledOwner = createAttempt.lastReconciledAt === null
-    ? sql<boolean>`last_reconciled_at IS NULL`
-    : sql<boolean>`last_reconciled_at = ${createAttempt.lastReconciledAt}`;
-  const terminalStatusOwner = createAttempt.terminalStatus === null
-    ? sql<boolean>`terminal_status IS NULL`
-    : sql<boolean>`terminal_status = ${createAttempt.terminalStatus}`;
+  const lastReconciledOwner =
+    createAttempt.lastReconciledAt === null
+      ? sql<boolean>`last_reconciled_at IS NULL`
+      : sql<boolean>`last_reconciled_at = ${createAttempt.lastReconciledAt}`;
+  const terminalStatusOwner =
+    createAttempt.terminalStatus === null
+      ? sql<boolean>`terminal_status IS NULL`
+      : sql<boolean>`terminal_status = ${createAttempt.terminalStatus}`;
   const expectedOwner = sql<boolean>`
     id = ${session.id}
     AND adapter = ${runtimeAdapterName}
@@ -11923,11 +11925,7 @@ async function reconcileStoppingRuntimeAdapterWorkspace(
 
   let replayMessage: string | null = null;
   if (session.adapter_create_pending === 1) {
-    const replay = await replayStoppingRuntimeAdapterCreate(
-      env,
-      session,
-      reconciliationClaimAt,
-    );
+    const replay = await replayStoppingRuntimeAdapterCreate(env, session, reconciliationClaimAt);
     replayMessage = replay.message;
     if (replay.terminalResult) return replay.terminalResult;
     if (!replay.resolved) {

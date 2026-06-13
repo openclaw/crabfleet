@@ -890,10 +890,7 @@ test("pending runtime adapter creates replay before any inspect", async () => {
   assert.ok(replayIndex >= 0);
   assert.ok(inspectFetchIndex >= 0);
   assert.ok(replayIndex < inspectFetchIndex);
-  assert.match(
-    inspectSource,
-    /runtimeAdapterReplayRequest\(runtimeAdapterRecord\(session\)\)/,
-  );
+  assert.match(inspectSource, /runtimeAdapterReplayRequest\(runtimeAdapterRecord\(session\)\)/);
   assert.ok(missingIndex >= 0);
   assert.doesNotMatch(missingSource, /provisionWithRuntimeAdapter/);
   assert.match(provisionSource, /const replayingPendingCreate = reconciliationOwner !== undefined/);
@@ -940,9 +937,7 @@ test("every session-bound adapter delete waits for create ambiguity to clear", a
   const releaseStart = source.indexOf("async function stopRuntimeAdapterWorkspaceForSession");
   const releaseEnd = source.indexOf("async function runtimeAdapterFetch", releaseStart);
   const releaseSource = source.slice(releaseStart, releaseEnd);
-  const pendingGateIndex = releaseSource.indexOf(
-    "if (registration?.adapter_create_pending !== 0)",
-  );
+  const pendingGateIndex = releaseSource.indexOf("if (registration?.adapter_create_pending !== 0)");
   const providerDeleteIndex = releaseSource.indexOf(
     "stopRuntimeAdapterWorkspace(env, controlPlane, adapterWorkspaceId)",
   );
@@ -1732,7 +1727,10 @@ test("workspace id conflicts detach without adopting or deleting the existing wo
       createSource.indexOf("definitiveRuntimeAdapterCreateFailure"),
   );
   assert.match(createSource, /failRuntimeAdapterWorkspaceIdConflict/);
-  assert.match(createSource, /throw conflict\("runtime adapter workspace conflict response is stale"\)/);
+  assert.match(
+    createSource,
+    /throw conflict\("runtime adapter workspace conflict response is stale"\)/,
+  );
   assert.match(stageSource, /updated_at: sql<number>`MAX\(updated_at \+ 1, \$\{stageAt\}\)`/);
   assert.match(
     stageSource,
@@ -1752,7 +1750,10 @@ test("workspace id conflicts detach without adopting or deleting the existing wo
   assert.match(conflictSource, /if \(!results\.at\(-1\)\?\.results\.length\) return null/);
   assert.match(conflictSource, /terminal_finalize_pending: 1/);
   assert.match(conflictSource, /env\.DB\.batch/);
-  assert.match(conflictSource, /finalizeTerminalInteractiveSession\(env, session\.id, "failed", now\)/);
+  assert.match(
+    conflictSource,
+    /finalizeTerminalInteractiveSession\(env, session\.id, "failed", now\)/,
+  );
   assert.doesNotMatch(conflictSource, /stopRuntimeAdapterWorkspace/);
   assert.match(stoppingReplaySource, /runtimeAdapterWorkspaceIdConflict/);
   assert.match(stoppingReplaySource, /terminalResult/);
