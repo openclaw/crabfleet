@@ -63,7 +63,7 @@ type listCmd struct{}
 type newCmd struct {
 	Repo    string   `help:"Repository to prepare, owner/repo."`
 	Branch  string   `help:"Git branch to checkout." default:"main"`
-	Runtime string   `help:"Runtime backend." enum:"crabbox,container" default:"crabbox"`
+	Runtime *string  `help:"Runtime backend override; omit to use the deployment default." enum:"crabbox,container"`
 	Command string   `help:"Command to run after checkout." default:"codex --yolo"`
 	Parent  string   `help:"Parent crabbox session id."`
 	Root    string   `help:"Root crabbox session id."`
@@ -151,22 +151,28 @@ type user struct {
 }
 
 type interactiveSession struct {
-	ID              string     `json:"id"`
-	ParentSessionID string     `json:"parentSessionId"`
-	RootSessionID   string     `json:"rootSessionId"`
-	Repo            string     `json:"repo"`
-	Branch          string     `json:"branch"`
-	Runtime         string     `json:"runtime"`
-	Status          string     `json:"status"`
-	Owner           string     `json:"owner"`
-	CreatedBy       string     `json:"createdBy"`
-	Purpose         string     `json:"purpose"`
-	Summary         string     `json:"summary"`
-	LeaseID         string     `json:"leaseId"`
-	AttachURL       string     `json:"attachUrl"`
-	VNCURL          string     `json:"vncUrl"`
-	LastEvent       string     `json:"lastEvent"`
-	LogArchive      logArchive `json:"logArchive"`
+	ID              string               `json:"id"`
+	ParentSessionID string               `json:"parentSessionId"`
+	RootSessionID   string               `json:"rootSessionId"`
+	Repo            string               `json:"repo"`
+	Branch          string               `json:"branch"`
+	Runtime         string               `json:"runtime"`
+	Status          string               `json:"status"`
+	Owner           string               `json:"owner"`
+	CreatedBy       string               `json:"createdBy"`
+	Purpose         string               `json:"purpose"`
+	Summary         string               `json:"summary"`
+	Capabilities    *sessionCapabilities `json:"capabilities"`
+	PtyAvailable    *bool                `json:"ptyAvailable"`
+	LeaseID         string               `json:"leaseId"`
+	AttachURL       string               `json:"attachUrl"`
+	VNCURL          string               `json:"vncUrl"`
+	LastEvent       string               `json:"lastEvent"`
+	LogArchive      logArchive           `json:"logArchive"`
+}
+
+type sessionCapabilities struct {
+	Terminal bool `json:"terminal"`
 }
 
 type createSessionRequest struct {
@@ -299,59 +305,13 @@ func (listCmd) Run(app *cli, api *apiClient) error {
 }
 
 func (cmd newCmd) Run(app *cli, api *apiClient) error {
-	prompt := strings.Join(cmd.Prompt, " ")
-	parent := cmd.Parent
-	if parent == "" {
-		parent = app.AgentID
-	}
-	root := cmd.Root
-	if root == "" {
-		root = os.Getenv("CRABFLEET_ROOT_SESSION_ID")
-	}
-	req := createSessionRequest{
-		Repo:            cmd.Repo,
-		Branch:          cmd.Branch,
-		Runtime:         cmd.Runtime,
-		Command:         cmd.Command,
-		Prompt:          prompt,
-		ParentSessionID: parent,
-		RootSessionID:   root,
-		Purpose:         cmd.Purpose,
-		Summary:         cmd.Summary,
-	}
+	req := cmd.sessionRequest(app)
 	session, err := api.createSession(context.Background(), req)
 	if err != nil {
 		if app.NoInput || app.JSON {
 			return err
 		}
-		args := []string{"new", "--branch", cmd.Branch, "--runtime", cmd.Runtime}
-		if cmd.Repo != "" {
-			args = append(args, "--repo", cmd.Repo)
-		}
-		if cmd.Command != "codex --yolo" {
-			args = append(args, "--command", cmd.Command)
-		}
-		if parent != "" {
-			args = append(args, "--parent", parent)
-		}
-		if root != "" {
-			args = append(args, "--root", root)
-		}
-		if cmd.Purpose != "" {
-			args = append(args, "--purpose", cmd.Purpose)
-		}
-		if cmd.Summary != "" {
-			args = append(args, "--summary", cmd.Summary)
-		}
-		if cmd.Detach {
-			args = append(args, "--detach")
-		}
-		if cmd.VNC {
-			args = append(args, "--vnc")
-		}
-		if prompt != "" {
-			args = append(args, prompt)
-		}
+		args := cmd.sshCreateArgs(req)
 		if cmd.VNC {
 			output, captureErr := runSSHCommandOutput(app, args...)
 			if output != "" {
@@ -380,7 +340,9 @@ func (cmd newCmd) Run(app *cli, api *apiClient) error {
 	if session.Summary != "" {
 		fmt.Fprintf(os.Stdout, "summary: %s\n", terminalSafe(session.Summary))
 	}
-	fmt.Fprintf(os.Stdout, "attach: crabfleet attach %s\n", session.ID)
+	if attachable(session) {
+		fmt.Fprintf(os.Stdout, "attach: crabfleet attach %s\n", session.ID)
+	}
 	if session.VNCURL != "" {
 		fmt.Fprintf(os.Stdout, "vnc: %s\n", session.VNCURL)
 	}
@@ -391,6 +353,68 @@ func (cmd newCmd) Run(app *cli, api *apiClient) error {
 		return runSSH(app, "attach", session.ID)
 	}
 	return nil
+}
+
+func (cmd newCmd) sessionRequest(app *cli) createSessionRequest {
+	prompt := strings.Join(cmd.Prompt, " ")
+	parent := cmd.Parent
+	if parent == "" {
+		parent = app.AgentID
+	}
+	root := cmd.Root
+	if root == "" {
+		root = os.Getenv("CRABFLEET_ROOT_SESSION_ID")
+	}
+	runtime := ""
+	if cmd.Runtime != nil {
+		runtime = *cmd.Runtime
+	}
+	return createSessionRequest{
+		Repo:            cmd.Repo,
+		Branch:          cmd.Branch,
+		Runtime:         runtime,
+		Command:         cmd.Command,
+		Prompt:          prompt,
+		ParentSessionID: parent,
+		RootSessionID:   root,
+		Purpose:         cmd.Purpose,
+		Summary:         cmd.Summary,
+	}
+}
+
+func (cmd newCmd) sshCreateArgs(req createSessionRequest) []string {
+	args := []string{"new", "--branch", req.Branch}
+	if req.Runtime != "" {
+		args = append(args, "--runtime", req.Runtime)
+	}
+	if req.Repo != "" {
+		args = append(args, "--repo", req.Repo)
+	}
+	if req.Command != "codex --yolo" {
+		args = append(args, "--command", req.Command)
+	}
+	if req.ParentSessionID != "" {
+		args = append(args, "--parent", req.ParentSessionID)
+	}
+	if req.RootSessionID != "" {
+		args = append(args, "--root", req.RootSessionID)
+	}
+	if req.Purpose != "" {
+		args = append(args, "--purpose", req.Purpose)
+	}
+	if req.Summary != "" {
+		args = append(args, "--summary", req.Summary)
+	}
+	if cmd.Detach {
+		args = append(args, "--detach")
+	}
+	if cmd.VNC {
+		args = append(args, "--vnc")
+	}
+	if req.Prompt != "" {
+		args = append(args, req.Prompt)
+	}
+	return args
 }
 
 func (cmd attachCmd) Run(app *cli, _ *apiClient) error {
@@ -1118,6 +1142,9 @@ func terminalSafe(value string) string {
 }
 
 func attachable(session interactiveSession) bool {
+	if !terminalCapable(session) {
+		return false
+	}
 	if !ptyAttachable(session) {
 		return false
 	}
@@ -1129,13 +1156,30 @@ func attachable(session interactiveSession) bool {
 	}
 }
 
+func terminalCapable(session interactiveSession) bool {
+	return session.Capabilities == nil || session.Capabilities.Terminal
+}
+
 func ptyAttachable(session interactiveSession) bool {
+	if session.PtyAvailable != nil {
+		return *session.PtyAvailable
+	}
 	if strings.HasPrefix(session.LeaseID, "sandbox:") || strings.HasPrefix(session.LeaseID, "cloudflare:") {
 		return true
 	}
-	return strings.HasPrefix(session.AttachURL, "/api/interactive-sessions/") ||
-		strings.HasPrefix(session.AttachURL, "ws://") ||
-		strings.HasPrefix(session.AttachURL, "wss://")
+	return strings.HasPrefix(session.AttachURL, "/api/interactive-sessions/") || validWebSocketAttachURL(session.AttachURL)
+}
+
+func validWebSocketAttachURL(raw string) bool {
+	target, err := url.Parse(raw)
+	if err != nil || target.Host == "" || target.User != nil {
+		return false
+	}
+	if target.Scheme == "wss" {
+		return true
+	}
+	host := target.Hostname()
+	return target.Scheme == "ws" && (host == "localhost" || host == "127.0.0.1" || host == "::1")
 }
 
 func isTerminal(file *os.File) bool {

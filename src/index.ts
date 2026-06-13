@@ -10,7 +10,9 @@ import {
   type Dialect,
   type Driver,
   type Generated,
-  type QueryResult,
+  type RawBuilder,
+  type Selectable,
+  type UpdateObject,
 } from "kysely";
 import {
   ContainerProxy,
@@ -36,9 +38,20 @@ import {
   terminalSubmittedLine,
   type TerminalInputState,
 } from "./terminal-multiplayer";
-import { buildFleetState, type FleetSandboxPolicySummary, type FleetState } from "./fleet-state";
+import {
+  buildFleetState,
+  ptyRouteKind,
+  type FleetSandboxPolicySummary,
+  type FleetState,
+  type PtyRouteKind,
+} from "./fleet-state";
 import { githubRequestCanUseRepoCredential, matchesAnyHost } from "./sandbox-security";
-import { githubOAuthRedirectUri } from "./oauth";
+import {
+  githubOAuthCallbackRequestMatches,
+  githubOAuthCanonicalLoginUrl,
+  githubOAuthCanonicalSshLinkUrl,
+  githubOAuthRedirectUri,
+} from "./oauth";
 import {
   APP_HTML,
   GHOSTTY_BROWSER_EXTERNAL_JS,
@@ -57,10 +70,77 @@ import {
   canonicalAppRedirect,
   productHostResponse,
 } from "./canonical-host";
+import {
+  adapterFailureReleaseState,
+  adapterWorkspaceIdMatches,
+  clearedAdapterCapabilities,
+  createOnlyAdapterStatus,
+  definitiveRuntimeAdapterCreateFailure,
+  effectiveAdapterCapabilities,
+  currentAdapterDesktopConnection,
+  legacyLeaseIdForAdapter,
+  namespacedAdapterWorkspaceId,
+  normalizeAdapterNamespace,
+  normalizeAdapterWorkspaceId,
+  parseAdapterWorkspaceResult,
+  redactedAdapterMessage,
+  redactedAdapterResponseMessage,
+  runtimeAdapterCreatePayload,
+  runtimeAdapterCollectionUrl,
+  runtimeAdapterControlPlaneIdentity,
+  runtimeAdapterBrowserVncUrl,
+  runtimeAdapterDesktopUrl,
+  runtimeAdapterName,
+  runtimeAdapterReplayRequest,
+  retainedRuntimeAdapterFailureMessage,
+  runtimeAdapterStopOutcome,
+  runtimeAdapterTerminalFailureStatus,
+  runtimeAdapterWorkspaceUrl,
+  resolveCreateAfterStopRace,
+  safeDesktopUrl,
+  safeWebSocketUrl,
+  shouldReplayRuntimeAdapterCreate,
+  validatedRuntimeAdapterCreatePayloadJson,
+  type AdapterWorkspaceResult,
+} from "./runtime-adapter";
+import { allocateInteractiveSessionIdSql, formatInteractiveSessionId } from "./session-id";
+import { configuredHttpOrigin, developmentIdentityEnabled } from "./url-security";
+import { D1Connection } from "./d1-execution";
+import { preferredEnabledRepo } from "./repo-selection";
+import { completeTerminalFinalization } from "./terminal-finalization";
+import { sizedTerminalTargetUrl } from "./terminal-target";
+import { cachedBooleanGrant } from "./terminal-authorization";
+import { obsoleteSessionArchiveObjectKeys, sessionArchiveAttemptKeys } from "./session-archive";
+import { readBoundedResponseText } from "./bounded-response";
+import {
+  credentialPolicyCleanupMatches,
+  credentialPolicyMigrationCleanupMatches,
+  credentialPolicyRegistrationAccepted,
+  credentialPolicySandboxIsExpected,
+  migratedCredentialPolicyRecord,
+  type CredentialPolicyGenerationRecord,
+  type CredentialPolicyGenerationTombstone,
+  type CredentialPolicyLegacyMigration,
+} from "./credential-policy-fence";
 
 type Role = "viewer" | "maintainer" | "owner";
 
 const defaultInteractiveCommand = "codex --yolo";
+
+type DeploymentConfig = {
+  label: string;
+  canonicalUrl: string;
+  productUrl: string;
+  sshHost: string;
+  preferredRepo: string;
+  defaultRuntime: "crabbox" | "container";
+  defaultProfile: string;
+};
+
+type PublicDeploymentConfig = Pick<
+  DeploymentConfig,
+  "label" | "canonicalUrl" | "productUrl" | "sshHost"
+>;
 
 type RuntimeEnv = Env & {
   DB: D1Database;
@@ -76,8 +156,14 @@ type RuntimeEnv = Env & {
   GITHUB_ORG?: string;
   CRABBOX_INTERACTIVE_PROVISION_URL?: string;
   CRABBOX_INTERACTIVE_PROVISION_TOKEN?: string;
+  CRABBOX_STANDALONE_SANDBOX_TTL_SECONDS?: string;
   CRABBOX_RUNTIME_PROVISION_URL?: string;
   CRABBOX_RUNTIME_PROVISION_TOKEN?: string;
+  CRABBOX_RUNTIME_ADAPTER_URL?: string;
+  CRABBOX_RUNTIME_ADAPTER_TOKEN?: string;
+  CRABBOX_RUNTIME_ADAPTER_NAMESPACE?: string;
+  CRABBOX_RUNTIME_ADAPTER_TTL_SECONDS?: string;
+  CRABBOX_RUNTIME_ADAPTER_IDLE_SECONDS?: string;
   CRABBOX_CLOUDFLARE_RUNNER_URL?: string;
   CRABBOX_CLOUDFLARE_RUNNER_TOKEN?: string;
   CRABBOX_CLOUDFLARE_RUNNER_INSTANCE_TYPE?: string;
@@ -96,6 +182,14 @@ type RuntimeEnv = Env & {
   BACKUP_BUCKET_NAME?: string;
   CLOUDFLARE_ACCOUNT_ID?: string;
   CRABFLEET_LOCAL_SANDBOX_BACKUPS?: string;
+  CRABFLEET_LABEL?: string;
+  CRABFLEET_CANONICAL_URL?: string;
+  CRABFLEET_PRODUCT_URL?: string;
+  CRABFLEET_SSH_HOST?: string;
+  CRABFLEET_PREFERRED_REPO?: string;
+  CRABFLEET_DEFAULT_RUNTIME?: string;
+  CRABFLEET_DEFAULT_PROFILE?: string;
+  CRABFLEET_DEV_LOGIN_ENABLED?: string;
   OPENAI_API_KEY?: string;
   OPENAI_BASE_URL?: string;
   OPENAI_ORG_ID?: string;
@@ -272,6 +366,7 @@ type RunAttempt = {
   leaseId: string | null;
   attachUrl: string | null;
   vncUrl: string | null;
+  ptyAvailable: boolean;
   selectionReason: string | null;
   capabilities: RuntimeCapabilities;
   operator: string | null;
@@ -289,6 +384,7 @@ type InteractiveSessionStatus =
   | "ready"
   | "attached"
   | "detached"
+  | "stopping"
   | "stopped"
   | "expired"
   | "failed";
@@ -300,6 +396,14 @@ type InteractiveSession = {
   repo: string;
   branch: string;
   runtime: "crabbox" | "container";
+  adapter: string | null;
+  profile: string;
+  adapterWorkspaceId: string | null;
+  providerResourceId: string | null;
+  capabilities: RuntimeCapabilities;
+  expiresAt: number | null;
+  lastReconciledAt: number | null;
+  reconcileError: string | null;
   command: string;
   prompt: string;
   purpose: string;
@@ -328,6 +432,7 @@ type InteractiveSession = {
   canChangeMultiplayer?: boolean;
   canRequestControl?: boolean;
   sharedReadOnly?: boolean;
+  ptyAvailable?: boolean;
   logs: string[];
   logArchive: InteractiveSessionLogArchive | null;
 };
@@ -360,13 +465,55 @@ type SandboxRuntimeSession = (InteractiveProvisionRequest | InteractiveSession) 
   githubToken?: string;
 };
 
+type SandboxLease = {
+  sandboxId: string;
+  terminalSessionId: string;
+};
+
+type SandboxLeaseRefreshFence = {
+  claim: string;
+  expiresAt: number;
+  refreshLeaseId: string | null;
+  sandboxId: string;
+};
+
+type SandboxCurrentLeaseFence = {
+  leaseId: string;
+  sandboxId: string;
+};
+
+type StandaloneSandboxProvisionFence = {
+  claim: string;
+  provisionId: string;
+  sandboxId: string;
+};
+
+type SandboxManagedOwnershipFence = SandboxCurrentLeaseFence | SandboxLeaseRefreshFence;
+
+type SandboxTerminalCleanupOwnership = {
+  fence: SandboxManagedOwnershipFence;
+  sandboxIds: string[];
+  terminalLeaseId: string;
+};
+
+type SandboxCredentialPolicyOwnershipFence =
+  | SandboxManagedOwnershipFence
+  | StandaloneSandboxProvisionFence;
+
 type InteractiveProvisionRequest = {
   id: string;
+  adapterWorkspaceId?: string | null;
+  adapterControlPlane?: string | null;
+  adapterTtlSeconds?: number | null;
+  adapterIdleTimeoutSeconds?: number | null;
+  adapterRequestedCapabilities?: RuntimeCapabilities | null;
+  adapterCreatePayloadJson?: string | null;
   parentSessionId: string | null;
   rootSessionId: string | null;
   repo: string;
   branch: string;
   runtime: "crabbox" | "container";
+  profile: string;
   command: string;
   prompt: string;
   purpose: string;
@@ -380,12 +527,26 @@ type InteractiveProvisionResult = {
   status: InteractiveSessionStatus;
   leaseId: string | null;
   attachUrl: string | null;
+  attachUrlPresent?: boolean;
   vncUrl: string | null;
   message: string;
+  adapter?: string | null;
+  profile?: string;
+  adapterWorkspaceId?: string | null;
+  providerResourceId?: string | null;
+  capabilities?: RuntimeCapabilities | null;
+  capabilitiesPresent?: boolean;
+  expiresAt?: number | null;
+  expiresAtPresent?: boolean;
+  reconciledAt?: number | null;
+  reconcileError?: string | null;
+  terminalStatus?: "failed" | null;
+  createPending?: boolean;
 };
 
 type SandboxCredentialPolicy = {
   allowedHosts: string[];
+  expiresAt?: number;
   githubCredentialSource?: "none" | "session" | "worker";
   githubRepo: string;
   githubRepoNodeId?: string;
@@ -395,6 +556,18 @@ type SandboxCredentialPolicy = {
   owner: string;
   sandboxId: string;
   sessionId: string;
+};
+
+type StoredSandboxCredentialPolicy = CredentialPolicyGenerationRecord<SandboxCredentialPolicy>;
+
+type SandboxCredentialPolicyLegacyMigration = CredentialPolicyLegacyMigration & {
+  sandboxIds: string[];
+};
+
+type SandboxCredentialPolicyRegistration = {
+  generation: string;
+  claim: string;
+  lookupIds: string[];
 };
 
 type SandboxFleetPolicyResult = {
@@ -434,6 +607,16 @@ type PendingTerminalSubscription = {
 type TerminalUpstream = {
   socket: WebSocket;
   markConnected: () => Promise<void>;
+};
+
+type StandaloneSandboxTerminalOwnership = {
+  provisionId: string;
+  requestHash: string;
+  sandboxId: string;
+  leaseId: string;
+  expiresAt: number;
+  updatedAt: number;
+  policyGeneration: string;
 };
 
 type SandboxExecutionSession = Awaited<ReturnType<CloudflareSandbox["createSession"]>>;
@@ -559,6 +742,27 @@ type InteractiveSessionTable = {
   repo: string;
   branch: string;
   runtime: "crabbox" | "container";
+  adapter: string | null;
+  profile: string;
+  adapter_workspace_id: string | null;
+  adapter_control_plane: string | null;
+  provider_resource_id: string | null;
+  capabilities_json: string;
+  expires_at: number | null;
+  last_reconciled_at: number | null;
+  reconcile_error: string | null;
+  terminal_status: "failed" | null;
+  terminal_failure_reason: Generated<string | null>;
+  adapter_ttl_seconds: number | null;
+  adapter_idle_timeout_seconds: number | null;
+  adapter_requested_capabilities_json: string | null;
+  adapter_create_payload_json: string | null;
+  adapter_create_pending: number;
+  terminal_finalize_pending: Generated<number>;
+  credential_cleanup_terminal_status: Generated<"stopped" | "expired" | "failed" | null>;
+  sandbox_refresh_sandbox_id: Generated<string | null>;
+  sandbox_refresh_claim: Generated<string | null>;
+  sandbox_refresh_claim_expires_at: Generated<number | null>;
   command: string;
   prompt: string;
   purpose: string;
@@ -585,6 +789,8 @@ type InteractiveSessionTable = {
   multiplayer_mode: number;
   agent_token_hash: string | null;
 };
+
+type InteractiveSessionRow = Selectable<InteractiveSessionTable>;
 
 type RepoWorkflowTable = {
   repo: string;
@@ -617,10 +823,55 @@ type InteractiveSessionEventTable = {
 type InteractiveSessionLogArchiveTable = {
   session_id: string;
   event_count: number;
+  session_updated_at: number | null;
   events_key: string | null;
   transcript_key: string | null;
   summary_key: string | null;
   archived_at: number;
+  updated_at: number;
+};
+
+type InteractiveSessionCredentialPolicyTable = {
+  session_id: string;
+  sandbox_id: string;
+  lookup_id: string;
+  state: "registering" | "active" | "cleanup_pending";
+  registration_generation: string;
+  registration_claim: string | null;
+  registration_claim_expires_at: number | null;
+  attempt_count: Generated<number>;
+  last_attempt_at: number | null;
+  last_error: string | null;
+  cleanup_claim: string | null;
+  cleanup_claim_expires_at: number | null;
+  created_at: number;
+  updated_at: number;
+};
+
+type CredentialPolicyReconcileStateTable = {
+  id: number;
+  last_rowid: number;
+  scan_max_rowid: number;
+  group_session_id: string;
+  group_sandbox_id: string;
+  group_max_session_id: string;
+  group_max_sandbox_id: string;
+  updated_at: number;
+};
+
+type StandaloneSandboxProvisionTable = {
+  id: string;
+  request_hash: string;
+  sandbox_id: string;
+  state: "provisioning" | "active" | "cleanup_pending";
+  ownership_claim: string | null;
+  ownership_claim_expires_at: number | null;
+  lease_id: string | null;
+  attach_url: string | null;
+  vnc_url: string | null;
+  expires_at: Generated<number | null>;
+  message: string;
+  created_at: number;
   updated_at: number;
 };
 
@@ -653,6 +904,11 @@ type SshLinkCodeTable = {
   created_at: number;
 };
 
+type IdSequenceTable = {
+  name: string;
+  last_id: number;
+};
+
 type Database = {
   settings: SettingsTable;
   allow_entries: AllowEntryTable;
@@ -664,15 +920,19 @@ type Database = {
   interactive_sessions: InteractiveSessionTable;
   interactive_session_events: InteractiveSessionEventTable;
   interactive_session_log_archives: InteractiveSessionLogArchiveTable;
+  interactive_session_credential_policies: InteractiveSessionCredentialPolicyTable;
+  credential_policy_reconcile_state: CredentialPolicyReconcileStateTable;
+  standalone_sandbox_provisions: StandaloneSandboxProvisionTable;
   repo_workflows: RepoWorkflowTable;
   events: EventTable;
   audit_events: AuditEventTable;
   ssh_keys: SshKeyTable;
   ssh_link_codes: SshLinkCodeTable;
+  id_sequences: IdSequenceTable;
 };
 
 type CompilableQuery = {
-  compile(): CompiledQuery;
+  compile(executorProvider: Kysely<Database>): CompiledQuery;
 };
 
 const encoder = new TextEncoder();
@@ -690,16 +950,6 @@ const preferredRepo = "openclaw/crabfleet";
 const sandboxLeasePrefix = "sandbox:";
 const sandboxLeaseProfile = "autostart-v4";
 const activeRunStatuses: readonly RunStatus[] = ["queued", "leasing", "running"];
-const interactiveSessionStatuses: readonly InteractiveSessionStatus[] = [
-  "provisioning",
-  "pending_adapter",
-  "ready",
-  "attached",
-  "detached",
-  "stopped",
-  "expired",
-  "failed",
-];
 const deadInteractiveSessionStatuses: readonly InteractiveSessionStatus[] = [
   "stopped",
   "expired",
@@ -710,6 +960,19 @@ const runtimeOptions = ["auto", "container", "crabbox"] as const;
 const mergePolicyOptions = ["open_pr", "merge_when_green", "fix_until_green_and_merge"] as const;
 const defaultStallMs = 5 * 60 * 1000;
 const workflowCacheMs = 60 * 60 * 1000;
+const runtimeAdapterReconcileIntervalMs = 15_000;
+const runtimeAdapterReconcileLimit = 3;
+const runtimeAdapterReconcileConcurrency = 3;
+const runtimeAdapterReconcileForegroundBudgetMs = 750;
+const terminalCleanupDeletePending = 2;
+const credentialPolicyCleanupLimit = 8;
+const credentialPolicyScanLimit = 32;
+const credentialPolicyCleanupClaimMs = 30_000;
+const credentialPolicyRegistrationClaimMs = 60_000;
+const credentialPolicyProvisioningStaleMs = 15 * 60_000;
+const credentialPolicyLegacyGenerationPrefix = "legacy:";
+const credentialPolicyLegacyRepairClaimPrefix = "legacy-repair:";
+const standaloneSandboxDefaultTtlSeconds = 14_400;
 const containerCapabilities: RuntimeCapabilities = {
   terminal: true,
   takeover: false,
@@ -726,6 +989,41 @@ const crabboxCapabilities: RuntimeCapabilities = {
   logs: true,
   artifacts: true,
 };
+function runtimeAdapterCreateSettings(
+  env: RuntimeEnv,
+  runtime: "crabbox" | "container",
+): {
+  ttlSeconds: number;
+  idleTimeoutSeconds: number;
+  capabilities: RuntimeCapabilities;
+} {
+  return {
+    ttlSeconds: clampedSeconds(env.CRABBOX_RUNTIME_ADAPTER_TTL_SECONDS, 14_400),
+    idleTimeoutSeconds: clampedSeconds(env.CRABBOX_RUNTIME_ADAPTER_IDLE_SECONDS, 1_800),
+    capabilities: runtime === "crabbox" ? crabboxCapabilities : containerCapabilities,
+  };
+}
+
+function deploymentConfig(env: RuntimeEnv): DeploymentConfig {
+  return {
+    label: clean(env.CRABFLEET_LABEL, 80) || "Crabfleet",
+    canonicalUrl: configuredHttpOrigin(env.CRABFLEET_CANONICAL_URL, appCanonicalOrigin),
+    productUrl: configuredHttpOrigin(env.CRABFLEET_PRODUCT_URL, "https://crabfleet.ai"),
+    sshHost: clean(env.CRABFLEET_SSH_HOST, 240) || "crabd.sh",
+    preferredRepo: normalizeRepo(env.CRABFLEET_PREFERRED_REPO) || preferredRepo,
+    defaultRuntime: oneOf(
+      env.CRABFLEET_DEFAULT_RUNTIME,
+      ["crabbox", "container"] as const,
+      "container",
+    ),
+    defaultProfile: clean(env.CRABFLEET_DEFAULT_PROFILE, 120) || "default",
+  };
+}
+
+function publicDeploymentConfig(env: RuntimeEnv): PublicDeploymentConfig {
+  const { label, canonicalUrl, productUrl, sshHost } = deploymentConfig(env);
+  return { label, canonicalUrl, productUrl, sshHost };
+}
 
 class D1Dialect implements Dialect {
   constructor(private readonly d1: D1Database) {}
@@ -773,49 +1071,18 @@ class D1Driver implements Driver {
   async destroy(): Promise<void> {}
 }
 
-class D1Connection implements DatabaseConnection {
-  constructor(private readonly d1: D1Database) {}
-
-  async executeQuery<R>(compiledQuery: CompiledQuery): Promise<QueryResult<R>> {
-    const statement = this.d1.prepare(compiledQuery.sql).bind(...compiledQuery.parameters);
-    if (isReadQuery(compiledQuery.sql)) {
-      const result = await statement.all<R>();
-      return { rows: result.results ?? [] };
-    }
-
-    const result = await statement.run();
-    const changes = result.meta.changes;
-    const lastRowId = result.meta.last_row_id;
-    const queryResult: QueryResult<R> = { rows: [] };
-    if (typeof changes === "number") {
-      Object.assign(queryResult, { numAffectedRows: BigInt(changes) });
-    }
-    if (typeof lastRowId === "number") {
-      Object.assign(queryResult, { insertId: BigInt(lastRowId) });
-    }
-    return queryResult;
-  }
-
-  async *streamQuery<R>(compiledQuery: CompiledQuery): AsyncIterableIterator<QueryResult<R>> {
-    yield await this.executeQuery<R>(compiledQuery);
-  }
-}
-
 function database(env: RuntimeEnv): Kysely<Database> {
   return new Kysely<Database>({ dialect: new D1Dialect(env.DB) });
 }
 
 async function executeBatch(env: RuntimeEnv, queries: readonly CompilableQuery[]): Promise<void> {
+  const db = database(env);
   await env.DB.batch(
     queries.map((query) => {
-      const compiled = query.compile();
+      const compiled = query.compile(db);
       return env.DB.prepare(compiled.sql).bind(...compiled.parameters);
     }),
   );
-}
-
-function isReadQuery(sqlText: string): boolean {
-  return /^(?:select|with|pragma)\b/i.test(sqlText.trim());
 }
 
 const defaultSandboxEgressHosts = [
@@ -837,6 +1104,8 @@ const defaultSandboxEgressHosts = [
 
 const sandboxControlObjectName = "__session-control";
 const sandboxPolicyKey = (sandboxId: string) => `sandbox:${sandboxId}`;
+const sandboxPolicyTombstoneKey = (sandboxId: string, generation: string) =>
+  `sandbox-tombstone:${encodeURIComponent(sandboxId)}:${encodeURIComponent(generation)}`;
 const sandboxCheckpointListKey = (sessionId: string) => `checkpoints:${sessionId}`;
 const sandboxCheckpointKey = (sessionId: string, checkpointId: string) =>
   `checkpoint:${sessionId}:${checkpointId}`;
@@ -889,11 +1158,99 @@ async function sandboxCredentialPolicy(
 ): Promise<SandboxCredentialPolicy | null> {
   const stub = sandboxControlStub(env);
   if (!stub) return null;
-  const response = await stub.fetch(
-    `https://crabfleet.internal/api/session-control/egress/${encodeURIComponent(sandboxId)}`,
-  );
+  const policyUrl = `https://crabfleet.internal/api/session-control/egress/${encodeURIComponent(sandboxId)}`;
+  let response = await stub.fetch(policyUrl);
+  if (response.status === 409) {
+    const legacy = (await response.json().catch(() => null)) as { sessionId?: unknown } | null;
+    const legacySessionId = clean(legacy?.sessionId, 120);
+    if (legacySessionId) {
+      await repairLegacySandboxCredentialPolicyBatch(env, Date.now(), legacySessionId);
+      response = await stub.fetch(policyUrl);
+    }
+  }
   if (!response.ok) return null;
-  return (await response.json()) as SandboxCredentialPolicy;
+  const generation = response.headers.get("x-crabfleet-policy-generation");
+  const policy = (await response.json().catch(() => null)) as SandboxCredentialPolicy | null;
+  if (
+    !generation ||
+    !policy ||
+    !(await sandboxCredentialPolicyHasDurableOwner(env, sandboxId, generation, policy, Date.now()))
+  ) {
+    return null;
+  }
+  return policy;
+}
+
+async function sandboxCredentialPolicyHasDurableOwner(
+  env: RuntimeEnv,
+  lookupId: string,
+  generation: string,
+  policy: SandboxCredentialPolicy,
+  now: number,
+): Promise<boolean> {
+  if (
+    !generation ||
+    policy.sandboxId !== lookupId ||
+    typeof policy.sessionId !== "string" ||
+    !policy.sessionId ||
+    !Array.isArray(policy.allowedHosts) ||
+    typeof policy.githubRepo !== "string" ||
+    typeof policy.owner !== "string" ||
+    (policy.expiresAt !== undefined &&
+      (!Number.isFinite(policy.expiresAt) || policy.expiresAt <= now))
+  ) {
+    return false;
+  }
+  const db = database(env);
+  const refs = await db
+    .selectFrom("interactive_session_credential_policies")
+    .select("sandbox_id")
+    .where("session_id", "=", policy.sessionId)
+    .where("lookup_id", "=", lookupId)
+    .where("state", "=", "active")
+    .where("registration_generation", "=", generation)
+    .where("registration_claim", "is", null)
+    .execute();
+  if (refs.length !== 1) return false;
+  const canonicalSandboxId = refs[0]?.sandbox_id;
+  if (
+    !canonicalSandboxId ||
+    (await activeSandboxCredentialPolicyGeneration(env, policy.sessionId, canonicalSandboxId)) !==
+      generation
+  ) {
+    return false;
+  }
+  const standalone = await db
+    .selectFrom("standalone_sandbox_provisions")
+    .select(["state", "ownership_claim", "ownership_claim_expires_at", "expires_at"])
+    .where("id", "=", policy.sessionId)
+    .where("sandbox_id", "=", canonicalSandboxId)
+    .executeTakeFirst();
+  if (standalone) {
+    const ownerActive =
+      standalone.state === "active" ||
+      (standalone.state === "provisioning" &&
+        Boolean(standalone.ownership_claim) &&
+        (standalone.ownership_claim_expires_at ?? 0) > now);
+    return Boolean(
+      ownerActive &&
+      policy.expiresAt !== undefined &&
+      policy.expiresAt === standalone.expires_at &&
+      policy.expiresAt > now,
+    );
+  }
+  const owner = await sql<{ expected: number }>`
+    SELECT CASE
+      WHEN ${sandboxCredentialPolicyCleanupAuthorizedCondition(
+        policy.sessionId,
+        canonicalSandboxId,
+        now,
+      )}
+      THEN 0
+      ELSE 1
+    END AS expected
+  `.execute(db);
+  return owner.rows[0]?.expected === 1;
 }
 
 async function sandboxOutbound(
@@ -904,6 +1261,9 @@ async function sandboxOutbound(
   const url = new URL(request.url);
   const host = url.hostname.toLowerCase();
   const policy = await sandboxCredentialPolicy(env, context.containerId);
+  if (policy?.expiresAt !== undefined && policy.expiresAt <= Date.now()) {
+    return new Response("Crabfleet standalone Sandbox credentials expired.\n", { status: 403 });
+  }
   const openAIHost = policy?.openAIBaseUrl
     ? new URL(policy.openAIBaseUrl).hostname.toLowerCase()
     : "api.openai.com";
@@ -964,33 +1324,159 @@ export class SessionControlDO extends DurableObject<RuntimeEnv> {
     const url = new URL(request.url);
     try {
       if (request.method === "POST" && url.pathname === "/api/session-control/register") {
-        const policy = (await request.json()) as SandboxCredentialPolicy;
-        await this.ctx.storage.put(sandboxPolicyKey(policy.sandboxId), policy);
+        const registration = (await request.json()) as StoredSandboxCredentialPolicy;
+        if (!validSandboxCredentialPolicyRegistration(registration)) {
+          return json({ error: "invalid credential policy registration" }, { status: 400 });
+        }
+        const outcome = await this.ctx.storage.transaction(async (transaction) => {
+          const [stored, tombstone] = await Promise.all([
+            transaction.get<StoredSandboxCredentialPolicy | SandboxCredentialPolicy>(
+              sandboxPolicyKey(registration.policy.sandboxId),
+            ),
+            transaction.get<CredentialPolicyGenerationTombstone>(
+              sandboxPolicyTombstoneKey(registration.policy.sandboxId, registration.generation),
+            ),
+          ]);
+          const current = storedSandboxCredentialPolicy(stored);
+          const legacy = legacySandboxCredentialPolicy(stored);
+          if (legacy && legacy.sessionId !== registration.policy.sessionId) return "conflict";
+          if (!credentialPolicyRegistrationAccepted(current, tombstone, registration, Date.now())) {
+            return tombstone ? "tombstoned" : "conflict";
+          }
+          await transaction.put(sandboxPolicyKey(registration.policy.sandboxId), registration);
+          return "stored";
+        });
+        if (outcome !== "stored") {
+          return json({ error: `credential policy generation ${outcome}` }, { status: 409 });
+        }
+        return json({ ok: true });
+      }
+
+      if (request.method === "POST" && url.pathname === "/api/session-control/migrate-legacy") {
+        const migration = (await request.json()) as SandboxCredentialPolicyLegacyMigration;
+        if (!validSandboxCredentialPolicyLegacyMigration(migration)) {
+          return json({ error: "invalid legacy credential policy migration" }, { status: 400 });
+        }
+        const outcome = await this.ctx.storage.transaction(async (transaction) => {
+          const records = await Promise.all(
+            migration.sandboxIds.map(async (sandboxId) => ({
+              sandboxId,
+              stored: await transaction.get<
+                StoredSandboxCredentialPolicy | SandboxCredentialPolicy
+              >(sandboxPolicyKey(sandboxId)),
+              tombstone: await transaction.get<CredentialPolicyGenerationTombstone>(
+                sandboxPolicyTombstoneKey(sandboxId, migration.generation),
+              ),
+            })),
+          );
+          const sourcePolicy = records
+            .map(
+              ({ stored }) =>
+                storedSandboxCredentialPolicy(stored)?.policy ??
+                legacySandboxCredentialPolicy(stored),
+            )
+            .find((policy) => policy?.sessionId === migration.sessionId);
+          if (!sourcePolicy) return "conflict";
+          const migratedRecords: Array<{
+            sandboxId: string;
+            policy: StoredSandboxCredentialPolicy;
+          }> = [];
+          for (const record of records) {
+            const current = storedSandboxCredentialPolicy(record.stored);
+            const legacy =
+              legacySandboxCredentialPolicy(record.stored) ??
+              (!current ? { ...sourcePolicy, sandboxId: record.sandboxId } : undefined);
+            const migrated = migratedCredentialPolicyRecord(
+              current,
+              legacy,
+              record.tombstone,
+              migration,
+              Date.now(),
+            );
+            if (!migrated || migrated.policy.sandboxId !== record.sandboxId) {
+              return record.tombstone ? "tombstoned" : "conflict";
+            }
+            migratedRecords.push({ sandboxId: record.sandboxId, policy: migrated });
+          }
+          for (const record of migratedRecords) {
+            await transaction.put(sandboxPolicyKey(record.sandboxId), record.policy);
+          }
+          return "stored";
+        });
+        if (outcome !== "stored") {
+          return json({ error: `legacy credential policy migration ${outcome}` }, { status: 409 });
+        }
         return json({ ok: true });
       }
 
       if (request.method === "GET" && url.pathname === "/api/session-control/policies") {
-        const entries = await this.ctx.storage.list<SandboxCredentialPolicy>({
+        const entries = await this.ctx.storage.list<
+          StoredSandboxCredentialPolicy | SandboxCredentialPolicy
+        >({
           prefix: "sandbox:",
         });
-        const policies = dedupeSandboxPolicies([...entries.values()]).map((policy) =>
-          redactSandboxPolicy(policy, Boolean(this.env.GITHUB_TOKEN)),
-        );
+        const policies = dedupeSandboxPolicies(
+          [...entries.values()]
+            .map((stored) => sandboxCredentialPolicyFromStorage(stored))
+            .filter((policy): policy is SandboxCredentialPolicy => Boolean(policy)),
+        ).map((policy) => redactSandboxPolicy(policy, Boolean(this.env.GITHUB_TOKEN)));
         return json({ policies });
       }
 
       const egressMatch = url.pathname.match(/^\/api\/session-control\/egress\/([^/]+)$/);
       if (request.method === "GET" && egressMatch) {
         const sandboxId = decodeURIComponent(egressMatch[1] ?? "");
-        const policy = await this.ctx.storage.get<SandboxCredentialPolicy>(
-          sandboxPolicyKey(sandboxId),
-        );
-        return policy ? json(policy) : json({ error: "not found" }, { status: 404 });
+        const key = sandboxPolicyKey(sandboxId);
+        const stored = await this.ctx.storage.get<
+          StoredSandboxCredentialPolicy | SandboxCredentialPolicy
+        >(key);
+        const current = storedSandboxCredentialPolicy(stored);
+        const legacy = legacySandboxCredentialPolicy(stored);
+        const policy = sandboxCredentialPolicyFromStorage(stored);
+        if (!current || !policy) {
+          if (legacy) {
+            return json(
+              { error: "legacy credential policy migration required", sessionId: legacy.sessionId },
+              { status: 409 },
+            );
+          }
+          return json({ error: "not found" }, { status: 404 });
+        }
+        return json(policy, {
+          headers: { "x-crabfleet-policy-generation": current.generation },
+        });
       }
 
       const sandboxMatch = url.pathname.match(/^\/api\/session-control\/sandbox\/([^/]+)$/);
       if (request.method === "DELETE" && sandboxMatch) {
-        await this.ctx.storage.delete(sandboxPolicyKey(decodeURIComponent(sandboxMatch[1] ?? "")));
+        const sandboxId = decodeURIComponent(sandboxMatch[1] ?? "");
+        const tombstone = (await request.json()) as CredentialPolicyGenerationTombstone;
+        if (!validCredentialPolicyTombstone(tombstone)) {
+          return json({ error: "invalid credential policy tombstone" }, { status: 400 });
+        }
+        await this.ctx.storage.transaction(async (transaction) => {
+          const key = sandboxPolicyKey(sandboxId);
+          const stored = await transaction.get<
+            StoredSandboxCredentialPolicy | SandboxCredentialPolicy
+          >(key);
+          const current = storedSandboxCredentialPolicy(stored);
+          const legacy = legacySandboxCredentialPolicy(stored);
+          await transaction.put(
+            sandboxPolicyTombstoneKey(sandboxId, tombstone.generation),
+            tombstone,
+          );
+          if (
+            credentialPolicyCleanupMatches(current, tombstone.generation, tombstone.sessionId) ||
+            credentialPolicyMigrationCleanupMatches(
+              current,
+              tombstone.generation,
+              tombstone.sessionId,
+            ) ||
+            legacy?.sessionId === tombstone.sessionId
+          ) {
+            await transaction.delete(key);
+          }
+        });
         return json({ ok: true });
       }
 
@@ -1035,6 +1521,99 @@ export class SessionControlDO extends DurableObject<RuntimeEnv> {
     }
     return json({ error: "not found" }, { status: 404 });
   }
+}
+
+function storedSandboxCredentialPolicy(
+  value: StoredSandboxCredentialPolicy | SandboxCredentialPolicy | undefined,
+): StoredSandboxCredentialPolicy | undefined {
+  if (
+    value &&
+    "policy" in value &&
+    typeof value.generation === "string" &&
+    typeof value.registrationClaim === "string" &&
+    typeof value.registrationExpiresAt === "number"
+  ) {
+    return value;
+  }
+  return undefined;
+}
+
+function legacySandboxCredentialPolicy(
+  value: StoredSandboxCredentialPolicy | SandboxCredentialPolicy | undefined,
+): SandboxCredentialPolicy | undefined {
+  return value && !("policy" in value) ? value : undefined;
+}
+
+function sandboxCredentialPolicyFromStorage(
+  value: StoredSandboxCredentialPolicy | SandboxCredentialPolicy | undefined,
+): SandboxCredentialPolicy | undefined {
+  const current = storedSandboxCredentialPolicy(value);
+  if (!current) return undefined;
+  if (
+    current.policy.expiresAt !== undefined &&
+    (!Number.isFinite(current.policy.expiresAt) || current.policy.expiresAt <= Date.now())
+  ) {
+    return undefined;
+  }
+  return current.policy;
+}
+
+function validSandboxCredentialPolicyRegistration(value: StoredSandboxCredentialPolicy): boolean {
+  return Boolean(
+    value &&
+    typeof value.generation === "string" &&
+    value.generation.length > 0 &&
+    value.generation.length <= 200 &&
+    typeof value.registrationClaim === "string" &&
+    value.registrationClaim.length > 0 &&
+    value.registrationClaim.length <= 200 &&
+    Number.isFinite(value.registrationExpiresAt) &&
+    value.policy &&
+    typeof value.policy.sandboxId === "string" &&
+    typeof value.policy.sessionId === "string" &&
+    (value.policy.expiresAt === undefined ||
+      (Number.isFinite(value.policy.expiresAt) && value.policy.expiresAt > Date.now())),
+  );
+}
+
+function validSandboxCredentialPolicyLegacyMigration(
+  value: SandboxCredentialPolicyLegacyMigration,
+): boolean {
+  return Boolean(
+    value &&
+    typeof value.generation === "string" &&
+    value.generation.length > 0 &&
+    value.generation.length <= 200 &&
+    !value.generation.startsWith(credentialPolicyLegacyGenerationPrefix) &&
+    typeof value.registrationClaim === "string" &&
+    value.registrationClaim.startsWith(credentialPolicyLegacyRepairClaimPrefix) &&
+    value.registrationClaim.length <= 200 &&
+    Number.isFinite(value.registrationExpiresAt) &&
+    Array.isArray(value.sandboxIds) &&
+    value.sandboxIds.length > 0 &&
+    value.sandboxIds.length <= 8 &&
+    new Set(value.sandboxIds).size === value.sandboxIds.length &&
+    value.sandboxIds.every(
+      (sandboxId) =>
+        typeof sandboxId === "string" && sandboxId.length > 0 && sandboxId.length <= 200,
+    ) &&
+    typeof value.sessionId === "string" &&
+    value.sessionId.length > 0 &&
+    value.sessionId.length <= 200,
+  );
+}
+
+function validCredentialPolicyTombstone(value: CredentialPolicyGenerationTombstone): boolean {
+  return Boolean(
+    value &&
+    typeof value.generation === "string" &&
+    value.generation.length > 0 &&
+    value.generation.length <= 200 &&
+    typeof value.sessionId === "string" &&
+    value.sessionId.length > 0 &&
+    value.sessionId.length <= 200 &&
+    Number.isFinite(value.tombstonedAt),
+  );
 }
 
 function dedupeSandboxPolicies(policies: SandboxCredentialPolicy[]): SandboxCredentialPolicy[] {
@@ -1097,7 +1676,7 @@ async function readSandboxFleetPolicies(env: RuntimeEnv): Promise<SandboxFleetPo
 }
 
 export default {
-  async fetch(request: Request, env: RuntimeEnv): Promise<Response> {
+  async fetch(request: Request, env: RuntimeEnv, context: ExecutionContext): Promise<Response> {
     const url = new URL(request.url);
 
     try {
@@ -1180,7 +1759,7 @@ export default {
       }
 
       if (url.pathname.startsWith("/api/")) {
-        return await api(request, env);
+        return await api(request, env, context);
       }
 
       if (
@@ -1210,9 +1789,24 @@ export default {
       return json({ error: message }, { status: Number.isFinite(status) ? status : 500 });
     }
   },
+  async scheduled(
+    _controller: ScheduledController,
+    env: RuntimeEnv,
+    context: ExecutionContext,
+  ): Promise<void> {
+    context.waitUntil(
+      reconcileInteractiveSessionLifecycleBatch(env, Date.now()).catch((error) => {
+        console.error("scheduled interactive session reconciliation failed", error);
+      }),
+    );
+  },
 } satisfies ExportedHandler<RuntimeEnv>;
 
-async function api(request: Request, env: RuntimeEnv): Promise<Response> {
+async function api(
+  request: Request,
+  env: RuntimeEnv,
+  context: ExecutionContext,
+): Promise<Response> {
   const url = new URL(request.url);
 
   if (request.method === "POST" && url.pathname === "/api/login/token") {
@@ -1228,7 +1822,31 @@ async function api(request: Request, env: RuntimeEnv): Promise<Response> {
   }
 
   if (request.method === "GET" && url.pathname === "/api/auth") {
-    return json({ auth: authMethods(env, request) });
+    return json({ auth: authMethods(env, request), deployment: publicDeploymentConfig(env) });
+  }
+
+  const standaloneProvisionPtyMatch = url.pathname.match(
+    /^\/api\/provision\/interactive\/([^/]+)\/pty$/,
+  );
+  if (request.method === "GET" && standaloneProvisionPtyMatch) {
+    return standaloneSandboxPty(
+      request,
+      env,
+      decodeURIComponent(standaloneProvisionPtyMatch[1] ?? ""),
+    );
+  }
+
+  const standaloneProvisionStopMatch = url.pathname.match(
+    /^\/api\/provision\/interactive\/([^/]+)\/stop$/,
+  );
+  if (request.method === "POST" && standaloneProvisionStopMatch) {
+    return json(
+      await stopStandaloneSandboxProvision(
+        request,
+        env,
+        decodeURIComponent(standaloneProvisionStopMatch[1] ?? ""),
+      ),
+    );
   }
 
   if (request.method === "POST" && url.pathname === "/api/provision/interactive") {
@@ -1259,7 +1877,7 @@ async function api(request: Request, env: RuntimeEnv): Promise<Response> {
   if (request.method === "GET" && sshInteractiveReadMatch) {
     const user = await requireSshGatewayUser(request, env);
     requireRole(user, "viewer");
-    const session = await readInteractiveSession(
+    const session = await readFreshInteractiveSession(
       env,
       decodeURIComponent(sshInteractiveReadMatch[1] ?? ""),
     );
@@ -1272,7 +1890,7 @@ async function api(request: Request, env: RuntimeEnv): Promise<Response> {
   );
   if (request.method === "GET" && agentInteractiveReadMatch) {
     const { user } = await requireAgentSession(request, env);
-    const session = await readInteractiveSession(
+    const session = await readFreshInteractiveSession(
       env,
       decodeURIComponent(agentInteractiveReadMatch[1] ?? ""),
     );
@@ -1465,12 +2083,12 @@ async function api(request: Request, env: RuntimeEnv): Promise<Response> {
   }
 
   if (request.method === "GET" && url.pathname === "/api/state") {
-    return json(await readState(request, env, user));
+    return json(await readState(request, env, user, context));
   }
 
   if (request.method === "GET" && url.pathname === "/api/fleet") {
     requireRole(user, "viewer");
-    return json({ fleet: await readFleetState(env, user) });
+    return json({ fleet: await readFleetState(env, user, undefined, context) });
   }
 
   if (request.method === "GET" && url.pathname === "/api/github/refs") {
@@ -1491,7 +2109,7 @@ async function api(request: Request, env: RuntimeEnv): Promise<Response> {
   const interactiveSessionReadMatch = url.pathname.match(/^\/api\/interactive-sessions\/([^/]+)$/);
   if (request.method === "GET" && interactiveSessionReadMatch) {
     requireRole(user, "viewer");
-    const session = await readInteractiveSession(
+    const session = await readFreshInteractiveSession(
       env,
       decodeURIComponent(interactiveSessionReadMatch[1] ?? ""),
     );
@@ -1551,6 +2169,18 @@ async function api(request: Request, env: RuntimeEnv): Promise<Response> {
         user,
         decodeURIComponent(interactiveSessionDiagnosticsMatch[1] ?? ""),
       ),
+    );
+  }
+
+  const interactiveSessionVncMatch = url.pathname.match(
+    /^\/api\/interactive-sessions\/([^/]+)\/vnc$/,
+  );
+  if (request.method === "GET" && interactiveSessionVncMatch) {
+    requireRole(user, "viewer");
+    return interactiveSessionVnc(
+      env,
+      user,
+      decodeURIComponent(interactiveSessionVncMatch[1] ?? ""),
     );
   }
 
@@ -1711,7 +2341,7 @@ async function tokenLogin(request: Request, env: RuntimeEnv): Promise<Response> 
 }
 
 async function devIdentityLogin(request: Request, env: RuntimeEnv): Promise<Response> {
-  if (!isLocalDevRequest(request)) return json({ error: "not found" }, { status: 404 });
+  if (!devIdentityEnabled(env, request)) return json({ error: "not found" }, { status: 404 });
 
   const body = await readJson<{ id?: string; name?: string; role?: string }>(request);
   const id = devIdentityId(body.id);
@@ -1741,6 +2371,10 @@ async function githubLogin(request: Request, env: RuntimeEnv): Promise<Response>
 
   const url = new URL(request.url);
   const redirectUri = githubOAuthRedirectUri(url, env.GITHUB_REDIRECT_URI);
+  const canonicalLoginUrl = githubOAuthCanonicalLoginUrl(url, env.GITHUB_REDIRECT_URI);
+  if (canonicalLoginUrl) {
+    return redirect(canonicalLoginUrl, { "cache-control": "no-store" });
+  }
   const state = crypto.randomUUID();
   const target = new URL("https://github.com/login/oauth/authorize");
   target.searchParams.set("client_id", env.GITHUB_CLIENT_ID);
@@ -1759,13 +2393,21 @@ async function githubCallback(request: Request, env: RuntimeEnv): Promise<Respon
   }
 
   const url = new URL(request.url);
+  const redirectUri = githubOAuthRedirectUri(url, env.GITHUB_REDIRECT_URI);
+  if (!githubOAuthCallbackRequestMatches(url, env.GITHUB_REDIRECT_URI)) {
+    return text(
+      "OAuth callback host does not match configured redirect URI.\n",
+      "text/plain; charset=utf-8",
+      {},
+      400,
+    );
+  }
   const code = url.searchParams.get("code");
   const state = url.searchParams.get("state");
   if (!code || !state || state !== cookies(request).get(oauthStateCookie)) {
     return text("Invalid OAuth state.\n", "text/plain; charset=utf-8", {}, 400);
   }
 
-  const redirectUri = githubOAuthRedirectUri(url, env.GITHUB_REDIRECT_URI);
   const tokenResponse = await fetch("https://github.com/login/oauth/access_token", {
     method: "POST",
     headers: {
@@ -1832,6 +2474,14 @@ async function githubCallback(request: Request, env: RuntimeEnv): Promise<Respon
 }
 
 async function sshLink(request: Request, env: RuntimeEnv, code: string): Promise<Response> {
+  const canonicalLinkUrl = githubOAuthCanonicalSshLinkUrl(
+    request.url,
+    code,
+    env.GITHUB_REDIRECT_URI,
+  );
+  if (canonicalLinkUrl) {
+    return redirect(canonicalLinkUrl, { "cache-control": "no-store" });
+  }
   const codeHash = await sha256(code);
   const row = await database(env)
     .selectFrom("ssh_link_codes")
@@ -2004,7 +2654,7 @@ async function requireUser(request: Request, env: RuntimeEnv): Promise<User> {
   }
 
   if (user.subject.startsWith("dev:")) {
-    if (!isLocalDevRequest(request)) {
+    if (!devIdentityEnabled(env, request)) {
       await db.deleteFrom("sessions").where("token_hash", "=", tokenHash).execute();
       throw unauthorized();
     }
@@ -2060,11 +2710,14 @@ async function sshAuth(request: Request, env: RuntimeEnv): Promise<Record<string
   if (!body.createLink) {
     const user = await readSshUser(env, fingerprint);
     if (!user) return { authorized: false };
-    await database(env)
+    const attached = await database(env)
       .updateTable("ssh_keys")
       .set({ last_used_at: now })
       .where("fingerprint", "=", fingerprint)
-      .execute();
+      .executeTakeFirst();
+    if ((attached.numUpdatedRows ?? 0n) === 0n) {
+      throw conflict("interactive session lifecycle changed; retry attach");
+    }
     return { authorized: true, user };
   }
 
@@ -2139,6 +2792,7 @@ async function sshCreateInteractiveSession(
     repo?: string;
     branch?: string;
     runtime?: string;
+    profile?: string;
     command?: string;
     prompt?: string;
     parentSessionId?: string;
@@ -2147,13 +2801,18 @@ async function sshCreateInteractiveSession(
     summary?: string;
   }>(request);
   if (!normalizeRepo(body.repo)) {
-    const repo = await database(env)
+    const preferred = deploymentConfig(env).preferredRepo;
+    const repos = await database(env)
       .selectFrom("repos")
       .select("repo")
       .where("enabled", "=", 1)
       .orderBy("repo")
-      .executeTakeFirst();
-    body.repo = repo?.repo ?? preferredRepo;
+      .execute();
+    const selectedRepo = preferredEnabledRepo(
+      repos.map((repo) => repo.repo),
+      preferred,
+    );
+    if (selectedRepo) body.repo = selectedRepo;
   }
   const result = await createInteractiveSessionFromInput(env, user, body, githubToken);
   await audit(env, user, `ssh interactive session created ${result.session.id}`, Date.now());
@@ -2169,6 +2828,7 @@ async function agentCreateInteractiveSession(
     repo?: string;
     branch?: string;
     runtime?: string;
+    profile?: string;
     command?: string;
     prompt?: string;
     parentSessionId?: string;
@@ -2176,7 +2836,7 @@ async function agentCreateInteractiveSession(
     purpose?: string;
     summary?: string;
   }>(request);
-  if (!normalizeRepo(body.repo)) body.repo = parent.repo || preferredRepo;
+  if (!normalizeRepo(body.repo)) body.repo = parent.repo || deploymentConfig(env).preferredRepo;
   const result = await createInteractiveSessionFromInput(env, user, body, undefined, {
     createdBy: `session:${parent.id}`,
     owner: parent.owner,
@@ -2201,6 +2861,7 @@ async function openClawCreateCrabbox(
     repo?: string;
     branch?: string;
     runtime?: string;
+    profile?: string;
     command?: string;
     prompt?: string;
     owner?: string;
@@ -2279,7 +2940,7 @@ async function requireAgentSession(
     throw unauthorized();
   }
   const session = interactiveSession(row, []);
-  if (deadInteractiveSessionStatuses.includes(session.status)) {
+  if (session.status === "stopping" || deadInteractiveSessionStatuses.includes(session.status)) {
     throw forbidden("agent session is not active");
   }
   return {
@@ -2421,12 +3082,437 @@ function sshGatewayTokens(env: RuntimeEnv): string[] {
   );
 }
 
+async function reconcileExternalInteractiveSessions(
+  env: RuntimeEnv,
+  now: number,
+  context?: ExecutionContext,
+): Promise<void> {
+  const reconciliation = reconcileInteractiveSessionLifecycleBatch(env, now).catch((error) => {
+    console.error("interactive session reconciliation failed", error);
+  });
+  if (!context) {
+    await reconciliation;
+    return;
+  }
+  context.waitUntil(reconciliation);
+  await Promise.race([
+    reconciliation,
+    new Promise<void>((resolve) => setTimeout(resolve, runtimeAdapterReconcileForegroundBudgetMs)),
+  ]);
+}
+
+async function reconcileInteractiveSessionLifecycleBatch(
+  env: RuntimeEnv,
+  now: number,
+): Promise<void> {
+  await reconcileCredentialPolicyCleanupBatch(env, now);
+  await reconcileLegacyStoppingInteractiveSessionBatch(env, now);
+  await reconcileExternalInteractiveSessionBatch(env, now);
+}
+
+async function reconcileLegacyStoppingInteractiveSessionBatch(
+  env: RuntimeEnv,
+  now: number,
+  sessionId?: string,
+): Promise<void> {
+  let query = database(env)
+    .selectFrom("interactive_sessions")
+    .selectAll()
+    .where("status", "=", "stopping")
+    .where((expression) =>
+      expression.or([
+        expression("adapter", "is", null),
+        expression("adapter", "!=", runtimeAdapterName),
+      ]),
+    )
+    .where("credential_cleanup_terminal_status", "is", null)
+    .where(sql<boolean>`lease_id IS NULL OR lease_id NOT LIKE ${`${sandboxLeasePrefix}%`}`)
+    .orderBy("updated_at", "asc")
+    .limit(runtimeAdapterReconcileLimit);
+  if (sessionId) query = query.where("id", "=", sessionId);
+  const candidates = await query.execute();
+  await mapWithConcurrency(candidates, runtimeAdapterReconcileConcurrency, async (session) => {
+    await completeLegacyInteractiveSessionStop(
+      env,
+      {
+        id: session.id,
+        status: session.status,
+        adapter: session.adapter,
+        leaseId: session.lease_id,
+        updatedAt: session.updated_at,
+      },
+      "system",
+      now,
+    ).catch((error) => {
+      console.error(`legacy interactive session stop recovery failed for ${session.id}`, error);
+    });
+  });
+}
+
+async function requeueTerminalArchiveObjectBackfill(
+  env: RuntimeEnv,
+  sessionId?: string,
+): Promise<void> {
+  if (!env.SESSION_LOGS) return;
+  const sessionFilter = sessionId ? sql`AND session.id = ${sessionId}` : sql``;
+  const limit = sessionId ? 1 : runtimeAdapterReconcileLimit * 2;
+  await sql`
+    UPDATE interactive_sessions
+    SET terminal_finalize_pending = 1,
+        last_reconciled_at = NULL
+    WHERE id IN (
+      SELECT session.id
+      FROM interactive_sessions AS session
+      JOIN interactive_session_log_archives AS archive
+        ON archive.session_id = session.id
+      WHERE session.status IN ('stopped', 'expired', 'failed')
+        AND session.terminal_finalize_pending = 0
+        AND (
+          archive.events_key IS NULL
+          OR archive.transcript_key IS NULL
+          OR archive.summary_key IS NULL
+        )
+        ${sessionFilter}
+      ORDER BY session.updated_at ASC, session.id ASC
+      LIMIT ${limit}
+    )
+  `.execute(database(env));
+}
+
+async function reconcileExternalInteractiveSessionBatch(
+  env: RuntimeEnv,
+  now: number,
+): Promise<void> {
+  await requeueTerminalArchiveObjectBackfill(env);
+  const providerConfigured = runtimeAdapterProviderConfigured(env);
+  const activeStatuses: InteractiveSessionStatus[] = [
+    "provisioning",
+    "pending_adapter",
+    "ready",
+    "attached",
+    "detached",
+    "stopping",
+  ];
+  const terminalStatuses: InteractiveSessionStatus[] = ["stopped", "expired", "failed"];
+  const rows = await database(env)
+    .selectFrom("interactive_sessions")
+    .selectAll()
+    .where((expression) =>
+      providerConfigured
+        ? expression.or([
+            expression.and([
+              expression("status", "in", terminalStatuses),
+              expression("terminal_finalize_pending", "=", 1),
+            ]),
+            expression.and([
+              expression("adapter", "=", runtimeAdapterName),
+              expression("status", "in", activeStatuses),
+            ]),
+          ])
+        : expression.and([
+            expression("status", "in", terminalStatuses),
+            expression("terminal_finalize_pending", "=", 1),
+          ]),
+    )
+    .orderBy("last_reconciled_at", "asc")
+    .limit(runtimeAdapterReconcileLimit * 2)
+    .execute();
+  const due = rows
+    .filter(
+      (row) =>
+        !row.last_reconciled_at ||
+        now - row.last_reconciled_at >= runtimeAdapterReconcileIntervalMs,
+    )
+    .slice(0, runtimeAdapterReconcileLimit);
+  await mapWithConcurrency(due, runtimeAdapterReconcileConcurrency, async (row) => {
+    await reconcileExternalInteractiveSession(env, row, now);
+  });
+}
+
+async function reconcileExternalInteractiveSessionById(
+  env: RuntimeEnv,
+  id: string,
+  now = Date.now(),
+): Promise<void> {
+  await reconcileCredentialPolicyCleanupBatch(env, now, id);
+  await reconcileLegacyStoppingInteractiveSessionBatch(env, now, id);
+  await requeueTerminalArchiveObjectBackfill(env, id);
+  const row = await database(env)
+    .selectFrom("interactive_sessions")
+    .selectAll()
+    .where("id", "=", id)
+    .executeTakeFirst();
+  if (!row) return;
+  const terminalFinalizationPending =
+    row.terminal_finalize_pending === 1 &&
+    (row.status === "stopped" || row.status === "expired" || row.status === "failed");
+  const providerConfigured = runtimeAdapterProviderConfigured(env);
+  const active = [
+    "provisioning",
+    "pending_adapter",
+    "ready",
+    "attached",
+    "detached",
+    "stopping",
+  ].includes(row.status);
+  if (
+    !terminalFinalizationPending &&
+    (row.adapter !== runtimeAdapterName || !providerConfigured || !active)
+  ) {
+    return;
+  }
+  if (row.last_reconciled_at && now - row.last_reconciled_at < runtimeAdapterReconcileIntervalMs) {
+    return;
+  }
+  await reconcileExternalInteractiveSession(env, row, now);
+}
+
+async function reconcileExternalInteractiveSession(
+  env: RuntimeEnv,
+  row: InteractiveSessionRow,
+  now: number,
+): Promise<void> {
+  const terminalFinalizationStatus: "stopped" | "expired" | "failed" | null =
+    row.terminal_finalize_pending === 1 &&
+    (row.status === "stopped" || row.status === "expired" || row.status === "failed")
+      ? row.status
+      : null;
+  if (
+    !terminalFinalizationStatus &&
+    (row.adapter !== runtimeAdapterName || !row.adapter_workspace_id)
+  ) {
+    return;
+  }
+  const claimAt = Math.max(now, Date.now(), (row.last_reconciled_at ?? 0) + 1);
+  let claim = database(env)
+    .updateTable("interactive_sessions")
+    .set({ last_reconciled_at: claimAt })
+    .where("id", "=", row.id)
+    .where("status", "=", row.status)
+    .where("updated_at", "=", row.updated_at);
+  claim = row.last_reconciled_at
+    ? claim.where("last_reconciled_at", "=", row.last_reconciled_at)
+    : claim.where("last_reconciled_at", "is", null);
+  const claimed = await claim.executeTakeFirst();
+  if ((claimed.numUpdatedRows ?? 0n) === 0n) return;
+
+  try {
+    if (terminalFinalizationStatus) {
+      await finalizeTerminalInteractiveSession(
+        env,
+        row.id,
+        terminalFinalizationStatus,
+        row.stopped_at ?? now,
+      );
+      return;
+    }
+    if (row.adapter !== runtimeAdapterName || !row.adapter_workspace_id) return;
+    const inspected = await inspectRuntimeAdapterWorkspace(env, row);
+    const completedAt = Math.max(Date.now(), claimAt);
+    const completionVersion = Math.max(completedAt, row.updated_at + 1);
+    const requestedTerminalStatus =
+      inspected.terminalStatus === undefined ? row.terminal_status : inspected.terminalStatus;
+    const status = reconciledInteractiveStatus(
+      row.status,
+      inspected.status,
+      requestedTerminalStatus,
+    );
+    const inactive = ["stopping", "stopped", "expired", "failed"].includes(status);
+    const terminalStatus = ["stopped", "expired", "failed"].includes(status)
+      ? null
+      : requestedTerminalStatus;
+    const terminal = inactive
+      ? null
+      : inspected.attachUrlPresent
+        ? inspected.attachUrl
+        : row.attach_url;
+    const capabilities = inspected.capabilities
+      ? JSON.stringify(inspected.capabilities)
+      : inspected.capabilitiesPresent
+        ? JSON.stringify(clearedAdapterCapabilities)
+        : row.capabilities_json;
+    const expiresAt = inspected.expiresAtPresent ? (inspected.expiresAt ?? null) : row.expires_at;
+    const createPending =
+      inspected.createPending === undefined
+        ? row.adapter_create_pending
+        : inspected.createPending
+          ? 1
+          : 0;
+    const stateChanged =
+      status !== row.status ||
+      terminal !== row.attach_url ||
+      capabilities !== row.capabilities_json ||
+      (inspected.providerResourceId ?? row.provider_resource_id) !== row.provider_resource_id ||
+      expiresAt !== row.expires_at ||
+      terminalStatus !== row.terminal_status ||
+      createPending !== row.adapter_create_pending ||
+      (inspected.reconcileError ?? null) !== row.reconcile_error;
+    const messageChanged = inspected.message !== row.last_event;
+    const expectedOwner = sql<boolean>`
+      id = ${row.id}
+      AND adapter = ${runtimeAdapterName}
+      AND status = ${row.status}
+      AND updated_at = ${row.updated_at}
+      AND last_reconciled_at = ${claimAt}
+    `;
+    const db = database(env);
+    const update = db
+      .updateTable("interactive_sessions")
+      .set({
+        status,
+        lease_id: null,
+        provider_resource_id: inspected.providerResourceId ?? row.provider_resource_id,
+        attach_url: terminal,
+        // Connection-bearing desktop URLs are never persisted.
+        vnc_url: null,
+        capabilities_json: capabilities,
+        expires_at: expiresAt,
+        last_reconciled_at: completedAt,
+        reconcile_error: inspected.reconcileError ?? null,
+        terminal_status: terminalStatus,
+        adapter_create_pending: createPending,
+        terminal_finalize_pending: ["stopped", "expired", "failed"].includes(status)
+          ? 1
+          : row.terminal_finalize_pending,
+        ...(inactive
+          ? {
+              agent_token_hash: null,
+              controller: null,
+              control_requested_by: null,
+              control_requested_at: null,
+              control_granted_at: null,
+              control_expires_at: null,
+            }
+          : {}),
+        stopped_at: ["stopped", "expired", "failed"].includes(status)
+          ? (row.stopped_at ?? completedAt)
+          : row.stopped_at,
+        ...(stateChanged || messageChanged
+          ? { updated_at: completionVersion, last_event: inspected.message }
+          : {}),
+      })
+      .where(expectedOwner)
+      .returning("updated_at");
+    const queries: CompilableQuery[] = [];
+    if (stateChanged || messageChanged) {
+      queries.push(sql`
+        INSERT INTO interactive_session_events (session_id, actor, message, created_at)
+        SELECT ${row.id}, 'system', ${clean(inspected.message, 1000)}, ${completedAt}
+        FROM interactive_sessions
+        WHERE ${expectedOwner}
+      `);
+    }
+    queries.push(update);
+    const results = await env.DB.batch<{ updated_at: number }>(
+      queries.map((query) => {
+        const compiled = query.compile(db);
+        return env.DB.prepare(compiled.sql).bind(...compiled.parameters);
+      }),
+    );
+    if (!results.at(-1)?.results.length) {
+      const current = await readInteractiveSession(env, row.id);
+      if (current && ["stopped", "expired", "failed"].includes(current.status)) {
+        await finalizeTerminalInteractiveSession(
+          env,
+          current.id,
+          current.status as "stopped" | "expired" | "failed",
+          current.stoppedAt ?? now,
+        ).catch(() => undefined);
+        return;
+      }
+      const currentAdapterProvision = Boolean(
+        current &&
+        current.adapter === runtimeAdapterName &&
+        current.adapterWorkspaceId === inspected.adapterWorkspaceId &&
+        ["provisioning", "pending_adapter", "ready", "attached", "detached"].includes(
+          current.status,
+        ),
+      );
+      if (!currentAdapterProvision && inspected.adapterWorkspaceId) {
+        await stopSupersededRuntimeAdapterProvision(
+          env,
+          row.id,
+          inspected.adapterWorkspaceId,
+          inspected.createPending === true,
+          Date.now(),
+        );
+      }
+      return;
+    }
+    if (stateChanged || messageChanged) {
+      await archiveInteractiveSessionLogs(env, row.id, completedAt).catch(() => undefined);
+    }
+    if (
+      status !== row.status &&
+      (status === "stopped" || status === "expired" || status === "failed")
+    ) {
+      await finalizeTerminalInteractiveSession(
+        env,
+        row.id,
+        status,
+        row.stopped_at ?? completedAt,
+      ).catch(() => undefined);
+    }
+  } catch (error) {
+    const failedAt = Math.max(Date.now(), claimAt);
+    await database(env)
+      .updateTable("interactive_sessions")
+      .set({
+        last_reconciled_at: failedAt,
+        reconcile_error: safeProviderError(
+          error,
+          [row.adapter_workspace_id, row.provider_resource_id],
+          [row.attach_url],
+        ),
+        updated_at: Math.max(failedAt, row.updated_at + 1),
+      })
+      .where("id", "=", row.id)
+      .where("status", "=", row.status)
+      .where("updated_at", "=", row.updated_at)
+      .where("last_reconciled_at", "=", claimAt)
+      .execute();
+  }
+}
+
+function reconciledInteractiveStatus(
+  current: InteractiveSessionStatus,
+  next: InteractiveSessionStatus,
+  terminalStatus: "failed" | null,
+): InteractiveSessionStatus {
+  if (current === "stopping") {
+    if (["stopped", "expired", "failed"].includes(next)) return terminalStatus ?? next;
+    return "stopping";
+  }
+  if ((current === "attached" || current === "detached") && next === "ready") return current;
+  return next;
+}
+
+async function mapWithConcurrency<T>(
+  values: T[],
+  concurrency: number,
+  operation: (value: T) => Promise<void>,
+): Promise<void> {
+  let cursor = 0;
+  const worker = async () => {
+    while (cursor < values.length) {
+      const index = cursor;
+      cursor += 1;
+      await operation(values[index] as T);
+    }
+  };
+  await Promise.all(
+    Array.from({ length: Math.min(Math.max(1, concurrency), values.length) }, () => worker()),
+  );
+}
+
 async function readState(
   request: Request,
   env: RuntimeEnv,
   user: User,
+  context?: ExecutionContext,
 ): Promise<Record<string, unknown>> {
   await reconcileStalledRuns(env, Date.now());
+  await reconcileExternalInteractiveSessions(env, Date.now(), context);
   const db = database(env);
   const [settings, allow, repos, cards, interactiveSessions, workflows] = await Promise.all([
     readSettings(env),
@@ -2438,12 +3524,16 @@ async function readState(
     readInteractiveSessions(env, user),
     user.role === "owner" ? readWorkflowSummaries(env) : Promise.resolve([]),
   ]);
-  const repoNames = sortRepos(repos.map((row) => row.repo));
+  const repoNames = sortRepos(
+    repos.map((row) => row.repo),
+    deploymentConfig(env).preferredRepo,
+  );
   const fleet = await readFleetState(env, user, interactiveSessions);
 
   return {
     user,
     auth: authMethods(env, request),
+    deployment: deploymentConfig(env),
     org: settings.org ?? "OpenClaw",
     cap: numberSetting(settings.cap, 20),
     retention: settings.retention ?? "30",
@@ -2461,17 +3551,23 @@ async function readFleetState(
   env: RuntimeEnv,
   user: User,
   sessions?: InteractiveSession[],
+  context?: ExecutionContext,
 ): Promise<FleetState> {
+  const deployment = deploymentConfig(env);
+  if (!sessions) await reconcileExternalInteractiveSessions(env, Date.now(), context);
   const [interactiveSessions, policyResult] = await Promise.all([
     sessions ? Promise.resolve(sessions) : readInteractiveSessions(env, user),
     readSandboxFleetPolicies(env),
   ]);
   return buildFleetState(interactiveSessions, policyResult.policies, {
-    canonicalUrl: appCanonicalOrigin,
-    productUrl: "https://crabfleet.ai",
+    canonicalUrl: deployment.canonicalUrl,
+    productUrl: deployment.productUrl,
     defaultEgressHosts: defaultSandboxEgressHosts,
     generatedAt: Date.now(),
     registryAvailable: policyResult.available,
+    sandboxAvailable: Boolean(env.SANDBOX),
+    ptyBridgeUrl: env.CRABBOX_PTY_BRIDGE_URL,
+    cloudflareRunnerUrl: env.CRABBOX_CLOUDFLARE_RUNNER_URL,
   });
 }
 
@@ -2505,6 +3601,7 @@ async function createInteractiveSessionFromInput(
     repo?: string;
     branch?: string;
     runtime?: string;
+    profile?: string;
     command?: string;
     prompt?: string;
     parentSessionId?: string;
@@ -2524,9 +3621,12 @@ async function createInteractiveSessionFromInput(
   if (!repo) throw badRequest("repo is required");
   await requireRepo(env, repo);
   const branch = clean(body.branch, 120) || "main";
-  const runtime = oneOf(body.runtime, ["crabbox", "container"], "container") as
+  const deployment = deploymentConfig(env);
+  const runtime = oneOf(body.runtime, ["crabbox", "container"], deployment.defaultRuntime) as
     | "crabbox"
     | "container";
+  requireRuntimeAdapterCreatePreflight(env, runtime);
+  const profile = clean(body.profile, 120) || deployment.defaultProfile;
   const command = interactiveCommand(body.command);
   const prompt = clean(body.prompt, 4000);
   const purpose = interactiveSessionPurpose(body.purpose, prompt, repo, branch, command);
@@ -2545,6 +3645,49 @@ async function createInteractiveSessionFromInput(
     const id = await nextInteractiveSessionId(env);
     const rootSessionId = lineage.rootSessionId ?? id;
     const agentToken = newAgentToken();
+    const initialAgentTokenHash = await sha256(agentToken);
+    const initialSandboxLease = runtime === "container" && env.SANDBOX ? newSandboxLease(id) : null;
+    const initialSandboxOwnership: SandboxCurrentLeaseFence | null = initialSandboxLease
+      ? {
+          leaseId: sandboxLeaseId(initialSandboxLease),
+          sandboxId: initialSandboxLease.sandboxId,
+        }
+      : null;
+    const adapterWorkspaceId = initialRuntimeAdapterWorkspaceId(env, runtime, id);
+    const adapterControlPlane = adapterWorkspaceId
+      ? configuredRuntimeAdapterControlPlane(env)
+      : null;
+    const adapterSettings = adapterWorkspaceId ? runtimeAdapterCreateSettings(env, runtime) : null;
+    const adapterCreatePayload =
+      adapterWorkspaceId && adapterSettings
+        ? runtimeAdapterCreatePayload(
+            {
+              namespace: normalizeAdapterNamespace(
+                env.CRABBOX_RUNTIME_ADAPTER_NAMESPACE ?? "",
+              ) as string,
+              id,
+              parentSessionId: lineage.parentSessionId,
+              rootSessionId,
+              repo,
+              branch,
+              runtime,
+              profile,
+              command,
+              prompt,
+              purpose,
+              summary,
+              owner,
+              createdBy,
+              ttlSeconds: adapterSettings.ttlSeconds,
+              idleTimeoutSeconds: adapterSettings.idleTimeoutSeconds,
+              desktop: adapterSettings.capabilities.desktop,
+            },
+            adapterWorkspaceId,
+          )
+        : null;
+    const adapterCreatePayloadJson = adapterCreatePayload
+      ? JSON.stringify(adapterCreatePayload)
+      : null;
     try {
       await db
         .insertInto("interactive_sessions")
@@ -2555,6 +3698,25 @@ async function createInteractiveSessionFromInput(
           repo,
           branch,
           runtime,
+          adapter: adapterWorkspaceId ? runtimeAdapterName : null,
+          profile,
+          adapter_workspace_id: adapterWorkspaceId,
+          adapter_control_plane: adapterControlPlane,
+          provider_resource_id: null,
+          capabilities_json: JSON.stringify(
+            runtime === "crabbox" ? crabboxCapabilities : containerCapabilities,
+          ),
+          expires_at: null,
+          last_reconciled_at: adapterWorkspaceId ? now : null,
+          reconcile_error: adapterWorkspaceId ? "runtime adapter create pending" : null,
+          terminal_status: null,
+          adapter_ttl_seconds: adapterSettings?.ttlSeconds ?? null,
+          adapter_idle_timeout_seconds: adapterSettings?.idleTimeoutSeconds ?? null,
+          adapter_requested_capabilities_json: adapterSettings
+            ? JSON.stringify(adapterSettings.capabilities)
+            : null,
+          adapter_create_payload_json: adapterCreatePayloadJson,
+          adapter_create_pending: adapterWorkspaceId ? 1 : 0,
           command,
           prompt,
           purpose,
@@ -2562,7 +3724,7 @@ async function createInteractiveSessionFromInput(
           owner,
           created_by: createdBy,
           status: "provisioning",
-          lease_id: null,
+          lease_id: initialSandboxOwnership?.leaseId ?? null,
           attach_url: null,
           vnc_url: null,
           last_event: "interactive workspace requested",
@@ -2579,7 +3741,7 @@ async function createInteractiveSessionFromInput(
           control_granted_at: null,
           control_expires_at: null,
           multiplayer_mode: 0,
-          agent_token_hash: await sha256(agentToken),
+          agent_token_hash: initialAgentTokenHash,
         })
         .execute();
       await appendInteractiveSessionEvent(env, id, user, "interactive workspace requested", now);
@@ -2587,11 +3749,22 @@ async function createInteractiveSessionFromInput(
         env,
         {
           id,
+          ...(adapterWorkspaceId ? { adapterWorkspaceId } : {}),
+          ...(adapterControlPlane ? { adapterControlPlane } : {}),
+          ...(adapterSettings
+            ? {
+                adapterTtlSeconds: adapterSettings.ttlSeconds,
+                adapterIdleTimeoutSeconds: adapterSettings.idleTimeoutSeconds,
+                adapterRequestedCapabilities: adapterSettings.capabilities,
+                adapterCreatePayloadJson,
+              }
+            : {}),
           parentSessionId: lineage.parentSessionId,
           rootSessionId,
           repo,
           branch,
           runtime,
+          profile,
           command,
           prompt,
           purpose,
@@ -2601,30 +3774,122 @@ async function createInteractiveSessionFromInput(
           ...(githubToken ? { githubToken } : {}),
         },
         agentToken,
+        initialSandboxLease && initialSandboxOwnership
+          ? { lease: initialSandboxLease, ownership: initialSandboxOwnership }
+          : undefined,
       );
       if (provisioned) {
-        await db
+        const initialTerminalStatus: "stopped" | "expired" | "failed" | null =
+          provisioned.status === "stopped" ||
+          provisioned.status === "expired" ||
+          provisioned.status === "failed"
+            ? provisioned.status
+            : null;
+        const terminalAt = provisioned.reconciledAt ?? now + 1;
+        const completionVersionFloor = Math.max(terminalAt, now + 1);
+        const provisionUpdate = await db
           .updateTable("interactive_sessions")
           .set({
             status: provisioned.status,
-            lease_id: provisioned.leaseId,
-            attach_url: provisioned.attachUrl,
-            vnc_url: provisioned.vncUrl,
+            lease_id: provisioned.adapter === runtimeAdapterName ? null : provisioned.leaseId,
+            attach_url: initialTerminalStatus ? null : provisioned.attachUrl,
+            // Versioned adapter desktop URLs are minted on demand and never persisted.
+            vnc_url: provisioned.adapter === runtimeAdapterName ? null : provisioned.vncUrl,
+            adapter: provisioned.adapter ?? null,
+            profile: provisioned.profile ?? profile,
+            adapter_workspace_id: provisioned.adapterWorkspaceId ?? null,
+            provider_resource_id: provisioned.providerResourceId ?? null,
+            capabilities_json: JSON.stringify(
+              provisioned.capabilities ??
+                (runtime === "crabbox" ? crabboxCapabilities : containerCapabilities),
+            ),
+            expires_at: provisioned.expiresAt ?? null,
+            last_reconciled_at: provisioned.reconciledAt ?? null,
+            reconcile_error: provisioned.reconcileError ?? null,
+            terminal_status: initialTerminalStatus ? null : (provisioned.terminalStatus ?? null),
+            adapter_create_pending: initialTerminalStatus ? 0 : provisioned.createPending ? 1 : 0,
+            terminal_finalize_pending: initialTerminalStatus ? 1 : 0,
+            ...(initialTerminalStatus
+              ? {
+                  stopped_at: terminalAt,
+                  agent_token_hash: null,
+                  controller: null,
+                  control_requested_by: null,
+                  control_requested_at: null,
+                  control_granted_at: null,
+                  control_expires_at: null,
+                }
+              : {}),
             last_event: provisioned.message,
-            updated_at: now + 1,
+            updated_at: sql<number>`MAX(updated_at + 1, ${completionVersionFloor})`,
           })
           .where("id", "=", id)
-          .execute();
+          .where("status", "in", ["provisioning", "pending_adapter"])
+          .where(sql<boolean>`lease_id IS ${initialSandboxOwnership?.leaseId ?? null}`)
+          .where("agent_token_hash", "=", initialAgentTokenHash)
+          .where("sandbox_refresh_sandbox_id", "is", null)
+          .where("sandbox_refresh_claim", "is", null)
+          .where("sandbox_refresh_claim_expires_at", "is", null)
+          .executeTakeFirst();
+        if ((provisionUpdate.numUpdatedRows ?? 0n) === 0n) {
+          let current = await readInteractiveSession(env, id);
+          const currentAdapterProvision = Boolean(
+            current &&
+            current.adapter === runtimeAdapterName &&
+            current.adapterWorkspaceId === provisioned.adapterWorkspaceId &&
+            ["provisioning", "pending_adapter", "ready", "attached", "detached"].includes(
+              current.status,
+            ),
+          );
+          if (
+            !currentAdapterProvision &&
+            provisioned.adapter === runtimeAdapterName &&
+            provisioned.adapterWorkspaceId
+          ) {
+            await stopSupersededRuntimeAdapterProvision(
+              env,
+              id,
+              provisioned.adapterWorkspaceId,
+              provisioned.createPending === true,
+              Date.now(),
+            );
+          }
+          if (
+            provisioned.adapter !== runtimeAdapterName &&
+            provisioned.leaseId?.startsWith(sandboxLeasePrefix)
+          ) {
+            await queueSandboxCredentialPolicyCleanup(
+              env,
+              id,
+              sandboxLeaseInfo({ id, leaseId: provisioned.leaseId }).sandboxId,
+            );
+            await reconcileCredentialPolicyCleanupBatch(env, Date.now(), id);
+            current = await readInteractiveSession(env, id);
+          }
+          if (!current) throw new Error("interactive session disappeared during provisioning");
+          return { session: decorateInteractiveSession(current, user, env) };
+        }
         await appendInteractiveSessionEvent(env, id, user, provisioned.message, now + 1);
+        if (initialTerminalStatus) {
+          await finalizeTerminalInteractiveSession(
+            env,
+            id,
+            initialTerminalStatus,
+            terminalAt,
+          ).catch(() => undefined);
+        }
       } else {
         await db
           .updateTable("interactive_sessions")
           .set({
             status: "pending_adapter",
             last_event: "waiting for interactive runtime adapter",
-            updated_at: now + 1,
+            updated_at: sql<number>`MAX(updated_at + 1, ${now + 1})`,
           })
           .where("id", "=", id)
+          .where("status", "=", "provisioning")
+          .where(sql<boolean>`lease_id IS ${initialSandboxOwnership?.leaseId ?? null}`)
+          .where("agent_token_hash", "=", initialAgentTokenHash)
           .execute();
         await appendInteractiveSessionEvent(
           env,
@@ -2652,6 +3917,252 @@ async function createInteractiveSessionFromInput(
     }
   }
   throw new Error("failed to allocate interactive session id");
+}
+
+function initialRuntimeAdapterWorkspaceId(
+  env: RuntimeEnv,
+  runtime: "crabbox" | "container",
+  sessionId: string,
+): string | null {
+  if (!env.CRABBOX_RUNTIME_ADAPTER_URL || (runtime === "container" && env.SANDBOX)) return null;
+  const namespace = normalizeAdapterNamespace(env.CRABBOX_RUNTIME_ADAPTER_NAMESPACE ?? "");
+  if (!namespace) {
+    throw serviceUnavailable(
+      "runtime adapter namespace is required and must be a DNS-safe label of at most 32 characters",
+    );
+  }
+  const adapterWorkspaceId = namespacedAdapterWorkspaceId(namespace, sessionId);
+  if (!adapterWorkspaceId) throw serviceUnavailable("runtime adapter workspace id is invalid");
+  return adapterWorkspaceId;
+}
+
+function requireRuntimeAdapterCreatePreflight(
+  env: RuntimeEnv,
+  runtime: "crabbox" | "container",
+): void {
+  if (!env.CRABBOX_RUNTIME_ADAPTER_URL || (runtime === "container" && env.SANDBOX)) return;
+  if (!configuredRuntimeAdapterControlPlane(env)) {
+    throw serviceUnavailable("runtime adapter URL must use HTTPS or literal loopback HTTP");
+  }
+  if (!runtimeAdapterToken(env)) {
+    throw serviceUnavailable("runtime adapter token is not configured");
+  }
+}
+
+function configuredRuntimeAdapterControlPlane(env: RuntimeEnv): string | null {
+  return runtimeAdapterControlPlaneIdentity(env.CRABBOX_RUNTIME_ADAPTER_URL);
+}
+
+function requireRegisteredRuntimeAdapterControlPlane(
+  env: RuntimeEnv,
+  registeredControlPlane: string | null | undefined,
+): string {
+  if (!registeredControlPlane) {
+    throw new Error("runtime adapter control-plane registration is missing");
+  }
+  const configuredControlPlane = configuredRuntimeAdapterControlPlane(env);
+  if (!configuredControlPlane) {
+    throw new Error("runtime adapter control plane is unavailable");
+  }
+  if (configuredControlPlane !== registeredControlPlane) {
+    throw new Error("runtime adapter control plane differs from workspace registration");
+  }
+  if (!runtimeAdapterToken(env)) throw new Error("runtime adapter token is not configured");
+  return registeredControlPlane;
+}
+
+async function registeredRuntimeAdapterControlPlaneForSession(
+  env: RuntimeEnv,
+  sessionId: string,
+  adapterWorkspaceId: string,
+): Promise<string> {
+  const registration = await database(env)
+    .selectFrom("interactive_sessions")
+    .select("adapter_control_plane")
+    .where("id", "=", sessionId)
+    .where("adapter", "=", runtimeAdapterName)
+    .where("adapter_workspace_id", "=", adapterWorkspaceId)
+    .executeTakeFirst();
+  return requireRegisteredRuntimeAdapterControlPlane(env, registration?.adapter_control_plane);
+}
+
+async function stopSupersededRuntimeAdapterProvision(
+  env: RuntimeEnv,
+  sessionId: string,
+  adapterWorkspaceId: string,
+  createPending: boolean,
+  now: number,
+): Promise<void> {
+  if (!createPending) {
+    await clearRuntimeAdapterCreatePending(env, sessionId, adapterWorkspaceId);
+  }
+  try {
+    const release = await stopRuntimeAdapterWorkspaceForSession(env, sessionId, adapterWorkspaceId);
+    if (release.status === "stopped") {
+      await recordConfirmedRuntimeAdapterRelease(
+        env,
+        sessionId,
+        adapterWorkspaceId,
+        now,
+        release.message,
+      );
+      return;
+    }
+    await persistRuntimeAdapterStopEvidence(
+      env,
+      sessionId,
+      adapterWorkspaceId,
+      release.message,
+      now,
+      null,
+    );
+  } catch (error) {
+    const message = safeProviderError(error, [adapterWorkspaceId]);
+    const pendingMessage = `superseded runtime adapter stop pending: ${message}`;
+    await persistRuntimeAdapterStopEvidence(
+      env,
+      sessionId,
+      adapterWorkspaceId,
+      pendingMessage,
+      now,
+      message,
+    );
+  }
+}
+
+async function recordConfirmedRuntimeAdapterRelease(
+  env: RuntimeEnv,
+  sessionId: string,
+  adapterWorkspaceId: string,
+  now: number,
+  releaseMessage?: string,
+): Promise<"stopping" | "stopped" | "failed" | null> {
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    const lifecycle = await database(env)
+      .selectFrom("interactive_sessions")
+      .select([
+        "adapter_create_pending",
+        "terminal_status",
+        "terminal_failure_reason",
+        "reconcile_error",
+        "last_event",
+        "updated_at",
+      ])
+      .where("id", "=", sessionId)
+      .where("adapter", "=", runtimeAdapterName)
+      .where("adapter_workspace_id", "=", adapterWorkspaceId)
+      .where("status", "=", "stopping")
+      .executeTakeFirst();
+    if (!lifecycle) return null;
+
+    const resolved = resolveCreateAfterStopRace(
+      lifecycle.adapter_create_pending === 1,
+      lifecycle.terminal_status,
+    );
+    const failureMessage = retainedRuntimeAdapterFailureMessage(
+      lifecycle.terminal_failure_reason,
+      lifecycle.reconcile_error,
+      lifecycle.last_event,
+    );
+    const retainedReleaseMessage = clean(releaseMessage, 500) || null;
+    const values =
+      resolved.status === "stopping"
+        ? ({
+            adapter_create_pending: 1,
+            last_reconciled_at: now,
+            updated_at: sql<number>`MAX(updated_at + 1, ${now})`,
+            last_event:
+              retainedReleaseMessage ?? "runtime adapter stop waiting for create resolution",
+          } as const)
+        : ({
+            status: resolved.status,
+            lease_id: null,
+            attach_url: null,
+            vnc_url: null,
+            terminal_status: resolved.terminalStatus,
+            terminal_failure_reason: resolved.status === "failed" ? failureMessage : null,
+            adapter_create_pending: 0,
+            terminal_finalize_pending: 1,
+            last_reconciled_at: now,
+            reconcile_error: resolved.status === "failed" ? failureMessage : null,
+            stopped_at: now,
+            agent_token_hash: null,
+            controller: null,
+            control_requested_by: null,
+            control_requested_at: null,
+            control_granted_at: null,
+            control_expires_at: null,
+            updated_at: sql<number>`MAX(updated_at + 1, ${now})`,
+            last_event:
+              resolved.status === "failed"
+                ? failureMessage
+                : (retainedReleaseMessage ?? "interactive workspace stopped"),
+          } as const);
+    const terminalStatusOwner = lifecycle.terminal_status
+      ? sql<boolean>`terminal_status = ${lifecycle.terminal_status}`
+      : sql<boolean>`terminal_status IS NULL`;
+    const expectedOwner = sql<boolean>`
+      id = ${sessionId}
+      AND adapter = ${runtimeAdapterName}
+      AND adapter_workspace_id = ${adapterWorkspaceId}
+      AND status = 'stopping'
+      AND adapter_create_pending = ${lifecycle.adapter_create_pending}
+      AND updated_at = ${lifecycle.updated_at}
+      AND ${terminalStatusOwner}
+    `;
+    const db = database(env);
+    const update = db
+      .updateTable("interactive_sessions")
+      .set(values)
+      .where(expectedOwner)
+      .returning("updated_at");
+    const recordReleaseEvent =
+      retainedReleaseMessage &&
+      (resolved.status !== "stopping" || lifecycle.last_event !== retainedReleaseMessage);
+    const queries: CompilableQuery[] = [];
+    if (recordReleaseEvent) {
+      queries.push(sql`
+        INSERT INTO interactive_session_events (session_id, actor, message, created_at)
+        SELECT ${sessionId}, 'system', ${retainedReleaseMessage}, ${now}
+        FROM interactive_sessions
+        WHERE ${expectedOwner}
+      `);
+    }
+    queries.push(update);
+    const results = await env.DB.batch<{ updated_at: number }>(
+      queries.map((query) => {
+        const compiled = query.compile(db);
+        return env.DB.prepare(compiled.sql).bind(...compiled.parameters);
+      }),
+    );
+    if (results.at(-1)?.results.length) {
+      if (recordReleaseEvent) {
+        await archiveInteractiveSessionLogs(env, sessionId, now).catch(() => undefined);
+      }
+      if (resolved.status === "stopped" || resolved.status === "failed") {
+        await finalizeTerminalInteractiveSession(env, sessionId, resolved.status, now).catch(
+          () => undefined,
+        );
+      }
+      return resolved.status;
+    }
+  }
+  return null;
+}
+
+async function clearRuntimeAdapterCreatePending(
+  env: RuntimeEnv,
+  sessionId: string,
+  adapterWorkspaceId: string,
+): Promise<void> {
+  await database(env)
+    .updateTable("interactive_sessions")
+    .set({ adapter_create_pending: 0 })
+    .where("id", "=", sessionId)
+    .where("adapter", "=", runtimeAdapterName)
+    .where("adapter_workspace_id", "=", adapterWorkspaceId)
+    .where("status", "=", "stopping")
+    .execute();
 }
 
 async function resolveInteractiveSessionLineage(
@@ -2709,34 +4220,290 @@ async function cleanupInteractiveSessions(
   let query = db
     .selectFrom("interactive_sessions")
     .selectAll()
-    .where("status", "in", deadInteractiveSessionStatuses);
+    .where("status", "in", deadInteractiveSessionStatuses)
+    .where("terminal_finalize_pending", "=", 0).where(sql<boolean>`
+      NOT EXISTS (
+        SELECT 1
+        FROM interactive_session_credential_policies AS policy
+        WHERE policy.session_id = interactive_sessions.id
+      )
+    `).where(sql<boolean>`
+      COALESCE(
+        (
+          SELECT event_count
+          FROM interactive_session_log_archives AS archive
+          WHERE archive.session_id = interactive_sessions.id
+        ),
+        -1
+      ) >= (
+        SELECT count(*)
+        FROM interactive_session_events AS event
+        WHERE event.session_id = interactive_sessions.id
+      )
+    `).where(sql<boolean>`
+      EXISTS (
+        SELECT 1
+        FROM interactive_session_log_archives AS archive
+        WHERE archive.session_id = interactive_sessions.id
+          AND archive.session_updated_at = interactive_sessions.updated_at
+      )
+    `).where(sql<boolean>`
+      ${env.SESSION_LOGS ? 1 : 0} = 0
+      OR EXISTS (
+        SELECT 1
+        FROM interactive_session_log_archives AS archive
+        WHERE archive.session_id = interactive_sessions.id
+          AND archive.events_key IS NOT NULL
+          AND archive.transcript_key IS NOT NULL
+          AND archive.summary_key IS NOT NULL
+      )
+    `);
   if (ids.length) query = query.where("id", "in", ids);
-  const removedSessions = (await query.execute())
-    .map((row) => interactiveSession(row, []))
-    .filter((session) => canManageInteractiveSession(user, session));
-  const removedIds = removedSessions.map((session) => session.id);
-  if (removedIds.length) {
+  const candidates = (await query.execute()).filter((row) =>
+    canManageInteractiveSession(user, interactiveSession(row, [])),
+  );
+  const removedIds = (
     await Promise.all(
-      removedSessions.map((session) => unregisterInteractiveSessionCredentialPolicy(env, session)),
-    );
-    const archives = await db
-      .selectFrom("interactive_session_log_archives")
-      .selectAll()
-      .where("session_id", "in", removedIds)
-      .execute();
-    await Promise.all(archives.map((archive) => cleanupSessionLogArchiveObjects(env, archive)));
-    await db
-      .deleteFrom("interactive_session_log_archives")
-      .where("session_id", "in", removedIds)
-      .execute();
-    await db
-      .deleteFrom("interactive_session_events")
-      .where("session_id", "in", removedIds)
-      .execute();
-    await db.deleteFrom("interactive_sessions").where("id", "in", removedIds).execute();
+      candidates.map(async (row) => {
+        const archive = await db
+          .selectFrom("interactive_session_log_archives")
+          .selectAll()
+          .where("session_id", "=", row.id)
+          .executeTakeFirst();
+        const removed = await deleteFinalizedInteractiveSession(env, row, archive);
+        if (!removed) return null;
+        await cleanupSessionLogArchiveObjects(env, archive).catch((error) => {
+          console.error(`session archive object cleanup leaked for ${row.id}`, error);
+        });
+        return row.id;
+      }),
+    )
+  ).filter((id): id is string => Boolean(id));
+  if (removedIds.length) {
     await audit(env, user, `interactive sessions cleaned ${removedIds.join(",")}`, Date.now());
   }
   return { state: await readState(request, env, user), removedIds };
+}
+
+async function deleteFinalizedInteractiveSession(
+  env: RuntimeEnv,
+  row: InteractiveSessionRow,
+  archive: Selectable<InteractiveSessionLogArchiveTable> | undefined,
+): Promise<boolean> {
+  const db = database(env);
+  const claimToken = `cleanup:${crypto.randomUUID()}`;
+  const finalClaim = db
+    .updateTable("interactive_sessions")
+    .set({
+      terminal_finalize_pending: terminalCleanupDeletePending,
+      reconcile_error: claimToken,
+    })
+    .where("id", "=", row.id)
+    .where("status", "=", row.status)
+    .where("updated_at", "=", row.updated_at)
+    .where("terminal_finalize_pending", "=", 0).where(sql<boolean>`
+      NOT EXISTS (
+        SELECT 1
+        FROM interactive_session_credential_policies
+        WHERE session_id = ${row.id}
+      )
+    `).where(sql<boolean>`
+      ${archive ? 1 : 0} = 1
+        AND EXISTS (
+          SELECT 1
+          FROM interactive_session_log_archives
+          WHERE session_id = ${row.id}
+            AND event_count = ${archive?.event_count ?? -1}
+            AND session_updated_at IS ${archive?.session_updated_at ?? null}
+            AND session_updated_at = ${row.updated_at}
+            AND events_key IS ${archive?.events_key ?? null}
+            AND transcript_key IS ${archive?.transcript_key ?? null}
+            AND summary_key IS ${archive?.summary_key ?? null}
+            AND archived_at = ${archive?.archived_at ?? -1}
+            AND updated_at = ${archive?.updated_at ?? -1}
+        )
+    `).where(sql<boolean>`
+      COALESCE(
+        (
+          SELECT event_count
+          FROM interactive_session_log_archives
+          WHERE session_id = ${row.id}
+        ),
+        -1
+      ) >= (
+        SELECT count(*)
+        FROM interactive_session_events
+        WHERE session_id = ${row.id}
+      )
+    `).where(sql<boolean>`
+      ${env.SESSION_LOGS ? 1 : 0} = 0
+      OR EXISTS (
+        SELECT 1
+        FROM interactive_session_log_archives
+        WHERE session_id = ${row.id}
+          AND events_key IS NOT NULL
+          AND transcript_key IS NOT NULL
+          AND summary_key IS NOT NULL
+      )
+    `);
+  const ownsFinalClaim = sql<boolean>`EXISTS (
+    SELECT 1
+    FROM interactive_sessions
+    WHERE id = ${row.id}
+      AND status = ${row.status}
+      AND updated_at = ${row.updated_at}
+      AND terminal_finalize_pending = ${terminalCleanupDeletePending}
+      AND reconcile_error = ${claimToken}
+  )`;
+  // D1 batches are transactional, so no event can interleave between the claim and row deletes.
+  await executeBatch(env, [
+    finalClaim,
+    db
+      .deleteFrom("interactive_session_events")
+      .where("session_id", "=", row.id)
+      .where(ownsFinalClaim),
+    db
+      .deleteFrom("interactive_session_log_archives")
+      .where("session_id", "=", row.id)
+      .where(ownsFinalClaim),
+    db
+      .deleteFrom("interactive_sessions")
+      .where("id", "=", row.id)
+      .where("status", "=", row.status)
+      .where("updated_at", "=", row.updated_at)
+      .where("terminal_finalize_pending", "=", terminalCleanupDeletePending)
+      .where("reconcile_error", "=", claimToken),
+  ]);
+  const current = await db
+    .selectFrom("interactive_sessions")
+    .select("id")
+    .where("id", "=", row.id)
+    .executeTakeFirst();
+  return !current;
+}
+
+async function mutateInteractiveSessionMetadataAtomically(
+  env: RuntimeEnv,
+  session: Pick<InteractiveSession, "id" | "status" | "updatedAt">,
+  user: User,
+  message: string,
+  values: UpdateObject<Database, "interactive_sessions">,
+  now = Date.now(),
+): Promise<void> {
+  const db = database(env);
+  const eventMessage = clean(message, 1000);
+  const revision = Math.max(now, session.updatedAt + 1);
+  const expectedOwner = sql<boolean>`
+    id = ${session.id}
+    AND status = ${session.status}
+    AND updated_at = ${session.updatedAt}
+  `;
+  const eventQuery = sql`
+    INSERT INTO interactive_session_events (session_id, actor, message, created_at)
+    SELECT ${session.id}, ${actor(user)}, ${eventMessage}, ${now}
+    FROM interactive_sessions
+    WHERE ${expectedOwner}
+  `;
+  const updateQuery = db
+    .updateTable("interactive_sessions")
+    .set({
+      ...values,
+      terminal_finalize_pending: sql<number>`CASE
+        WHEN status IN ('stopped', 'expired', 'failed') THEN 1
+        ELSE terminal_finalize_pending
+      END`,
+      updated_at: revision,
+      last_event: eventMessage,
+    })
+    .where(expectedOwner)
+    .returning("updated_at");
+  const results = await env.DB.batch<{ updated_at: number }>(
+    [eventQuery, updateQuery].map((query) => {
+      const compiled = query.compile(db);
+      return env.DB.prepare(compiled.sql).bind(...compiled.parameters);
+    }),
+  );
+  if (!results.at(-1)?.results.some((row) => row.updated_at === revision)) {
+    throw conflict("interactive session lifecycle changed; retry metadata update");
+  }
+  await archiveInteractiveSessionLogs(env, session.id, now).catch(() => undefined);
+}
+
+type LegacyInteractiveSessionStopOwner = {
+  id: string;
+  status: InteractiveSessionStatus;
+  adapter: string | null;
+  leaseId: string | null;
+  updatedAt: number;
+};
+
+async function completeLegacyInteractiveSessionStop(
+  env: RuntimeEnv,
+  owner: LegacyInteractiveSessionStopOwner,
+  eventActor: string,
+  now: number,
+): Promise<boolean> {
+  const db = database(env);
+  const revision = Math.max(now, owner.updatedAt + 1);
+  const actorName = clean(eventActor, 120) || "system";
+  const expectedOwner = sql<boolean>`
+    id = ${owner.id}
+    AND status = ${owner.status}
+    AND updated_at = ${owner.updatedAt}
+    AND adapter IS ${owner.adapter}
+    AND lease_id IS ${owner.leaseId}
+    AND (adapter IS NULL OR adapter != ${runtimeAdapterName})
+    AND (lease_id IS NULL OR lease_id NOT LIKE ${`${sandboxLeasePrefix}%`})
+    AND credential_cleanup_terminal_status IS NULL
+  `;
+  const requestedMessage = "interactive workspace stop requested";
+  const finalMessage = "interactive workspace stopped";
+  const requestedEvent = sql`
+    INSERT INTO interactive_session_events (session_id, actor, message, created_at)
+    SELECT ${owner.id}, ${actorName}, ${requestedMessage}, ${now}
+    FROM interactive_sessions
+    WHERE ${expectedOwner}
+  `;
+  const stoppedEvent = sql`
+    INSERT INTO interactive_session_events (session_id, actor, message, created_at)
+    SELECT ${owner.id}, ${actorName}, ${finalMessage}, ${now}
+    FROM interactive_sessions
+    WHERE ${expectedOwner}
+  `;
+  const stop = db
+    .updateTable("interactive_sessions")
+    .set({
+      status: "stopped",
+      stopped_at: sql<number>`COALESCE(stopped_at, ${now})`,
+      reconcile_error: null,
+      terminal_status: null,
+      adapter_create_pending: 0,
+      terminal_finalize_pending: 1,
+      agent_token_hash: null,
+      attach_url: null,
+      vnc_url: null,
+      controller: null,
+      control_requested_by: null,
+      control_requested_at: null,
+      control_granted_at: null,
+      control_expires_at: null,
+      updated_at: revision,
+      last_event: finalMessage,
+    })
+    .where(expectedOwner)
+    .returning("updated_at");
+  const results = await env.DB.batch<{ updated_at: number }>(
+    [requestedEvent, stoppedEvent, stop].map((query) => {
+      const compiled = query.compile(db);
+      return env.DB.prepare(compiled.sql).bind(...compiled.parameters);
+    }),
+  );
+  const stopped = results.at(-1)?.results.some((row) => row.updated_at === revision) ?? false;
+  if (stopped) {
+    await archiveInteractiveSessionLogs(env, owner.id, now).catch(() => undefined);
+    await finalizeTerminalInteractiveSession(env, owner.id, "stopped", now).catch(() => undefined);
+  }
+  return stopped;
 }
 
 async function mutateInteractiveSession(
@@ -2746,16 +4513,19 @@ async function mutateInteractiveSession(
   id: string,
   action: string,
 ): Promise<{ session: InteractiveSession; shareUrl?: string }> {
-  const session = await readInteractiveSession(env, id);
+  const session = await readFreshInteractiveSession(env, id);
   if (!session) throw notFound("interactive session not found");
   const now = Date.now();
   const userActor = actor(user);
   const canManage = canManageInteractiveSession(user, session);
   if (action === "attach") {
+    if (!session.capabilities.terminal) {
+      throw badRequest("session does not advertise terminal access");
+    }
     if (!canControlInteractiveSession(user, session, now, canGrantDelegatedControl(env, session))) {
       throw forbidden("terminal control has not been granted");
     }
-    if (["expired", "failed", "stopped"].includes(session.status)) {
+    if (["stopping", "expired", "failed", "stopped"].includes(session.status)) {
       throw badRequest(`session is ${session.status}`);
     }
     const nextStatus =
@@ -2766,17 +4536,21 @@ async function mutateInteractiveSession(
         : session.status === "provisioning"
           ? "attach requested; workspace provisioning"
           : "interactive terminal attached";
-    await database(env)
+    const attached = await database(env)
       .updateTable("interactive_sessions")
       .set({
         status: nextStatus,
         last_seen_at: now,
-        updated_at: now,
+        updated_at: sql<number>`MAX(updated_at + 1, ${now})`,
         last_event: message,
       })
       .where("id", "=", id)
-      .where("status", "!=", "stopped")
-      .execute();
+      .where("status", "=", session.status)
+      .where("updated_at", "=", session.updatedAt)
+      .executeTakeFirst();
+    if ((attached.numUpdatedRows ?? 0n) === 0n) {
+      throw conflict("interactive session lifecycle changed; retry attach");
+    }
     await appendInteractiveSessionEvent(env, id, user, message, now);
     return {
       session: decorateInteractiveSession(
@@ -2792,18 +4566,18 @@ async function mutateInteractiveSession(
     const token = shareToken();
     const tokenHash = await sha256(token);
     const preview = token.slice(0, 8);
-    await database(env)
-      .updateTable("interactive_sessions")
-      .set({
+    await mutateInteractiveSessionMetadataAtomically(
+      env,
+      session,
+      user,
+      "read-only share link enabled",
+      {
         share_mode: "link_read",
         share_token_hash: tokenHash,
         share_token_preview: preview,
-        updated_at: now,
-        last_event: "read-only share link enabled",
-      })
-      .where("id", "=", id)
-      .execute();
-    await appendInteractiveSessionEvent(env, id, user, "read-only share link enabled", now);
+      },
+      now,
+    );
     await audit(env, user, `interactive session share enabled ${id}`, now);
     return {
       session: decorateInteractiveSession(
@@ -2817,9 +4591,12 @@ async function mutateInteractiveSession(
 
   if (action === "disable_share") {
     if (!canManage) throw forbidden("only the session owner or maintainer can disable sharing");
-    await database(env)
-      .updateTable("interactive_sessions")
-      .set({
+    await mutateInteractiveSessionMetadataAtomically(
+      env,
+      session,
+      user,
+      "session sharing disabled",
+      {
         share_mode: "private",
         share_token_hash: null,
         share_token_preview: null,
@@ -2828,12 +4605,9 @@ async function mutateInteractiveSession(
         controller: null,
         control_granted_at: null,
         control_expires_at: null,
-        updated_at: now,
-        last_event: "session sharing disabled",
-      })
-      .where("id", "=", id)
-      .execute();
-    await appendInteractiveSessionEvent(env, id, user, "session sharing disabled", now);
+      },
+      now,
+    );
     await audit(env, user, `interactive session share disabled ${id}`, now);
     return {
       session: decorateInteractiveSession(
@@ -2850,16 +4624,14 @@ async function mutateInteractiveSession(
     }
     const enabled = action === "enable_multiplayer";
     const message = enabled ? "multiplayer mode enabled" : "multiplayer mode disabled";
-    await database(env)
-      .updateTable("interactive_sessions")
-      .set({
-        multiplayer_mode: enabled ? 1 : 0,
-        updated_at: now,
-        last_event: message,
-      })
-      .where("id", "=", id)
-      .execute();
-    await appendInteractiveSessionEvent(env, id, user, message, now);
+    await mutateInteractiveSessionMetadataAtomically(
+      env,
+      session,
+      user,
+      message,
+      { multiplayer_mode: enabled ? 1 : 0 },
+      now,
+    );
     await audit(
       env,
       user,
@@ -2882,24 +4654,19 @@ async function mutateInteractiveSession(
     if (canControlInteractiveSession(user, session, now, canGrantDelegatedControl(env, session))) {
       return { session: decorateInteractiveSession(session, user, env) };
     }
-    if (["expired", "failed", "stopped"].includes(session.status)) {
+    if (["stopping", "expired", "failed", "stopped"].includes(session.status)) {
       throw badRequest(`session is ${session.status}`);
     }
-    await database(env)
-      .updateTable("interactive_sessions")
-      .set({
+    const message = `${userActor} requested terminal control`;
+    await mutateInteractiveSessionMetadataAtomically(
+      env,
+      session,
+      user,
+      message,
+      {
         control_requested_by: userActor,
         control_requested_at: now,
-        updated_at: now,
-        last_event: `${userActor} requested terminal control`,
-      })
-      .where("id", "=", id)
-      .execute();
-    await appendInteractiveSessionEvent(
-      env,
-      id,
-      user,
-      `${userActor} requested terminal control`,
+      },
       now,
     );
     return {
@@ -2918,24 +4685,19 @@ async function mutateInteractiveSession(
       throw badRequest("delegated terminal control requires a revocable PTY bridge");
     }
     const expires = now + 30 * 60 * 1000;
-    await database(env)
-      .updateTable("interactive_sessions")
-      .set({
+    const message = `control granted to ${session.controlRequestedBy}`;
+    await mutateInteractiveSessionMetadataAtomically(
+      env,
+      session,
+      user,
+      message,
+      {
         controller: session.controlRequestedBy,
         control_granted_at: now,
         control_expires_at: expires,
         control_requested_by: null,
         control_requested_at: null,
-        updated_at: now,
-        last_event: `control granted to ${session.controlRequestedBy}`,
-      })
-      .where("id", "=", id)
-      .execute();
-    await appendInteractiveSessionEvent(
-      env,
-      id,
-      user,
-      `control granted to ${session.controlRequestedBy}`,
+      },
       now,
     );
     await audit(
@@ -2956,23 +4718,18 @@ async function mutateInteractiveSession(
   if (action === "deny_control") {
     if (!canManage) throw forbidden("only the session owner or maintainer can deny control");
     const requester = session.controlRequestedBy;
-    await database(env)
-      .updateTable("interactive_sessions")
-      .set({
+    const message = requester
+      ? `control request denied for ${requester}`
+      : "control request denied";
+    await mutateInteractiveSessionMetadataAtomically(
+      env,
+      session,
+      user,
+      message,
+      {
         control_requested_by: null,
         control_requested_at: null,
-        updated_at: now,
-        last_event: requester
-          ? `control request denied for ${requester}`
-          : "control request denied",
-      })
-      .where("id", "=", id)
-      .execute();
-    await appendInteractiveSessionEvent(
-      env,
-      id,
-      user,
-      requester ? `control request denied for ${requester}` : "control request denied",
+      },
       now,
     );
     return {
@@ -2986,18 +4743,18 @@ async function mutateInteractiveSession(
 
   if (action === "revoke_control") {
     if (!canManage) throw forbidden("only the session owner or maintainer can revoke control");
-    await database(env)
-      .updateTable("interactive_sessions")
-      .set({
+    await mutateInteractiveSessionMetadataAtomically(
+      env,
+      session,
+      user,
+      "terminal control revoked",
+      {
         controller: null,
         control_granted_at: null,
         control_expires_at: null,
-        updated_at: now,
-        last_event: "terminal control revoked",
-      })
-      .where("id", "=", id)
-      .execute();
-    await appendInteractiveSessionEvent(env, id, user, "terminal control revoked", now);
+      },
+      now,
+    );
     await audit(env, user, `interactive session control revoked ${id}`, now);
     return {
       session: decorateInteractiveSession(
@@ -3010,23 +4767,187 @@ async function mutateInteractiveSession(
 
   if (action === "stop") {
     if (!canManage) throw forbidden("only the session owner or maintainer can stop");
-    await unregisterInteractiveSessionCredentialPolicy(env, session);
-    await database(env)
-      .updateTable("interactive_sessions")
-      .set({
-        status: "stopped",
-        stopped_at: now,
-        controller: null,
-        control_requested_by: null,
-        control_requested_at: null,
-        updated_at: now,
-        last_event: "interactive workspace stopped",
-      })
-      .where("id", "=", id)
-      .where("status", "!=", "stopped")
-      .execute();
-    await appendInteractiveSessionEvent(env, id, user, "interactive workspace stopped", now);
-    await archiveInteractiveSessionLogs(env, id, now, { force: true }).catch(() => undefined);
+    if (["stopped", "expired", "failed"].includes(session.status)) {
+      if (isSandboxInteractiveSession(session)) {
+        const staged = await stageTerminalCredentialPolicyCleanupById(
+          env,
+          session.id,
+          session.status as "stopped" | "expired" | "failed",
+          "sandbox credential cleanup pending",
+          now,
+        );
+        if (!staged) throw conflict("interactive session lifecycle changed; retry stop");
+        await reconcileCredentialPolicyCleanupBatch(env, now, session.id);
+        const current = await readInteractiveSession(env, session.id);
+        if (current) return { session: decorateInteractiveSession(current, user, env) };
+      }
+      await finalizeTerminalInteractiveSession(
+        env,
+        session.id,
+        session.status as "stopped" | "expired" | "failed",
+        session.stoppedAt ?? now,
+      ).catch(() => undefined);
+      return { session: decorateInteractiveSession(session, user, env) };
+    }
+    if (session.adapter === runtimeAdapterName) {
+      if (!session.adapterWorkspaceId) {
+        throw serviceUnavailable("runtime adapter workspace reference is incomplete");
+      }
+      const stopClaimRevision = Math.max(now, session.updatedAt + 1);
+      const stopClaim = await database(env)
+        .updateTable("interactive_sessions")
+        .set({
+          status: "stopping",
+          lease_id: null,
+          updated_at: stopClaimRevision,
+          last_event: "runtime adapter stop requested",
+          reconcile_error: null,
+          agent_token_hash: null,
+          attach_url: null,
+          vnc_url: null,
+          controller: null,
+          control_requested_by: null,
+          control_requested_at: null,
+          control_granted_at: null,
+          control_expires_at: null,
+        })
+        .where("id", "=", id)
+        .where("status", "=", session.status)
+        .where("updated_at", "=", session.updatedAt)
+        .executeTakeFirst();
+      if ((stopClaim.numUpdatedRows ?? 0n) === 0n) {
+        const current = await readInteractiveSession(env, id);
+        if (
+          !current ||
+          current.adapter !== runtimeAdapterName ||
+          current.adapterWorkspaceId !== session.adapterWorkspaceId ||
+          !["stopping", "stopped", "expired", "failed"].includes(current.status)
+        ) {
+          throw conflict("interactive session lifecycle changed; retry stop");
+        }
+        return {
+          session: decorateInteractiveSession(current, user, env),
+        };
+      }
+      await appendInteractiveSessionEvent(env, id, user, "runtime adapter stop requested", now);
+      let adapterStop: RuntimeAdapterStopResult;
+      try {
+        adapterStop = await stopRuntimeAdapterWorkspaceForSession(
+          env,
+          session.id,
+          session.adapterWorkspaceId,
+        );
+      } catch (error) {
+        const message = safeProviderError(error, [session.adapterWorkspaceId]);
+        const pendingMessage = `runtime adapter stop pending: ${message}`;
+        await persistRuntimeAdapterStopEvidence(
+          env,
+          id,
+          session.adapterWorkspaceId,
+          pendingMessage,
+          now,
+          message,
+          actor(user),
+        );
+        throw serviceUnavailable(`runtime adapter stop failed: ${message}`);
+      }
+      if (adapterStop.status === "stopping") {
+        const lifecycle = await database(env)
+          .selectFrom("interactive_sessions")
+          .select("adapter_create_pending")
+          .where("id", "=", id)
+          .where("adapter", "=", runtimeAdapterName)
+          .where("adapter_workspace_id", "=", session.adapterWorkspaceId)
+          .where("status", "=", "stopping")
+          .executeTakeFirst();
+        const message = lifecycle?.adapter_create_pending
+          ? `${adapterStop.message}; runtime adapter stop waiting for create resolution`
+          : adapterStop.message;
+        await persistRuntimeAdapterStopEvidence(
+          env,
+          id,
+          session.adapterWorkspaceId,
+          message,
+          now,
+          null,
+          actor(user),
+        );
+        return {
+          session: decorateInteractiveSession(
+            (await readInteractiveSession(env, id)) as InteractiveSession,
+            user,
+            env,
+          ),
+        };
+      }
+      const resolved = await recordConfirmedRuntimeAdapterRelease(
+        env,
+        id,
+        session.adapterWorkspaceId,
+        Date.now(),
+        adapterStop.message,
+      );
+      if (resolved === "failed" || resolved === "stopped") {
+        await audit(env, user, `interactive session stopped ${id}`, Date.now());
+      }
+      return {
+        session: decorateInteractiveSession(
+          (await readInteractiveSession(env, id)) as InteractiveSession,
+          user,
+          env,
+        ),
+      };
+    }
+    if (isSandboxInteractiveSession(session)) {
+      const message = "interactive workspace stop waiting for credential cleanup";
+      const staged = await stageTerminalCredentialPolicyCleanupById(
+        env,
+        session.id,
+        "stopped",
+        message,
+        now,
+      );
+      if (!staged) {
+        const current = await readInteractiveSession(env, id);
+        if (!current) throw notFound("interactive session not found");
+        const terminalIntent = await database(env)
+          .selectFrom("interactive_sessions")
+          .select("credential_cleanup_terminal_status")
+          .where("id", "=", id)
+          .where("status", "=", "stopping")
+          .executeTakeFirst();
+        if (terminalIntent?.credential_cleanup_terminal_status) {
+          return { session: decorateInteractiveSession(current, user, env) };
+        }
+        if (["stopped", "expired", "failed"].includes(current.status)) {
+          return { session: decorateInteractiveSession(current, user, env) };
+        }
+        throw conflict("interactive session lifecycle changed; retry stop");
+      }
+      await appendInteractiveSessionEvent(
+        env,
+        id,
+        user,
+        "interactive workspace stop requested",
+        now,
+      );
+      await reconcileCredentialPolicyCleanupBatch(env, now, id);
+      return {
+        session: decorateInteractiveSession(
+          (await readInteractiveSession(env, id)) as InteractiveSession,
+          user,
+          env,
+        ),
+      };
+    }
+    if (!(await completeLegacyInteractiveSessionStop(env, session, actor(user), now))) {
+      const current = await readInteractiveSession(env, id);
+      if (!current) throw notFound("interactive session not found");
+      if (!["stopped", "expired", "failed"].includes(current.status)) {
+        throw conflict("interactive session lifecycle changed; retry stop");
+      }
+      return { session: decorateInteractiveSession(current, user, env) };
+    }
     await audit(env, user, `interactive session stopped ${id}`, now);
     return {
       session: decorateInteractiveSession(
@@ -3040,29 +4961,1373 @@ async function mutateInteractiveSession(
   throw badRequest("unknown action");
 }
 
-async function unregisterSandboxCredentialPolicy(
+async function unregisterSandboxCredentialPolicyLookup(
   env: RuntimeEnv,
-  sandboxId: string,
+  lookupId: string,
+  generation: string,
+  sessionId: string,
 ): Promise<void> {
   const stub = sandboxControlStub(env);
-  if (!stub) return;
-  await Promise.all(
-    sandboxLookupIds(env, sandboxId).map((lookupId) =>
-      stub.fetch(
-        `https://crabfleet.internal/api/session-control/sandbox/${encodeURIComponent(lookupId)}`,
-        { method: "DELETE" },
+  if (!stub) throw serviceUnavailable("sandbox credential policy cleanup is unavailable");
+  let response: Response;
+  try {
+    response = await stub.fetch(
+      `https://crabfleet.internal/api/session-control/sandbox/${encodeURIComponent(lookupId)}`,
+      {
+        method: "DELETE",
+        body: JSON.stringify({ generation, sessionId, tombstonedAt: Date.now() }),
+        headers: { "content-type": "application/json" },
+      },
+    );
+  } catch {
+    throw serviceUnavailable("sandbox credential policy cleanup failed");
+  }
+  if (!response.ok) {
+    throw serviceUnavailable("sandbox credential policy cleanup failed");
+  }
+}
+
+function sandboxCredentialPolicyRefQueries(
+  env: RuntimeEnv,
+  sessionId: string,
+  sandboxId: string,
+  state: "registering" | "active" | "cleanup_pending",
+  generation: string,
+  now: number,
+  authorizationCondition: RawBuilder<boolean>,
+): CompilableQuery[] {
+  return sandboxLookupIds(env, sandboxId).map(
+    (lookupId) => sql`
+    INSERT INTO interactive_session_credential_policies (
+      session_id,
+      sandbox_id,
+      lookup_id,
+      state,
+      registration_generation,
+      registration_claim,
+      registration_claim_expires_at,
+      attempt_count,
+      last_attempt_at,
+      last_error,
+      cleanup_claim,
+      cleanup_claim_expires_at,
+      created_at,
+      updated_at
+    ) SELECT
+      ${sessionId},
+      ${sandboxId},
+      ${lookupId},
+      ${state},
+      ${generation},
+      NULL,
+      NULL,
+      0,
+      NULL,
+      NULL,
+      NULL,
+      NULL,
+      ${now},
+      ${now}
+    WHERE ${authorizationCondition}
+    ON CONFLICT(session_id, sandbox_id, lookup_id) DO UPDATE SET
+      state = CASE
+        WHEN interactive_session_credential_policies.state = 'cleanup_pending'
+          OR excluded.state = 'cleanup_pending'
+        THEN 'cleanup_pending'
+        WHEN interactive_session_credential_policies.registration_claim IS NOT NULL
+        THEN interactive_session_credential_policies.state
+        ELSE excluded.state
+      END,
+      last_error = CASE
+        WHEN interactive_session_credential_policies.state = 'cleanup_pending'
+          OR interactive_session_credential_policies.registration_claim IS NOT NULL
+          OR excluded.state = 'cleanup_pending'
+        THEN interactive_session_credential_policies.last_error
+        ELSE NULL
+      END,
+      cleanup_claim = CASE
+        WHEN interactive_session_credential_policies.state = 'cleanup_pending'
+          OR interactive_session_credential_policies.registration_claim IS NOT NULL
+          OR excluded.state = 'cleanup_pending'
+        THEN interactive_session_credential_policies.cleanup_claim
+        ELSE NULL
+      END,
+      cleanup_claim_expires_at = CASE
+        WHEN interactive_session_credential_policies.state = 'cleanup_pending'
+          OR interactive_session_credential_policies.registration_claim IS NOT NULL
+          OR excluded.state = 'cleanup_pending'
+        THEN interactive_session_credential_policies.cleanup_claim_expires_at
+        ELSE NULL
+      END,
+      updated_at = excluded.updated_at
+  `,
+  );
+}
+
+function sandboxCredentialPolicyCleanupAuthorizedCondition(
+  sessionId: string,
+  sandboxId: string,
+  now: number,
+): RawBuilder<boolean> {
+  const leasePrefix = `${sandboxLeasePrefix}${sandboxId}`;
+  return sql<boolean>`
+    NOT EXISTS (
+      SELECT 1
+      FROM standalone_sandbox_provisions AS owner
+      WHERE owner.id = ${sessionId}
+        AND owner.sandbox_id = ${sandboxId}
+        AND (
+          owner.state = 'active'
+          OR (
+            owner.state = 'provisioning'
+            AND owner.ownership_claim IS NOT NULL
+            AND owner.ownership_claim_expires_at > ${now}
+          )
+        )
+    )
+    AND NOT EXISTS (
+      SELECT 1
+      FROM interactive_sessions AS session
+      WHERE session.id = ${sessionId}
+        AND (session.adapter IS NULL OR session.adapter != ${runtimeAdapterName})
+        AND session.status IN ('provisioning', 'pending_adapter', 'ready', 'attached', 'detached')
+        AND session.credential_cleanup_terminal_status IS NULL
+        AND session.agent_token_hash IS NOT NULL
+        AND (
+          (
+            session.lease_id IS NOT NULL
+            AND substr(session.lease_id, 1, ${leasePrefix.length}) = ${leasePrefix}
+            AND (
+              length(session.lease_id) = ${leasePrefix.length}
+              OR substr(session.lease_id, ${leasePrefix.length + 1}, 1) = ':'
+            )
+          )
+          OR (
+            session.sandbox_refresh_sandbox_id = ${sandboxId}
+            AND session.sandbox_refresh_claim IS NOT NULL
+            AND session.sandbox_refresh_claim_expires_at > ${now}
+          )
+        )
+    )
+  `;
+}
+
+async function sandboxCredentialPolicyGeneration(
+  env: RuntimeEnv,
+  sessionId: string,
+  sandboxId: string,
+): Promise<string> {
+  return (
+    (await existingSandboxCredentialPolicyGeneration(env, sessionId, sandboxId)) ??
+    `generation:${crypto.randomUUID()}`
+  );
+}
+
+async function existingSandboxCredentialPolicyGeneration(
+  env: RuntimeEnv,
+  sessionId: string,
+  sandboxId: string,
+): Promise<string | null> {
+  const existing = await database(env)
+    .selectFrom("interactive_session_credential_policies")
+    .select("registration_generation")
+    .where("session_id", "=", sessionId)
+    .where("sandbox_id", "=", sandboxId)
+    .orderBy("lookup_id", "asc")
+    .executeTakeFirst();
+  return existing?.registration_generation ?? null;
+}
+
+function activeSandboxCredentialPolicyCondition(
+  env: RuntimeEnv,
+  sessionId: string,
+  sandboxId: string,
+  generation: string,
+  updatedAt?: number,
+): RawBuilder<boolean> {
+  const lookupIds = sandboxLookupIds(env, sandboxId);
+  const updatedAtCondition =
+    updatedAt === undefined ? sql<boolean>`1 = 1` : sql<boolean>`updated_at = ${updatedAt}`;
+  return sql<boolean>`
+    (
+      SELECT count(DISTINCT lookup_id)
+      FROM interactive_session_credential_policies
+      WHERE session_id = ${sessionId}
+        AND sandbox_id = ${sandboxId}
+        AND lookup_id IN (${sql.join(lookupIds)})
+        AND state = 'active'
+        AND registration_generation = ${generation}
+        AND registration_claim IS NULL
+        AND ${updatedAtCondition}
+    ) = ${lookupIds.length}
+    AND NOT EXISTS (
+      SELECT 1
+      FROM interactive_session_credential_policies
+      WHERE session_id = ${sessionId}
+        AND sandbox_id = ${sandboxId}
+        AND (
+          state != 'active'
+          OR registration_generation != ${generation}
+          OR registration_claim IS NOT NULL
+          OR NOT (${updatedAtCondition})
+        )
+    )
+  `;
+}
+
+async function activeSandboxCredentialPolicyGeneration(
+  env: RuntimeEnv,
+  sessionId: string,
+  sandboxId: string,
+): Promise<string | null> {
+  const rows = await database(env)
+    .selectFrom("interactive_session_credential_policies")
+    .select(["lookup_id", "state", "registration_generation", "registration_claim"])
+    .where("session_id", "=", sessionId)
+    .where("sandbox_id", "=", sandboxId)
+    .execute();
+  const expected = sandboxLookupIds(env, sandboxId);
+  const generation = rows[0]?.registration_generation;
+  if (
+    !generation ||
+    !expected.every((lookupId) =>
+      rows.some(
+        (row) =>
+          row.lookup_id === lookupId &&
+          row.state === "active" &&
+          row.registration_generation === generation &&
+          row.registration_claim === null,
       ),
+    ) ||
+    rows.some(
+      (row) =>
+        row.state !== "active" ||
+        row.registration_generation !== generation ||
+        row.registration_claim !== null,
+    )
+  ) {
+    return null;
+  }
+  return generation;
+}
+
+async function queueSandboxCredentialPolicyCleanup(
+  env: RuntimeEnv,
+  sessionId: string,
+  sandboxId: string,
+  now = Date.now(),
+): Promise<void> {
+  const generation = await sandboxCredentialPolicyGeneration(env, sessionId, sandboxId);
+  await executeBatch(
+    env,
+    sandboxCredentialPolicyRefQueries(
+      env,
+      sessionId,
+      sandboxId,
+      "cleanup_pending",
+      generation,
+      now,
+      sandboxCredentialPolicyCleanupAuthorizedCondition(sessionId, sandboxId, now),
     ),
   );
 }
 
-async function unregisterInteractiveSessionCredentialPolicy(
-  env: RuntimeEnv,
-  session: Pick<InteractiveSession, "id" | "leaseId">,
-): Promise<void> {
-  if (session.leaseId?.startsWith(sandboxLeasePrefix)) {
-    await unregisterSandboxCredentialPolicy(env, sandboxLeaseInfo(session).sandboxId);
+function sandboxTerminalCleanupOwnership(
+  session: Pick<
+    InteractiveSessionRow,
+    | "id"
+    | "lease_id"
+    | "sandbox_refresh_sandbox_id"
+    | "sandbox_refresh_claim"
+    | "sandbox_refresh_claim_expires_at"
+  >,
+): SandboxTerminalCleanupOwnership | null {
+  if (!session.lease_id?.startsWith(sandboxLeasePrefix)) return null;
+  const terminalLeaseId = sandboxLeaseWithoutRefresh(session.lease_id);
+  let currentSandboxId: string;
+  try {
+    currentSandboxId = sandboxLeaseInfo({ id: session.id, leaseId: terminalLeaseId }).sandboxId;
+  } catch {
+    return null;
   }
+  const refreshValues = [
+    session.sandbox_refresh_sandbox_id,
+    session.sandbox_refresh_claim,
+    session.sandbox_refresh_claim_expires_at,
+  ];
+  const refreshPresent = refreshValues.some((value) => value !== null);
+  if (refreshPresent && refreshValues.some((value) => value === null)) return null;
+  if (
+    session.sandbox_refresh_sandbox_id &&
+    session.sandbox_refresh_claim &&
+    session.sandbox_refresh_claim_expires_at !== null
+  ) {
+    return {
+      fence: {
+        claim: session.sandbox_refresh_claim,
+        expiresAt: session.sandbox_refresh_claim_expires_at,
+        refreshLeaseId: session.lease_id,
+        sandboxId: session.sandbox_refresh_sandbox_id,
+      },
+      sandboxIds: [...new Set([currentSandboxId, session.sandbox_refresh_sandbox_id])],
+      terminalLeaseId,
+    };
+  }
+  return {
+    fence: { leaseId: session.lease_id, sandboxId: currentSandboxId },
+    sandboxIds: [currentSandboxId],
+    terminalLeaseId,
+  };
+}
+
+function sandboxManagedOwnershipFencesMatch(
+  left: SandboxManagedOwnershipFence,
+  right: SandboxManagedOwnershipFence,
+): boolean {
+  if ("leaseId" in left || "leaseId" in right) {
+    return (
+      "leaseId" in left &&
+      "leaseId" in right &&
+      left.leaseId === right.leaseId &&
+      left.sandboxId === right.sandboxId
+    );
+  }
+  return (
+    left.claim === right.claim &&
+    left.expiresAt === right.expiresAt &&
+    left.refreshLeaseId === right.refreshLeaseId &&
+    left.sandboxId === right.sandboxId
+  );
+}
+
+function terminalCleanupIntentRank(status: "stopped" | "expired" | "failed"): number {
+  return status === "failed" ? 3 : status === "expired" ? 2 : 1;
+}
+
+async function stageTerminalCredentialPolicyCleanup(
+  env: RuntimeEnv,
+  session: InteractiveSessionRow,
+  terminalStatus: "stopped" | "expired" | "failed",
+  message: string,
+  now: number,
+  failureReason?: string,
+  requiredFence?: SandboxManagedOwnershipFence,
+): Promise<boolean> {
+  const ownership = sandboxTerminalCleanupOwnership(session);
+  if (
+    !ownership ||
+    (requiredFence && !sandboxManagedOwnershipFencesMatch(ownership.fence, requiredFence))
+  ) {
+    return false;
+  }
+  const db = database(env);
+  const stageRevision = Math.max(now, session.updated_at + 1);
+  const generations = await Promise.all(
+    ownership.sandboxIds.map(async (sandboxId) => ({
+      generation: await sandboxCredentialPolicyGeneration(env, session.id, sandboxId),
+      sandboxId,
+    })),
+  );
+  const cleanupIntent = sql<"stopped" | "expired" | "failed">`CASE
+    WHEN credential_cleanup_terminal_status = 'failed' OR ${terminalStatus} = 'failed'
+      THEN 'failed'
+    WHEN credential_cleanup_terminal_status = 'expired' OR ${terminalStatus} = 'expired'
+      THEN 'expired'
+    ELSE 'stopped'
+  END`;
+  const failureFallback =
+    failureReason ??
+    (terminalStatus === "failed"
+      ? message
+      : "interactive workspace failed during credential cleanup");
+  const failureEvidence = sql<string | null>`CASE
+    WHEN credential_cleanup_terminal_status = 'failed' THEN COALESCE(
+      NULLIF(terminal_failure_reason, ''),
+      NULLIF(reconcile_error, ''),
+      NULLIF(last_event, ''),
+      ${failureFallback}
+    )
+    WHEN ${terminalStatus} = 'failed' THEN COALESCE(
+      NULLIF(terminal_failure_reason, ''),
+      NULLIF(${failureFallback}, ''),
+      NULLIF(reconcile_error, ''),
+      NULLIF(last_event, ''),
+      'interactive workspace failed during credential cleanup'
+    )
+    ELSE terminal_failure_reason
+  END`;
+  const sessionTransition = db
+    .updateTable("interactive_sessions")
+    .set({
+      status: "stopping",
+      lease_id: ownership.terminalLeaseId,
+      credential_cleanup_terminal_status: cleanupIntent,
+      terminal_finalize_pending: 0,
+      sandbox_refresh_sandbox_id: null,
+      sandbox_refresh_claim: null,
+      sandbox_refresh_claim_expires_at: null,
+      agent_token_hash: null,
+      attach_url: null,
+      vnc_url: null,
+      controller: null,
+      control_requested_by: null,
+      control_requested_at: null,
+      control_granted_at: null,
+      control_expires_at: null,
+      reconcile_error: sql<string>`CASE
+        WHEN credential_cleanup_terminal_status = 'failed' OR ${terminalStatus} = 'failed'
+          THEN COALESCE(${failureEvidence}, ${message})
+        ELSE ${message}
+      END`,
+      terminal_failure_reason: failureEvidence,
+      terminal_status: null,
+      adapter_create_pending: 0,
+      stopped_at: sql<number>`COALESCE(stopped_at, ${now})`,
+      updated_at: stageRevision,
+      last_event: message,
+    })
+    .where("id", "=", session.id)
+    .where("updated_at", "=", session.updated_at)
+    .where((expression) =>
+      expression.or([
+        expression("adapter", "is", null),
+        expression("adapter", "!=", runtimeAdapterName),
+      ]),
+    )
+    .where(sandboxManagedStoredOwnershipCondition(ownership.fence));
+  const policyTransitions = generations.flatMap(({ generation, sandboxId }) => [
+    ...sandboxCredentialPolicyRefQueries(
+      env,
+      session.id,
+      sandboxId,
+      "cleanup_pending",
+      generation,
+      stageRevision,
+      sandboxCredentialPolicyCleanupAuthorizedCondition(session.id, sandboxId, stageRevision),
+    ),
+    db
+      .updateTable("interactive_session_credential_policies")
+      .set({
+        state: "cleanup_pending",
+        updated_at: stageRevision,
+      })
+      .where("session_id", "=", session.id)
+      .where("sandbox_id", "=", sandboxId)
+      .where(
+        sandboxCredentialPolicyCleanupAuthorizedCondition(session.id, sandboxId, stageRevision),
+      ),
+  ]);
+  await executeBatch(env, [sessionTransition, ...policyTransitions]);
+  const staged = await db
+    .selectFrom("interactive_sessions")
+    .select([
+      "status",
+      "credential_cleanup_terminal_status",
+      "terminal_failure_reason",
+      "updated_at",
+    ])
+    .where("id", "=", session.id)
+    .executeTakeFirst();
+  return Boolean(
+    staged?.status === "stopping" &&
+    staged.updated_at === stageRevision &&
+    staged.credential_cleanup_terminal_status &&
+    terminalCleanupIntentRank(staged.credential_cleanup_terminal_status) >=
+      terminalCleanupIntentRank(terminalStatus) &&
+    (staged.credential_cleanup_terminal_status !== "failed" || staged.terminal_failure_reason),
+  );
+}
+
+async function stageTerminalCredentialPolicyCleanupById(
+  env: RuntimeEnv,
+  sessionId: string,
+  terminalStatus: "stopped" | "expired" | "failed",
+  message: string,
+  now: number,
+  failureReason?: string,
+  requiredFence?: SandboxManagedOwnershipFence,
+): Promise<boolean> {
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    const session = await database(env)
+      .selectFrom("interactive_sessions")
+      .selectAll()
+      .where("id", "=", sessionId)
+      .executeTakeFirst();
+    if (!session) return false;
+    if (
+      session.status === "stopping" &&
+      session.credential_cleanup_terminal_status &&
+      terminalCleanupIntentRank(session.credential_cleanup_terminal_status) >=
+        terminalCleanupIntentRank(terminalStatus) &&
+      (session.credential_cleanup_terminal_status !== "failed" || session.terminal_failure_reason)
+    ) {
+      return true;
+    }
+    if (
+      await stageTerminalCredentialPolicyCleanup(
+        env,
+        session,
+        terminalStatus,
+        message,
+        now,
+        failureReason,
+        session.status === "stopping" && session.credential_cleanup_terminal_status
+          ? undefined
+          : requiredFence,
+      )
+    ) {
+      return true;
+    }
+  }
+  return false;
+}
+
+type CredentialPolicyScanRow = {
+  scan_rowid: number;
+  session_id: string;
+  sandbox_id: string;
+  lookup_id: string;
+  policy_state: "registering" | "active";
+  registration_generation: string;
+  registration_claim: string | null;
+  registration_claim_expires_at: number | null;
+  policy_updated_at: number;
+  matched_session_id: string | null;
+  session_adapter: string | null;
+  session_status: InteractiveSessionStatus | null;
+  session_lease_id: string | null;
+  credential_cleanup_terminal_status: "stopped" | "expired" | "failed" | null;
+  session_sandbox_refresh_sandbox_id: string | null;
+  session_sandbox_refresh_claim: string | null;
+  session_sandbox_refresh_claim_expires_at: number | null;
+  session_agent_token_hash: string | null;
+  session_updated_at: number | null;
+  matched_standalone_id: string | null;
+  standalone_state: "provisioning" | "active" | "cleanup_pending" | null;
+  standalone_claim: string | null;
+  standalone_claim_expires_at: number | null;
+  standalone_updated_at: number | null;
+};
+
+async function scanCredentialPolicyCleanupPage(
+  env: RuntimeEnv,
+  now: number,
+  sessionId?: string,
+): Promise<void> {
+  const db = database(env);
+  const state = sessionId
+    ? null
+    : await db
+        .selectFrom("credential_policy_reconcile_state")
+        .select(["last_rowid", "scan_max_rowid"])
+        .where("id", "=", 1)
+        .executeTakeFirst();
+  const originalCursor = state?.last_rowid ?? 0;
+  const originalMaxRowid = state?.scan_max_rowid ?? 0;
+  let cursor = sessionId ? 0 : originalCursor;
+  let maxRowid = sessionId
+    ? Number.MAX_SAFE_INTEGER
+    : originalMaxRowid || (await maximumCredentialPolicyRowid(db));
+  let rows = await readCredentialPolicyScanPage(db, cursor, maxRowid, sessionId);
+  if (!sessionId && rows.length === 0 && (cursor > 0 || maxRowid > 0)) {
+    cursor = 0;
+    maxRowid = await maximumCredentialPolicyRowid(db);
+    rows = await readCredentialPolicyScanPage(db, cursor, maxRowid);
+  }
+  const attemptedRepairs = new Set<string>();
+  const repairedRegistrations = new Set<string>();
+  const deferredRegistrations = new Set<string>();
+  for (const row of rows) {
+    const registrationKey = `${row.session_id}\u0000${row.sandbox_id}\u0000${row.registration_generation}`;
+    if (attemptedRepairs.has(registrationKey)) continue;
+    attemptedRepairs.add(registrationKey);
+    try {
+      if (await repairActiveSandboxCredentialPolicyRegistration(env, row, now)) {
+        repairedRegistrations.add(registrationKey);
+      }
+    } catch (error) {
+      deferredRegistrations.add(registrationKey);
+      console.error("active sandbox credential policy repair failed", error);
+    }
+  }
+  const candidates = rows.filter(
+    (row) =>
+      !repairedRegistrations.has(
+        `${row.session_id}\u0000${row.sandbox_id}\u0000${row.registration_generation}`,
+      ) &&
+      !deferredRegistrations.has(
+        `${row.session_id}\u0000${row.sandbox_id}\u0000${row.registration_generation}`,
+      ) &&
+      credentialPolicyScanRequiresCleanup(row, now),
+  );
+  for (const row of candidates) {
+    const transitionRevision = Math.max(
+      now,
+      row.policy_updated_at + 1,
+      (row.session_updated_at ?? 0) + 1,
+      (row.standalone_updated_at ?? 0) + 1,
+    );
+    let policyTransition = db
+      .updateTable("interactive_session_credential_policies")
+      .set({ state: "cleanup_pending", updated_at: transitionRevision })
+      .where("session_id", "=", row.session_id)
+      .where("sandbox_id", "=", row.sandbox_id)
+      .where("lookup_id", "=", row.lookup_id)
+      .where("state", "=", row.policy_state)
+      .where("registration_generation", "=", row.registration_generation)
+      .where("updated_at", "=", row.policy_updated_at)
+      .where(
+        sandboxCredentialPolicyCleanupAuthorizedCondition(row.session_id, row.sandbox_id, now),
+      );
+    policyTransition = row.registration_claim
+      ? policyTransition.where("registration_claim", "=", row.registration_claim)
+      : policyTransition.where("registration_claim", "is", null);
+    policyTransition =
+      row.registration_claim_expires_at === null
+        ? policyTransition.where("registration_claim_expires_at", "is", null)
+        : policyTransition.where(
+            "registration_claim_expires_at",
+            "=",
+            row.registration_claim_expires_at,
+          );
+    if (row.matched_standalone_id) {
+      if (!row.standalone_state || row.standalone_updated_at === null) continue;
+      let ownerTransition = db
+        .updateTable("standalone_sandbox_provisions")
+        .set({
+          state: "cleanup_pending",
+          ownership_claim: null,
+          ownership_claim_expires_at: null,
+          updated_at: transitionRevision,
+        })
+        .where("id", "=", row.matched_standalone_id)
+        .where("sandbox_id", "=", row.sandbox_id)
+        .where("state", "=", row.standalone_state)
+        .where("updated_at", "=", row.standalone_updated_at);
+      ownerTransition = row.standalone_claim
+        ? ownerTransition.where("ownership_claim", "=", row.standalone_claim)
+        : ownerTransition.where("ownership_claim", "is", null);
+      ownerTransition =
+        row.standalone_claim_expires_at === null
+          ? ownerTransition.where("ownership_claim_expires_at", "is", null)
+          : ownerTransition.where(
+              "ownership_claim_expires_at",
+              "=",
+              row.standalone_claim_expires_at,
+            );
+      await executeBatch(env, [ownerTransition, policyTransition]);
+      continue;
+    }
+    if (!row.matched_session_id || row.session_adapter === runtimeAdapterName) {
+      await executeBatch(env, [policyTransition]);
+      continue;
+    }
+    const sessionTransition = sql`
+        UPDATE interactive_sessions
+        SET terminal_failure_reason = CASE
+              WHEN credential_cleanup_terminal_status = 'failed'
+                OR status = 'failed'
+                OR (
+                  credential_cleanup_terminal_status IS NULL
+                  AND status NOT IN ('stopping', 'stopped', 'expired')
+                )
+              THEN COALESCE(
+                NULLIF(terminal_failure_reason, ''),
+                NULLIF(reconcile_error, ''),
+                NULLIF(last_event, ''),
+                'sandbox credential registration cleanup failed'
+              )
+              ELSE terminal_failure_reason
+            END,
+            status = 'stopping',
+            credential_cleanup_terminal_status = CASE
+              WHEN credential_cleanup_terminal_status = 'failed' OR status = 'failed'
+                THEN 'failed'
+              WHEN credential_cleanup_terminal_status = 'expired' OR status = 'expired'
+                THEN 'expired'
+              WHEN credential_cleanup_terminal_status = 'stopped'
+                OR status IN ('stopping', 'stopped')
+                THEN 'stopped'
+              ELSE 'failed'
+            END,
+            terminal_status = NULL,
+            adapter_create_pending = 0,
+            terminal_finalize_pending = 0,
+            sandbox_refresh_sandbox_id = NULL,
+            sandbox_refresh_claim = NULL,
+            sandbox_refresh_claim_expires_at = NULL,
+            agent_token_hash = NULL,
+            attach_url = NULL,
+            vnc_url = NULL,
+            controller = NULL,
+            control_requested_by = NULL,
+            control_requested_at = NULL,
+            control_granted_at = NULL,
+            control_expires_at = NULL,
+            reconcile_error = CASE
+              WHEN credential_cleanup_terminal_status = 'failed'
+                OR status = 'failed'
+                OR (
+                  credential_cleanup_terminal_status IS NULL
+                  AND status NOT IN ('stopping', 'stopped', 'expired')
+                )
+              THEN COALESCE(
+                NULLIF(terminal_failure_reason, ''),
+                NULLIF(reconcile_error, ''),
+                NULLIF(last_event, ''),
+                'sandbox credential registration cleanup failed'
+              )
+              ELSE 'sandbox credential registration cleanup pending'
+            END,
+            stopped_at = COALESCE(stopped_at, ${now}),
+            updated_at = ${transitionRevision},
+            last_event = 'sandbox credential registration cleanup pending'
+        WHERE id = ${row.matched_session_id}
+          AND adapter IS ${row.session_adapter}
+          AND status IS ${row.session_status}
+          AND lease_id IS ${row.session_lease_id}
+          AND credential_cleanup_terminal_status IS ${row.credential_cleanup_terminal_status}
+          AND sandbox_refresh_sandbox_id IS ${row.session_sandbox_refresh_sandbox_id}
+          AND sandbox_refresh_claim IS ${row.session_sandbox_refresh_claim}
+          AND sandbox_refresh_claim_expires_at IS ${row.session_sandbox_refresh_claim_expires_at}
+          AND agent_token_hash IS ${row.session_agent_token_hash}
+          AND updated_at IS ${row.session_updated_at}
+      `;
+    await executeBatch(env, [sessionTransition, policyTransition]);
+  }
+  if (!sessionId) {
+    const nextCursor = rows.at(-1)?.scan_rowid ?? 0;
+    await sql`
+      UPDATE credential_policy_reconcile_state
+      SET last_rowid = ${nextCursor}, scan_max_rowid = ${maxRowid}, updated_at = ${now}
+      WHERE id = 1
+        AND last_rowid = ${originalCursor}
+        AND scan_max_rowid = ${originalMaxRowid}
+    `.execute(db);
+  }
+}
+
+async function readCredentialPolicyScanPage(
+  db: Kysely<Database>,
+  cursor: number,
+  maxRowid: number,
+  sessionId?: string,
+): Promise<CredentialPolicyScanRow[]> {
+  const sessionFilter = sessionId ? sql`AND policy.session_id = ${sessionId}` : sql``;
+  const result = await sql<CredentialPolicyScanRow>`
+    SELECT
+      policy.rowid AS scan_rowid,
+      policy.session_id,
+      policy.sandbox_id,
+      policy.lookup_id,
+      policy.state AS policy_state,
+      policy.registration_generation,
+      policy.registration_claim,
+      policy.registration_claim_expires_at,
+      policy.updated_at AS policy_updated_at,
+      session.id AS matched_session_id,
+      session.adapter AS session_adapter,
+      session.status AS session_status,
+      session.lease_id AS session_lease_id,
+      session.credential_cleanup_terminal_status,
+      session.sandbox_refresh_sandbox_id AS session_sandbox_refresh_sandbox_id,
+      session.sandbox_refresh_claim AS session_sandbox_refresh_claim,
+      session.sandbox_refresh_claim_expires_at AS session_sandbox_refresh_claim_expires_at,
+      session.agent_token_hash AS session_agent_token_hash,
+      session.updated_at AS session_updated_at,
+      standalone.id AS matched_standalone_id,
+      standalone.state AS standalone_state,
+      standalone.ownership_claim AS standalone_claim,
+      standalone.ownership_claim_expires_at AS standalone_claim_expires_at,
+      standalone.updated_at AS standalone_updated_at
+    FROM interactive_session_credential_policies AS policy
+    LEFT JOIN interactive_sessions AS session ON session.id = policy.session_id
+    LEFT JOIN standalone_sandbox_provisions AS standalone
+      ON standalone.id = policy.session_id
+      AND standalone.sandbox_id = policy.sandbox_id
+    WHERE policy.rowid > ${cursor}
+      AND policy.rowid <= ${maxRowid}
+      AND policy.state IN ('registering', 'active')
+      ${sessionFilter}
+    ORDER BY policy.rowid ASC
+    LIMIT ${credentialPolicyScanLimit}
+  `.execute(db);
+  return result.rows;
+}
+
+async function maximumCredentialPolicyRowid(db: Kysely<Database>): Promise<number> {
+  const result = await sql<{ max_rowid: number }>`
+    SELECT COALESCE(MAX(rowid), 0) AS max_rowid
+    FROM interactive_session_credential_policies
+  `.execute(db);
+  return result.rows[0]?.max_rowid ?? 0;
+}
+
+async function repairActiveSandboxCredentialPolicyRegistration(
+  env: RuntimeEnv,
+  row: CredentialPolicyScanRow,
+  now: number,
+): Promise<boolean> {
+  if (
+    row.policy_state !== "registering" ||
+    (row.registration_claim !== null &&
+      (row.registration_claim_expires_at ?? Number.NEGATIVE_INFINITY) > now)
+  ) {
+    return false;
+  }
+  const ownershipFence = credentialPolicyScanOwnershipFence(row, now);
+  if (!ownershipFence) return false;
+  if (!(await sandboxCredentialPolicyExists(env, row.sandbox_id, row.registration_generation))) {
+    return false;
+  }
+  const repaired = await recordSandboxCredentialPolicyRefs(
+    env,
+    row.session_id,
+    row.sandbox_id,
+    "active",
+    row.registration_generation,
+    ownershipFence,
+    now,
+  );
+  if (!repaired) {
+    throw new Error("active sandbox credential policy repair lost durable ownership");
+  }
+  return true;
+}
+
+function credentialPolicyScanOwnershipFence(
+  row: CredentialPolicyScanRow,
+  now: number,
+): SandboxCredentialPolicyOwnershipFence | null {
+  if (
+    row.matched_standalone_id === row.session_id &&
+    row.standalone_state === "provisioning" &&
+    row.standalone_claim &&
+    (row.standalone_claim_expires_at ?? Number.NEGATIVE_INFINITY) > now
+  ) {
+    return {
+      claim: row.standalone_claim,
+      provisionId: row.matched_standalone_id,
+      sandboxId: row.sandbox_id,
+    };
+  }
+  if (!row.matched_session_id || !row.session_lease_id) return null;
+  try {
+    const lease = sandboxLeaseInfo({
+      id: row.matched_session_id,
+      adapter: row.session_adapter,
+      leaseId: row.session_lease_id,
+    });
+    if (lease.sandboxId === row.sandbox_id) {
+      return { leaseId: row.session_lease_id, sandboxId: row.sandbox_id };
+    }
+  } catch {
+    return null;
+  }
+  if (
+    row.session_sandbox_refresh_sandbox_id === row.sandbox_id &&
+    row.session_sandbox_refresh_claim &&
+    (row.session_sandbox_refresh_claim_expires_at ?? Number.NEGATIVE_INFINITY) > now
+  ) {
+    return {
+      claim: row.session_sandbox_refresh_claim,
+      expiresAt: row.session_sandbox_refresh_claim_expires_at as number,
+      refreshLeaseId: row.session_lease_id,
+      sandboxId: row.sandbox_id,
+    };
+  }
+  return null;
+}
+
+function credentialPolicyScanRequiresCleanup(row: CredentialPolicyScanRow, now: number): boolean {
+  const registrationAbandoned =
+    row.policy_state === "registering" &&
+    (row.registration_claim === null ||
+      (row.registration_claim_expires_at ?? Number.NEGATIVE_INFINITY) <= now);
+  if (row.matched_standalone_id) {
+    if (row.standalone_state === "active") return false;
+    if (row.standalone_state === "provisioning") {
+      return (row.standalone_claim_expires_at ?? Number.NEGATIVE_INFINITY) <= now;
+    }
+    return true;
+  }
+  if (!row.matched_session_id || row.session_adapter === runtimeAdapterName) return true;
+  if (
+    row.credential_cleanup_terminal_status !== null ||
+    row.session_status === "stopping" ||
+    row.session_status === "stopped" ||
+    row.session_status === "expired" ||
+    row.session_status === "failed"
+  ) {
+    return true;
+  }
+  const leaseSandboxId = row.session_lease_id?.startsWith(sandboxLeasePrefix)
+    ? (row.session_lease_id.slice(sandboxLeasePrefix.length).split(":", 1)[0] ?? null)
+    : null;
+  const sandboxExpected = credentialPolicySandboxIsExpected(
+    leaseSandboxId,
+    row.sandbox_id,
+    row.session_sandbox_refresh_sandbox_id,
+    row.session_sandbox_refresh_claim,
+    row.session_sandbox_refresh_claim_expires_at,
+    now,
+  );
+  if (
+    sandboxExpected &&
+    (row.session_status === "ready" ||
+      row.session_status === "attached" ||
+      row.session_status === "detached")
+  ) {
+    // Migrated live sessions can predate agent tokens; the durable lease/refresh fence owns policy.
+    return false;
+  }
+  if (registrationAbandoned) return true;
+  if (
+    row.policy_state === "active" &&
+    (row.session_status === "provisioning" || row.session_status === "pending_adapter") &&
+    row.policy_updated_at <= now - credentialPolicyProvisioningStaleMs &&
+    (row.session_updated_at ?? Number.NEGATIVE_INFINITY) <=
+      now - credentialPolicyProvisioningStaleMs
+  ) {
+    return true;
+  }
+  if (
+    row.policy_state === "active" &&
+    (row.session_status === "ready" ||
+      row.session_status === "attached" ||
+      row.session_status === "detached")
+  ) {
+    return true;
+  }
+  return false;
+}
+
+async function normalizeCredentialPolicyCleanupGroups(
+  env: RuntimeEnv,
+  now: number,
+  sessionId?: string,
+): Promise<void> {
+  const db = database(env);
+  const state = sessionId
+    ? null
+    : await db
+        .selectFrom("credential_policy_reconcile_state")
+        .select([
+          "group_session_id",
+          "group_sandbox_id",
+          "group_max_session_id",
+          "group_max_sandbox_id",
+        ])
+        .where("id", "=", 1)
+        .executeTakeFirst();
+  const originalSessionCursor = state?.group_session_id ?? "";
+  const originalSandboxCursor = state?.group_sandbox_id ?? "";
+  const originalMaxSession = state?.group_max_session_id ?? "";
+  const originalMaxSandbox = state?.group_max_sandbox_id ?? "";
+  let maximum = sessionId
+    ? { session_id: sessionId, sandbox_id: "\uffff" }
+    : originalMaxSession
+      ? { session_id: originalMaxSession, sandbox_id: originalMaxSandbox }
+      : await maximumCredentialPolicyCleanupGroup(db);
+  let groups = await readCredentialPolicyCleanupGroups(
+    db,
+    sessionId ? "" : originalSessionCursor,
+    sessionId ? "" : originalSandboxCursor,
+    maximum,
+    sessionId,
+  );
+  if (!sessionId && groups.length === 0 && maximum) {
+    maximum = await maximumCredentialPolicyCleanupGroup(db);
+    groups = await readCredentialPolicyCleanupGroups(db, "", "", maximum);
+  }
+  for (const group of groups) {
+    await queueSandboxCredentialPolicyCleanup(env, group.session_id, group.sandbox_id, now);
+  }
+  if (!sessionId) {
+    const last = groups.at(-1);
+    await db
+      .updateTable("credential_policy_reconcile_state")
+      .set({
+        group_session_id: last?.session_id ?? "",
+        group_sandbox_id: last?.sandbox_id ?? "",
+        group_max_session_id: maximum?.session_id ?? "",
+        group_max_sandbox_id: maximum?.sandbox_id ?? "",
+        updated_at: now,
+      })
+      .where("id", "=", 1)
+      .where("group_session_id", "=", originalSessionCursor)
+      .where("group_sandbox_id", "=", originalSandboxCursor)
+      .where("group_max_session_id", "=", originalMaxSession)
+      .where("group_max_sandbox_id", "=", originalMaxSandbox)
+      .execute();
+  }
+}
+
+async function readCredentialPolicyCleanupGroups(
+  db: Kysely<Database>,
+  sessionCursor: string,
+  sandboxCursor: string,
+  maximum: { session_id: string; sandbox_id: string } | null,
+  sessionId?: string,
+): Promise<Array<{ session_id: string; sandbox_id: string }>> {
+  let query = db
+    .selectFrom("interactive_session_credential_policies")
+    .select(["session_id", "sandbox_id"])
+    .distinct()
+    .where("state", "=", "cleanup_pending")
+    .where((expression) =>
+      expression.or([
+        expression("session_id", ">", sessionCursor),
+        expression.and([
+          expression("session_id", "=", sessionCursor),
+          expression("sandbox_id", ">", sandboxCursor),
+        ]),
+      ]),
+    )
+    .where((expression) =>
+      maximum
+        ? expression.or([
+            expression("session_id", "<", maximum.session_id),
+            expression.and([
+              expression("session_id", "=", maximum.session_id),
+              expression("sandbox_id", "<=", maximum.sandbox_id),
+            ]),
+          ])
+        : expression("session_id", "=", ""),
+    )
+    .orderBy("session_id", "asc")
+    .orderBy("sandbox_id", "asc")
+    .limit(credentialPolicyCleanupLimit);
+  if (sessionId) query = query.where("session_id", "=", sessionId);
+  return query.execute();
+}
+
+async function maximumCredentialPolicyCleanupGroup(
+  db: Kysely<Database>,
+): Promise<{ session_id: string; sandbox_id: string } | null> {
+  return (
+    (await db
+      .selectFrom("interactive_session_credential_policies")
+      .select(["session_id", "sandbox_id"])
+      .where("state", "=", "cleanup_pending")
+      .orderBy("session_id", "desc")
+      .orderBy("sandbox_id", "desc")
+      .executeTakeFirst()) ?? null
+  );
+}
+
+async function reconcileCredentialPolicyCleanupBatch(
+  env: RuntimeEnv,
+  now: number,
+  sessionId?: string,
+): Promise<void> {
+  await repairLegacySandboxCredentialPolicyBatch(env, now, sessionId).catch((error) => {
+    console.error("legacy sandbox credential policy repair batch failed", error);
+  });
+  await expireStandaloneSandboxProvisions(env, now, sessionId).catch((error) => {
+    console.error("standalone Sandbox expiry failed", error);
+  });
+  await scanCredentialPolicyCleanupPage(env, now, sessionId).catch((error) => {
+    console.error("credential policy cleanup scan failed", error);
+  });
+  await normalizeCredentialPolicyCleanupGroups(env, now, sessionId).catch((error) => {
+    console.error("credential policy cleanup group normalization failed", error);
+  });
+  let query = database(env)
+    .selectFrom("interactive_session_credential_policies")
+    .selectAll()
+    .where("state", "=", "cleanup_pending")
+    .where((expression) =>
+      expression.or([
+        expression("cleanup_claim", "is", null),
+        expression("cleanup_claim_expires_at", "<", now),
+      ]),
+    )
+    .where(sql<boolean>`
+      NOT EXISTS (
+        SELECT 1
+        FROM interactive_session_credential_policies AS registration
+        WHERE registration.session_id = interactive_session_credential_policies.session_id
+          AND registration.sandbox_id = interactive_session_credential_policies.sandbox_id
+          AND registration.registration_claim IS NOT NULL
+          AND registration.registration_claim_expires_at > ${now}
+      )
+    `)
+    .orderBy(sql`COALESCE(last_attempt_at, created_at)`, "asc")
+    .orderBy("session_id", "asc")
+    .orderBy("sandbox_id", "asc")
+    .orderBy("lookup_id", "asc")
+    .limit(credentialPolicyCleanupLimit);
+  if (sessionId) query = query.where("session_id", "=", sessionId);
+  const policies = await query.execute();
+  await mapWithConcurrency(policies, 3, async (policy) => {
+    await reconcileCredentialPolicyCleanup(env, policy, now);
+  });
+  let completedSessions = database(env)
+    .selectFrom("interactive_sessions")
+    .select("id")
+    .where("status", "in", ["stopping", "stopped", "expired", "failed"])
+    .where("credential_cleanup_terminal_status", "is not", null)
+    .where(sql<boolean>`
+      NOT EXISTS (
+        SELECT 1
+        FROM interactive_session_credential_policies AS policy
+        WHERE policy.session_id = interactive_sessions.id
+      )
+    `)
+    .orderBy("stopped_at", "asc")
+    .orderBy("id", "asc")
+    .limit(credentialPolicyCleanupLimit);
+  if (sessionId) completedSessions = completedSessions.where("id", "=", sessionId);
+  await mapWithConcurrency(await completedSessions.execute(), 3, async (session) => {
+    await completeCredentialPolicyCleanupSession(env, session.id, Date.now());
+  });
+  let standaloneCleanup = database(env)
+    .selectFrom("standalone_sandbox_provisions")
+    .select(["id", "sandbox_id"])
+    .where("state", "=", "cleanup_pending")
+    .orderBy("updated_at", "asc")
+    .limit(credentialPolicyCleanupLimit);
+  if (sessionId) standaloneCleanup = standaloneCleanup.where("id", "=", sessionId);
+  await mapWithConcurrency(await standaloneCleanup.execute(), 3, async (owner) => {
+    await completeStandaloneSandboxProvisionCleanupSafely(env, owner.id, owner.sandbox_id);
+  });
+}
+
+async function reconcileCredentialPolicyCleanup(
+  env: RuntimeEnv,
+  policy: Selectable<InteractiveSessionCredentialPolicyTable>,
+  now: number,
+): Promise<void> {
+  const claim = crypto.randomUUID();
+  const claimed = await sql`
+    UPDATE interactive_session_credential_policies
+    SET cleanup_claim = ${claim},
+        cleanup_claim_expires_at = ${now + credentialPolicyCleanupClaimMs},
+        attempt_count = attempt_count + 1,
+        last_attempt_at = ${now},
+        updated_at = ${now}
+    WHERE session_id = ${policy.session_id}
+      AND sandbox_id = ${policy.sandbox_id}
+      AND lookup_id = ${policy.lookup_id}
+      AND registration_generation = ${policy.registration_generation}
+      AND state = 'cleanup_pending'
+      AND (cleanup_claim IS NULL OR cleanup_claim_expires_at < ${now})
+      AND ${sandboxCredentialPolicyCleanupAuthorizedCondition(
+        policy.session_id,
+        policy.sandbox_id,
+        now,
+      )}
+      AND NOT EXISTS (
+        SELECT 1
+        FROM interactive_session_credential_policies AS registration
+        WHERE registration.session_id = interactive_session_credential_policies.session_id
+          AND registration.sandbox_id = interactive_session_credential_policies.sandbox_id
+          AND registration.registration_claim IS NOT NULL
+          AND registration.registration_claim_expires_at > ${now}
+      )
+  `.execute(database(env));
+  if ((claimed.numAffectedRows ?? 0n) === 0n) return;
+  try {
+    await unregisterSandboxCredentialPolicyLookup(
+      env,
+      policy.lookup_id,
+      policy.registration_generation,
+      policy.session_id,
+    );
+  } catch (error) {
+    await database(env)
+      .updateTable("interactive_session_credential_policies")
+      .set({
+        last_error: clean(error instanceof Error ? error.message : String(error), 500),
+        cleanup_claim: null,
+        cleanup_claim_expires_at: null,
+        updated_at: Date.now(),
+      })
+      .where("session_id", "=", policy.session_id)
+      .where("sandbox_id", "=", policy.sandbox_id)
+      .where("lookup_id", "=", policy.lookup_id)
+      .where("registration_generation", "=", policy.registration_generation)
+      .where("cleanup_claim", "=", claim)
+      .execute();
+    return;
+  }
+  await database(env)
+    .deleteFrom("interactive_session_credential_policies")
+    .where("session_id", "=", policy.session_id)
+    .where("sandbox_id", "=", policy.sandbox_id)
+    .where("lookup_id", "=", policy.lookup_id)
+    .where("registration_generation", "=", policy.registration_generation)
+    .where("cleanup_claim", "=", claim)
+    .execute();
+  await completeCredentialPolicyCleanupSession(env, policy.session_id, Date.now());
+  await completeStandaloneSandboxProvisionCleanupSafely(env, policy.session_id, policy.sandbox_id);
+}
+
+async function completeStandaloneSandboxProvisionCleanupSafely(
+  env: RuntimeEnv,
+  provisionId: string,
+  sandboxId: string,
+): Promise<void> {
+  try {
+    await completeStandaloneSandboxProvisionCleanup(env, provisionId, sandboxId);
+  } catch (error) {
+    const now = Date.now();
+    const message = `standalone Sandbox cleanup pending: ${safeProviderError(error, [
+      provisionId,
+      sandboxId,
+    ])}`;
+    try {
+      await database(env)
+        .updateTable("standalone_sandbox_provisions")
+        .set({
+          message,
+          updated_at: sql<number>`MAX(updated_at + 1, ${now})`,
+        })
+        .where("id", "=", provisionId)
+        .where("sandbox_id", "=", sandboxId)
+        .where("state", "=", "cleanup_pending")
+        .execute();
+    } catch (persistError) {
+      console.error("standalone Sandbox cleanup failure persistence failed", persistError);
+    }
+  }
+}
+
+async function completeStandaloneSandboxProvisionCleanup(
+  env: RuntimeEnv,
+  provisionId: string,
+  sandboxId: string,
+): Promise<void> {
+  const db = database(env);
+  const owner = await db
+    .selectFrom("standalone_sandbox_provisions")
+    .selectAll()
+    .where("id", "=", provisionId)
+    .where("sandbox_id", "=", sandboxId)
+    .where("state", "=", "cleanup_pending")
+    .executeTakeFirst();
+  if (!owner) return;
+  if (owner.lease_id) {
+    if (!env.SANDBOX) throw serviceUnavailable("Sandbox binding is not configured");
+    if (!isCurrentSandboxLease(owner.lease_id)) {
+      throw serviceUnavailable("standalone Sandbox cleanup lease is invalid");
+    }
+    const lease = sandboxLeaseInfo({ id: owner.id, leaseId: owner.lease_id });
+    if (lease.sandboxId !== owner.sandbox_id) {
+      throw serviceUnavailable("standalone Sandbox cleanup ownership is inconsistent");
+    }
+    try {
+      await getSandbox(env.SANDBOX, owner.sandbox_id).deleteSession(lease.terminalSessionId);
+    } catch (error) {
+      if (!isSandboxSessionAlreadyGone(error, lease.terminalSessionId)) throw error;
+    }
+  }
+  await db
+    .deleteFrom("standalone_sandbox_provisions")
+    .where("id", "=", provisionId)
+    .where("sandbox_id", "=", sandboxId)
+    .where("request_hash", "=", owner.request_hash)
+    .where("state", "=", "cleanup_pending")
+    .where("updated_at", "=", owner.updated_at)
+    .where(sql<boolean>`lease_id IS ${owner.lease_id}`)
+    .where(sql<boolean>`expires_at IS ${owner.expires_at}`)
+    .where(sql<boolean>`
+      NOT EXISTS (
+        SELECT 1
+        FROM interactive_session_credential_policies AS policy
+        WHERE policy.session_id = ${provisionId}
+          AND policy.sandbox_id = ${sandboxId}
+      )
+    `)
+    .execute();
+}
+
+async function completeCredentialPolicyCleanupSession(
+  env: RuntimeEnv,
+  sessionId: string,
+  now: number,
+): Promise<void> {
+  const db = database(env);
+  const remaining = await db
+    .selectFrom("interactive_session_credential_policies")
+    .select(({ fn }) => fn.countAll<number>().as("count"))
+    .where("session_id", "=", sessionId)
+    .executeTakeFirst();
+  if (Number(remaining?.count ?? 0) > 0) return;
+  const session = await db
+    .selectFrom("interactive_sessions")
+    .select([
+      "status",
+      "credential_cleanup_terminal_status",
+      "terminal_failure_reason",
+      "reconcile_error",
+      "last_event",
+      "stopped_at",
+      "updated_at",
+    ])
+    .where("id", "=", sessionId)
+    .executeTakeFirst();
+  const terminalStatus = session?.credential_cleanup_terminal_status;
+  if (!session || !terminalStatus) return;
+  const failureMessage = retainedRuntimeAdapterFailureMessage(
+    session.terminal_failure_reason,
+    session.reconcile_error,
+    session.last_event,
+  );
+  const updated = await db
+    .updateTable("interactive_sessions")
+    .set({
+      status: terminalStatus,
+      credential_cleanup_terminal_status: null,
+      terminal_status: null,
+      adapter_create_pending: 0,
+      terminal_finalize_pending: 1,
+      sandbox_refresh_sandbox_id: null,
+      sandbox_refresh_claim: null,
+      sandbox_refresh_claim_expires_at: null,
+      terminal_failure_reason: terminalStatus === "failed" ? failureMessage : null,
+      reconcile_error: terminalStatus === "failed" ? failureMessage : null,
+      stopped_at: session.stopped_at ?? now,
+      updated_at: sql<number>`MAX(updated_at + 1, ${now})`,
+      last_event:
+        terminalStatus === "failed"
+          ? failureMessage
+          : terminalStatus === "expired"
+            ? "interactive workspace expired after credential cleanup"
+            : "interactive workspace stopped after credential cleanup",
+    })
+    .where("id", "=", sessionId)
+    .where("status", "=", session.status)
+    .where("updated_at", "=", session.updated_at)
+    .where("credential_cleanup_terminal_status", "=", terminalStatus)
+    .where(sql<boolean>`
+      NOT EXISTS (
+        SELECT 1
+        FROM interactive_session_credential_policies
+        WHERE session_id = ${sessionId}
+      )
+    `)
+    .executeTakeFirst();
+  if ((updated.numUpdatedRows ?? 0n) === 0n) return;
+  await finalizeTerminalInteractiveSession(
+    env,
+    sessionId,
+    terminalStatus,
+    session.stopped_at ?? now,
+  ).catch(() => undefined);
+}
+
+function legacyInteractiveSessionLeaseId(
+  session: Pick<InteractiveSession, "adapter" | "leaseId">,
+): string | null {
+  return legacyLeaseIdForAdapter(session.adapter, session.leaseId);
+}
+
+function isSandboxInteractiveSession(
+  session: Pick<InteractiveSession, "adapter" | "leaseId">,
+): boolean {
+  return legacyInteractiveSessionLeaseId(session)?.startsWith(sandboxLeasePrefix) === true;
 }
 
 async function interactiveTerminalHub(
@@ -3251,7 +6516,7 @@ async function writeTerminalClipboardFile(
   rawName: unknown,
   rawMediaType: unknown,
 ): Promise<{ path: string; name: string; mediaType: string; byteCount: number }> {
-  if (!session.leaseId?.startsWith(sandboxLeasePrefix) || !env.SANDBOX) {
+  if (!isSandboxInteractiveSession(session) || !env.SANDBOX) {
     throw serviceUnavailable("clipboard file paste requires a Cloudflare Sandbox session");
   }
   if (!bytes.byteLength || bytes.byteLength > terminalClipboardMaxBytes) {
@@ -3306,16 +6571,22 @@ async function subscribeTerminalHubSession(
     return;
   }
 
-  const session = await readInteractiveSession(env, id);
+  const session = await readFreshInteractiveSession(env, id);
   if (!session) {
     sendTerminalJson(client, TerminalMessageType.Error, id, {
       error: "interactive session not found",
     });
     return;
   }
-  if (["expired", "failed", "stopped"].includes(session.status)) {
+  if (["stopping", "expired", "failed", "stopped"].includes(session.status)) {
     sendTerminalJson(client, TerminalMessageType.Error, id, {
       error: `session is ${session.status}`,
+    });
+    return;
+  }
+  if (!session.capabilities.terminal) {
+    sendTerminalJson(client, TerminalMessageType.Error, id, {
+      error: "session does not advertise terminal access",
     });
     return;
   }
@@ -3328,6 +6599,7 @@ async function subscribeTerminalHubSession(
     const canInput = terminalInputGrant(env, user, session);
     const canInputNow = await canInput();
     const canView = terminalViewGrant(request, env, user, session);
+    const reconcileSubscription = terminalSubscriptionReconciler(env, id);
     const cols = canInputNow ? terminalDimension(subscription.cols, 120) : 120;
     const rows = canInputNow ? terminalDimension(subscription.rows, 34) : 34;
     let closingReason: string | undefined;
@@ -3350,10 +6622,15 @@ async function subscribeTerminalHubSession(
         rows,
       );
     } catch (error) {
-      const message = `terminal unavailable: ${
-        error instanceof Error ? clean(error.message, 180) : "terminal connection failed"
-      }`;
-      if (session.leaseId?.startsWith(sandboxLeasePrefix) && env.SANDBOX) {
+      const message = redactedAdapterMessage(
+        `terminal unavailable: ${
+          error instanceof Error ? error.message : "terminal connection failed"
+        }`,
+        "failed",
+        [session.adapterWorkspaceId, session.providerResourceId],
+        [session.attachUrl],
+      );
+      if (isSandboxInteractiveSession(session) && env.SANDBOX) {
         await markInteractiveTerminalDetached(env, user, id, Date.now(), message);
       } else {
         await markInteractiveTerminalUnavailable(env, user, id, Date.now(), message);
@@ -3381,6 +6658,7 @@ async function subscribeTerminalHubSession(
       });
     };
     viewCheck = setInterval(() => {
+      reconcileSubscription();
       void canView()
         .then((allowed) => {
           if (!allowed) revokeView();
@@ -3424,17 +6702,25 @@ async function subscribeTerminalHubSession(
     });
     upstream.addEventListener("close", (event) => {
       const closeReason = consumeCloseReason();
+      const safeUpstreamReason = event.reason
+        ? redactedAdapterMessage(
+            event.reason,
+            "detached",
+            [session.adapterWorkspaceId, session.providerResourceId],
+            [session.attachUrl],
+          )
+        : "";
       subscriptions.delete(id);
       if (viewCheck !== null) clearInterval(viewCheck);
       if (!isPassiveTerminalClose(closeReason)) {
-        const message = terminalCloseMessage(event.code, event.reason);
+        const message = terminalCloseMessage(event.code, safeUpstreamReason);
         void markInteractiveTerminalDetached(env, user, id, Date.now(), message);
       }
       if (client.readyState === WebSocket.OPEN) {
         sendTerminalJson(client, TerminalMessageType.Event, id, {
           type: "closed",
           code: event.code,
-          reason: closeReason || event.reason,
+          reason: closeReason || safeUpstreamReason,
         });
       }
     });
@@ -3445,7 +6731,7 @@ async function subscribeTerminalHubSession(
       const message = "terminal unavailable: upstream terminal error";
       if (!isPassiveTerminalClose(closeReason)) {
         const markTerminal =
-          session.leaseId?.startsWith(sandboxLeasePrefix) && env.SANDBOX
+          isSandboxInteractiveSession(session) && env.SANDBOX
             ? markInteractiveTerminalDetached
             : markInteractiveTerminalUnavailable;
         void markTerminal(env, user, id, Date.now(), message);
@@ -3460,7 +6746,12 @@ async function subscribeTerminalHubSession(
     });
   } catch (error) {
     sendTerminalJson(client, TerminalMessageType.Error, id, {
-      error: error instanceof Error ? clean(error.message, 180) : "terminal subscription failed",
+      error: redactedAdapterMessage(
+        error instanceof Error ? error.message : "terminal subscription failed",
+        "failed",
+        [session.adapterWorkspaceId, session.providerResourceId],
+        [session.attachUrl],
+      ),
     });
   }
 }
@@ -3473,8 +6764,12 @@ async function openInteractiveTerminalUpstream(
   cols: number,
   rows: number,
 ): Promise<TerminalUpstream> {
+  if (!session.capabilities.terminal) {
+    throw serviceUnavailable("session does not advertise terminal access");
+  }
   const now = Date.now();
-  if (session.leaseId?.startsWith(sandboxLeasePrefix) && env.SANDBOX) {
+  const routeKind = interactivePtyRouteKind(env, session);
+  if (routeKind === "sandbox" && env.SANDBOX) {
     const runtimeSession = await sandboxSessionWithGitHubToken(request, env, user, session);
     const sandboxSession = await ensureCurrentSandboxLease(request, env, user, runtimeSession);
     const lease = sandboxLeaseInfo(sandboxSession);
@@ -3507,14 +6802,11 @@ async function openInteractiveTerminalUpstream(
     };
   }
 
-  const target = interactiveTerminalTarget(env, session);
+  const target = interactiveTerminalTarget(env, session, routeKind);
   if (!target) throw serviceUnavailable("PTY bridge is not configured for this session");
-  const upstreamResponse = await fetch(
-    addQuery(target.url, { cols: String(cols), rows: String(rows) }),
-    {
-      headers: interactiveTerminalHeaders(session, target.authorization),
-    },
-  );
+  const upstreamResponse = await fetch(sizedTerminalTargetUrl(target.url, routeKind, cols, rows), {
+    headers: interactiveTerminalHeaders(session, target.authorization),
+  });
   const upstream = upstreamResponse.webSocket;
   if (!upstream || upstreamResponse.status !== 101) {
     throw serviceUnavailable(`PTY bridge HTTP ${upstreamResponse.status}`);
@@ -3571,7 +6863,7 @@ async function markInteractiveTerminalDetached(
     .select("status")
     .where("id", "=", id)
     .executeTakeFirst();
-  if (!existing || ["expired", "failed", "stopped"].includes(existing.status)) return;
+  if (!existing || ["stopping", "expired", "failed", "stopped"].includes(existing.status)) return;
   await database(env)
     .updateTable("interactive_sessions")
     .set({
@@ -3593,28 +6885,59 @@ async function markInteractiveTerminalUnavailable(
 ): Promise<void> {
   const existing = await database(env)
     .selectFrom("interactive_sessions")
-    .select(["id", "lease_id", "status"])
+    .selectAll()
     .where("id", "=", id)
     .executeTakeFirst();
   if (!existing || ["expired", "failed", "stopped"].includes(existing.status)) return;
+  if (runtimeAdapterTerminalFailureStatus(existing.adapter) === "detached") {
+    if (existing.status === "stopping") return;
+    await markInteractiveTerminalDetached(env, user, id, now, message);
+    return;
+  }
+  const legacySession = {
+    adapter: existing.adapter,
+    leaseId: existing.lease_id,
+  };
+  if (isSandboxInteractiveSession(legacySession)) {
+    const staged = await stageTerminalCredentialPolicyCleanupById(
+      env,
+      id,
+      "failed",
+      message,
+      now,
+      message,
+    );
+    if (!staged) return;
+    await appendInteractiveSessionLog(env, id, user, message, now);
+    await reconcileCredentialPolicyCleanupBatch(env, now, id);
+    return;
+  }
+  if (existing.status === "stopping") return;
   const update = await database(env)
     .updateTable("interactive_sessions")
     .set({
       status: "expired",
-      updated_at: now,
+      agent_token_hash: null,
+      attach_url: null,
+      vnc_url: null,
+      controller: null,
+      control_requested_by: null,
+      control_requested_at: null,
+      control_granted_at: null,
+      control_expires_at: null,
+      updated_at: sql<number>`MAX(updated_at + 1, ${now})`,
       stopped_at: now,
+      terminal_finalize_pending: 1,
       last_event: message,
     })
     .where("id", "=", id)
-    .where("status", "not in", ["expired", "failed", "stopped"])
+    .where("status", "=", existing.status)
+    .where("updated_at", "=", existing.updated_at)
     .executeTakeFirst();
   if ((update.numUpdatedRows ?? 0n) > 0n) {
-    await unregisterInteractiveSessionCredentialPolicy(env, {
-      id: existing.id,
-      leaseId: existing.lease_id,
-    });
+    await appendInteractiveSessionLog(env, id, user, message, now);
+    await finalizeTerminalInteractiveSession(env, id, "expired", now).catch(() => undefined);
   }
-  await appendInteractiveSessionLog(env, id, user, message, now);
 }
 
 async function uploadInteractiveSessionClipboard(
@@ -3628,7 +6951,7 @@ async function uploadInteractiveSessionClipboard(
   }
   const session = await readInteractiveSession(env, id);
   if (!session) throw notFound("interactive session not found");
-  if (["expired", "failed", "stopped"].includes(session.status)) {
+  if (["stopping", "expired", "failed", "stopped"].includes(session.status)) {
     throw badRequest(`session is ${session.status}`);
   }
   const bytes = await readClipboardUploadBytes(request);
@@ -3664,9 +6987,26 @@ function terminalInputGrant(
   user: User | null,
   session: InteractiveSession,
 ): () => Promise<boolean> {
-  if (!user) return async () => false;
-  if (canManageInteractiveSession(user, session)) return async () => true;
-  return () => canControlInteractiveSessionById(env, user, session.id);
+  if (!user || !session.capabilities.terminal) return async () => false;
+  return cachedBooleanGrant(() => canControlInteractiveSessionById(env, user, session.id));
+}
+
+function terminalSubscriptionReconciler(env: RuntimeEnv, id: string): () => void {
+  let nextAt = Date.now() + runtimeAdapterReconcileIntervalMs;
+  let inFlight = false;
+  return () => {
+    const now = Date.now();
+    if (inFlight || now < nextAt) return;
+    inFlight = true;
+    nextAt = now + runtimeAdapterReconcileIntervalMs;
+    void reconcileExternalInteractiveSessionById(env, id, now)
+      .catch((error) => {
+        console.error("terminal subscription reconciliation failed", error);
+      })
+      .finally(() => {
+        inFlight = false;
+      });
+  };
 }
 
 function terminalViewGrant(
@@ -3715,13 +7055,14 @@ async function isSharedSessionToken(env: RuntimeEnv, id: string, token: string):
   if (!token) return false;
   const row = await database(env)
     .selectFrom("interactive_sessions")
-    .select(["share_token_hash", "share_mode", "status"])
+    .select(["share_token_hash", "share_mode", "status", "runtime", "capabilities_json"])
     .where("id", "=", id)
     .where("share_mode", "=", "link_read")
     .executeTakeFirst();
   return Boolean(
     row?.share_token_hash &&
-    !["expired", "failed", "stopped"].includes(row.status) &&
+    !["stopping", "expired", "failed", "stopped"].includes(row.status) &&
+    runtimeCapabilities(row.runtime, row.capabilities_json).terminal &&
     (await sha256(token)) === row.share_token_hash,
   );
 }
@@ -3769,42 +7110,63 @@ async function interactiveSessionPty(
     throw badRequest("websocket upgrade required");
   }
 
-  const session = await readInteractiveSession(env, id);
+  const session = await readFreshInteractiveSession(env, id);
   if (!session) throw notFound("interactive session not found");
-  if (["expired", "failed", "stopped"].includes(session.status)) {
+  if (["stopping", "expired", "failed", "stopped"].includes(session.status)) {
     throw badRequest(`session is ${session.status}`);
+  }
+  if (!session.capabilities.terminal) {
+    throw badRequest("session does not advertise terminal access");
   }
   if (
     !canControlInteractiveSession(user, session, Date.now(), canGrantDelegatedControl(env, session))
   ) {
     throw forbidden("terminal control has not been granted");
   }
-  const canManage = canManageInteractiveSession(user, session);
-
-  if (session.leaseId?.startsWith(sandboxLeasePrefix) && env.SANDBOX) {
+  const routeKind = interactivePtyRouteKind(env, session);
+  if (routeKind === "sandbox" && env.SANDBOX) {
     return interactiveSandboxTerminal(
       request,
       env,
       user,
       session,
-      canManage ? undefined : () => canControlInteractiveSessionById(env, user, id),
+      terminalInputGrant(env, user, session),
+      terminalSubscriptionReconciler(env, id),
     );
   }
 
-  const target = interactiveTerminalTarget(env, session);
+  const target = interactiveTerminalTarget(env, session, routeKind);
   if (!target) throw serviceUnavailable("PTY bridge is not configured for this session");
+  const targetUrl = sizedTerminalTargetUrl(
+    target.url,
+    routeKind,
+    terminalSize(request, "cols", 120),
+    terminalSize(request, "rows", 34),
+  );
+  if (!targetUrl) throw serviceUnavailable("PTY bridge URL is invalid");
 
   const pair = new WebSocketPair();
   const client = pair[0];
   const server = pair[1];
   let upstreamResponse: Response;
   try {
-    upstreamResponse = await fetch(target.url, {
+    upstreamResponse = await fetch(targetUrl, {
       headers: interactiveTerminalHeaders(session, target.authorization),
     });
   } catch (error) {
     server.accept();
-    server.close(1011, `PTY bridge failed: ${clean(String(error), 120)}`);
+    server.close(
+      1011,
+      clean(
+        redactedAdapterMessage(
+          `PTY bridge failed: ${String(error)}`,
+          "failed",
+          [session.adapterWorkspaceId, session.providerResourceId],
+          [target.url, session.attachUrl],
+        ),
+        120,
+      ),
+    );
     return new Response(null, { status: 101, webSocket: client });
   }
   const upstream = upstreamResponse.webSocket;
@@ -3819,7 +7181,8 @@ async function interactiveSessionPty(
   bridgeWebSockets(
     server,
     upstream,
-    canManage ? undefined : () => canControlInteractiveSessionById(env, user, id),
+    terminalInputGrant(env, user, session),
+    terminalSubscriptionReconciler(env, id),
   );
 
   const now = Date.now();
@@ -3829,11 +7192,11 @@ async function interactiveSessionPty(
       status:
         session.status === "ready" || session.status === "detached" ? "attached" : session.status,
       last_seen_at: now,
-      updated_at: now,
+      updated_at: sql<number>`MAX(updated_at + 1, ${now})`,
       last_event: "PTY terminal connected",
     })
     .where("id", "=", id)
-    .where("status", "!=", "stopped")
+    .where("status", "in", ["ready", "attached", "detached"])
     .execute();
   await appendInteractiveSessionEvent(env, id, user, "PTY terminal connected", now);
 
@@ -3846,6 +7209,7 @@ async function interactiveSandboxTerminal(
   user: User,
   session: InteractiveSession,
   canSendLeft?: () => Promise<boolean>,
+  reconcileSubscription?: () => void,
 ): Promise<Response> {
   if (!env.SANDBOX) throw serviceUnavailable("Sandbox binding is not configured");
   const runtimeSession = await sandboxSessionWithGitHubToken(request, env, user, session);
@@ -3886,7 +7250,7 @@ async function interactiveSandboxTerminal(
     Date.now(),
     "Cloudflare Sandbox terminal connected",
   );
-  bridgeWebSockets(server, upstream, canSendLeft);
+  bridgeWebSockets(server, upstream, canSendLeft, reconcileSubscription);
   return new Response(null, { status: 101, webSocket: client });
 }
 
@@ -3903,7 +7267,7 @@ async function readInteractiveSessionDiagnostics(
   ) {
     throw forbidden("terminal control has not been granted");
   }
-  if (!env.SANDBOX || !session.leaseId?.startsWith(sandboxLeasePrefix)) {
+  if (!env.SANDBOX || !isSandboxInteractiveSession(session)) {
     return {
       session: decoratedSession,
       diagnostics: {
@@ -4161,10 +7525,10 @@ async function managedSandboxSession(
   if (!canManageInteractiveSession(user, session)) {
     throw forbidden("only the session owner or maintainer can manage checkpoints");
   }
-  if (!env.SANDBOX || !session.leaseId?.startsWith(sandboxLeasePrefix)) {
+  if (!env.SANDBOX || !isSandboxInteractiveSession(session)) {
     throw badRequest("checkpoints require a Cloudflare Sandbox session");
   }
-  if (["expired", "failed", "stopped"].includes(session.status)) {
+  if (["stopping", "expired", "failed", "stopped"].includes(session.status)) {
     throw badRequest(`session is ${session.status}`);
   }
   return session;
@@ -4182,11 +7546,115 @@ function sandboxBackupAllowedHosts(env: RuntimeEnv): string[] {
     : [];
 }
 
+async function interactiveSessionVnc(env: RuntimeEnv, user: User, id: string): Promise<Response> {
+  const session = await readFreshInteractiveSession(env, id);
+  if (!session) throw notFound("interactive session not found");
+  if (["stopping", "stopped", "expired", "failed"].includes(session.status)) {
+    throw badRequest(`session is ${session.status}`);
+  }
+  const now = Date.now();
+  const delegatedControl = canGrantDelegatedControl(env, session);
+  if (!canControlInteractiveSession(user, session, now, delegatedControl)) {
+    throw forbidden("terminal control has not been granted");
+  }
+  let target: string;
+  if (session.adapter === runtimeAdapterName) {
+    if (!["ready", "attached", "detached"].includes(session.status)) {
+      throw badRequest(`session is ${session.status}`);
+    }
+    if (!session.capabilities.vnc && !session.capabilities.desktop) {
+      throw badRequest("session does not advertise desktop access");
+    }
+    if (!session.adapterWorkspaceId) {
+      throw serviceUnavailable("runtime adapter workspace reference is incomplete");
+    }
+    let controlPlane: string;
+    try {
+      controlPlane = await registeredRuntimeAdapterControlPlaneForSession(
+        env,
+        session.id,
+        session.adapterWorkspaceId,
+      );
+    } catch (error) {
+      throw serviceUnavailable(clean(error instanceof Error ? error.message : String(error), 240));
+    }
+    let response: Response;
+    let responseBody: unknown;
+    try {
+      response = await runtimeAdapterFetch(
+        env,
+        runtimeAdapterDesktopUrl(controlPlane, session.adapterWorkspaceId),
+        {
+          method: "POST",
+          body: JSON.stringify({}),
+        },
+      );
+      responseBody = await readRuntimeAdapterResponseBody(response);
+    } catch (error) {
+      throw serviceUnavailable(
+        `runtime adapter desktop connection failed: ${clean(String(error), 240)}`,
+      );
+    }
+    if (!response.ok) {
+      throw serviceUnavailable(`runtime adapter desktop connection HTTP ${response.status}`);
+    }
+    const connection = currentAdapterDesktopConnection(responseBody, Date.now());
+    if (!connection) throw serviceUnavailable("desktop connection has an invalid expiry");
+    if (!(await currentRuntimeAdapterDesktopAccess(env, user, session, controlPlane))) {
+      throw forbidden("desktop authorization changed; retry");
+    }
+    target = connection.url;
+  } else {
+    const legacyTarget = safeDesktopUrl(session.vncUrl);
+    if (!legacyTarget) throw badRequest("legacy desktop connection is not available");
+    target = legacyTarget;
+  }
+  return new Response(null, {
+    status: 302,
+    headers: {
+      location: target,
+      "cache-control": "no-store",
+      "referrer-policy": "no-referrer",
+    },
+  });
+}
+
+async function currentRuntimeAdapterDesktopAccess(
+  env: RuntimeEnv,
+  user: User,
+  expected: InteractiveSession,
+  controlPlane: string,
+): Promise<boolean> {
+  const currentRow = await database(env)
+    .selectFrom("interactive_sessions")
+    .selectAll()
+    .where("id", "=", expected.id)
+    .where("adapter", "=", runtimeAdapterName)
+    .where("adapter_workspace_id", "=", expected.adapterWorkspaceId)
+    .where("adapter_control_plane", "=", controlPlane)
+    .where(sql<boolean>`provider_resource_id IS ${expected.providerResourceId}`)
+    .where("runtime", "=", expected.runtime)
+    .where("profile", "=", expected.profile)
+    .where("adapter_create_pending", "=", 0)
+    .where("status", "in", ["ready", "attached", "detached"])
+    .executeTakeFirst();
+  if (!currentRow) return false;
+  const current = interactiveSession(currentRow, []);
+  if (!current.capabilities.vnc && !current.capabilities.desktop) return false;
+  return canControlInteractiveSession(
+    user,
+    current,
+    Date.now(),
+    canGrantDelegatedControl(env, current),
+  );
+}
+
 function interactiveTerminalTarget(
   env: RuntimeEnv,
   session: InteractiveSession,
+  routeKind = interactivePtyRouteKind(env, session),
 ): InteractiveTerminalTarget | null {
-  if (env.CRABBOX_PTY_BRIDGE_URL) {
+  if (routeKind === "bridge" && env.CRABBOX_PTY_BRIDGE_URL) {
     const url = interactiveBridgeUrl(env.CRABBOX_PTY_BRIDGE_URL, session);
     if (!url) return null;
     return {
@@ -4195,17 +7663,22 @@ function interactiveTerminalTarget(
     };
   }
 
-  if (session.attachUrl && /^wss?:\/\//i.test(session.attachUrl)) {
-    return { url: session.attachUrl, authorization: null };
+  const attachUrl = routeKind === "attach" ? safeWebSocketUrl(session.attachUrl) : null;
+  if (attachUrl) {
+    return { url: attachUrl, authorization: null };
   }
 
-  if (session.leaseId?.startsWith("cloudflare:") && env.CRABBOX_CLOUDFLARE_RUNNER_URL) {
-    const sandboxId = session.leaseId.slice("cloudflare:".length);
+  const leaseId = legacyInteractiveSessionLeaseId(session);
+  if (
+    routeKind === "cloudflare" &&
+    leaseId?.startsWith("cloudflare:") &&
+    env.CRABBOX_CLOUDFLARE_RUNNER_URL
+  ) {
+    const sandboxId = leaseId.slice("cloudflare:".length);
+    const runnerUrl = safeDesktopUrl(env.CRABBOX_CLOUDFLARE_RUNNER_URL);
+    if (!runnerUrl) return null;
     const url = addQuery(
-      joinUrl(
-        env.CRABBOX_CLOUDFLARE_RUNNER_URL,
-        `/v1/sandboxes/${encodeURIComponent(sandboxId)}/pty`,
-      ),
+      joinUrl(runnerUrl, `/v1/sandboxes/${encodeURIComponent(sandboxId)}/pty`),
       terminalQuery(session),
     );
     if (!url) return null;
@@ -4218,10 +7691,22 @@ function interactiveTerminalTarget(
   return null;
 }
 
+function interactivePtyRouteKind(
+  env: RuntimeEnv,
+  session: Pick<InteractiveSession, "adapter" | "leaseId" | "attachUrl">,
+): PtyRouteKind | null {
+  return ptyRouteKind(session, {
+    sandboxAvailable: Boolean(env.SANDBOX),
+    bridgeUrl: env.CRABBOX_PTY_BRIDGE_URL,
+    cloudflareRunnerUrl: env.CRABBOX_CLOUDFLARE_RUNNER_URL,
+  });
+}
+
 function interactiveBridgeUrl(base: string, session: InteractiveSession): string {
+  const leaseId = legacyInteractiveSessionLeaseId(session) ?? "";
   const replacements: Record<string, string> = {
     id: session.id,
-    leaseId: session.leaseId ?? "",
+    leaseId,
     repo: session.repo,
     branch: session.branch,
     runtime: session.runtime,
@@ -4230,16 +7715,17 @@ function interactiveBridgeUrl(base: string, session: InteractiveSession): string
   for (const [key, value] of Object.entries(replacements)) {
     url = url.replaceAll(`{${key}}`, encodeURIComponent(value));
   }
-  return addQuery(httpToWebSocketUrl(url), terminalQuery(session));
+  return safeWebSocketUrl(addQuery(httpToWebSocketUrl(url), terminalQuery(session))) ?? "";
 }
 
 function terminalQuery(session: InteractiveSession): Record<string, string> {
   return {
     sessionId: session.id,
-    leaseId: session.leaseId ?? "",
+    leaseId: legacyInteractiveSessionLeaseId(session) ?? "",
     repo: session.repo,
     branch: session.branch,
     runtime: session.runtime,
+    profile: session.profile,
     command: session.command,
   };
 }
@@ -4310,6 +7796,8 @@ function bridgeWebSockets(
   left: WebSocket,
   right: WebSocket,
   canSendLeft?: () => Promise<boolean>,
+  reconcileSubscription?: () => void,
+  deniedReason = "terminal control revoked",
 ): void {
   let leftInputQueue = Promise.resolve();
   let rightOutputQueue = Promise.resolve();
@@ -4325,12 +7813,13 @@ function bridgeWebSockets(
     leftCanSend = canSend;
     if (!canSend) {
       stopControlCheck();
-      closePair(left, right, 1008, "terminal control revoked");
+      closePair(left, right, 1008, deniedReason);
       return false;
     }
     return true;
   };
   const scheduleControlCheck = () => {
+    reconcileSubscription?.();
     if (controlCheckInFlight) return;
     controlCheckInFlight = verifyControl()
       .then(() => undefined)
@@ -4351,7 +7840,7 @@ function bridgeWebSockets(
       .then(async () => {
         if (left.readyState !== WebSocket.OPEN || right.readyState !== WebSocket.OPEN) return;
         if (!leftCanSend || !(await verifyControl())) {
-          closePair(left, right, 1008, "terminal control revoked");
+          closePair(left, right, 1008, deniedReason);
           return;
         }
         right.send(await webSocketMessageData(data));
@@ -4403,7 +7892,10 @@ async function webSocketMessageData(data: unknown): Promise<string | ArrayBuffer
 
 function closePeer(event: CloseEvent, to: WebSocket): void {
   if (to.readyState === WebSocket.OPEN || to.readyState === WebSocket.CONNECTING) {
-    to.close(event.code || 1000, event.reason || "peer closed");
+    to.close(
+      event.code || 1000,
+      clean(event.reason ? redactedAdapterMessage(event.reason, "detached") : "peer closed", 120),
+    );
   }
 }
 
@@ -4420,13 +7912,29 @@ async function provisionInteractiveSession(
   env: RuntimeEnv,
   session: InteractiveProvisionRequest,
   agentToken?: string,
+  sandboxProvision?: {
+    lease: SandboxLease;
+    ownership: SandboxCurrentLeaseFence;
+  },
 ): Promise<InteractiveProvisionResult | null> {
   if (session.runtime === "container" && env.SANDBOX) {
-    return provisionWithSandbox(env, session, agentToken);
+    if (!sandboxProvision) {
+      return failedProvision("Cloudflare Sandbox durable ownership is missing");
+    }
+    return provisionWithSandbox(
+      env,
+      session,
+      agentToken,
+      sandboxProvision.lease,
+      sandboxProvision.ownership,
+    );
+  }
+  if (env.CRABBOX_RUNTIME_ADAPTER_URL) {
+    return provisionWithRuntimeAdapter(env, session, agentToken);
   }
   if (!env.CRABBOX_INTERACTIVE_PROVISION_URL) return null;
-  if (isBuiltInInteractiveProvisionUrl(env.CRABBOX_INTERACTIVE_PROVISION_URL)) {
-    return provisionInteractivePayload(env, session);
+  if (isBuiltInInteractiveProvisionUrl(env, env.CRABBOX_INTERACTIVE_PROVISION_URL)) {
+    return provisionInteractivePayload(env, session, agentToken);
   }
   let response: Response;
   try {
@@ -4458,7 +7966,7 @@ async function provisionInteractiveSession(
     };
   }
   const body = (await response.json().catch(() => ({}))) as Record<string, unknown>;
-  const status = optionalOneOf(body.status, interactiveSessionStatuses);
+  const status = createOnlyAdapterStatus(body.status);
   if (!status) {
     return {
       status: "failed",
@@ -4468,12 +7976,20 @@ async function provisionInteractiveSession(
       message: "interactive provision failed: invalid adapter response",
     };
   }
+  const leaseId = clean(body.leaseId ?? body.lease_id, 240) || null;
+  const attachUrl = clean(body.attachUrl ?? body.attach_url, 1000) || null;
+  const vncUrl = clean(body.vncUrl ?? body.vnc_url, 1000) || null;
   return {
     status,
-    leaseId: clean(body.leaseId ?? body.lease_id, 240) || null,
-    attachUrl: clean(body.attachUrl ?? body.attach_url, 1000) || null,
-    vncUrl: clean(body.vncUrl ?? body.vnc_url, 1000) || null,
-    message: clean(body.message, 500) || `interactive workspace ${status}`,
+    leaseId,
+    attachUrl,
+    vncUrl,
+    message: redactedAdapterMessage(
+      clean(body.message, 500) || null,
+      status,
+      [leaseId],
+      [attachUrl, vncUrl],
+    ),
   };
 }
 
@@ -4490,6 +8006,7 @@ async function provisionInteractiveEndpoint(
     | "crabbox"
     | "container";
   const command = interactiveCommand(session.command);
+  const profile = clean(session.profile, 120) || deploymentConfig(env).defaultProfile;
   const prompt = clean(session.prompt, 4000);
   const purpose = interactiveSessionPurpose(session.purpose, prompt, repo, branch, command);
   const summary = interactiveSessionSummary(session.summary, purpose, prompt);
@@ -4498,12 +8015,12 @@ async function provisionInteractiveEndpoint(
   if (!id || !repo || !owner) {
     return failedProvision("interactive provision failed: invalid session request");
   }
-
   const payload: InteractiveProvisionRequest = {
     id,
     repo,
     branch,
     runtime,
+    profile,
     command,
     prompt,
     purpose,
@@ -4514,16 +8031,802 @@ async function provisionInteractiveEndpoint(
     rootSessionId: clean(session.rootSessionId, 120) || id,
     ...(githubToken ? { githubToken } : {}),
   };
+  const managed = await database(env)
+    .selectFrom("interactive_sessions")
+    .selectAll()
+    .where("id", "=", payload.id)
+    .executeTakeFirst();
+  if (managed) {
+    if (payload.runtime !== "container" || !env.SANDBOX) {
+      return failedProvision(
+        "interactive provision failed: managed session id is not available to this backend",
+      );
+    }
+    return provisionManagedSandboxEndpoint(env, payload, managed);
+  }
+  if (payload.runtime === "container" && env.SANDBOX) {
+    if (managedInteractiveSessionId(payload.id)) {
+      return failedProvision(
+        "interactive provision failed: standalone provision id uses the managed session namespace",
+      );
+    }
+    return provisionStandaloneSandbox(env, payload);
+  }
   return provisionInteractivePayload(env, payload);
 }
 
-function isBuiltInInteractiveProvisionUrl(value: string): boolean {
+function managedSandboxProvisionPayloadMatches(
+  payload: InteractiveProvisionRequest,
+  session: InteractiveSessionRow,
+): boolean {
+  return (
+    payload.id === session.id &&
+    payload.parentSessionId === session.parent_session_id &&
+    payload.rootSessionId === (session.root_session_id ?? session.id) &&
+    payload.repo === session.repo &&
+    payload.branch === session.branch &&
+    payload.runtime === session.runtime &&
+    payload.profile === session.profile &&
+    payload.command === session.command &&
+    payload.prompt === session.prompt &&
+    payload.purpose === session.purpose &&
+    payload.summary === session.summary &&
+    payload.owner === session.owner &&
+    payload.createdBy === session.created_by
+  );
+}
+
+async function provisionManagedSandboxEndpoint(
+  env: RuntimeEnv,
+  payload: InteractiveProvisionRequest,
+  session: InteractiveSessionRow,
+): Promise<InteractiveProvisionResult> {
+  if (
+    !managedSandboxProvisionPayloadMatches(payload, session) ||
+    !["provisioning", "pending_adapter"].includes(session.status) ||
+    session.adapter === runtimeAdapterName ||
+    session.credential_cleanup_terminal_status !== null
+  ) {
+    return failedProvision(
+      "interactive provision failed: managed session request does not match durable ownership",
+    );
+  }
+  const preflightError = sandboxProvisionPreflightError(env, payload);
+  if (preflightError) return failedProvision(preflightError);
+  const now = Date.now();
+  const claimRevision = Math.max(now, session.updated_at + 1);
+  const agentToken = newAgentToken();
+  const agentTokenHash = await sha256(agentToken);
+  const lease = newSandboxLease(payload.id);
+  const fence: SandboxLeaseRefreshFence = {
+    claim: `managed-provision:${crypto.randomUUID()}`,
+    expiresAt: now + credentialPolicyProvisioningStaleMs,
+    refreshLeaseId: session.lease_id,
+    sandboxId: lease.sandboxId,
+  };
+  const claimed = await database(env)
+    .updateTable("interactive_sessions")
+    .set({
+      sandbox_refresh_sandbox_id: fence.sandboxId,
+      sandbox_refresh_claim: fence.claim,
+      sandbox_refresh_claim_expires_at: fence.expiresAt,
+      agent_token_hash: agentTokenHash,
+      last_event: "managed Sandbox provision claimed",
+      updated_at: claimRevision,
+    })
+    .where("id", "=", session.id)
+    .where("updated_at", "=", session.updated_at)
+    .where("status", "in", ["provisioning", "pending_adapter"])
+    .where(sql<boolean>`parent_session_id IS ${payload.parentSessionId}`)
+    .where(sql<boolean>`COALESCE(root_session_id, id) = ${payload.rootSessionId}`)
+    .where("runtime", "=", payload.runtime)
+    .where("repo", "=", payload.repo)
+    .where("branch", "=", payload.branch)
+    .where("profile", "=", payload.profile)
+    .where("command", "=", payload.command)
+    .where("prompt", "=", payload.prompt)
+    .where("purpose", "=", payload.purpose)
+    .where("summary", "=", payload.summary)
+    .where("owner", "=", payload.owner)
+    .where("created_by", "=", payload.createdBy)
+    .where((expression) =>
+      expression.or([
+        expression("adapter", "is", null),
+        expression("adapter", "!=", runtimeAdapterName),
+      ]),
+    )
+    .where("credential_cleanup_terminal_status", "is", null)
+    .where(sql<boolean>`agent_token_hash IS ${session.agent_token_hash}`)
+    .where(sql<boolean>`lease_id IS ${session.lease_id}`)
+    .where((expression) =>
+      expression.or([
+        expression("sandbox_refresh_claim", "is", null),
+        expression("sandbox_refresh_claim_expires_at", "<=", now),
+      ]),
+    )
+    .executeTakeFirst();
+  if ((claimed.numUpdatedRows ?? 0n) === 0n) {
+    return failedProvision("interactive provision failed: managed session claim was not acquired");
+  }
+
+  let provisioned: InteractiveProvisionResult;
+  try {
+    provisioned = await provisionWithSandbox(env, payload, agentToken, lease, fence);
+  } catch (error) {
+    const message = `Cloudflare Sandbox provision failed: ${safeProviderError(error)}`;
+    await stageFailedManagedSandboxProvision(env, session.id, fence, message, Date.now());
+    return failedProvision(message);
+  }
+  if (provisioned.status !== "ready") {
+    await stageFailedManagedSandboxProvision(
+      env,
+      session.id,
+      fence,
+      provisioned.message,
+      Date.now(),
+    );
+    return provisioned;
+  }
+  const expectedLeaseId = sandboxLeaseId(lease);
+  const previousSandboxId = session.lease_id?.startsWith(sandboxLeasePrefix)
+    ? sandboxLeaseInfo({
+        id: session.id,
+        leaseId: sandboxLeaseWithoutRefresh(session.lease_id),
+      }).sandboxId
+    : null;
+  const finishedAt = Date.now();
+  if (provisioned.leaseId !== expectedLeaseId) {
+    const message = "interactive provision failed: managed Sandbox lease mismatch";
+    const staged = await stageTerminalCredentialPolicyCleanupById(
+      env,
+      session.id,
+      "failed",
+      message,
+      finishedAt,
+      message,
+      fence,
+    );
+    if (!staged) {
+      return failedProvision("interactive provision failed: managed session ownership changed");
+    }
+    await reconcileCredentialPolicyCleanupBatch(env, finishedAt, session.id);
+    return failedProvision(message);
+  }
+  const db = database(env);
+  const commitRevision = Math.max(finishedAt, claimRevision + 1);
+  const commitQueries: CompilableQuery[] = [
+    db
+      .updateTable("interactive_sessions")
+      .set({
+        status: "ready",
+        lease_id: expectedLeaseId,
+        attach_url: provisioned.attachUrl,
+        vnc_url: provisioned.vncUrl,
+        sandbox_refresh_sandbox_id: null,
+        sandbox_refresh_claim: null,
+        sandbox_refresh_claim_expires_at: null,
+        last_event: provisioned.message,
+        updated_at: sql<number>`MAX(updated_at + 1, ${commitRevision})`,
+      })
+      .where("id", "=", session.id)
+      .where("status", "in", ["provisioning", "pending_adapter"])
+      .where(sql<boolean>`lease_id IS ${fence.refreshLeaseId}`)
+      .where("sandbox_refresh_sandbox_id", "=", fence.sandboxId)
+      .where("sandbox_refresh_claim", "=", fence.claim)
+      .where("sandbox_refresh_claim_expires_at", "=", fence.expiresAt)
+      .where("sandbox_refresh_claim_expires_at", ">", finishedAt)
+      .where("agent_token_hash", "=", agentTokenHash),
+  ];
+  if (previousSandboxId && previousSandboxId !== lease.sandboxId) {
+    commitQueries.push(
+      db
+        .updateTable("interactive_session_credential_policies")
+        .set({
+          state: "cleanup_pending",
+          cleanup_claim: null,
+          cleanup_claim_expires_at: null,
+          updated_at: commitRevision,
+        })
+        .where("session_id", "=", session.id)
+        .where("sandbox_id", "=", previousSandboxId).where(sql<boolean>`
+          EXISTS (
+            SELECT 1
+            FROM interactive_sessions AS owner
+            WHERE owner.id = ${session.id}
+              AND owner.status = 'ready'
+              AND owner.lease_id = ${expectedLeaseId}
+              AND owner.agent_token_hash = ${agentTokenHash}
+              AND owner.credential_cleanup_terminal_status IS NULL
+              AND owner.sandbox_refresh_sandbox_id IS NULL
+              AND owner.sandbox_refresh_claim IS NULL
+              AND owner.sandbox_refresh_claim_expires_at IS NULL
+          )
+        `),
+    );
+  }
+  await executeBatch(env, commitQueries);
+  const current = await db
+    .selectFrom("interactive_sessions")
+    .select(["lease_id", "status", "sandbox_refresh_claim", "agent_token_hash"])
+    .where("id", "=", session.id)
+    .executeTakeFirst();
+  if (
+    current?.lease_id === expectedLeaseId &&
+    current.sandbox_refresh_claim === null &&
+    current.agent_token_hash === agentTokenHash &&
+    ["ready", "attached", "detached"].includes(current.status)
+  ) {
+    if (previousSandboxId && previousSandboxId !== lease.sandboxId) {
+      await reconcileCredentialPolicyCleanupBatch(env, commitRevision, session.id);
+    }
+    return provisioned;
+  }
+  await stageFailedManagedSandboxProvision(
+    env,
+    session.id,
+    fence,
+    "interactive provision failed: managed session ownership changed",
+    finishedAt,
+  );
+  return failedProvision("interactive provision failed: managed session ownership changed");
+}
+
+async function provisionStandaloneSandbox(
+  env: RuntimeEnv,
+  payload: InteractiveProvisionRequest,
+): Promise<InteractiveProvisionResult> {
+  if (managedInteractiveSessionId(payload.id)) {
+    return failedProvision(
+      "interactive provision failed: standalone provision id uses the managed session namespace",
+    );
+  }
+  const { githubToken: _githubToken, ...ownershipPayload } = payload;
+  const requestHash = await sha256(JSON.stringify(ownershipPayload));
+  const db = database(env);
+  const now = Date.now();
+  let previous = await db
+    .selectFrom("standalone_sandbox_provisions")
+    .selectAll()
+    .where("id", "=", payload.id)
+    .executeTakeFirst();
+  if (previous && previous.request_hash !== requestHash) {
+    return failedProvision("interactive provision failed: provision id is already registered");
+  }
+  if (previous?.state === "active") {
+    if (!previous.expires_at || previous.expires_at <= Date.now()) {
+      await stageStandaloneSandboxProvisionCleanup(
+        env,
+        previous,
+        "standalone Sandbox provision expired",
+        Date.now(),
+      );
+      await reconcileCredentialPolicyCleanupBatch(env, Date.now(), payload.id);
+      return failedProvision("interactive provision failed: standalone Sandbox provision expired");
+    }
+    return {
+      status: "ready",
+      leaseId: previous.lease_id,
+      attachUrl: previous.attach_url,
+      vncUrl: previous.vnc_url,
+      expiresAt: previous.expires_at,
+      expiresAtPresent: true,
+      message: previous.message,
+    };
+  }
+  if (previous?.state === "cleanup_pending") {
+    return failedProvision("interactive provision failed: previous credential cleanup is pending");
+  }
+  if (
+    previous?.state === "provisioning" &&
+    (previous.ownership_claim_expires_at ?? Number.NEGATIVE_INFINITY) <= now
+  ) {
+    const staged = await stageStandaloneSandboxProvisionCleanup(
+      env,
+      previous,
+      "abandoned standalone Sandbox provision cleanup",
+      now,
+    );
+    if (!staged) {
+      return failedProvision("interactive provision failed: standalone ownership changed");
+    }
+    await reconcileCredentialPolicyCleanupBatch(env, now, payload.id);
+    previous = await db
+      .selectFrom("standalone_sandbox_provisions")
+      .selectAll()
+      .where("id", "=", payload.id)
+      .executeTakeFirst();
+    if (previous) {
+      return failedProvision(
+        "interactive provision failed: previous credential cleanup is pending",
+      );
+    }
+  }
+
+  const expiresAt =
+    now +
+    clampedSeconds(env.CRABBOX_STANDALONE_SANDBOX_TTL_SECONDS, standaloneSandboxDefaultTtlSeconds) *
+      1000;
+  const lease = newSandboxLease(payload.id);
+  const claim = `standalone:${crypto.randomUUID()}`;
+  await sql`
+    INSERT INTO standalone_sandbox_provisions (
+      id,
+      request_hash,
+      sandbox_id,
+      state,
+      ownership_claim,
+      ownership_claim_expires_at,
+      lease_id,
+      attach_url,
+      vnc_url,
+      expires_at,
+      message,
+      created_at,
+      updated_at
+    ) VALUES (
+      ${payload.id},
+      ${requestHash},
+      ${lease.sandboxId},
+      'provisioning',
+      ${claim},
+      ${now + credentialPolicyProvisioningStaleMs},
+      ${sandboxLeaseId(lease)},
+      NULL,
+      NULL,
+      ${expiresAt},
+      'standalone Sandbox provision started',
+      ${now},
+      ${now}
+    )
+    ON CONFLICT(id) DO UPDATE SET
+      sandbox_id = excluded.sandbox_id,
+      ownership_claim = excluded.ownership_claim,
+      ownership_claim_expires_at = excluded.ownership_claim_expires_at,
+      lease_id = excluded.lease_id,
+      attach_url = NULL,
+      vnc_url = NULL,
+      expires_at = excluded.expires_at,
+      message = excluded.message,
+      updated_at = excluded.updated_at
+    WHERE standalone_sandbox_provisions.request_hash = excluded.request_hash
+      AND standalone_sandbox_provisions.state = 'provisioning'
+      AND standalone_sandbox_provisions.ownership_claim_expires_at <= ${now}
+  `.execute(db);
+  const ownership = await db
+    .selectFrom("standalone_sandbox_provisions")
+    .select(["sandbox_id", "state", "ownership_claim", "ownership_claim_expires_at", "expires_at"])
+    .where("id", "=", payload.id)
+    .executeTakeFirst();
+  if (
+    ownership?.sandbox_id !== lease.sandboxId ||
+    ownership.state !== "provisioning" ||
+    ownership.ownership_claim !== claim ||
+    (ownership.ownership_claim_expires_at ?? 0) <= now ||
+    ownership.expires_at !== expiresAt
+  ) {
+    return failedProvision("interactive provision failed: provision id is already in progress");
+  }
+  if (previous?.sandbox_id && previous.sandbox_id !== lease.sandboxId) {
+    await queueSandboxCredentialPolicyCleanup(env, payload.id, previous.sandbox_id, now);
+  }
+  const fence: StandaloneSandboxProvisionFence = {
+    claim,
+    provisionId: payload.id,
+    sandboxId: lease.sandboxId,
+  };
+  const result = await provisionWithSandbox(env, payload, undefined, lease, fence);
+  const finishedAt = Date.now();
+  if (result.status !== "ready") {
+    await db
+      .updateTable("standalone_sandbox_provisions")
+      .set({
+        state: "cleanup_pending",
+        ownership_claim: null,
+        ownership_claim_expires_at: null,
+        message: result.message,
+        updated_at: finishedAt,
+      })
+      .where("id", "=", payload.id)
+      .where("sandbox_id", "=", lease.sandboxId)
+      .where("ownership_claim", "=", claim)
+      .where("expires_at", "=", expiresAt)
+      .execute();
+    await queueSandboxCredentialPolicyCleanup(env, payload.id, lease.sandboxId, finishedAt);
+    await reconcileCredentialPolicyCleanupBatch(env, finishedAt, payload.id);
+    return result;
+  }
+  const policyGeneration = await activeSandboxCredentialPolicyGeneration(
+    env,
+    payload.id,
+    lease.sandboxId,
+  );
+  const activationVersion = Math.max(Date.now(), finishedAt + 1);
+  if (policyGeneration) {
+    const ownerStillClaimed = sql<boolean>`EXISTS (
+      SELECT 1
+      FROM standalone_sandbox_provisions AS owner
+      WHERE owner.id = ${payload.id}
+        AND owner.sandbox_id = ${lease.sandboxId}
+        AND owner.state = 'provisioning'
+        AND owner.ownership_claim = ${claim}
+        AND owner.ownership_claim_expires_at > ${activationVersion}
+        AND owner.expires_at = ${expiresAt}
+        AND owner.expires_at > ${activationVersion}
+    )`;
+    await executeBatch(env, [
+      db
+        .updateTable("interactive_session_credential_policies")
+        .set({ updated_at: activationVersion })
+        .where("session_id", "=", payload.id)
+        .where("sandbox_id", "=", lease.sandboxId)
+        .where("state", "=", "active")
+        .where("registration_generation", "=", policyGeneration)
+        .where("registration_claim", "is", null)
+        .where(ownerStillClaimed),
+      db
+        .updateTable("standalone_sandbox_provisions")
+        .set({
+          state: "active",
+          ownership_claim: null,
+          ownership_claim_expires_at: null,
+          lease_id: result.leaseId,
+          attach_url: result.attachUrl,
+          vnc_url: result.vncUrl,
+          message: result.message,
+          updated_at: activationVersion,
+        })
+        .where("id", "=", payload.id)
+        .where("sandbox_id", "=", lease.sandboxId)
+        .where("state", "=", "provisioning")
+        .where("ownership_claim", "=", claim)
+        .where("ownership_claim_expires_at", ">", activationVersion)
+        .where("expires_at", "=", expiresAt)
+        .where("expires_at", ">", activationVersion)
+        .where(
+          activeSandboxCredentialPolicyCondition(
+            env,
+            payload.id,
+            lease.sandboxId,
+            policyGeneration,
+            activationVersion,
+          ),
+        ),
+    ]);
+  }
+  const activated = await db
+    .selectFrom("standalone_sandbox_provisions")
+    .select(["state", "sandbox_id", "lease_id", "expires_at"])
+    .where("id", "=", payload.id)
+    .executeTakeFirst();
+  if (
+    activated?.state !== "active" ||
+    activated.sandbox_id !== lease.sandboxId ||
+    activated.lease_id !== result.leaseId ||
+    activated.expires_at !== expiresAt
+  ) {
+    await db
+      .updateTable("standalone_sandbox_provisions")
+      .set({
+        state: "cleanup_pending",
+        ownership_claim: null,
+        ownership_claim_expires_at: null,
+        message: "standalone ownership claim expired",
+        updated_at: finishedAt,
+      })
+      .where("id", "=", payload.id)
+      .where("sandbox_id", "=", lease.sandboxId)
+      .where("ownership_claim", "=", claim)
+      .where("expires_at", "=", expiresAt)
+      .execute();
+    await queueSandboxCredentialPolicyCleanup(env, payload.id, lease.sandboxId, finishedAt);
+    await reconcileCredentialPolicyCleanupBatch(env, finishedAt, payload.id);
+    return failedProvision("interactive provision failed: standalone ownership claim expired");
+  }
+  return { ...result, expiresAt, expiresAtPresent: true };
+}
+
+function managedInteractiveSessionId(id: string): boolean {
+  return /^is-[0-9]+$/i.test(id);
+}
+
+async function stageStandaloneSandboxProvisionCleanup(
+  env: RuntimeEnv,
+  owner: Selectable<StandaloneSandboxProvisionTable>,
+  message: string,
+  now: number,
+): Promise<boolean> {
+  if (owner.state === "cleanup_pending") return true;
+  const db = database(env);
+  const transitionRevision = Math.max(now, owner.updated_at + 1);
+  const generation = await sandboxCredentialPolicyGeneration(env, owner.id, owner.sandbox_id);
+  let ownerTransition = db
+    .updateTable("standalone_sandbox_provisions")
+    .set({
+      state: "cleanup_pending",
+      ownership_claim: null,
+      ownership_claim_expires_at: null,
+      attach_url: null,
+      vnc_url: null,
+      message,
+      updated_at: transitionRevision,
+    })
+    .where("id", "=", owner.id)
+    .where("request_hash", "=", owner.request_hash)
+    .where("sandbox_id", "=", owner.sandbox_id)
+    .where("state", "=", owner.state)
+    .where("updated_at", "=", owner.updated_at);
+  ownerTransition = owner.ownership_claim
+    ? ownerTransition.where("ownership_claim", "=", owner.ownership_claim)
+    : ownerTransition.where("ownership_claim", "is", null);
+  ownerTransition =
+    owner.ownership_claim_expires_at === null
+      ? ownerTransition.where("ownership_claim_expires_at", "is", null)
+      : ownerTransition.where("ownership_claim_expires_at", "=", owner.ownership_claim_expires_at);
+  ownerTransition = owner.lease_id
+    ? ownerTransition.where("lease_id", "=", owner.lease_id)
+    : ownerTransition.where("lease_id", "is", null);
+  ownerTransition =
+    owner.expires_at === null
+      ? ownerTransition.where("expires_at", "is", null)
+      : ownerTransition.where("expires_at", "=", owner.expires_at);
+  const cleanupAuthorized = sandboxCredentialPolicyCleanupAuthorizedCondition(
+    owner.id,
+    owner.sandbox_id,
+    transitionRevision,
+  );
+  await executeBatch(env, [
+    ownerTransition,
+    ...sandboxCredentialPolicyRefQueries(
+      env,
+      owner.id,
+      owner.sandbox_id,
+      "cleanup_pending",
+      generation,
+      transitionRevision,
+      cleanupAuthorized,
+    ),
+    db
+      .updateTable("interactive_session_credential_policies")
+      .set({ state: "cleanup_pending", updated_at: transitionRevision })
+      .where("session_id", "=", owner.id)
+      .where("sandbox_id", "=", owner.sandbox_id)
+      .where(cleanupAuthorized),
+  ]);
+  const staged = await db
+    .selectFrom("standalone_sandbox_provisions")
+    .select(["state", "sandbox_id", "updated_at"])
+    .where("id", "=", owner.id)
+    .executeTakeFirst();
+  return Boolean(
+    staged?.state === "cleanup_pending" &&
+    staged.sandbox_id === owner.sandbox_id &&
+    staged.updated_at === transitionRevision,
+  );
+}
+
+async function expireStandaloneSandboxProvisions(
+  env: RuntimeEnv,
+  now: number,
+  provisionId?: string,
+): Promise<void> {
+  const idFilter = provisionId ? sql`AND id = ${provisionId}` : sql``;
+  const result = await sql<Selectable<StandaloneSandboxProvisionTable>>`
+    SELECT *
+    FROM standalone_sandbox_provisions
+    WHERE (
+      (state = 'active' AND (expires_at IS NULL OR expires_at <= ${now}))
+      OR (
+        state = 'provisioning'
+        AND (
+          expires_at IS NULL
+          OR expires_at <= ${now}
+          OR ownership_claim_expires_at IS NULL
+          OR ownership_claim_expires_at <= ${now}
+        )
+      )
+      OR (
+        state = 'active'
+        AND lower(id) GLOB 'is-[0-9]*'
+        AND substr(lower(id), 4) NOT GLOB '*[^0-9]*'
+      )
+    )
+    ${idFilter}
+    ORDER BY COALESCE(expires_at, 0) ASC, updated_at ASC, id ASC
+    LIMIT ${credentialPolicyCleanupLimit}
+  `.execute(database(env));
+  await mapWithConcurrency(result.rows, 3, async (owner) => {
+    await stageStandaloneSandboxProvisionCleanup(
+      env,
+      owner,
+      managedInteractiveSessionId(owner.id)
+        ? "standalone provision used the reserved managed session namespace"
+        : "standalone Sandbox provision expired",
+      now,
+    );
+  });
+}
+
+async function stopStandaloneSandboxProvision(
+  request: Request,
+  env: RuntimeEnv,
+  provisionId: string,
+): Promise<InteractiveProvisionResult> {
+  authorizeProvisionBearerToken(request, env);
+  const owner = await database(env)
+    .selectFrom("standalone_sandbox_provisions")
+    .selectAll()
+    .where("id", "=", provisionId)
+    .executeTakeFirst();
+  if (!owner) throw notFound("standalone Sandbox provision not found");
+  const now = Date.now();
+  const staged = await stageStandaloneSandboxProvisionCleanup(
+    env,
+    owner,
+    "standalone Sandbox stop requested",
+    now,
+  );
+  if (!staged) throw conflict("standalone Sandbox ownership changed; retry stop");
+  await reconcileCredentialPolicyCleanupBatch(env, now, provisionId);
+  const remaining = await database(env)
+    .selectFrom("standalone_sandbox_provisions")
+    .select("state")
+    .where("id", "=", provisionId)
+    .executeTakeFirst();
+  return {
+    status: remaining ? "stopping" : "stopped",
+    leaseId: null,
+    attachUrl: null,
+    vncUrl: null,
+    expiresAt: null,
+    expiresAtPresent: true,
+    message: remaining ? "standalone Sandbox cleanup pending" : "standalone Sandbox stopped",
+  };
+}
+
+function standaloneSandboxAttachUrl(env: RuntimeEnv, provisionId: string): string {
+  const url = new URL(
+    `/api/provision/interactive/${encodeURIComponent(provisionId)}/pty`,
+    deploymentConfig(env).canonicalUrl,
+  );
+  url.protocol = url.protocol === "http:" ? "ws:" : "wss:";
+  return url.toString();
+}
+
+async function standaloneSandboxPty(
+  request: Request,
+  env: RuntimeEnv,
+  provisionId: string,
+): Promise<Response> {
+  authorizeProvisionEndpoint(request, env);
+  if (request.headers.get("upgrade")?.toLowerCase() !== "websocket") {
+    throw badRequest("websocket upgrade required");
+  }
+  if (!env.SANDBOX) throw serviceUnavailable("Sandbox binding is not configured");
+  const owner = await database(env)
+    .selectFrom("standalone_sandbox_provisions")
+    .selectAll()
+    .where("id", "=", provisionId)
+    .where("state", "=", "active")
+    .executeTakeFirst();
+  if (
+    !owner?.lease_id ||
+    !isCurrentSandboxLease(owner.lease_id) ||
+    !owner.expires_at ||
+    owner.expires_at <= Date.now() ||
+    managedInteractiveSessionId(provisionId)
+  ) {
+    if (owner) {
+      const now = Date.now();
+      await stageStandaloneSandboxProvisionCleanup(
+        env,
+        owner,
+        managedInteractiveSessionId(provisionId)
+          ? "standalone provision used the reserved managed session namespace"
+          : "standalone Sandbox provision expired",
+        now,
+      );
+      await reconcileCredentialPolicyCleanupBatch(env, now, provisionId);
+    }
+    throw notFound("standalone Sandbox provision not found");
+  }
+  const lease = sandboxLeaseInfo({ id: provisionId, leaseId: owner.lease_id });
+  if (lease.sandboxId !== owner.sandbox_id) {
+    throw serviceUnavailable("standalone Sandbox ownership is inconsistent");
+  }
+  const policyGeneration = await activeSandboxCredentialPolicyGeneration(
+    env,
+    provisionId,
+    owner.sandbox_id,
+  );
+  if (!policyGeneration) {
+    throw serviceUnavailable("standalone Sandbox credentials are unavailable");
+  }
+  const terminalOwnership: StandaloneSandboxTerminalOwnership = {
+    provisionId,
+    requestHash: owner.request_hash,
+    sandboxId: owner.sandbox_id,
+    leaseId: owner.lease_id,
+    expiresAt: owner.expires_at,
+    updatedAt: owner.updated_at,
+    policyGeneration,
+  };
+  const terminalGrant = standaloneSandboxTerminalGrant(env, terminalOwnership);
+  if (!(await terminalGrant())) {
+    throw serviceUnavailable("standalone Sandbox terminal authorization changed");
+  }
+  const sandbox = getSandbox(env.SANDBOX, owner.sandbox_id);
+  let response: Response;
+  try {
+    const terminalSession = await sandbox.getSession(lease.terminalSessionId);
+    const terminalHeaders = new Headers(request.headers);
+    terminalHeaders.delete("authorization");
+    terminalHeaders.delete("cookie");
+    response = await terminalSession.terminal(new Request(request, { headers: terminalHeaders }), {
+      cols: terminalSize(request, "cols", 120),
+      rows: terminalSize(request, "rows", 34),
+      shell: sandboxTerminalShellPath(provisionId),
+    });
+  } catch (error) {
+    throw serviceUnavailable(`standalone Sandbox terminal failed: ${safeProviderError(error)}`);
+  }
+  if (!response.webSocket || response.status !== 101) {
+    throw serviceUnavailable(`standalone Sandbox terminal HTTP ${response.status}`);
+  }
+  const pair = new WebSocketPair();
+  const client = pair[0];
+  const server = pair[1];
+  server.accept();
+  response.webSocket.accept();
+  bridgeWebSockets(
+    server,
+    response.webSocket,
+    terminalGrant,
+    undefined,
+    "standalone Sandbox authorization revoked or expired",
+  );
+  return new Response(null, { status: 101, webSocket: client });
+}
+
+function standaloneSandboxTerminalGrant(
+  env: RuntimeEnv,
+  ownership: StandaloneSandboxTerminalOwnership,
+): () => Promise<boolean> {
+  return cachedBooleanGrant(async () => {
+    const now = Date.now();
+    const owner = await database(env)
+      .selectFrom("standalone_sandbox_provisions")
+      .select("id")
+      .where("id", "=", ownership.provisionId)
+      .where("request_hash", "=", ownership.requestHash)
+      .where("sandbox_id", "=", ownership.sandboxId)
+      .where("state", "=", "active")
+      .where("lease_id", "=", ownership.leaseId)
+      .where("expires_at", "=", ownership.expiresAt)
+      .where("expires_at", ">", now)
+      .where("updated_at", "=", ownership.updatedAt)
+      .where(
+        activeSandboxCredentialPolicyCondition(
+          env,
+          ownership.provisionId,
+          ownership.sandboxId,
+          ownership.policyGeneration,
+          ownership.updatedAt,
+        ),
+      )
+      .executeTakeFirst();
+    return Boolean(owner);
+  });
+}
+
+function isBuiltInInteractiveProvisionUrl(env: RuntimeEnv, value: string): boolean {
   if (value === "/api/provision/interactive") return true;
   try {
     const url = new URL(value);
     return (
       url.pathname === "/api/provision/interactive" &&
-      (url.hostname === appCanonicalHost || appRedirectHosts.has(url.hostname))
+      (url.hostname === new URL(deploymentConfig(env).canonicalUrl).hostname ||
+        url.hostname === appCanonicalHost ||
+        appRedirectHosts.has(url.hostname))
     );
   } catch {
     return false;
@@ -4533,9 +8836,15 @@ function isBuiltInInteractiveProvisionUrl(value: string): boolean {
 async function provisionInteractivePayload(
   env: RuntimeEnv,
   payload: InteractiveProvisionRequest,
+  _agentToken?: string,
 ): Promise<InteractiveProvisionResult> {
   if (payload.runtime === "container" && env.SANDBOX) {
-    return provisionWithSandbox(env, payload);
+    return failedProvision("Cloudflare Sandbox provision requires durable ownership");
+  }
+  if (env.CRABBOX_RUNTIME_ADAPTER_URL) {
+    return failedProvision(
+      "versioned runtime adapter requires a durable interactive session lifecycle",
+    );
   }
   if (env.CRABBOX_RUNTIME_PROVISION_URL) {
     return forwardRuntimeProvision(env, payload);
@@ -4550,6 +8859,7 @@ async function provisionInteractivePayload(
     status: "pending_adapter",
     leaseId: null,
     attachUrl: null,
+    attachUrlPresent: true,
     vncUrl: null,
     message: "provision route live; runtime backend not configured",
   };
@@ -4558,6 +8868,7 @@ async function provisionInteractivePayload(
 function authorizeProvisionEndpoint(request: Request, env: RuntimeEnv): void {
   const hasBackend = Boolean(
     env.SANDBOX ||
+    env.CRABBOX_RUNTIME_ADAPTER_URL ||
     env.CRABBOX_RUNTIME_PROVISION_URL ||
     env.CRABBOX_CLOUDFLARE_RUNNER_URL ||
     env.CRABBOX_CLAWFLEET_URL,
@@ -4568,30 +8879,68 @@ function authorizeProvisionEndpoint(request: Request, env: RuntimeEnv): void {
     }
     return;
   }
+  authorizeProvisionBearerToken(request, env);
+}
+
+function authorizeProvisionBearerToken(request: Request, env: RuntimeEnv): void {
+  if (!env.CRABBOX_INTERACTIVE_PROVISION_TOKEN) {
+    throw serviceUnavailable("interactive provision token is not configured");
+  }
   const expected = `Bearer ${env.CRABBOX_INTERACTIVE_PROVISION_TOKEN}`;
   if (request.headers.get("authorization") !== expected) throw unauthorized();
+}
+
+function sandboxProvisionPreflightError(
+  env: RuntimeEnv,
+  session: SandboxRuntimeSession,
+): string | null {
+  if (!env.SANDBOX) return "Cloudflare Sandbox binding is not configured";
+  if (!env.SESSION_CONTROL) return "SESSION_CONTROL Durable Object is not configured";
+  if (!env.OPENAI_API_KEY) {
+    return "OPENAI_API_KEY is not configured for Cloudflare Sandbox Codex";
+  }
+  if (session.githubToken && !env.CRABBOX_TOKEN_ENCRYPTION_KEY && !env.GITHUB_CLIENT_SECRET) {
+    return "CRABBOX_TOKEN_ENCRYPTION_KEY or GITHUB_CLIENT_SECRET is required for user GitHub tokens";
+  }
+  return null;
+}
+
+async function stageFailedManagedSandboxProvision(
+  env: RuntimeEnv,
+  sessionId: string,
+  ownershipFence: SandboxLeaseRefreshFence,
+  message: string,
+  now: number,
+): Promise<boolean> {
+  const staged = await stageTerminalCredentialPolicyCleanupById(
+    env,
+    sessionId,
+    "failed",
+    message,
+    now,
+    message,
+    ownershipFence,
+  );
+  await reconcileCredentialPolicyCleanupBatch(env, now, sessionId);
+  return staged;
 }
 
 async function provisionWithSandbox(
   env: RuntimeEnv,
   session: InteractiveProvisionRequest,
-  agentToken?: string,
+  agentToken: string | undefined,
+  lease: SandboxLease,
+  ownershipFence: SandboxCredentialPolicyOwnershipFence,
 ): Promise<InteractiveProvisionResult> {
-  if (!env.SANDBOX) {
-    return failedProvision("Cloudflare Sandbox binding is not configured");
-  }
-  if (!env.SESSION_CONTROL) {
-    return failedProvision("SESSION_CONTROL Durable Object is not configured");
-  }
-  if (!env.OPENAI_API_KEY) {
-    return failedProvision("OPENAI_API_KEY is not configured for Cloudflare Sandbox Codex");
-  }
-
-  const lease = newSandboxLease(session.id);
-  const workdir = sandboxWorkdir(session.id);
-  const sandbox = getSandbox(env.SANDBOX, lease.sandboxId);
   try {
-    await registerSandboxCredentialPolicy(env, session, lease.sandboxId);
+    const preflightError = sandboxProvisionPreflightError(env, session);
+    if (preflightError) throw new Error(preflightError);
+    const workdir = sandboxWorkdir(session.id);
+    const sandbox = getSandbox(env.SANDBOX!, lease.sandboxId);
+    if (!("provisionId" in ownershipFence) && !agentToken) {
+      throw new Error("managed Sandbox agent token is unavailable");
+    }
+    await registerSandboxCredentialPolicy(env, session, lease.sandboxId, ownershipFence);
     await setupSandboxTerminalSession(
       sandbox,
       env,
@@ -4601,78 +8950,804 @@ async function provisionWithSandbox(
       agentToken,
     );
   } catch (error) {
-    await unregisterSandboxCredentialPolicy(env, lease.sandboxId);
-    const message = clean(error instanceof Error ? error.message : String(error), 240);
-    return failedProvision(`Cloudflare Sandbox provision failed: ${message}`);
+    const message = safeProviderError(error);
+    const cleanupMessage = `Cloudflare Sandbox provision failed: ${message}`;
+    const failureAt = Date.now();
+    if ("provisionId" in ownershipFence) {
+      await queueSandboxCredentialPolicyCleanup(env, session.id, lease.sandboxId, failureAt);
+    } else {
+      await stageTerminalCredentialPolicyCleanupById(
+        env,
+        session.id,
+        "failed",
+        cleanupMessage,
+        failureAt,
+        cleanupMessage,
+        ownershipFence,
+      );
+    }
+    await reconcileCredentialPolicyCleanupBatch(env, Date.now(), session.id);
+    return {
+      status: "stopping",
+      leaseId: sandboxLeaseId(lease),
+      attachUrl: null,
+      vncUrl: null,
+      message: `${cleanupMessage}; credential cleanup pending`,
+      terminalStatus: "failed",
+      createPending: false,
+    };
   }
 
   return {
     status: "ready",
     leaseId: sandboxLeaseId(lease),
-    attachUrl: `/api/interactive-sessions/${encodeURIComponent(session.id)}/pty`,
+    attachUrl:
+      "provisionId" in ownershipFence
+        ? standaloneSandboxAttachUrl(env, session.id)
+        : `/api/interactive-sessions/${encodeURIComponent(session.id)}/pty`,
     vncUrl: null,
     message: `Cloudflare Sandbox ready for ${session.repo}`,
   };
+}
+
+function sandboxManagedOwnershipCondition(
+  ownershipFence: SandboxManagedOwnershipFence,
+  now: number,
+): RawBuilder<boolean> {
+  if ("leaseId" in ownershipFence) {
+    return sql<boolean>`
+      lease_id = ${ownershipFence.leaseId}
+      AND sandbox_refresh_sandbox_id IS NULL
+      AND sandbox_refresh_claim IS NULL
+      AND sandbox_refresh_claim_expires_at IS NULL
+    `;
+  }
+  return sql<boolean>`
+    lease_id IS ${ownershipFence.refreshLeaseId}
+    AND sandbox_refresh_sandbox_id = ${ownershipFence.sandboxId}
+    AND sandbox_refresh_claim = ${ownershipFence.claim}
+    AND sandbox_refresh_claim_expires_at > ${now}
+  `;
+}
+
+function sandboxManagedStoredOwnershipCondition(
+  ownershipFence: SandboxManagedOwnershipFence,
+): RawBuilder<boolean> {
+  if ("leaseId" in ownershipFence) {
+    return sql<boolean>`
+      lease_id = ${ownershipFence.leaseId}
+      AND sandbox_refresh_sandbox_id IS NULL
+      AND sandbox_refresh_claim IS NULL
+      AND sandbox_refresh_claim_expires_at IS NULL
+    `;
+  }
+  return sql<boolean>`
+    lease_id IS ${ownershipFence.refreshLeaseId}
+    AND sandbox_refresh_sandbox_id = ${ownershipFence.sandboxId}
+    AND sandbox_refresh_claim = ${ownershipFence.claim}
+    AND sandbox_refresh_claim_expires_at = ${ownershipFence.expiresAt}
+  `;
+}
+
+function sandboxCredentialPolicyOwnerCondition(
+  sessionId: string,
+  sandboxId: string,
+  ownershipFence: SandboxCredentialPolicyOwnershipFence,
+  now: number,
+): RawBuilder<boolean> {
+  if ("provisionId" in ownershipFence) {
+    return sql<boolean>`EXISTS (
+      SELECT 1
+      FROM standalone_sandbox_provisions AS owner
+      WHERE owner.id = ${sessionId}
+        AND owner.id = ${ownershipFence.provisionId}
+        AND owner.sandbox_id = ${sandboxId}
+        AND owner.sandbox_id = ${ownershipFence.sandboxId}
+        AND owner.state = 'provisioning'
+        AND owner.ownership_claim = ${ownershipFence.claim}
+        AND owner.ownership_claim_expires_at > ${now}
+    )`;
+  }
+  return sql<boolean>`EXISTS (
+    SELECT 1
+    FROM interactive_sessions
+    WHERE id = ${sessionId}
+      AND ${sandboxId} = ${ownershipFence.sandboxId}
+      AND (adapter IS NULL OR adapter != ${runtimeAdapterName})
+      AND status IN ('provisioning', 'pending_adapter', 'ready', 'attached', 'detached')
+      AND credential_cleanup_terminal_status IS NULL
+      AND agent_token_hash IS NOT NULL
+      AND ${sandboxManagedOwnershipCondition(ownershipFence, now)}
+  )`;
+}
+
+function sandboxCredentialPolicyRegistrationQueries(
+  sessionId: string,
+  sandboxId: string,
+  registration: SandboxCredentialPolicyRegistration,
+  registrationExpiresAt: number,
+  now: number,
+  ownershipFence: SandboxCredentialPolicyOwnershipFence,
+): CompilableQuery[] {
+  return registration.lookupIds.map(
+    (lookupId) => sql`
+      INSERT INTO interactive_session_credential_policies (
+        session_id,
+        sandbox_id,
+        lookup_id,
+        state,
+        registration_generation,
+        registration_claim,
+        registration_claim_expires_at,
+        attempt_count,
+        last_attempt_at,
+        last_error,
+        cleanup_claim,
+        cleanup_claim_expires_at,
+        created_at,
+        updated_at
+      )
+      SELECT
+        ${sessionId},
+        ${sandboxId},
+        ${lookupId},
+        'registering',
+        ${registration.generation},
+        ${registration.claim},
+        ${registrationExpiresAt},
+        0,
+        NULL,
+        NULL,
+        NULL,
+        NULL,
+        ${now},
+        ${now}
+      WHERE ${sandboxCredentialPolicyOwnerCondition(sessionId, sandboxId, ownershipFence, now)}
+      ON CONFLICT(session_id, sandbox_id, lookup_id) DO UPDATE SET
+        state = 'registering',
+        registration_generation = excluded.registration_generation,
+        registration_claim = excluded.registration_claim,
+        registration_claim_expires_at = excluded.registration_claim_expires_at,
+        last_error = NULL,
+        cleanup_claim = NULL,
+        cleanup_claim_expires_at = NULL,
+        updated_at = excluded.updated_at
+      WHERE interactive_session_credential_policies.state != 'cleanup_pending'
+        AND (
+          interactive_session_credential_policies.registration_claim IS NULL
+          OR interactive_session_credential_policies.registration_claim_expires_at <= ${now}
+        )
+        AND ${sandboxCredentialPolicyOwnerCondition(sessionId, sandboxId, ownershipFence, now)}
+    `,
+  );
+}
+
+async function beginSandboxCredentialPolicyRegistration(
+  env: RuntimeEnv,
+  sessionId: string,
+  sandboxId: string,
+  ownershipFence: SandboxCredentialPolicyOwnershipFence,
+): Promise<SandboxCredentialPolicyRegistration> {
+  const db = database(env);
+  const lookupIds = sandboxLookupIds(env, sandboxId);
+  const existing = await db
+    .selectFrom("interactive_session_credential_policies")
+    .select("registration_generation")
+    .distinct()
+    .where("session_id", "=", sessionId)
+    .where("sandbox_id", "=", sandboxId)
+    .execute();
+  if (existing.length > 1) {
+    throw new Error("sandbox credential policy generations are inconsistent");
+  }
+  const registration = {
+    generation: existing[0]?.registration_generation ?? `generation:${crypto.randomUUID()}`,
+    claim: `registration:${crypto.randomUUID()}`,
+    lookupIds,
+  };
+  const now = Date.now();
+  const registrationExpiresAt = now + credentialPolicyRegistrationClaimMs;
+  await executeBatch(
+    env,
+    sandboxCredentialPolicyRegistrationQueries(
+      sessionId,
+      sandboxId,
+      registration,
+      registrationExpiresAt,
+      now,
+      ownershipFence,
+    ),
+  );
+  const claimed = await db
+    .selectFrom("interactive_session_credential_policies")
+    .select([
+      "lookup_id",
+      "state",
+      "registration_generation",
+      "registration_claim",
+      "registration_claim_expires_at",
+    ])
+    .where("session_id", "=", sessionId)
+    .where("sandbox_id", "=", sandboxId)
+    .where("lookup_id", "in", lookupIds)
+    .execute();
+  if (
+    claimed.length !== lookupIds.length ||
+    claimed.some(
+      (row) =>
+        row.state !== "registering" ||
+        row.registration_generation !== registration.generation ||
+        row.registration_claim !== registration.claim ||
+        row.registration_claim_expires_at !== registrationExpiresAt,
+    )
+  ) {
+    await abandonSandboxCredentialPolicyRegistration(
+      env,
+      sessionId,
+      sandboxId,
+      registration,
+      "sandbox credential policy registration claim was not acquired",
+    );
+    throw new Error("sandbox credential policy registration is unavailable");
+  }
+  return registration;
+}
+
+async function beginLegacySandboxCredentialPolicyRepair(
+  env: RuntimeEnv,
+  sessionId: string,
+  sandboxId: string,
+  ownershipFence: SandboxCurrentLeaseFence,
+): Promise<SandboxCredentialPolicyRegistration> {
+  const db = database(env);
+  const lookupIds = sandboxLookupIds(env, sandboxId);
+  const existing = await db
+    .selectFrom("interactive_session_credential_policies")
+    .select(["registration_generation", "registration_claim"])
+    .where("session_id", "=", sessionId)
+    .where("sandbox_id", "=", sandboxId)
+    .execute();
+  const generations = [...new Set(existing.map((row) => row.registration_generation))];
+  const existingGeneration = generations[0];
+  if (!existingGeneration || generations.length !== 1) {
+    throw new Error("legacy sandbox credential policy generations are inconsistent");
+  }
+  const resuming = existing.some((row) =>
+    row.registration_claim?.startsWith(credentialPolicyLegacyRepairClaimPrefix),
+  );
+  if (!existingGeneration?.startsWith(credentialPolicyLegacyGenerationPrefix) && !resuming) {
+    throw new Error("legacy sandbox credential policy repair is not pending");
+  }
+  const registration: SandboxCredentialPolicyRegistration = {
+    generation: existingGeneration.startsWith(credentialPolicyLegacyGenerationPrefix)
+      ? `generation:${crypto.randomUUID()}`
+      : existingGeneration,
+    claim: `${credentialPolicyLegacyRepairClaimPrefix}${crypto.randomUUID()}`,
+    lookupIds,
+  };
+  const now = Date.now();
+  const registrationExpiresAt = now + credentialPolicyRegistrationClaimMs;
+  await executeBatch(
+    env,
+    sandboxCredentialPolicyRegistrationQueries(
+      sessionId,
+      sandboxId,
+      registration,
+      registrationExpiresAt,
+      now,
+      ownershipFence,
+    ),
+  );
+  const claimed = await db
+    .selectFrom("interactive_session_credential_policies")
+    .select([
+      "lookup_id",
+      "state",
+      "registration_generation",
+      "registration_claim",
+      "registration_claim_expires_at",
+    ])
+    .where("session_id", "=", sessionId)
+    .where("sandbox_id", "=", sandboxId)
+    .where("lookup_id", "in", lookupIds)
+    .execute();
+  if (
+    claimed.length !== lookupIds.length ||
+    claimed.some(
+      (row) =>
+        row.state !== "registering" ||
+        row.registration_generation !== registration.generation ||
+        row.registration_claim !== registration.claim ||
+        row.registration_claim_expires_at !== registrationExpiresAt,
+    )
+  ) {
+    throw new Error("legacy sandbox credential policy repair claim was not acquired");
+  }
+  return registration;
+}
+
+async function repairLegacySandboxCredentialPolicy(
+  env: RuntimeEnv,
+  sessionId: string,
+  sandboxId: string,
+): Promise<void> {
+  const stub = sandboxControlStub(env);
+  if (!stub || !env.SANDBOX) {
+    throw new Error("legacy sandbox credential policy repair is unavailable");
+  }
+  const session = await database(env)
+    .selectFrom("interactive_sessions")
+    .selectAll()
+    .where("id", "=", sessionId)
+    .executeTakeFirst();
+  if (!session?.lease_id) {
+    throw new Error("legacy sandbox credential policy owner is unavailable");
+  }
+  const lease = sandboxLeaseInfo({
+    id: session.id,
+    adapter: session.adapter,
+    leaseId: session.lease_id,
+  });
+  if (lease.sandboxId !== sandboxId) {
+    throw new Error("legacy sandbox credential policy lease does not match");
+  }
+  const ownership: SandboxCurrentLeaseFence = { leaseId: session.lease_id, sandboxId };
+  const registration = await beginLegacySandboxCredentialPolicyRepair(
+    env,
+    sessionId,
+    sandboxId,
+    ownership,
+  );
+  try {
+    const registrationExpiresAt = await renewSandboxCredentialPolicyRegistration(
+      env,
+      sessionId,
+      sandboxId,
+      registration,
+      ownership,
+    );
+    if (!registrationExpiresAt) {
+      throw new Error("legacy sandbox credential policy repair claim was revoked");
+    }
+    const response = await stub.fetch(
+      "https://crabfleet.internal/api/session-control/migrate-legacy",
+      {
+        method: "POST",
+        body: JSON.stringify({
+          generation: registration.generation,
+          registrationClaim: registration.claim,
+          registrationExpiresAt,
+          sandboxIds: registration.lookupIds,
+          sessionId,
+        } satisfies SandboxCredentialPolicyLegacyMigration),
+        headers: { "content-type": "application/json" },
+      },
+    );
+    if (!response.ok) {
+      throw new Error("legacy sandbox credential policy repair failed");
+    }
+    if (
+      !(await finishSandboxCredentialPolicyRegistration(
+        env,
+        sessionId,
+        sandboxId,
+        registration,
+        ownership,
+      ))
+    ) {
+      throw new Error("legacy sandbox credential policy repair lost ownership");
+    }
+  } catch (error) {
+    await database(env)
+      .updateTable("interactive_session_credential_policies")
+      .set({
+        last_error: clean(error instanceof Error ? error.message : String(error), 500),
+        updated_at: Date.now(),
+      })
+      .where("session_id", "=", sessionId)
+      .where("sandbox_id", "=", sandboxId)
+      .where("registration_generation", "=", registration.generation)
+      .where("registration_claim", "=", registration.claim)
+      .execute();
+    throw error;
+  }
+}
+
+async function repairLegacySandboxCredentialPolicyBatch(
+  env: RuntimeEnv,
+  now: number,
+  sessionId?: string,
+): Promise<void> {
+  if (!env.SANDBOX || !env.SESSION_CONTROL) return;
+  let query = database(env)
+    .selectFrom("interactive_session_credential_policies")
+    .select(["session_id", "sandbox_id"])
+    .select(({ fn }) => fn.min<number>("updated_at").as("repair_updated_at"))
+    .where((expression) =>
+      expression.or([
+        expression.and([
+          expression("state", "=", "active"),
+          expression(
+            "registration_generation",
+            "like",
+            `${credentialPolicyLegacyGenerationPrefix}%`,
+          ),
+        ]),
+        expression.and([
+          expression("state", "=", "registering"),
+          expression("registration_claim", "like", `${credentialPolicyLegacyRepairClaimPrefix}%`),
+          expression("registration_claim_expires_at", "<=", now),
+        ]),
+      ]),
+    )
+    .groupBy(["session_id", "sandbox_id"])
+    .orderBy("repair_updated_at", "asc")
+    .orderBy("session_id", "asc")
+    .orderBy("sandbox_id", "asc")
+    .limit(credentialPolicyCleanupLimit);
+  if (sessionId) query = query.where("session_id", "=", sessionId);
+  const candidates = await query.execute();
+  await mapWithConcurrency(candidates, 3, async (candidate) => {
+    await repairLegacySandboxCredentialPolicy(
+      env,
+      candidate.session_id,
+      candidate.sandbox_id,
+    ).catch((error) => {
+      console.error("legacy sandbox credential policy repair failed", error);
+    });
+  });
+}
+
+async function renewSandboxCredentialPolicyRegistration(
+  env: RuntimeEnv,
+  sessionId: string,
+  sandboxId: string,
+  registration: SandboxCredentialPolicyRegistration,
+  ownershipFence: SandboxCredentialPolicyOwnershipFence,
+): Promise<number | null> {
+  const now = Date.now();
+  const registrationExpiresAt = now + credentialPolicyRegistrationClaimMs;
+  const renewed = await database(env)
+    .updateTable("interactive_session_credential_policies")
+    .set({
+      registration_claim_expires_at: registrationExpiresAt,
+      updated_at: now,
+    })
+    .where("session_id", "=", sessionId)
+    .where("sandbox_id", "=", sandboxId)
+    .where("lookup_id", "in", registration.lookupIds)
+    .where("state", "=", "registering")
+    .where("registration_generation", "=", registration.generation)
+    .where("registration_claim", "=", registration.claim)
+    .where(sandboxCredentialPolicyOwnerCondition(sessionId, sandboxId, ownershipFence, now))
+    .executeTakeFirst();
+  return Number(renewed.numUpdatedRows ?? 0n) === registration.lookupIds.length
+    ? registrationExpiresAt
+    : null;
+}
+
+async function finishSandboxCredentialPolicyRegistration(
+  env: RuntimeEnv,
+  sessionId: string,
+  sandboxId: string,
+  registration: SandboxCredentialPolicyRegistration,
+  ownershipFence: SandboxCredentialPolicyOwnershipFence,
+): Promise<boolean> {
+  const now = Date.now();
+  const db = database(env);
+  await db
+    .updateTable("interactive_session_credential_policies")
+    .set({
+      state: "active",
+      registration_claim: null,
+      registration_claim_expires_at: null,
+      updated_at: now,
+    })
+    .where("session_id", "=", sessionId)
+    .where("sandbox_id", "=", sandboxId)
+    .where("lookup_id", "in", registration.lookupIds)
+    .where("state", "=", "registering")
+    .where("registration_generation", "=", registration.generation)
+    .where("registration_claim", "=", registration.claim)
+    .where(sandboxCredentialPolicyOwnerCondition(sessionId, sandboxId, ownershipFence, now))
+    .execute();
+  const active = await db
+    .selectFrom("interactive_session_credential_policies")
+    .select(["lookup_id", "state", "registration_generation", "registration_claim"])
+    .where("session_id", "=", sessionId)
+    .where("sandbox_id", "=", sandboxId)
+    .where("lookup_id", "in", registration.lookupIds)
+    .execute();
+  return (
+    active.length === registration.lookupIds.length &&
+    active.every(
+      (row) =>
+        row.state === "active" &&
+        row.registration_generation === registration.generation &&
+        row.registration_claim === null,
+    )
+  );
+}
+
+async function abandonSandboxCredentialPolicyRegistration(
+  env: RuntimeEnv,
+  sessionId: string,
+  sandboxId: string,
+  registration: SandboxCredentialPolicyRegistration,
+  reason: string,
+): Promise<void> {
+  const now = Date.now();
+  await database(env)
+    .updateTable("interactive_session_credential_policies")
+    .set({
+      state: sql<"registering" | "cleanup_pending">`CASE
+        WHEN ${sandboxCredentialPolicyCleanupAuthorizedCondition(sessionId, sandboxId, now)}
+        THEN 'cleanup_pending'
+        ELSE 'registering'
+      END`,
+      registration_claim: null,
+      registration_claim_expires_at: null,
+      last_error: reason,
+      updated_at: now,
+    })
+    .where("session_id", "=", sessionId)
+    .where("sandbox_id", "=", sandboxId)
+    .where("registration_generation", "=", registration.generation)
+    .where("registration_claim", "=", registration.claim)
+    .execute();
 }
 
 async function registerSandboxCredentialPolicy(
   env: RuntimeEnv,
   session: SandboxRuntimeSession,
   sandboxId: string,
+  ownershipFence: SandboxCredentialPolicyOwnershipFence,
 ): Promise<void> {
   const stub = sandboxControlStub(env);
   if (!stub) throw new Error("SESSION_CONTROL Durable Object is not configured");
-  const githubToken = "githubToken" in session ? session.githubToken : undefined;
-  const githubTokenCiphertext = githubToken ? await sealSecret(env, githubToken) : null;
-  if (githubToken && !githubTokenCiphertext) {
-    throw new Error(
-      "CRABBOX_TOKEN_ENCRYPTION_KEY or GITHUB_CLIENT_SECRET is required for user GitHub tokens",
-    );
+  const policyExpiresAt =
+    "provisionId" in ownershipFence
+      ? await standaloneSandboxPolicyExpiresAt(env, session.id, sandboxId, ownershipFence)
+      : null;
+  if ("provisionId" in ownershipFence && !policyExpiresAt) {
+    throw new Error("standalone Sandbox credential expiry is unavailable");
   }
-  const effectiveGithubToken = githubToken ?? env.GITHUB_TOKEN;
-  const githubCredentialSource = githubTokenCiphertext
-    ? "session"
-    : env.GITHUB_TOKEN
-      ? "worker"
-      : "none";
-  const githubRepoNodeId = effectiveGithubToken
-    ? await fetchGithubRepoNodeId(session.repo, effectiveGithubToken)
-    : null;
-  const policy: SandboxCredentialPolicy = {
-    allowedHosts: sandboxBackupAllowedHosts(env),
-    githubCredentialSource,
-    githubRepo: session.repo,
-    owner: session.owner,
+  const registration = await beginSandboxCredentialPolicyRegistration(
+    env,
+    session.id,
     sandboxId,
-    sessionId: session.id,
-    ...(githubRepoNodeId ? { githubRepoNodeId } : {}),
-    ...(githubTokenCiphertext ? { githubTokenCiphertext } : {}),
-    ...(env.OPENAI_BASE_URL ? { openAIBaseUrl: env.OPENAI_BASE_URL } : {}),
-    ...(env.OPENAI_ORG_ID ? { openAIOrgId: env.OPENAI_ORG_ID } : {}),
-  };
-  for (const lookupId of sandboxLookupIds(env, sandboxId)) {
-    const response = await stub.fetch("https://crabfleet.internal/api/session-control/register", {
-      method: "POST",
-      body: JSON.stringify({ ...policy, sandboxId: lookupId }),
-      headers: { "content-type": "application/json" },
-    });
-    if (!response.ok) {
-      throw new Error("sandbox credential policy registration failed");
+    ownershipFence,
+  );
+  try {
+    const githubToken = "githubToken" in session ? session.githubToken : undefined;
+    const githubTokenCiphertext = githubToken ? await sealSecret(env, githubToken) : null;
+    if (githubToken && !githubTokenCiphertext) {
+      throw new Error(
+        "CRABBOX_TOKEN_ENCRYPTION_KEY or GITHUB_CLIENT_SECRET is required for user GitHub tokens",
+      );
     }
+    const effectiveGithubToken = githubToken ?? env.GITHUB_TOKEN;
+    const githubCredentialSource = githubTokenCiphertext
+      ? "session"
+      : env.GITHUB_TOKEN
+        ? "worker"
+        : "none";
+    const githubRepoNodeId = effectiveGithubToken
+      ? await fetchGithubRepoNodeId(session.repo, effectiveGithubToken)
+      : null;
+    const policy: SandboxCredentialPolicy = {
+      allowedHosts: sandboxBackupAllowedHosts(env),
+      ...(policyExpiresAt ? { expiresAt: policyExpiresAt } : {}),
+      githubCredentialSource,
+      githubRepo: session.repo,
+      owner: session.owner,
+      sandboxId,
+      sessionId: session.id,
+      ...(githubRepoNodeId ? { githubRepoNodeId } : {}),
+      ...(githubTokenCiphertext ? { githubTokenCiphertext } : {}),
+      ...(env.OPENAI_BASE_URL ? { openAIBaseUrl: env.OPENAI_BASE_URL } : {}),
+      ...(env.OPENAI_ORG_ID ? { openAIOrgId: env.OPENAI_ORG_ID } : {}),
+    };
+    for (const lookupId of registration.lookupIds) {
+      const registrationExpiresAt = await renewSandboxCredentialPolicyRegistration(
+        env,
+        session.id,
+        sandboxId,
+        registration,
+        ownershipFence,
+      );
+      if (!registrationExpiresAt) {
+        throw new Error("sandbox credential policy registration claim was revoked");
+      }
+      const response = await stub.fetch("https://crabfleet.internal/api/session-control/register", {
+        method: "POST",
+        body: JSON.stringify({
+          generation: registration.generation,
+          registrationClaim: registration.claim,
+          registrationExpiresAt,
+          policy: { ...policy, sandboxId: lookupId },
+        } satisfies StoredSandboxCredentialPolicy),
+        headers: { "content-type": "application/json" },
+      });
+      if (!response.ok) {
+        throw new Error("sandbox credential policy registration failed");
+      }
+    }
+    if (
+      !(await finishSandboxCredentialPolicyRegistration(
+        env,
+        session.id,
+        sandboxId,
+        registration,
+        ownershipFence,
+      ))
+    ) {
+      throw new Error("sandbox credential policy cleanup became pending during registration");
+    }
+  } catch (error) {
+    await abandonSandboxCredentialPolicyRegistration(
+      env,
+      session.id,
+      sandboxId,
+      registration,
+      clean(error instanceof Error ? error.message : String(error), 500),
+    ).catch(() => undefined);
+    throw error;
   }
+}
+
+async function standaloneSandboxPolicyExpiresAt(
+  env: RuntimeEnv,
+  sessionId: string,
+  sandboxId: string,
+  fence: StandaloneSandboxProvisionFence,
+): Promise<number | null> {
+  const now = Date.now();
+  const owner = await database(env)
+    .selectFrom("standalone_sandbox_provisions")
+    .select("expires_at")
+    .where("id", "=", sessionId)
+    .where("id", "=", fence.provisionId)
+    .where("sandbox_id", "=", sandboxId)
+    .where("sandbox_id", "=", fence.sandboxId)
+    .where("state", "=", "provisioning")
+    .where("ownership_claim", "=", fence.claim)
+    .where("ownership_claim_expires_at", ">", now)
+    .where("expires_at", ">", now)
+    .executeTakeFirst();
+  return owner?.expires_at ?? null;
 }
 
 async function ensureSandboxCredentialPolicy(
   env: RuntimeEnv,
-  session: SandboxRuntimeSession,
+  session: InteractiveSession & { githubToken?: string },
   sandboxId: string,
 ): Promise<void> {
+  const leaseId = session.leaseId;
+  if (!leaseId || !leaseId.startsWith(sandboxLeasePrefix)) {
+    throw new Error("sandbox credential policy requires a current durable lease");
+  }
+  const lease = sandboxLeaseInfo(session);
+  if (lease.sandboxId !== sandboxId) {
+    throw new Error("sandbox credential policy lease ownership does not match");
+  }
+  const ownership: SandboxCurrentLeaseFence = { leaseId, sandboxId };
   const hasFreshUserToken = Boolean("githubToken" in session && session.githubToken);
-  if (!hasFreshUserToken && (await sandboxCredentialPolicyExists(env, sandboxId))) return;
-  await registerSandboxCredentialPolicy(env, session, sandboxId);
+  let generation = await existingSandboxCredentialPolicyGeneration(env, session.id, sandboxId);
+  if (generation?.startsWith(credentialPolicyLegacyGenerationPrefix)) {
+    await repairLegacySandboxCredentialPolicy(env, session.id, sandboxId);
+    if (!hasFreshUserToken) return;
+    generation = await existingSandboxCredentialPolicyGeneration(env, session.id, sandboxId);
+  }
+  if (
+    !hasFreshUserToken &&
+    generation &&
+    (await sandboxCredentialPolicyExists(env, sandboxId, generation))
+  ) {
+    if (
+      !(await recordSandboxCredentialPolicyRefs(
+        env,
+        session.id,
+        sandboxId,
+        "active",
+        generation,
+        ownership,
+      ))
+    ) {
+      throw new Error("sandbox credential policy lifecycle is unavailable");
+    }
+    return;
+  }
+  await registerSandboxCredentialPolicy(env, session, sandboxId, ownership);
 }
 
-async function sandboxCredentialPolicyExists(env: RuntimeEnv, sandboxId: string): Promise<boolean> {
+async function recordSandboxCredentialPolicyRefs(
+  env: RuntimeEnv,
+  sessionId: string,
+  sandboxId: string,
+  state: "registering" | "active" | "cleanup_pending",
+  generation: string,
+  ownershipFence: SandboxCredentialPolicyOwnershipFence,
+  now = Date.now(),
+): Promise<boolean> {
+  const lookupIds = sandboxLookupIds(env, sandboxId);
+  if (state === "active") {
+    await promoteSandboxCredentialPolicyRegistration(
+      env,
+      sessionId,
+      sandboxId,
+      generation,
+      ownershipFence,
+      now,
+    );
+  }
+  await executeBatch(
+    env,
+    sandboxCredentialPolicyRefQueries(
+      env,
+      sessionId,
+      sandboxId,
+      state,
+      generation,
+      now,
+      sandboxCredentialPolicyOwnerCondition(sessionId, sandboxId, ownershipFence, now),
+    ),
+  );
+  const refs = await database(env)
+    .selectFrom("interactive_session_credential_policies")
+    .select(["lookup_id", "state", "registration_generation", "registration_claim"])
+    .where("session_id", "=", sessionId)
+    .where("sandbox_id", "=", sandboxId)
+    .where("lookup_id", "in", lookupIds)
+    .execute();
+  return (
+    refs.length === lookupIds.length &&
+    refs.every(
+      (ref) =>
+        ref.state === state &&
+        ref.registration_generation === generation &&
+        ref.registration_claim === null,
+    )
+  );
+}
+
+async function promoteSandboxCredentialPolicyRegistration(
+  env: RuntimeEnv,
+  sessionId: string,
+  sandboxId: string,
+  generation: string,
+  ownershipFence: SandboxCredentialPolicyOwnershipFence,
+  now: number,
+): Promise<void> {
+  await database(env)
+    .updateTable("interactive_session_credential_policies")
+    .set({
+      state: "active",
+      registration_claim: null,
+      registration_claim_expires_at: null,
+      last_error: null,
+      updated_at: now,
+    })
+    .where("session_id", "=", sessionId)
+    .where("sandbox_id", "=", sandboxId)
+    .where("lookup_id", "in", sandboxLookupIds(env, sandboxId))
+    .where("state", "=", "registering")
+    .where("registration_generation", "=", generation)
+    .where((expression) =>
+      expression.or([
+        expression("registration_claim", "is", null),
+        expression("registration_claim_expires_at", "<=", now),
+      ]),
+    )
+    .where(sandboxCredentialPolicyOwnerCondition(sessionId, sandboxId, ownershipFence, now))
+    .execute();
+}
+
+async function sandboxCredentialPolicyExists(
+  env: RuntimeEnv,
+  sandboxId: string,
+  generation: string,
+): Promise<boolean> {
   const stub = sandboxControlStub(env);
   if (!stub) return false;
   const responses = await Promise.all(
@@ -4682,7 +9757,13 @@ async function sandboxCredentialPolicyExists(env: RuntimeEnv, sandboxId: string)
       ),
     ),
   );
-  return responses.some((response) => response.ok);
+  if (responses.some((response) => !response.ok && response.status !== 404)) {
+    throw new Error("sandbox credential policy lookup failed");
+  }
+  return responses.every(
+    (response) =>
+      response.ok && response.headers.get("x-crabfleet-policy-generation") === generation,
+  );
 }
 
 async function fetchGithubRepoNodeId(repo: string, token: string): Promise<string> {
@@ -4771,6 +9852,9 @@ async function ensureCurrentSandboxLease(
   session: InteractiveSession & { githubToken?: string },
 ): Promise<InteractiveSession & { githubToken?: string }> {
   if (!env.SANDBOX) return session;
+  if (!isSandboxInteractiveSession(session)) {
+    throw serviceUnavailable("session is not backed by a Cloudflare Sandbox lease");
+  }
   if (isCurrentSandboxLease(session.leaseId)) {
     await ensureSandboxCredentialPolicy(env, session, sandboxLeaseInfo(session).sandboxId);
     return session;
@@ -4793,34 +9877,14 @@ async function ensureCurrentSandboxLease(
   if (user.subject.startsWith("github:") && !githubToken) {
     throw forbidden("GitHub PR credentials are not connected; sign in with GitHub again");
   }
-  const fallbackLeaseId = sandboxLeaseWithoutRefresh(originalLeaseId);
-  const oldSandboxId = originalLeaseId.startsWith(sandboxLeasePrefix)
-    ? sandboxLeaseInfo({ id: session.id, leaseId: fallbackLeaseId }).sandboxId
-    : null;
-  const refreshLeaseId = `${fallbackLeaseId}:refreshing-${now}-${crypto.randomUUID().slice(0, 8)}`;
-  const claim = await database(env)
-    .updateTable("interactive_sessions")
-    .set({
-      lease_id: refreshLeaseId,
-      last_event: "Cloudflare Sandbox lease refresh started",
-      updated_at: now,
-    })
-    .where("id", "=", session.id)
-    .where("lease_id", "=", originalLeaseId)
-    .where("status", "in", ["ready", "attached", "detached"])
-    .executeTakeFirst();
-  if ((claim.numUpdatedRows ?? 0n) === 0n) {
-    const current = await readInteractiveSession(env, session.id);
-    if (current && isCurrentSandboxLease(current.leaseId)) return current;
-    throw serviceUnavailable("Cloudflare Sandbox lease refresh is already in progress");
-  }
-  const provisioned = await provisionWithSandbox(env, {
+  const refreshPayload: InteractiveProvisionRequest = {
     id: session.id,
     parentSessionId: session.parentSessionId,
     rootSessionId: session.rootSessionId ?? session.id,
     repo: session.repo,
     branch: session.branch,
     runtime: session.runtime,
+    profile: session.profile,
     command: session.command,
     prompt: session.prompt,
     purpose: session.purpose,
@@ -4828,51 +9892,158 @@ async function ensureCurrentSandboxLease(
     owner: session.owner,
     createdBy: session.createdBy,
     ...(githubToken ? { githubToken } : {}),
-  });
-  if (provisioned.status === "failed") {
-    await database(env)
-      .updateTable("interactive_sessions")
-      .set({
-        lease_id: fallbackLeaseId,
-        last_event: provisioned.message,
-        updated_at: Date.now(),
-      })
-      .where("id", "=", session.id)
-      .where("lease_id", "=", refreshLeaseId)
-      .execute();
+  };
+  const preflightError = sandboxProvisionPreflightError(env, refreshPayload);
+  if (preflightError) throw serviceUnavailable(preflightError);
+  const fallbackLeaseId = sandboxLeaseWithoutRefresh(originalLeaseId);
+  const oldSandboxId = originalLeaseId.startsWith(sandboxLeasePrefix)
+    ? sandboxLeaseInfo({ id: session.id, leaseId: fallbackLeaseId }).sandboxId
+    : null;
+  const refreshLeaseId = `${fallbackLeaseId}:refreshing-${now}-${crypto.randomUUID().slice(0, 8)}`;
+  const refreshLease = newSandboxLease(session.id);
+  const agentToken = newAgentToken();
+  const agentTokenHash = await sha256(agentToken);
+  const refreshFence: SandboxLeaseRefreshFence = {
+    claim: `refresh:${crypto.randomUUID()}`,
+    expiresAt: now + credentialPolicyProvisioningStaleMs,
+    refreshLeaseId,
+    sandboxId: refreshLease.sandboxId,
+  };
+  const claim = await database(env)
+    .updateTable("interactive_sessions")
+    .set({
+      lease_id: refreshLeaseId,
+      sandbox_refresh_sandbox_id: refreshFence.sandboxId,
+      sandbox_refresh_claim: refreshFence.claim,
+      sandbox_refresh_claim_expires_at: refreshFence.expiresAt,
+      agent_token_hash: agentTokenHash,
+      last_event: "Cloudflare Sandbox lease refresh started",
+      updated_at: sql<number>`MAX(updated_at + 1, ${now})`,
+    })
+    .where("id", "=", session.id)
+    .where("lease_id", "=", originalLeaseId)
+    .where("status", "in", ["ready", "attached", "detached"])
+    .executeTakeFirst();
+  if ((claim.numUpdatedRows ?? 0n) === 0n) {
+    const current = await readInteractiveSession(env, session.id);
+    if (current && isSandboxInteractiveSession(current) && isCurrentSandboxLease(current.leaseId)) {
+      return current;
+    }
+    throw serviceUnavailable("Cloudflare Sandbox lease refresh is already in progress");
+  }
+  let provisioned: InteractiveProvisionResult;
+  try {
+    provisioned = await provisionWithSandbox(
+      env,
+      refreshPayload,
+      agentToken,
+      refreshLease,
+      refreshFence,
+    );
+  } catch (error) {
+    const message = `Cloudflare Sandbox lease refresh failed: ${safeProviderError(error)}`;
+    await stageFailedManagedSandboxProvision(env, session.id, refreshFence, message, Date.now());
+    throw serviceUnavailable(message);
+  }
+  if (provisioned.status !== "ready") {
+    await stageFailedManagedSandboxProvision(
+      env,
+      session.id,
+      refreshFence,
+      provisioned.message,
+      Date.now(),
+    );
     throw serviceUnavailable(provisioned.message);
   }
   const refreshedAt = Date.now();
-  const update = await database(env)
-    .updateTable("interactive_sessions")
-    .set({
-      status: provisioned.status,
-      lease_id: provisioned.leaseId,
-      attach_url: provisioned.attachUrl,
-      vnc_url: provisioned.vncUrl,
-      last_event: "Cloudflare Sandbox lease refreshed",
-      updated_at: refreshedAt,
-    })
+  const expectedLeaseId = sandboxLeaseId(refreshLease);
+  if (provisioned.leaseId !== expectedLeaseId) {
+    await stageFailedManagedSandboxProvision(
+      env,
+      session.id,
+      refreshFence,
+      "Cloudflare Sandbox lease refresh returned an unexpected lease",
+      refreshedAt,
+    );
+    throw serviceUnavailable("Cloudflare Sandbox lease refresh returned an unexpected lease");
+  }
+  const db = database(env);
+  const commitQueries: CompilableQuery[] = [
+    db
+      .updateTable("interactive_sessions")
+      .set({
+        status: provisioned.status,
+        lease_id: provisioned.leaseId,
+        attach_url: provisioned.attachUrl,
+        vnc_url: provisioned.vncUrl,
+        sandbox_refresh_sandbox_id: null,
+        sandbox_refresh_claim: null,
+        sandbox_refresh_claim_expires_at: null,
+        last_event: "Cloudflare Sandbox lease refreshed",
+        updated_at: sql<number>`MAX(updated_at + 1, ${refreshedAt})`,
+      })
+      .where("id", "=", session.id)
+      .where(sql<boolean>`lease_id IS ${refreshFence.refreshLeaseId}`)
+      .where("sandbox_refresh_sandbox_id", "=", refreshFence.sandboxId)
+      .where("sandbox_refresh_claim", "=", refreshFence.claim)
+      .where("sandbox_refresh_claim_expires_at", "=", refreshFence.expiresAt)
+      .where("sandbox_refresh_claim_expires_at", ">", refreshedAt)
+      .where("agent_token_hash", "=", agentTokenHash)
+      .where("status", "in", ["ready", "attached", "detached"]),
+  ];
+  if (oldSandboxId && oldSandboxId !== refreshLease.sandboxId) {
+    commitQueries.push(
+      db
+        .updateTable("interactive_session_credential_policies")
+        .set({
+          state: "cleanup_pending",
+          cleanup_claim: null,
+          cleanup_claim_expires_at: null,
+          updated_at: refreshedAt,
+        })
+        .where("session_id", "=", session.id)
+        .where("sandbox_id", "=", oldSandboxId).where(sql<boolean>`
+          EXISTS (
+            SELECT 1
+            FROM interactive_sessions AS session
+            WHERE session.id = ${session.id}
+              AND session.lease_id = ${provisioned.leaseId}
+              AND session.sandbox_refresh_claim IS NULL
+          )
+        `),
+    );
+  }
+  await executeBatch(env, commitQueries);
+  const committed = await db
+    .selectFrom("interactive_sessions")
+    .select(["lease_id", "status", "credential_cleanup_terminal_status", "agent_token_hash"])
     .where("id", "=", session.id)
-    .where("lease_id", "=", refreshLeaseId)
-    .where("status", "in", ["ready", "attached", "detached"])
     .executeTakeFirst();
-  if ((update.numUpdatedRows ?? 0n) === 0n) {
-    if (provisioned.leaseId?.startsWith(sandboxLeasePrefix)) {
-      await unregisterSandboxCredentialPolicy(
-        env,
-        sandboxLeaseInfo({ id: session.id, leaseId: provisioned.leaseId }).sandboxId,
-      );
-    }
-    const current = await readInteractiveSession(env, session.id);
-    if (current && isCurrentSandboxLease(current.leaseId)) return current;
+  if (
+    committed?.lease_id !== provisioned.leaseId ||
+    committed.agent_token_hash !== agentTokenHash ||
+    committed.credential_cleanup_terminal_status !== null ||
+    !["ready", "attached", "detached"].includes(committed.status)
+  ) {
+    await stageFailedManagedSandboxProvision(
+      env,
+      session.id,
+      refreshFence,
+      "Cloudflare Sandbox lease refresh ownership changed",
+      refreshedAt,
+    );
     throw serviceUnavailable("Cloudflare Sandbox lease refresh is already in progress");
   }
-  const newSandboxId = provisioned.leaseId?.startsWith(sandboxLeasePrefix)
-    ? sandboxLeaseInfo({ id: session.id, leaseId: provisioned.leaseId }).sandboxId
-    : null;
-  if (oldSandboxId && oldSandboxId !== newSandboxId) {
-    await unregisterSandboxCredentialPolicy(env, oldSandboxId);
+  if (oldSandboxId && oldSandboxId !== refreshLease.sandboxId) {
+    await reconcileCredentialPolicyCleanupBatch(env, refreshedAt, session.id);
+  }
+  const current = await readInteractiveSession(env, session.id);
+  if (
+    !current ||
+    current.leaseId !== provisioned.leaseId ||
+    !["ready", "attached", "detached"].includes(current.status)
+  ) {
+    throw serviceUnavailable("previous Cloudflare Sandbox credential cleanup stopped the session");
   }
   await appendInteractiveSessionLog(
     env,
@@ -4881,15 +10052,15 @@ async function ensureCurrentSandboxLease(
     "Cloudflare Sandbox lease refreshed",
     refreshedAt,
   );
-  return {
-    ...session,
-    status: provisioned.status,
-    leaseId: provisioned.leaseId,
-    attachUrl: provisioned.attachUrl,
-    vncUrl: provisioned.vncUrl,
-    lastEvent: "Cloudflare Sandbox lease refreshed",
-    ...(githubToken ? { githubToken } : {}),
-  };
+  const latest = await readInteractiveSession(env, session.id);
+  if (
+    !latest ||
+    latest.leaseId !== provisioned.leaseId ||
+    !["ready", "attached", "detached"].includes(latest.status)
+  ) {
+    throw serviceUnavailable("previous Cloudflare Sandbox credential cleanup stopped the session");
+  }
+  return { ...latest, ...(githubToken ? { githubToken } : {}) };
 }
 
 async function prepareSandboxWorkspace(
@@ -5061,6 +10232,7 @@ fi
 
 async function prepareSandboxRuntimeTools(
   sandbox: SandboxSessionTarget,
+  env: RuntimeEnv,
   session: SandboxRuntimeSession,
   workdir: string,
   commandEnv: Record<string, string | undefined> = {},
@@ -5111,7 +10283,7 @@ export CRABFLEET_SESSION_ID=${shellQuote(session.id)}
 export CRABFLEET_PARENT_SESSION_ID=${shellQuote(session.parentSessionId ?? "")}
 export CRABFLEET_ROOT_SESSION_ID=${shellQuote(session.rootSessionId ?? session.id)}
 export CRABFLEET_AGENT_TOKEN=${shellQuote(agentToken ?? "")}
-export CRABFLEET_API_URL=${shellQuote(appCanonicalOrigin)}
+export CRABFLEET_API_URL=${shellQuote(deploymentConfig(env).canonicalUrl)}
 export CRABBOX_REPO=${shellQuote(session.repo)}
 export CRABBOX_BRANCH=${shellQuote(session.branch)}
 export CRABBOX_RUNTIME=${shellQuote(session.runtime)}
@@ -5278,7 +10450,7 @@ async function setupSandboxTerminalSession(
   );
   await runSandboxSetupStep("Codex auth", () => prepareSandboxCodexAuth(setup, env, workdir));
   await runSandboxSetupStep("runtime tools", () =>
-    prepareSandboxRuntimeTools(setup, session, workdir, {}, agentToken),
+    prepareSandboxRuntimeTools(setup, env, session, workdir, {}, agentToken),
   );
   await runSandboxSetupStep("terminal session", () =>
     createFreshSandboxSession(sandbox, terminalSessionId, workdir, sessionEnv),
@@ -5311,7 +10483,7 @@ function sandboxSessionEnv(
     CRABFLEET_PARENT_SESSION_ID: session.parentSessionId ?? undefined,
     CRABFLEET_ROOT_SESSION_ID: session.rootSessionId ?? session.id,
     CRABFLEET_AGENT_TOKEN: agentToken,
-    CRABFLEET_API_URL: appCanonicalOrigin,
+    CRABFLEET_API_URL: deploymentConfig(env).canonicalUrl,
     CRABBOX_REPO: session.repo,
     CRABBOX_BRANCH: session.branch,
     CRABBOX_RUNTIME: session.runtime,
@@ -5342,6 +10514,913 @@ function githubTokenEnv(session: Pick<InteractiveProvisionRequest, "githubToken"
     : {};
 }
 
+async function provisionWithRuntimeAdapter(
+  env: RuntimeEnv,
+  session: InteractiveProvisionRequest,
+  _agentToken?: string,
+): Promise<InteractiveProvisionResult> {
+  const namespace = normalizeAdapterNamespace(env.CRABBOX_RUNTIME_ADAPTER_NAMESPACE ?? "");
+  const adapterWorkspaceId = session.adapterWorkspaceId
+    ? normalizeAdapterWorkspaceId(session.adapterWorkspaceId) === session.adapterWorkspaceId
+      ? session.adapterWorkspaceId
+      : null
+    : namespace
+      ? namespacedAdapterWorkspaceId(namespace, session.id)
+      : null;
+  if (!adapterWorkspaceId) {
+    return failedProvision(
+      "runtime adapter provision failed: persisted workspace id or valid namespace is required",
+    );
+  }
+  const fallbackCapabilities =
+    session.runtime === "crabbox" ? crabboxCapabilities : containerCapabilities;
+  let baseUrl: string;
+  try {
+    baseUrl = requireRegisteredRuntimeAdapterControlPlane(env, session.adapterControlPlane);
+  } catch (error) {
+    return unresolvedRuntimeAdapterProvision(
+      session,
+      adapterWorkspaceId,
+      fallbackCapabilities,
+      clean(error instanceof Error ? error.message : String(error), 240),
+    );
+  }
+  const requestedCapabilities = session.adapterRequestedCapabilities;
+  const ttlSeconds = persistedRuntimeAdapterSeconds(session.adapterTtlSeconds);
+  const idleTimeoutSeconds = persistedRuntimeAdapterSeconds(session.adapterIdleTimeoutSeconds);
+  if (!requestedCapabilities || !ttlSeconds || !idleTimeoutSeconds) {
+    return releaseFailedRuntimeAdapterProvision(
+      env,
+      session.id,
+      runtimeAdapterFailureProvision(
+        session,
+        adapterWorkspaceId,
+        requestedCapabilities ?? fallbackCapabilities,
+        "runtime adapter provision failed: persisted create settings are incomplete",
+      ),
+    );
+  }
+  const generatedPayload = session.adapterCreatePayloadJson
+    ? null
+    : runtimeAdapterCreatePayload(
+        {
+          namespace: namespace ?? "",
+          id: session.id,
+          parentSessionId: session.parentSessionId,
+          rootSessionId: session.rootSessionId,
+          repo: session.repo,
+          branch: session.branch,
+          runtime: session.runtime,
+          profile: session.profile,
+          command: session.command,
+          prompt: session.prompt,
+          purpose: session.purpose,
+          summary: session.summary,
+          owner: session.owner,
+          createdBy: session.createdBy,
+          ttlSeconds,
+          idleTimeoutSeconds,
+          desktop: requestedCapabilities.desktop,
+        },
+        adapterWorkspaceId,
+      );
+  const createPayloadJson = validatedRuntimeAdapterCreatePayloadJson(
+    session.adapterCreatePayloadJson ?? (generatedPayload ? JSON.stringify(generatedPayload) : ""),
+    {
+      workspaceId: adapterWorkspaceId,
+      ttlSeconds,
+      idleTimeoutSeconds,
+      desktop: requestedCapabilities.desktop,
+    },
+  );
+  if (!createPayloadJson) {
+    return releaseFailedRuntimeAdapterProvision(
+      env,
+      session.id,
+      runtimeAdapterFailureProvision(
+        session,
+        adapterWorkspaceId,
+        requestedCapabilities,
+        "runtime adapter provision failed: persisted create payload is invalid",
+      ),
+    );
+  }
+  if (
+    !(await stageRuntimeAdapterProvision(
+      env,
+      session,
+      baseUrl,
+      adapterWorkspaceId,
+      requestedCapabilities,
+      ttlSeconds,
+      idleTimeoutSeconds,
+      createPayloadJson,
+    ))
+  ) {
+    return unresolvedRuntimeAdapterProvision(
+      session,
+      adapterWorkspaceId,
+      requestedCapabilities,
+      "runtime adapter control-plane registration changed before create",
+    );
+  }
+  let response: Response;
+  try {
+    response = await runtimeAdapterFetch(env, runtimeAdapterCollectionUrl(baseUrl), {
+      method: "POST",
+      headers: { "idempotency-key": adapterWorkspaceId },
+      body: createPayloadJson,
+    });
+  } catch (error) {
+    return ambiguousRuntimeAdapterProvision(
+      session,
+      adapterWorkspaceId,
+      requestedCapabilities,
+      `runtime adapter create outcome unknown: ${safeProviderError(error, [adapterWorkspaceId])}`,
+    );
+  }
+  let responseBody: unknown;
+  try {
+    responseBody = await readRuntimeAdapterResponseBody(response);
+  } catch (error) {
+    return ambiguousRuntimeAdapterProvision(
+      session,
+      adapterWorkspaceId,
+      requestedCapabilities,
+      `runtime adapter create outcome unknown: ${safeProviderError(error, [adapterWorkspaceId])}`,
+    );
+  }
+  if (!response.ok) {
+    const responseMessage = redactedAdapterResponseMessage(
+      responseBody,
+      `HTTP ${response.status}`,
+      [adapterWorkspaceId],
+    );
+    if (definitiveRuntimeAdapterCreateFailure(response.status)) {
+      return releaseFailedRuntimeAdapterProvision(
+        env,
+        session.id,
+        runtimeAdapterFailureProvision(
+          session,
+          adapterWorkspaceId,
+          requestedCapabilities,
+          `runtime adapter provision failed: ${responseMessage}`,
+        ),
+      );
+    }
+    return ambiguousRuntimeAdapterProvision(
+      session,
+      adapterWorkspaceId,
+      requestedCapabilities,
+      `runtime adapter create outcome unknown: ${responseMessage}`,
+    );
+  }
+  const parsed = parseAdapterWorkspaceResult(responseBody, {
+    workspaceId: adapterWorkspaceId,
+    profile: session.profile,
+  });
+  if (!parsed) {
+    return ambiguousRuntimeAdapterProvision(
+      session,
+      adapterWorkspaceId,
+      requestedCapabilities,
+      "runtime adapter create outcome unknown: invalid workspace response",
+    );
+  }
+  if (!adapterWorkspaceIdMatches(parsed, adapterWorkspaceId)) {
+    return ambiguousRuntimeAdapterProvision(
+      session,
+      adapterWorkspaceId,
+      requestedCapabilities,
+      "runtime adapter create outcome unknown: workspace identity mismatch",
+    );
+  }
+  const result = runtimeAdapterProvisionResult(
+    parsed,
+    session,
+    Date.now(),
+    adapterWorkspaceId,
+    true,
+  );
+  return result.status === "failed"
+    ? releaseFailedRuntimeAdapterProvision(env, session.id, result)
+    : result;
+}
+
+function persistedRuntimeAdapterSeconds(value: number | null | undefined): number | null {
+  return typeof value === "number" && Number.isInteger(value) && value > 0 ? value : null;
+}
+
+async function stageRuntimeAdapterProvision(
+  env: RuntimeEnv,
+  session: InteractiveProvisionRequest,
+  adapterControlPlane: string,
+  adapterWorkspaceId: string,
+  capabilities: RuntimeCapabilities,
+  ttlSeconds: number,
+  idleTimeoutSeconds: number,
+  createPayloadJson: string,
+): Promise<boolean> {
+  const staged = await database(env)
+    .updateTable("interactive_sessions")
+    .set({
+      adapter: runtimeAdapterName,
+      profile: session.profile,
+      adapter_workspace_id: adapterWorkspaceId,
+      capabilities_json: JSON.stringify(capabilities),
+      adapter_ttl_seconds: ttlSeconds,
+      adapter_idle_timeout_seconds: idleTimeoutSeconds,
+      adapter_requested_capabilities_json: JSON.stringify(capabilities),
+      adapter_create_payload_json: createPayloadJson,
+      adapter_create_pending: 1,
+      reconcile_error: "runtime adapter create pending",
+    })
+    .where("id", "=", session.id)
+    .where("adapter_control_plane", "=", adapterControlPlane)
+    .where("status", "in", ["provisioning", "pending_adapter"])
+    .executeTakeFirst();
+  return (staged.numUpdatedRows ?? 0n) > 0n;
+}
+
+function ambiguousRuntimeAdapterProvision(
+  session: Pick<InteractiveProvisionRequest, "runtime" | "profile">,
+  adapterWorkspaceId: string,
+  capabilities: RuntimeCapabilities,
+  message: string,
+): InteractiveProvisionResult {
+  return {
+    status: "provisioning",
+    leaseId: null,
+    attachUrl: null,
+    attachUrlPresent: true,
+    vncUrl: null,
+    message,
+    adapter: runtimeAdapterName,
+    profile: session.profile,
+    adapterWorkspaceId,
+    providerResourceId: null,
+    capabilities,
+    capabilitiesPresent: true,
+    expiresAt: null,
+    expiresAtPresent: false,
+    reconciledAt: Date.now(),
+    reconcileError: message,
+    terminalStatus: null,
+    createPending: true,
+  };
+}
+
+function runtimeAdapterFailureProvision(
+  session: Pick<InteractiveProvisionRequest, "runtime" | "profile">,
+  adapterWorkspaceId: string,
+  capabilities: RuntimeCapabilities,
+  message: string,
+): InteractiveProvisionResult {
+  return {
+    ...ambiguousRuntimeAdapterProvision(session, adapterWorkspaceId, capabilities, message),
+    status: "failed",
+    terminalStatus: null,
+    createPending: false,
+  };
+}
+
+function unresolvedRuntimeAdapterProvision(
+  session: Pick<InteractiveProvisionRequest, "runtime" | "profile">,
+  adapterWorkspaceId: string,
+  capabilities: RuntimeCapabilities,
+  message: string,
+): InteractiveProvisionResult {
+  return {
+    ...runtimeAdapterFailureProvision(session, adapterWorkspaceId, capabilities, message),
+    status: "stopping",
+    message: `${message}; runtime workspace outcome unresolved`,
+    reconcileError: message,
+    terminalStatus: "failed",
+    createPending: true,
+  };
+}
+
+async function releaseFailedRuntimeAdapterProvision(
+  env: RuntimeEnv,
+  sessionId: string,
+  result: InteractiveProvisionResult,
+): Promise<InteractiveProvisionResult> {
+  const adapterWorkspaceId = result.adapterWorkspaceId;
+  if (!adapterWorkspaceId) return result;
+  await stageFailedRuntimeAdapterRelease(env, sessionId, adapterWorkspaceId, result.message);
+  try {
+    const release = await stopRuntimeAdapterWorkspaceForSession(env, sessionId, adapterWorkspaceId);
+    const releaseState = adapterFailureReleaseState(release.status);
+    if (release.status === "stopped") {
+      await recordConfirmedRuntimeAdapterRelease(
+        env,
+        sessionId,
+        adapterWorkspaceId,
+        Date.now(),
+        release.message,
+      );
+    }
+    const releaseMessage = `${result.message}; ${release.message}`;
+    if (release.status === "stopping") {
+      await persistRuntimeAdapterStopEvidence(
+        env,
+        sessionId,
+        adapterWorkspaceId,
+        releaseMessage,
+        Date.now(),
+      );
+    }
+    return {
+      ...result,
+      status: releaseState.status,
+      attachUrl: null,
+      vncUrl: null,
+      message: releaseMessage,
+      reconcileError: release.status === "stopping" ? releaseMessage : result.message,
+      terminalStatus: releaseState.terminalStatus,
+    };
+  } catch (error) {
+    const releaseError = safeProviderError(
+      error,
+      [adapterWorkspaceId, result.providerResourceId ?? null],
+      [result.attachUrl],
+    );
+    const releaseState = adapterFailureReleaseState("stopping");
+    const pendingMessage = `${result.message}; ${releaseState.message}: ${releaseError}`;
+    await persistRuntimeAdapterStopEvidence(
+      env,
+      sessionId,
+      adapterWorkspaceId,
+      pendingMessage,
+      Date.now(),
+    );
+    return {
+      ...result,
+      status: releaseState.status,
+      attachUrl: null,
+      vncUrl: null,
+      message: pendingMessage,
+      reconcileError: pendingMessage,
+      terminalStatus: releaseState.terminalStatus,
+    };
+  }
+}
+
+async function persistRuntimeAdapterStopEvidence(
+  env: RuntimeEnv,
+  sessionId: string,
+  adapterWorkspaceId: string,
+  message: string,
+  now: number,
+  reconcileError: string | null = message,
+  eventActor = "system",
+): Promise<void> {
+  const evidence = clean(message, 500);
+  const errorEvidence = reconcileError ? clean(reconcileError, 500) : null;
+  const actorName = clean(eventActor, 120) || "system";
+  const reconcileErrorOwner = errorEvidence
+    ? sql<boolean>`reconcile_error = ${errorEvidence}`
+    : sql<boolean>`reconcile_error IS NULL`;
+  const db = database(env);
+  await executeBatch(env, [
+    db
+      .updateTable("interactive_sessions")
+      .set({
+        last_reconciled_at: now,
+        reconcile_error: errorEvidence,
+        last_event: evidence,
+        updated_at: sql<number>`MAX(updated_at + 1, ${now})`,
+      })
+      .where("id", "=", sessionId)
+      .where("adapter", "=", runtimeAdapterName)
+      .where("adapter_workspace_id", "=", adapterWorkspaceId)
+      .where("status", "=", "stopping").where(sql<boolean>`
+        COALESCE(last_event, '') != ${evidence}
+        OR COALESCE(reconcile_error, '') != ${errorEvidence ?? ""}
+      `),
+    sql`
+      INSERT INTO interactive_session_events (session_id, actor, message, created_at)
+      SELECT ${sessionId}, ${actorName}, ${evidence}, ${now}
+      WHERE EXISTS (
+        SELECT 1
+        FROM interactive_sessions
+        WHERE id = ${sessionId}
+          AND adapter = ${runtimeAdapterName}
+          AND adapter_workspace_id = ${adapterWorkspaceId}
+          AND status = 'stopping'
+          AND last_event = ${evidence}
+          AND ${reconcileErrorOwner}
+      )
+      AND NOT EXISTS (
+        SELECT 1
+        FROM interactive_session_events
+        WHERE session_id = ${sessionId}
+          AND actor = ${actorName}
+          AND message = ${evidence}
+      )
+    `,
+  ]);
+  await archiveInteractiveSessionLogs(env, sessionId, now).catch(() => undefined);
+}
+
+async function stageFailedRuntimeAdapterRelease(
+  env: RuntimeEnv,
+  sessionId: string,
+  adapterWorkspaceId: string,
+  message: string,
+): Promise<void> {
+  const now = Date.now();
+  await database(env)
+    .updateTable("interactive_sessions")
+    .set({
+      status: "stopping",
+      lease_id: null,
+      attach_url: null,
+      vnc_url: null,
+      terminal_status: "failed",
+      terminal_failure_reason: message,
+      adapter_create_pending: 0,
+      last_reconciled_at: now,
+      reconcile_error: message,
+      agent_token_hash: null,
+      controller: null,
+      control_requested_by: null,
+      control_requested_at: null,
+      control_granted_at: null,
+      control_expires_at: null,
+      updated_at: sql<number>`MAX(updated_at + 1, ${now})`,
+      last_event: `${message}; runtime workspace release pending`,
+    })
+    .where("id", "=", sessionId)
+    .where("adapter", "=", runtimeAdapterName)
+    .where("adapter_workspace_id", "=", adapterWorkspaceId)
+    .where("status", "in", [
+      "provisioning",
+      "pending_adapter",
+      "ready",
+      "attached",
+      "detached",
+      "stopping",
+    ])
+    .execute();
+}
+
+function runtimeAdapterProvisionResult(
+  result: AdapterWorkspaceResult,
+  session: Pick<InteractiveProvisionRequest, "runtime" | "profile"> & {
+    capabilities_json?: string;
+  },
+  reconciledAt: number,
+  adapterWorkspaceId: string,
+  initialCreate: boolean,
+): InteractiveProvisionResult {
+  const defaultCapabilities = session.capabilities_json
+    ? runtimeCapabilities(session.runtime, session.capabilities_json)
+    : session.runtime === "crabbox"
+      ? crabboxCapabilities
+      : containerCapabilities;
+  const capabilities = effectiveAdapterCapabilities(result, defaultCapabilities, initialCreate);
+  return {
+    status: result.status,
+    leaseId: null,
+    attachUrl: result.terminalUrl,
+    attachUrlPresent: initialCreate || result.terminalUrlPresent,
+    // Desktop access is minted only after Crabfleet authenticates the viewer.
+    vncUrl: null,
+    message: result.message,
+    adapter: runtimeAdapterName,
+    profile: result.profile ?? session.profile,
+    adapterWorkspaceId,
+    providerResourceId: result.providerResourceId,
+    ...(capabilities === undefined ? {} : { capabilities, capabilitiesPresent: true }),
+    ...(initialCreate || result.expiresAtPresent
+      ? { expiresAt: result.expiresAt, expiresAtPresent: true }
+      : {}),
+    reconciledAt,
+    reconcileError: null,
+    createPending: false,
+  };
+}
+
+async function inspectRuntimeAdapterWorkspace(
+  env: RuntimeEnv,
+  session: InteractiveSessionRow,
+): Promise<InteractiveProvisionResult> {
+  const adapterWorkspaceId = session.adapter_workspace_id;
+  const providerResourceId = session.provider_resource_id;
+  if (!adapterWorkspaceId) {
+    throw new Error("runtime adapter workspace reference is incomplete");
+  }
+  const controlPlane = requireRegisteredRuntimeAdapterControlPlane(
+    env,
+    session.adapter_control_plane,
+  );
+  if (session.status === "stopping") {
+    return reconcileStoppingRuntimeAdapterWorkspace(env, session);
+  }
+  const response = await runtimeAdapterFetch(
+    env,
+    runtimeAdapterWorkspaceUrl(controlPlane, adapterWorkspaceId),
+    { method: "GET" },
+  );
+  const responseBody = await readRuntimeAdapterResponseBody(response);
+  if (response.status === 404) {
+    if (shouldReplayRuntimeAdapterCreate(session.status, session.adapter_create_pending === 1)) {
+      return provisionWithRuntimeAdapter(env, runtimeAdapterReplayRequest(session));
+    }
+    return {
+      status: "expired",
+      leaseId: null,
+      attachUrl: null,
+      attachUrlPresent: true,
+      vncUrl: null,
+      message: "runtime adapter workspace is gone",
+      adapter: runtimeAdapterName,
+      profile: session.profile,
+      adapterWorkspaceId,
+      providerResourceId,
+      reconciledAt: Date.now(),
+      reconcileError: null,
+      createPending: false,
+    };
+  }
+  if (!response.ok) {
+    throw new Error(
+      redactedAdapterResponseMessage(
+        responseBody,
+        `runtime adapter inspect HTTP ${response.status}`,
+        [adapterWorkspaceId, providerResourceId],
+      ),
+    );
+  }
+  const parsed = parseAdapterWorkspaceResult(responseBody, {
+    workspaceId: adapterWorkspaceId,
+    providerResourceId,
+    profile: session.profile,
+  });
+  if (!parsed) throw new Error("runtime adapter inspect returned an invalid workspace");
+  if (!adapterWorkspaceIdMatches(parsed, adapterWorkspaceId)) {
+    throw new Error("runtime adapter inspect returned a different workspace id");
+  }
+  const result = runtimeAdapterProvisionResult(
+    parsed,
+    session,
+    Date.now(),
+    adapterWorkspaceId,
+    false,
+  );
+  return result.status === "failed"
+    ? releaseFailedRuntimeAdapterProvision(env, session.id, result)
+    : result;
+}
+
+async function reconcileStoppingRuntimeAdapterWorkspace(
+  env: RuntimeEnv,
+  session: InteractiveSessionRow,
+): Promise<InteractiveProvisionResult> {
+  const adapterWorkspaceId = session.adapter_workspace_id;
+  if (!adapterWorkspaceId) throw new Error("runtime adapter workspace reference is incomplete");
+
+  let replayMessage: string | null = null;
+  if (session.adapter_create_pending === 1) {
+    const replay = await replayStoppingRuntimeAdapterCreate(env, session);
+    replayMessage = replay.message;
+  }
+
+  let release: RuntimeAdapterStopResult;
+  try {
+    release = await stopRuntimeAdapterWorkspace(
+      env,
+      requireRegisteredRuntimeAdapterControlPlane(env, session.adapter_control_plane),
+      adapterWorkspaceId,
+    );
+  } catch (error) {
+    const message = `runtime adapter stop pending: ${safeProviderError(
+      error,
+      [adapterWorkspaceId, session.provider_resource_id],
+      [session.attach_url],
+    )}`;
+    return {
+      status: "stopping",
+      leaseId: null,
+      attachUrl: null,
+      attachUrlPresent: true,
+      vncUrl: null,
+      message: replayMessage ? `${replayMessage}; ${message}` : message,
+      adapter: runtimeAdapterName,
+      profile: session.profile,
+      adapterWorkspaceId,
+      providerResourceId: session.provider_resource_id,
+      reconciledAt: Date.now(),
+      reconcileError: message,
+      terminalStatus: session.terminal_status,
+      createPending: session.adapter_create_pending === 1,
+    };
+  }
+  if (release.status === "stopped") {
+    await recordConfirmedRuntimeAdapterRelease(
+      env,
+      session.id,
+      adapterWorkspaceId,
+      Date.now(),
+      release.message,
+    );
+  }
+  const lifecycle = await database(env)
+    .selectFrom("interactive_sessions")
+    .select(["status", "terminal_status", "adapter_create_pending"])
+    .where("id", "=", session.id)
+    .where("adapter", "=", runtimeAdapterName)
+    .where("adapter_workspace_id", "=", adapterWorkspaceId)
+    .executeTakeFirst();
+  const status = lifecycle?.status ?? (release.status === "stopped" ? "stopped" : "stopping");
+  const createPending = lifecycle?.adapter_create_pending === 1;
+  const releaseMessage = createPending
+    ? `${release.message}; runtime adapter stop waiting for create resolution`
+    : release.message;
+  return {
+    status,
+    leaseId: null,
+    attachUrl: null,
+    attachUrlPresent: true,
+    vncUrl: null,
+    message: replayMessage ? `${replayMessage}; ${releaseMessage}` : releaseMessage,
+    adapter: runtimeAdapterName,
+    profile: session.profile,
+    adapterWorkspaceId,
+    providerResourceId: session.provider_resource_id,
+    reconciledAt: Date.now(),
+    reconcileError: null,
+    terminalStatus: lifecycle?.terminal_status ?? null,
+    createPending,
+  };
+}
+
+type StoppingRuntimeAdapterReplay = {
+  message: string;
+  resolved: boolean;
+};
+
+async function replayStoppingRuntimeAdapterCreate(
+  env: RuntimeEnv,
+  session: InteractiveSessionRow,
+): Promise<StoppingRuntimeAdapterReplay> {
+  const adapterWorkspaceId = session.adapter_workspace_id;
+  const replay = runtimeAdapterReplayRequest(session);
+  const requestedCapabilities = replay.adapterRequestedCapabilities;
+  const ttlSeconds = persistedRuntimeAdapterSeconds(replay.adapterTtlSeconds);
+  const idleTimeoutSeconds = persistedRuntimeAdapterSeconds(replay.adapterIdleTimeoutSeconds);
+  if (
+    !adapterWorkspaceId ||
+    !requestedCapabilities ||
+    !ttlSeconds ||
+    !idleTimeoutSeconds ||
+    !session.adapter_requested_capabilities_json
+  ) {
+    return {
+      message: "runtime adapter create replay blocked: persisted lifecycle is incomplete",
+      resolved: false,
+    };
+  }
+  let controlPlane: string;
+  try {
+    controlPlane = requireRegisteredRuntimeAdapterControlPlane(env, session.adapter_control_plane);
+  } catch (error) {
+    return {
+      message: safeProviderError(error, [adapterWorkspaceId]),
+      resolved: false,
+    };
+  }
+  const createPayloadJson = validatedRuntimeAdapterCreatePayloadJson(
+    replay.adapterCreatePayloadJson ?? "",
+    {
+      workspaceId: adapterWorkspaceId,
+      ttlSeconds,
+      idleTimeoutSeconds,
+      desktop: requestedCapabilities.desktop,
+    },
+  );
+  if (!createPayloadJson) {
+    return {
+      message: "runtime adapter create replay blocked: persisted payload is invalid",
+      resolved: false,
+    };
+  }
+  let ownership = database(env)
+    .selectFrom("interactive_sessions")
+    .select("id")
+    .where("id", "=", session.id)
+    .where("adapter", "=", runtimeAdapterName)
+    .where("adapter_workspace_id", "=", adapterWorkspaceId)
+    .where("adapter_control_plane", "=", controlPlane)
+    .where("adapter_create_payload_json", "=", createPayloadJson)
+    .where("adapter_requested_capabilities_json", "=", session.adapter_requested_capabilities_json)
+    .where("adapter_ttl_seconds", "=", ttlSeconds)
+    .where("adapter_idle_timeout_seconds", "=", idleTimeoutSeconds)
+    .where("adapter_create_pending", "=", 1)
+    .where("status", "=", "stopping")
+    .where("updated_at", "=", session.updated_at);
+  ownership = session.terminal_status
+    ? ownership.where("terminal_status", "=", session.terminal_status)
+    : ownership.where("terminal_status", "is", null);
+  if (!(await ownership.executeTakeFirst())) {
+    return {
+      message: "runtime adapter create replay deferred: lifecycle ownership changed",
+      resolved: false,
+    };
+  }
+
+  let response: Response;
+  try {
+    response = await runtimeAdapterFetch(env, runtimeAdapterCollectionUrl(controlPlane), {
+      method: "POST",
+      headers: { "idempotency-key": adapterWorkspaceId },
+      body: createPayloadJson,
+    });
+  } catch (error) {
+    return {
+      message: `runtime adapter create replay pending: ${safeProviderError(error, [adapterWorkspaceId])}`,
+      resolved: false,
+    };
+  }
+
+  let responseBody: unknown;
+  try {
+    responseBody = await readRuntimeAdapterResponseBody(response);
+  } catch (error) {
+    return {
+      message: `runtime adapter create replay pending: ${safeProviderError(error, [adapterWorkspaceId])}`,
+      resolved: false,
+    };
+  }
+  let message: string;
+  if (!response.ok) {
+    const responseMessage = redactedAdapterResponseMessage(
+      responseBody,
+      `HTTP ${response.status}`,
+      [adapterWorkspaceId],
+    );
+    if (!definitiveRuntimeAdapterCreateFailure(response.status)) {
+      return {
+        message: `runtime adapter create replay pending: ${responseMessage}`,
+        resolved: false,
+      };
+    }
+    message = `runtime adapter create replay resolved: ${responseMessage}`;
+  } else {
+    const parsed = parseAdapterWorkspaceResult(responseBody, {
+      workspaceId: adapterWorkspaceId,
+      profile: session.profile,
+    });
+    if (!parsed || !adapterWorkspaceIdMatches(parsed, adapterWorkspaceId)) {
+      return {
+        message: "runtime adapter create replay pending: invalid workspace identity",
+        resolved: false,
+      };
+    }
+    message = `runtime adapter create replay resolved: ${parsed.status}`;
+  }
+
+  const resolvedAt = Date.now();
+  const terminalStatusOwner = session.terminal_status
+    ? sql<boolean>`terminal_status = ${session.terminal_status}`
+    : sql<boolean>`terminal_status IS NULL`;
+  const expectedOwner = sql<boolean>`
+    id = ${session.id}
+    AND adapter = ${runtimeAdapterName}
+    AND adapter_workspace_id = ${adapterWorkspaceId}
+    AND adapter_control_plane = ${controlPlane}
+    AND adapter_create_payload_json = ${createPayloadJson}
+    AND adapter_requested_capabilities_json = ${session.adapter_requested_capabilities_json}
+    AND adapter_ttl_seconds = ${ttlSeconds}
+    AND adapter_idle_timeout_seconds = ${idleTimeoutSeconds}
+    AND adapter_create_pending = 1
+    AND status = 'stopping'
+    AND updated_at = ${session.updated_at}
+    AND ${terminalStatusOwner}
+  `;
+  const db = database(env);
+  const update = db
+    .updateTable("interactive_sessions")
+    .set({
+      adapter_create_pending: 0,
+      last_reconciled_at: resolvedAt,
+      reconcile_error: message,
+      last_event: message,
+      updated_at: sql<number>`MAX(updated_at + 1, ${resolvedAt})`,
+    })
+    .where(expectedOwner)
+    .returning("updated_at");
+  const event = sql`
+    INSERT INTO interactive_session_events (session_id, actor, message, created_at)
+    SELECT ${session.id}, 'system', ${clean(message, 1000)}, ${resolvedAt}
+    FROM interactive_sessions
+    WHERE ${expectedOwner}
+  `;
+  const results = await env.DB.batch<{ updated_at: number }>(
+    [event, update].map((query) => {
+      const compiled = query.compile(db);
+      return env.DB.prepare(compiled.sql).bind(...compiled.parameters);
+    }),
+  );
+  const resolved = Boolean(results.at(-1)?.results.length);
+  if (resolved) {
+    await archiveInteractiveSessionLogs(env, session.id, resolvedAt).catch(() => undefined);
+  }
+  return { message, resolved };
+}
+
+async function stopRuntimeAdapterWorkspace(
+  env: RuntimeEnv,
+  registeredControlPlane: string,
+  adapterWorkspaceId: string,
+): Promise<RuntimeAdapterStopResult> {
+  const controlPlane = requireRegisteredRuntimeAdapterControlPlane(env, registeredControlPlane);
+  const response = await runtimeAdapterFetch(
+    env,
+    runtimeAdapterWorkspaceUrl(controlPlane, adapterWorkspaceId),
+    { method: "DELETE" },
+  );
+  const body = response.status === 204 ? null : await readRuntimeAdapterResponseBody(response);
+  const parsed = parseAdapterWorkspaceResult(body, { workspaceId: adapterWorkspaceId });
+  if (parsed && !adapterWorkspaceIdMatches(parsed, adapterWorkspaceId)) {
+    throw new Error("runtime adapter stop returned a different workspace id");
+  }
+  const fallbackMessage =
+    response.status === 404 || response.status === 204
+      ? "runtime adapter workspace released"
+      : `runtime adapter stop HTTP ${response.status}`;
+  const message =
+    parsed?.message ?? redactedAdapterResponseMessage(body, fallbackMessage, [adapterWorkspaceId]);
+  if (response.status === 404 || response.status === 204) {
+    return { status: "stopped", message };
+  }
+  if (!response.ok) throw new Error(message);
+  const outcome = runtimeAdapterStopOutcome(response.status, parsed, adapterWorkspaceId);
+  if (outcome === "identity_mismatch") {
+    throw new Error("runtime adapter stop returned a different workspace id");
+  }
+  return { status: outcome, message };
+}
+
+type RuntimeAdapterStopResult = {
+  status: "stopping" | "stopped";
+  message: string;
+};
+
+async function stopRuntimeAdapterWorkspaceForSession(
+  env: RuntimeEnv,
+  sessionId: string,
+  adapterWorkspaceId: string,
+): Promise<RuntimeAdapterStopResult> {
+  const controlPlane = await registeredRuntimeAdapterControlPlaneForSession(
+    env,
+    sessionId,
+    adapterWorkspaceId,
+  );
+  return stopRuntimeAdapterWorkspace(env, controlPlane, adapterWorkspaceId);
+}
+
+async function runtimeAdapterFetch(
+  env: RuntimeEnv,
+  url: string,
+  init: RequestInit,
+): Promise<Response> {
+  const token = runtimeAdapterToken(env);
+  if (!token) throw new Error("runtime adapter token is not configured");
+  const safeTarget = safeDesktopUrl(url);
+  if (!safeTarget) throw new Error("runtime adapter URL must use HTTPS or loopback HTTP");
+  const target = new URL(safeTarget);
+  const headers = new Headers(init.headers);
+  headers.set("authorization", `Bearer ${token}`);
+  headers.set("accept", "application/json");
+  if (init.body) headers.set("content-type", "application/json");
+  return fetch(target, {
+    ...init,
+    headers,
+    redirect: "error",
+    signal: AbortSignal.timeout(10_000),
+  });
+}
+
+async function readRuntimeAdapterResponseBody(response: Response): Promise<unknown> {
+  const body = await readBoundedResponseText(response);
+  if (!body) return null;
+  try {
+    return JSON.parse(body);
+  } catch {
+    return { message: body };
+  }
+}
+
+function runtimeAdapterToken(env: RuntimeEnv): string {
+  return clean(env.CRABBOX_RUNTIME_ADAPTER_TOKEN, 4000);
+}
+
+function runtimeAdapterProviderConfigured(env: RuntimeEnv): boolean {
+  return Boolean(configuredRuntimeAdapterControlPlane(env) && runtimeAdapterToken(env));
+}
+
 async function forwardRuntimeProvision(
   env: RuntimeEnv,
   session: InteractiveProvisionRequest,
@@ -5358,7 +11437,7 @@ async function forwardRuntimeProvision(
       body: JSON.stringify(session),
     });
   } catch (error) {
-    return failedProvision(`interactive provision failed: ${clean(String(error), 240)}`);
+    return failedProvision(`interactive provision failed: ${safeProviderError(error)}`);
   }
   if (!response.ok) {
     return failedProvision(`interactive provision failed: runtime HTTP ${response.status}`);
@@ -5411,7 +11490,7 @@ async function provisionWithCloudflareRunner(
       }),
     });
   } catch (error) {
-    return failedProvision(`cloudflare runner provision failed: ${clean(String(error), 240)}`);
+    return failedProvision(`cloudflare runner provision failed: ${safeProviderError(error)}`);
   }
   if (!response.ok) {
     return failedProvision(`cloudflare runner provision failed: HTTP ${response.status}`);
@@ -5457,7 +11536,7 @@ async function provisionWithClawFleet(
       body: JSON.stringify({ count: 1, runtime_type: "openclaw" }),
     });
   } catch (error) {
-    return failedProvision(`clawfleet provision failed: ${clean(String(error), 240)}`);
+    return failedProvision(`clawfleet provision failed: ${safeProviderError(error)}`);
   }
   if (!response.ok) {
     return failedProvision(`clawfleet provision failed: HTTP ${response.status}`);
@@ -5484,14 +11563,22 @@ function provisionResultFromBody(
   body: Record<string, unknown>,
   invalidMessage: string,
 ): InteractiveProvisionResult {
-  const status = optionalOneOf(body.status, interactiveSessionStatuses);
+  const status = createOnlyAdapterStatus(body.status);
   if (!status) return failedProvision(invalidMessage);
+  const leaseId = clean(body.leaseId ?? body.lease_id, 240) || null;
+  const attachUrl = clean(body.attachUrl ?? body.attach_url, 1000) || null;
+  const vncUrl = clean(body.vncUrl ?? body.vnc_url, 1000) || null;
   return {
     status,
-    leaseId: clean(body.leaseId ?? body.lease_id, 240) || null,
-    attachUrl: clean(body.attachUrl ?? body.attach_url, 1000) || null,
-    vncUrl: clean(body.vncUrl ?? body.vnc_url, 1000) || null,
-    message: clean(body.message, 500) || `interactive workspace ${status}`,
+    leaseId,
+    attachUrl,
+    vncUrl,
+    message: redactedAdapterMessage(
+      clean(body.message, 500) || null,
+      status,
+      [leaseId],
+      [attachUrl, vncUrl],
+    ),
   };
 }
 
@@ -5503,6 +11590,19 @@ function failedProvision(message: string): InteractiveProvisionResult {
     vncUrl: null,
     message,
   };
+}
+
+function safeProviderError(
+  error: unknown,
+  identifiers: Array<string | null> = [],
+  connectionValues: Array<string | null> = [],
+): string {
+  return redactedAdapterMessage(
+    clean(error instanceof Error ? error.message : String(error), 2000),
+    "failed",
+    identifiers,
+    connectionValues,
+  );
 }
 
 function cloudflareRunnerWorkdir(env: RuntimeEnv, session: InteractiveProvisionRequest): string {
@@ -5796,7 +11896,7 @@ async function evaluateWorkflow(
   user: User,
 ): Promise<Record<string, unknown>> {
   const body = await readJson<{ repo?: string }>(request);
-  const repo = normalizeRepo(body.repo) || preferredRepo;
+  const repo = normalizeRepo(body.repo) || deploymentConfig(env).preferredRepo;
   await requireRepo(env, repo);
   const workflow = await refreshWorkflowForRepo(env, repo, Date.now());
   await audit(env, user, `workflow evaluated ${repo} status=${workflow.status}`, Date.now());
@@ -5942,7 +12042,9 @@ async function fetchGitHubReferences(
       const item = payload.data?.[`r${index}`]?.issueOrPullRequest;
       return item ? [githubReferenceFromGraphql(target.repo, item)] : [];
     })
-    .sort((left, right) => sortRepoNames(left.repo, right.repo));
+    .sort((left, right) =>
+      sortRepoNames(left.repo, right.repo, deploymentConfig(env).preferredRepo),
+    );
 }
 
 async function fetchPublicGitHubReferences(
@@ -5950,7 +12052,8 @@ async function fetchPublicGitHubReferences(
   repos: string[],
   number: number,
 ): Promise<GitHubReference[]> {
-  const repo = repos.includes(preferredRepo) ? preferredRepo : repos[0];
+  const preferred = deploymentConfig(env).preferredRepo;
+  const repo = repos.includes(preferred) ? preferred : repos[0];
   if (!repo) return [];
   const match = await fetchGitHubReference(env, repo, number);
   return match ? [match] : [];
@@ -6275,10 +12378,7 @@ async function readRunsForCard(env: RuntimeEnv, cardId: string): Promise<RunAtte
   return rows.map(runAttempt);
 }
 
-async function readInteractiveSessions(
-  env: RuntimeEnv,
-  user?: User,
-): Promise<InteractiveSession[]> {
+async function readInteractiveSessions(env: RuntimeEnv, user: User): Promise<InteractiveSession[]> {
   const rows = await database(env)
     .selectFrom("interactive_sessions")
     .selectAll()
@@ -6318,6 +12418,16 @@ async function readInteractiveSession(
   return interactiveSession(row, logs.get(id) ?? [], archives.get(id) ?? null);
 }
 
+async function readFreshInteractiveSession(
+  env: RuntimeEnv,
+  id: string,
+): Promise<InteractiveSession | null> {
+  await reconcileExternalInteractiveSessionById(env, id).catch((error) => {
+    console.error("targeted runtime adapter reconciliation failed", error);
+  });
+  return readInteractiveSession(env, id);
+}
+
 async function readSharedInteractiveSession(
   env: RuntimeEnv,
   id: string,
@@ -6338,9 +12448,16 @@ async function readSharedInteractiveSession(
   return {
     session: {
       ...session,
+      adapter: null,
+      profile: "",
+      adapterWorkspaceId: null,
+      providerResourceId: null,
+      lastReconciledAt: null,
+      reconcileError: null,
       leaseId: null,
       attachUrl: null,
       vncUrl: null,
+      ptyAvailable: false,
       controller: activeController,
       controlGrantedAt: activeController ? session.controlGrantedAt : null,
       controlExpiresAt: activeController ? session.controlExpiresAt : null,
@@ -6416,20 +12533,15 @@ async function updateInteractiveSessionSummary(
   const summary = clean(body.summary, 500);
   if (!purpose && !summary) throw badRequest("summary or purpose is required");
   const now = Date.now();
-  await database(env)
-    .updateTable("interactive_sessions")
-    .set({
-      ...(purpose ? { purpose } : {}),
-      ...(summary ? { summary } : {}),
-      updated_at: now,
-    })
-    .where("id", "=", id)
-    .execute();
-  await appendInteractiveSessionEvent(
+  await mutateInteractiveSessionMetadataAtomically(
     env,
-    id,
+    session,
     user,
     summary ? "session summary updated" : "session purpose updated",
+    {
+      ...(purpose ? { purpose } : {}),
+      ...(summary ? { summary } : {}),
+    },
     now,
   );
   return {
@@ -6520,15 +12632,16 @@ async function appendInteractiveSessionEvent(
   message: string,
   now = Date.now(),
 ): Promise<void> {
-  await database(env)
-    .insertInto("interactive_session_events")
-    .values({
+  const db = database(env);
+  await executeBatch(env, [
+    db.insertInto("interactive_session_events").values({
       session_id: id,
       actor: actor(user),
       message: clean(message, 1000),
       created_at: now,
-    })
-    .execute();
+    }),
+    terminalFinalizationPendingQuery(db, id),
+  ]);
   await archiveInteractiveSessionLogs(env, id, now).catch(() => undefined);
 }
 
@@ -6543,16 +12656,150 @@ async function appendInteractiveSessionLog(
     await appendInteractiveSessionEvent(env, id, user, message, now);
     return;
   }
-  await database(env)
-    .insertInto("interactive_session_events")
-    .values({
+  const db = database(env);
+  await executeBatch(env, [
+    db.insertInto("interactive_session_events").values({
       session_id: id,
       actor: "system",
       message: clean(message, 1000),
       created_at: now,
-    })
-    .execute();
+    }),
+    terminalFinalizationPendingQuery(db, id),
+  ]);
   await archiveInteractiveSessionLogs(env, id, now).catch(() => undefined);
+}
+
+function terminalFinalizationPendingQuery(db: Kysely<Database>, id: string): CompilableQuery {
+  return db
+    .updateTable("interactive_sessions")
+    .set({ terminal_finalize_pending: 1 })
+    .where("id", "=", id)
+    .where("status", "in", deadInteractiveSessionStatuses);
+}
+
+async function finalizeTerminalInteractiveSession(
+  env: RuntimeEnv,
+  id: string,
+  status: "stopped" | "expired" | "failed",
+  now: number,
+): Promise<void> {
+  const db = database(env);
+  const terminal = await db
+    .selectFrom("interactive_sessions")
+    .select(["terminal_failure_reason", "reconcile_error", "last_event"])
+    .where("id", "=", id)
+    .where("status", "=", status)
+    .executeTakeFirst();
+  const message =
+    status === "failed"
+      ? retainedRuntimeAdapterFailureMessage(
+          terminal?.terminal_failure_reason ?? null,
+          terminal?.reconcile_error ?? null,
+          terminal?.last_event ?? null,
+        )
+      : status === "expired"
+        ? "interactive workspace expired"
+        : "interactive workspace stopped";
+  await completeTerminalFinalization({
+    ensureEvent: async () => {
+      await executeBatch(env, [
+        sql`
+          INSERT INTO interactive_session_events (session_id, actor, message, created_at)
+          SELECT ${id}, 'system', ${message}, COALESCE(stopped_at, ${now})
+          FROM interactive_sessions AS session
+          WHERE session.id = ${id}
+            AND session.status = ${status}
+            AND NOT EXISTS (
+              SELECT 1
+              FROM interactive_session_events AS event
+              WHERE event.session_id = session.id
+                AND event.actor = 'system'
+                AND event.message = ${message}
+            )
+        `,
+        terminalFinalizationPendingQuery(db, id),
+      ]);
+      return true;
+    },
+    readArchiveState: async () => {
+      const [currentArchive, eventCount, currentSession] = await Promise.all([
+        db
+          .selectFrom("interactive_session_log_archives")
+          .selectAll()
+          .where("session_id", "=", id)
+          .executeTakeFirst(),
+        countInteractiveSessionEvents(env, id),
+        db
+          .selectFrom("interactive_sessions")
+          .select("updated_at")
+          .where("id", "=", id)
+          .executeTakeFirst(),
+      ]);
+      return {
+        eventCount,
+        archiveEventCount: currentArchive?.event_count ?? null,
+        archiveSessionVersionMatches:
+          currentArchive?.session_updated_at === currentSession?.updated_at,
+        archiveObjectsReady: Boolean(
+          !env.SESSION_LOGS ||
+          (currentArchive?.events_key &&
+            currentArchive.transcript_key &&
+            currentArchive.summary_key),
+        ),
+      };
+    },
+    archive: () => archiveInteractiveSessionLogs(env, id, now, { force: true }),
+    clearPending: async () => {
+      const cleared = await sql`
+        UPDATE interactive_sessions
+        SET terminal_finalize_pending = 0
+        WHERE id = ${id}
+          AND status = ${status}
+          AND terminal_finalize_pending > 0
+          AND EXISTS (
+            SELECT 1
+            FROM interactive_session_log_archives AS archive
+            WHERE archive.session_id = interactive_sessions.id
+              AND archive.session_updated_at = interactive_sessions.updated_at
+          )
+          AND NOT EXISTS (
+            SELECT 1
+            FROM interactive_session_credential_policies
+            WHERE session_id = ${id}
+          )
+          AND COALESCE(
+            (
+              SELECT event_count
+              FROM interactive_session_log_archives
+              WHERE session_id = ${id}
+            ),
+            -1
+          ) >= (
+            SELECT count(*)
+            FROM interactive_session_events
+            WHERE session_id = ${id}
+          )
+          AND (
+            ${env.SESSION_LOGS ? 1 : 0} = 0
+            OR EXISTS (
+              SELECT 1
+              FROM interactive_session_log_archives
+              WHERE session_id = ${id}
+                AND events_key IS NOT NULL
+                AND transcript_key IS NOT NULL
+                AND summary_key IS NOT NULL
+            )
+          )
+      `.execute(db);
+      if ((cleared.numAffectedRows ?? 0n) > 0n) return true;
+      const current = await db
+        .selectFrom("interactive_sessions")
+        .select("terminal_finalize_pending")
+        .where("id", "=", id)
+        .executeTakeFirst();
+      return !current || current.terminal_finalize_pending === 0;
+    },
+  });
 }
 
 async function archiveInteractiveSessionLogs(
@@ -6577,11 +12824,16 @@ async function archiveInteractiveSessionLogs(
   }
   const events = await readInteractiveSessionEventRows(env, id);
   const latestEventAt = events.at(-1)?.created_at ?? now;
-  const archiveVersion = `${String(events.length).padStart(8, "0")}-${String(latestEventAt).padStart(13, "0")}-${now}`;
-  const base = `${sessionLogArchiveBase(id)}/${archiveVersion}`;
-  const eventsKey = `${base}/events.ndjson`;
-  const transcriptKey = `${base}/transcript.md`;
-  const summaryKey = `${base}/summary.json`;
+  const attemptedArchive = sessionArchiveAttemptKeys(
+    sessionLogArchiveBase(id),
+    events.length,
+    latestEventAt,
+    now,
+    crypto.randomUUID(),
+  );
+  const eventsKey = attemptedArchive.events_key;
+  const transcriptKey = attemptedArchive.transcript_key;
+  const summaryKey = attemptedArchive.summary_key;
   if (env.SESSION_LOGS) {
     await Promise.all([
       env.SESSION_LOGS.put(
@@ -6603,6 +12855,7 @@ async function archiveInteractiveSessionLogs(
     INSERT INTO interactive_session_log_archives (
       session_id,
       event_count,
+      session_updated_at,
       events_key,
       transcript_key,
       summary_key,
@@ -6612,6 +12865,7 @@ async function archiveInteractiveSessionLogs(
     VALUES (
       ${id},
       ${events.length},
+      ${sessionRow.updated_at},
       ${env.SESSION_LOGS ? eventsKey : null},
       ${env.SESSION_LOGS ? transcriptKey : null},
       ${env.SESSION_LOGS ? summaryKey : null},
@@ -6620,6 +12874,7 @@ async function archiveInteractiveSessionLogs(
     )
     ON CONFLICT(session_id) DO UPDATE SET
       event_count = excluded.event_count,
+      session_updated_at = excluded.session_updated_at,
       events_key = excluded.events_key,
       transcript_key = excluded.transcript_key,
       summary_key = excluded.summary_key,
@@ -6627,7 +12882,24 @@ async function archiveInteractiveSessionLogs(
     WHERE excluded.event_count > interactive_session_log_archives.event_count
       OR (
         excluded.event_count = interactive_session_log_archives.event_count
-        AND excluded.updated_at >= interactive_session_log_archives.updated_at
+        AND (
+          (
+            excluded.session_updated_at IS NOT NULL
+            AND interactive_session_log_archives.session_updated_at IS NULL
+          )
+          OR (
+            excluded.session_updated_at > interactive_session_log_archives.session_updated_at
+          )
+          OR (
+            excluded.session_updated_at IS interactive_session_log_archives.session_updated_at
+            AND (
+              interactive_session_log_archives.events_key IS NULL
+              OR interactive_session_log_archives.transcript_key IS NULL
+              OR interactive_session_log_archives.summary_key IS NULL
+              OR excluded.updated_at >= interactive_session_log_archives.updated_at
+            )
+          )
+        )
       )
   `.execute(db);
   if (!env.SESSION_LOGS) return;
@@ -6636,12 +12908,9 @@ async function archiveInteractiveSessionLogs(
     .selectAll()
     .where("session_id", "=", id)
     .executeTakeFirst();
-  const archiveWon = latestArchive?.events_key === eventsKey;
   await cleanupSessionLogArchiveObjects(
     env,
-    archiveWon
-      ? currentArchive
-      : { events_key: eventsKey, transcript_key: transcriptKey, summary_key: summaryKey },
+    obsoleteSessionArchiveObjectKeys(latestArchive, currentArchive, attemptedArchive),
   );
 }
 
@@ -6840,12 +13109,19 @@ async function nextRunAttempt(env: RuntimeEnv, cardId: string): Promise<number> 
 }
 
 async function nextInteractiveSessionId(env: RuntimeEnv): Promise<string> {
-  const row = await database(env)
-    .selectFrom("interactive_sessions")
-    .select(sql<number | null>`max(CAST(substr(id, 4) AS INTEGER))`.as("max_id"))
-    .where("id", "like", "IS-%")
-    .executeTakeFirst();
-  return `IS-${String((row?.max_id ?? 100) + 1)}`;
+  const db = database(env);
+  for (let attempt = 0; attempt < 100; attempt += 1) {
+    const result = await sql.raw<{ next_id: number }>(allocateInteractiveSessionIdSql).execute(db);
+    const id = formatInteractiveSessionId(Number(result.rows[0]?.next_id));
+    if (!id) throw new Error("failed to allocate interactive session id");
+    const standalone = await db
+      .selectFrom("standalone_sandbox_provisions")
+      .select("id")
+      .where(sql<boolean>`id = ${id} COLLATE NOCASE`)
+      .executeTakeFirst();
+    if (!standalone) return id;
+  }
+  throw new Error("failed to allocate an unreserved interactive session id");
 }
 
 async function requireRepo(env: RuntimeEnv, repo: string): Promise<void> {
@@ -7116,23 +13392,16 @@ function authMethods(env: RuntimeEnv, request?: Request): Record<string, boolean
   return {
     github: Boolean(env.GITHUB_CLIENT_ID && env.GITHUB_CLIENT_SECRET),
     token: Boolean(env.CRABBOX_BOOTSTRAP_TOKEN),
-    devIdentity: request ? isLocalDevRequest(request) : false,
+    devIdentity: request ? devIdentityEnabled(env, request) : false,
   };
+}
+
+function devIdentityEnabled(env: RuntimeEnv, request: Request): boolean {
+  return developmentIdentityEnabled(env.CRABFLEET_DEV_LOGIN_ENABLED, request.url);
 }
 
 function actor(user: Pick<User, "subject" | "login" | "email">): string {
   return user.login ?? user.email ?? user.subject;
-}
-
-function isLocalDevRequest(request: Request): boolean {
-  const hostname = new URL(request.url).hostname.toLowerCase();
-  return (
-    hostname === "localhost" ||
-    hostname.endsWith(".localhost") ||
-    hostname === "127.0.0.1" ||
-    hostname === "::1" ||
-    hostname === "[::1]"
-  );
 }
 
 function devIdentityId(value: unknown): string {
@@ -7187,6 +13456,7 @@ function isChangedFile(value: unknown): value is ChangedFile {
 }
 
 function runAttempt(row: RunAttemptTable): RunAttempt {
+  const capabilities = runtimeCapabilities(row.runtime, row.capabilities_json);
   return {
     id: row.id,
     cardId: row.card_id,
@@ -7195,10 +13465,11 @@ function runAttempt(row: RunAttemptTable): RunAttempt {
     status: row.status,
     controlIntent: row.control_intent,
     leaseId: row.lease_id,
-    attachUrl: row.attach_url,
+    attachUrl: capabilities.terminal ? row.attach_url : null,
     vncUrl: row.vnc_url,
+    ptyAvailable: false,
     selectionReason: row.selection_reason,
-    capabilities: runtimeCapabilities(row.runtime, row.capabilities_json),
+    capabilities,
     operator: row.operator,
     lastHeartbeatAt: row.last_heartbeat_at,
     startedAt: row.started_at,
@@ -7210,10 +13481,11 @@ function runAttempt(row: RunAttemptTable): RunAttempt {
 }
 
 function interactiveSession(
-  row: InteractiveSessionTable,
+  row: InteractiveSessionRow,
   logs: string[],
   logArchive: InteractiveSessionLogArchive | null = null,
 ): InteractiveSession {
+  const capabilities = runtimeCapabilities(row.runtime, row.capabilities_json);
   return {
     id: row.id,
     parentSessionId: row.parent_session_id,
@@ -7221,6 +13493,14 @@ function interactiveSession(
     repo: row.repo,
     branch: row.branch,
     runtime: row.runtime,
+    adapter: row.adapter,
+    profile: row.profile,
+    adapterWorkspaceId: row.adapter_workspace_id,
+    providerResourceId: row.provider_resource_id,
+    capabilities,
+    expiresAt: row.expires_at,
+    lastReconciledAt: row.last_reconciled_at,
+    reconcileError: row.reconcile_error,
     command: row.command,
     prompt: row.prompt,
     purpose: row.purpose,
@@ -7229,7 +13509,7 @@ function interactiveSession(
     createdBy: row.created_by,
     status: row.status,
     leaseId: row.lease_id,
-    attachUrl: row.attach_url,
+    attachUrl: capabilities.terminal ? row.attach_url : null,
     vncUrl: row.vnc_url,
     lastEvent: row.last_event,
     createdAt: row.created_at,
@@ -7276,7 +13556,7 @@ function sessionLogArchiveBase(id: string): string {
 }
 
 function sessionLogTranscript(
-  session: InteractiveSession | InteractiveSessionTable,
+  session: InteractiveSession | InteractiveSessionRow,
   events: InteractiveSessionEventRow[],
 ): string {
   const parentSessionId =
@@ -7308,7 +13588,7 @@ function sessionLogTranscript(
 }
 
 function sessionLogSummary(
-  session: InteractiveSessionTable,
+  session: InteractiveSessionRow,
   events: InteractiveSessionEventRow[],
 ): Record<string, unknown> {
   return {
@@ -7333,21 +13613,49 @@ function sessionLogSummary(
 
 function decorateInteractiveSession(
   session: InteractiveSession,
-  user?: User,
-  env?: RuntimeEnv,
+  user: User,
+  env: RuntimeEnv,
 ): InteractiveSession {
-  if (!user) return session;
   const now = Date.now();
-  const delegatedControl = env ? canGrantDelegatedControl(env, session) : true;
+  const delegatedControl = canGrantDelegatedControl(env, session);
   const canManage = canManageInteractiveSession(user, session);
   const canChangeMultiplayer = canChangeInteractiveSessionMultiplayer(user, session);
   const canControl = canControlInteractiveSession(user, session, now, delegatedControl);
   const activeController = activeDelegatedController(session, now);
+  const desktopActive = !["stopping", "stopped", "expired", "failed"].includes(session.status);
+  const versionedDesktopReady = ["ready", "attached", "detached"].includes(session.status);
+  const versionedDesktopAvailable =
+    versionedDesktopReady &&
+    session.adapter === runtimeAdapterName &&
+    (session.capabilities.vnc || session.capabilities.desktop);
+  const legacyDesktopUrl = desktopActive ? safeDesktopUrl(session.vncUrl) : null;
+  const ptyAvailable =
+    canControl &&
+    session.capabilities.terminal &&
+    ["ready", "attached", "detached"].includes(session.status) &&
+    Boolean(interactivePtyRouteKind(env, session));
+  const attachUrl =
+    ptyAvailable && session.adapter === runtimeAdapterName
+      ? `/api/interactive-sessions/${encodeURIComponent(session.id)}/pty`
+      : canControl && session.capabilities.terminal
+        ? session.attachUrl
+        : null;
   return {
     ...session,
-    leaseId: canControl ? session.leaseId : null,
-    attachUrl: canControl ? session.attachUrl : null,
-    vncUrl: canControl ? session.vncUrl : null,
+    adapter: canControl ? session.adapter : null,
+    profile: canControl ? session.profile : "",
+    adapterWorkspaceId: canControl ? session.adapterWorkspaceId : null,
+    providerResourceId: canControl ? session.providerResourceId : null,
+    lastReconciledAt: canControl ? session.lastReconciledAt : null,
+    reconcileError: canControl ? session.reconcileError : null,
+    leaseId: canControl ? legacyInteractiveSessionLeaseId(session) : null,
+    attachUrl,
+    ptyAvailable,
+    vncUrl: canControl
+      ? versionedDesktopAvailable
+        ? runtimeAdapterBrowserVncUrl(deploymentConfig(env).canonicalUrl, session.id)
+        : legacyDesktopUrl
+      : null,
     controller: activeController,
     controlGrantedAt: activeController ? session.controlGrantedAt : null,
     controlExpiresAt: activeController ? session.controlExpiresAt : null,
@@ -7412,7 +13720,8 @@ async function canControlInteractiveSessionById(
     .executeTakeFirst();
   if (!row) return false;
   const session = interactiveSession(row, []);
-  if (["expired", "failed", "stopped"].includes(session.status)) return false;
+  if (!session.capabilities.terminal) return false;
+  if (["stopping", "expired", "failed", "stopped"].includes(session.status)) return false;
   return canControlInteractiveSession(
     user,
     session,
@@ -7422,7 +13731,7 @@ async function canControlInteractiveSessionById(
 }
 
 function canGrantDelegatedControl(env: RuntimeEnv, session: InteractiveSession): boolean {
-  if (!env.SANDBOX && session.leaseId?.startsWith(sandboxLeasePrefix)) return false;
+  if (!env.SANDBOX && isSandboxInteractiveSession(session)) return false;
   return true;
 }
 
@@ -7820,9 +14129,10 @@ function sandboxLeaseWithoutRefresh(leaseId: string): string {
 function sandboxLeaseInfo(
   session: Pick<InteractiveSession | InteractiveProvisionRequest, "id"> & {
     leaseId?: string | null;
+    adapter?: string | null;
   },
 ): { sandboxId: string; terminalSessionId: string } {
-  const rawLease = "leaseId" in session ? session.leaseId : null;
+  const rawLease = legacyLeaseIdForAdapter(session.adapter ?? null, session.leaseId ?? null);
   const raw = rawLease?.startsWith(sandboxLeasePrefix)
     ? rawLease.slice(sandboxLeasePrefix.length)
     : "";
@@ -7879,7 +14189,7 @@ function terminalDimension(value: number | null, fallback: number): number {
 }
 
 function terminalCloseMessage(code: number, reason: string): string {
-  const suffix = reason ? `: ${clean(reason, 120)}` : "";
+  const suffix = reason ? `: ${clean(redactedAdapterMessage(reason, "detached"), 120)}` : "";
   return `PTY detached ${code || 1000}${suffix}`;
 }
 
@@ -8051,13 +14361,13 @@ function numberSetting(value: string | undefined, fallback: number): number {
   return Number.isFinite(parsed) ? parsed : fallback;
 }
 
-function sortRepos(repos: string[]): string[] {
-  return [...repos].sort(sortRepoNames);
+function sortRepos(repos: string[], preferred = preferredRepo): string[] {
+  return [...repos].sort((left, right) => sortRepoNames(left, right, preferred));
 }
 
-function sortRepoNames(left: string, right: string): number {
-  if (left === preferredRepo) return -1;
-  if (right === preferredRepo) return 1;
+function sortRepoNames(left: string, right: string, preferred = preferredRepo): number {
+  if (left === preferred) return -1;
+  if (right === preferred) return 1;
   return left.localeCompare(right);
 }
 
@@ -8136,6 +14446,10 @@ function unauthorized(): Error {
 
 function forbidden(message: string): Error {
   return Object.assign(new Error(message), { status: 403 });
+}
+
+function conflict(message: string): Error {
+  return Object.assign(new Error(message), { status: 409 });
 }
 
 function serviceUnavailable(message: string): Error {

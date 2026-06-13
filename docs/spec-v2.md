@@ -75,6 +75,7 @@ Fleet state shape:
       "ready": 2,
       "attached": 0,
       "detached": 0,
+      "stopping": 0,
       "stopped": 1,
       "expired": 0,
       "failed": 1
@@ -110,6 +111,8 @@ Per-session summary:
 - `policy.githubRepo`
 - `policy.hasGithubToken`
 - `policy.openAIBaseUrlHost`
+
+`attachable` is true only for terminal-capable `ready`, `attached`, or `detached` sessions with current control and a resolvable Sandbox, configured bridge, valid WSS/literal-loopback WS URL, or configured Cloudflare runner route.
 
 ## Security
 
@@ -185,6 +188,7 @@ Session states:
 - `ready`: attachable.
 - `attached`: attachable and observed attached.
 - `detached`: attachable but not currently attached.
+- `stopping`: external adapter release requested but not yet confirmed.
 - `stopped`: intentionally stopped.
 - `expired`: lease expired.
 - `failed`: provision/run failed.

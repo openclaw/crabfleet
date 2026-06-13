@@ -4,11 +4,13 @@ import {
   humanStatus,
   isActiveRun,
   isDeadInteractiveSession,
+  isFleetSessionAttachable,
   isTerminalReadyInteractiveSession,
   interactiveSessionStatus,
   interactiveCommand,
   linkedInteractiveSessionPlaceholder,
   optimisticInteractiveSession,
+  runCapabilities,
   sessionItems,
   terminalText,
 } from "../src/app/utils.js";
@@ -111,15 +113,64 @@ test("linked session placeholders render a best-effort Codex card", () => {
 test("interactive lifecycle helpers keep UI and terminal state aligned", () => {
   const live = { kind: "interactive", status: "attached" };
   const rawLive = { status: "ready" };
+  const terminalWithdrawn = {
+    kind: "interactive",
+    status: "ready",
+    capabilities: { terminal: false },
+  };
+  const rawTerminalWithdrawn = { status: "ready", capabilities: { terminal: false } };
+  const controlledWithoutPty = {
+    kind: "interactive",
+    status: "ready",
+    capabilities: { terminal: true },
+    canControl: true,
+    ptyAvailable: false,
+  };
+  const controlledWithPty = { ...controlledWithoutPty, ptyAvailable: true };
+  const sharedReadOnly = {
+    ...controlledWithoutPty,
+    canControl: false,
+    sharedReadOnly: true,
+  };
   const provisioning = { kind: "interactive", status: "pending_adapter" };
+  const stopping = { kind: "interactive", status: "stopping" };
   const failed = { kind: "interactive", status: "failed" };
 
   assert.equal(isActiveRun(live), true);
   assert.equal(isTerminalReadyInteractiveSession(live), true);
   assert.equal(isTerminalReadyInteractiveSession(rawLive), true);
+  assert.equal(isTerminalReadyInteractiveSession(terminalWithdrawn), false);
+  assert.equal(isTerminalReadyInteractiveSession(rawTerminalWithdrawn), false);
+  assert.equal(isTerminalReadyInteractiveSession(controlledWithoutPty), false);
+  assert.equal(isTerminalReadyInteractiveSession(controlledWithPty), true);
+  assert.equal(isTerminalReadyInteractiveSession(sharedReadOnly), true);
+  assert.equal(runCapabilities(rawTerminalWithdrawn).terminal, false);
+  assert.equal(
+    isFleetSessionAttachable({
+      ...rawLive,
+      attachUrl: "wss://terminal.example/session",
+      fleet: { attachable: true },
+      capabilities: { terminal: false },
+    }),
+    false,
+  );
+  assert.equal(
+    isFleetSessionAttachable({
+      ...rawLive,
+      attachUrl: "wss://terminal.example/session",
+      fleet: { attachable: false },
+      capabilities: { terminal: true },
+    }),
+    false,
+  );
   assert.deepEqual(interactiveSessionStatus(live), { label: "Live", tone: "live" });
   assert.deepEqual(interactiveSessionStatus(provisioning), {
     label: "Provisioning",
+    tone: "provisioning",
+  });
+  assert.equal(isActiveRun(stopping), false);
+  assert.deepEqual(interactiveSessionStatus(stopping), {
+    label: "Stopping",
     tone: "provisioning",
   });
   assert.equal(isDeadInteractiveSession(failed), true);

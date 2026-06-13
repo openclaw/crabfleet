@@ -2,8 +2,11 @@ package main
 
 import (
 	"bytes"
+	"encoding/json"
 	"strings"
 	"testing"
+
+	"github.com/alecthomas/kong"
 )
 
 func TestVersionIsSet(t *testing.T) {
@@ -40,6 +43,60 @@ func TestFirstLineSkipsBlankLines(t *testing.T) {
 	}
 }
 
+func TestNewRuntimeOverrideIsOptional(t *testing.T) {
+	t.Setenv("CRABFLEET_ROOT_SESSION_ID", "")
+	parse := func(args ...string) cli {
+		var app cli
+		parser, err := kong.New(
+			&app,
+			kong.Name("crabfleet"),
+			kong.Vars{"version": version},
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := parser.Parse(args); err != nil {
+			t.Fatal(err)
+		}
+		return app
+	}
+
+	app := parse("new")
+	cmd := app.New
+	req := cmd.sessionRequest(&cli{})
+	if req.Runtime != "" {
+		t.Fatalf("runtime = %q, want deployment default", req.Runtime)
+	}
+	encoded, err := json.Marshal(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(encoded, []byte(`"runtime"`)) {
+		t.Fatalf("omitted runtime was serialized: %s", encoded)
+	}
+	for _, arg := range cmd.sshCreateArgs(req) {
+		if arg == "--runtime" {
+			t.Fatal("SSH fallback forced a runtime override")
+		}
+	}
+
+	cmd = parse("new", "--runtime", "container").New
+	req = cmd.sessionRequest(&cli{})
+	if req.Runtime != "container" {
+		t.Fatalf("runtime = %q, want explicit override", req.Runtime)
+	}
+	args := cmd.sshCreateArgs(req)
+	found := false
+	for index := 0; index+1 < len(args); index++ {
+		if args[index] == "--runtime" && args[index+1] == "container" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("explicit runtime missing from SSH fallback: %q", args)
+	}
+}
+
 func TestAttachableRequiresReadySessionWithAttachURL(t *testing.T) {
 	if !attachable(interactiveSession{Status: "ready", AttachURL: "/api/interactive-sessions/IS-1/pty"}) {
 		t.Fatal("ready session with sandbox attach URL should be attachable")
@@ -50,8 +107,30 @@ func TestAttachableRequiresReadySessionWithAttachURL(t *testing.T) {
 	if attachable(interactiveSession{Status: "ready", AttachURL: "https://example.com/console"}) {
 		t.Fatal("http console URL should not be SSH attachable")
 	}
+	if attachable(interactiveSession{Status: "ready", AttachURL: "ws://example.com/terminal"}) {
+		t.Fatal("insecure remote websocket should not be attachable")
+	}
+	if !attachable(interactiveSession{Status: "ready", AttachURL: "ws://127.0.0.1:9000/terminal"}) {
+		t.Fatal("loopback websocket should be attachable")
+	}
 	if !attachable(interactiveSession{Status: "ready", LeaseID: "sandbox:test"}) {
 		t.Fatal("sandbox lease should be attachable")
+	}
+	if attachable(interactiveSession{
+		Status:       "ready",
+		LeaseID:      "sandbox:test",
+		AttachURL:    "/api/interactive-sessions/IS-1/pty",
+		Capabilities: &sessionCapabilities{Terminal: false},
+	}) {
+		t.Fatal("session with withdrawn terminal capability should not be attachable")
+	}
+	available := false
+	if attachable(interactiveSession{
+		Status:       "ready",
+		LeaseID:      "sandbox:test",
+		PtyAvailable: &available,
+	}) {
+		t.Fatal("server PTY availability should be authoritative")
 	}
 }
 

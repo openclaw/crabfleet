@@ -80,7 +80,7 @@ Click New crabbox or use the CLI:
 crabfleet new --repo openclaw/crabfleet "fix the failing check"
 ```
 
-Crabbox is the default runtime so terminal and WebVNC affordances appear as soon as the provision adapter returns links.
+The CLI omits `runtime` unless `--runtime` is passed, so the deployment chooses via `CRABFLEET_DEFAULT_RUNTIME` (`container` when unset). Set a deployment to `crabbox` when its configured adapter provides terminal and WebVNC capabilities.
 
 ## 6. Create a Card
 

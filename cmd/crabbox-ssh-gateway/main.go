@@ -49,21 +49,28 @@ type stateResponse struct {
 }
 
 type interactiveSession struct {
-	ID              string     `json:"id"`
-	ParentSessionID string     `json:"parentSessionId"`
-	RootSessionID   string     `json:"rootSessionId"`
-	Repo            string     `json:"repo"`
-	Branch          string     `json:"branch"`
-	Runtime         string     `json:"runtime"`
-	Status          string     `json:"status"`
-	Owner           string     `json:"owner"`
-	CreatedBy       string     `json:"createdBy"`
-	Purpose         string     `json:"purpose"`
-	Summary         string     `json:"summary"`
-	AttachURL       string     `json:"attachUrl"`
-	VNCURL          string     `json:"vncUrl"`
-	LastEvent       string     `json:"lastEvent"`
-	LogArchive      logArchive `json:"logArchive"`
+	ID              string               `json:"id"`
+	ParentSessionID string               `json:"parentSessionId"`
+	RootSessionID   string               `json:"rootSessionId"`
+	Repo            string               `json:"repo"`
+	Branch          string               `json:"branch"`
+	Runtime         string               `json:"runtime"`
+	Status          string               `json:"status"`
+	Owner           string               `json:"owner"`
+	CreatedBy       string               `json:"createdBy"`
+	Purpose         string               `json:"purpose"`
+	Summary         string               `json:"summary"`
+	Capabilities    *sessionCapabilities `json:"capabilities"`
+	PtyAvailable    *bool                `json:"ptyAvailable"`
+	LeaseID         string               `json:"leaseId"`
+	AttachURL       string               `json:"attachUrl"`
+	VNCURL          string               `json:"vncUrl"`
+	LastEvent       string               `json:"lastEvent"`
+	LogArchive      logArchive           `json:"logArchive"`
+}
+
+type sessionCapabilities struct {
+	Terminal bool `json:"terminal"`
 }
 
 type card struct {
@@ -346,7 +353,10 @@ func runCommand(ctx context.Context, out io.ReadWriter, perms *ssh.Permissions, 
 			fmt.Fprintf(out, "error: %v\n", err)
 			return 1
 		}
-		fmt.Fprintf(out, "session: %s\nrepo: %s\nstatus: %s\nattach: ssh crabfleet attach %s\n", session.ID, session.Repo, session.Status, session.ID)
+		fmt.Fprintf(out, "session: %s\nrepo: %s\nstatus: %s\n", session.ID, session.Repo, session.Status)
+		if attachable(session) {
+			fmt.Fprintf(out, "attach: ssh crabfleet attach %s\n", session.ID)
+		}
 		if session.VNCURL != "" {
 			fmt.Fprintf(out, "vnc: %s\n", terminalSafe(session.VNCURL))
 		}
@@ -356,7 +366,7 @@ func runCommand(ctx context.Context, out io.ReadWriter, perms *ssh.Permissions, 
 			}
 			return 0
 		}
-		if create.detach {
+		if create.detach || !attachable(session) {
 			return 0
 		}
 		return client.attach(ctx, auth.fingerprint, session.ID, out, pty)
@@ -470,12 +480,51 @@ func runCommand(ctx context.Context, out io.ReadWriter, perms *ssh.Permissions, 
 	}
 }
 
+func terminalCapable(session interactiveSession) bool {
+	return session.Capabilities == nil || session.Capabilities.Terminal
+}
+
+func attachable(session interactiveSession) bool {
+	if !terminalCapable(session) || !ptyAttachable(session) {
+		return false
+	}
+	switch session.Status {
+	case "ready", "attached", "detached":
+		return true
+	default:
+		return false
+	}
+}
+
+func ptyAttachable(session interactiveSession) bool {
+	if session.PtyAvailable != nil {
+		return *session.PtyAvailable
+	}
+	if strings.HasPrefix(session.LeaseID, "sandbox:") || strings.HasPrefix(session.LeaseID, "cloudflare:") {
+		return true
+	}
+	return strings.HasPrefix(session.AttachURL, "/api/interactive-sessions/") || validWebSocketAttachURL(session.AttachURL)
+}
+
+func validWebSocketAttachURL(raw string) bool {
+	target, err := url.Parse(raw)
+	if err != nil || target.Host == "" || target.User != nil {
+		return false
+	}
+	if target.Scheme == "wss" {
+		return true
+	}
+	host := target.Hostname()
+	return target.Scheme == "ws" && (host == "localhost" || host == "127.0.0.1" || host == "::1")
+}
+
 func printHelp(out io.Writer, user user) {
 	fmt.Fprintf(out, "Crabfleet SSH\nlogin: %s\nrole: %s\n\n", terminalSafe(displayUser(user)), terminalSafe(user.Role))
 	fmt.Fprintln(out, "commands:")
 	fmt.Fprintln(out, "  whoami")
 	fmt.Fprintln(out, "  list")
 	fmt.Fprintln(out, "  new [--repo owner/repo] [--branch main] [--runtime crabbox|container] [--parent id] [--purpose text] [--command codex] [--vnc] [prompt]")
+	fmt.Fprintln(out, "      --runtime overrides the deployment default")
 	fmt.Fprintln(out, "  attach SESSION_ID")
 	fmt.Fprintln(out, "  vnc SESSION_ID")
 	fmt.Fprintln(out, "  logs SESSION_ID")
@@ -745,7 +794,7 @@ func parseCreate(args []string, client *apiClient, fingerprint string) createArg
 	var vnc bool
 	fs.StringVar(&req.Repo, "repo", "", "repo")
 	fs.StringVar(&req.Branch, "branch", "main", "branch")
-	fs.StringVar(&req.Runtime, "runtime", "crabbox", "runtime")
+	fs.StringVar(&req.Runtime, "runtime", "", "runtime override; defaults to deployment")
 	fs.StringVar(&req.Command, "command", "", "command")
 	fs.StringVar(&req.ParentSessionID, "parent", "", "parent session")
 	fs.StringVar(&req.RootSessionID, "root", "", "root session")
