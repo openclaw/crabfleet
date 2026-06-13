@@ -43,7 +43,7 @@ type cli struct {
 	New         newCmd         `cmd:"" help:"Create a repo-ready crabbox and attach."`
 	Attach      attachCmd      `cmd:"" help:"Attach to a crabbox terminal."`
 	Status      statusCmd      `cmd:"" help:"Show one crabbox lifecycle state."`
-	Stop        stopCmd        `cmd:"" help:"Stop a crabbox workspace."`
+	Delete      deleteCmd      `cmd:"" aliases:"stop" help:"End a crabbox session through its configured lifecycle."`
 	Doctor      doctorCmd      `cmd:"" help:"Check API, auth, and linked lifecycle access."`
 	Checkpoints checkpointsCmd `cmd:"" help:"List sandbox checkpoints."`
 	Checkpoint  checkpointCmd  `cmd:"" help:"Create a sandbox checkpoint."`
@@ -82,7 +82,7 @@ type statusCmd struct {
 	ID string `arg:"" help:"Crabbox session id."`
 }
 
-type stopCmd struct {
+type deleteCmd struct {
 	ID string `arg:"" help:"Crabbox session id."`
 }
 
@@ -157,6 +157,7 @@ type interactiveSession struct {
 	Repo            string               `json:"repo"`
 	Branch          string               `json:"branch"`
 	Runtime         string               `json:"runtime"`
+	Adapter         string               `json:"adapter"`
 	Status          string               `json:"status"`
 	Owner           string               `json:"owner"`
 	CreatedBy       string               `json:"createdBy"`
@@ -169,6 +170,28 @@ type interactiveSession struct {
 	VNCURL          string               `json:"vncUrl"`
 	LastEvent       string               `json:"lastEvent"`
 	LogArchive      logArchive           `json:"logArchive"`
+}
+
+func legacyProviderCleanupMayBeRequired(session interactiveSession) bool {
+	if session.Adapter == "runtime-v1" || session.Runtime == "github_actions" {
+		return false
+	}
+	switch session.Status {
+	case "stopping", "stopped", "expired":
+		return true
+	default:
+		return false
+	}
+}
+
+func lifecycleStopNote(session interactiveSession) string {
+	if session.Runtime == "github_actions" && session.Status == "stopped" {
+		return "GitHub Actions workflow run was not canceled and may continue on GitHub"
+	}
+	if legacyProviderCleanupMayBeRequired(session) {
+		return "provider deletion was not confirmed; legacy runtimes may require separate cleanup"
+	}
+	return ""
 }
 
 type sessionCapabilities struct {
@@ -436,18 +459,21 @@ func (cmd statusCmd) Run(app *cli, api *apiClient) error {
 	return nil
 }
 
-func (cmd stopCmd) Run(app *cli, api *apiClient) error {
+func (cmd deleteCmd) Run(app *cli, api *apiClient) error {
 	session, err := api.action(context.Background(), cmd.ID, "stop")
 	if err != nil {
 		if app.NoInput || app.JSON {
 			return err
 		}
-		return runSSH(app, "stop", cmd.ID)
+		return runSSH(app, "delete", cmd.ID)
 	}
 	if app.JSON {
 		return json.NewEncoder(os.Stdout).Encode(session)
 	}
 	fmt.Fprintf(os.Stdout, "session: %s\nstatus: %s\n", session.ID, session.Status)
+	if note := lifecycleStopNote(session); note != "" {
+		fmt.Fprintf(os.Stdout, "note: %s\n", note)
+	}
 	return nil
 }
 

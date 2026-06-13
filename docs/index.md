@@ -23,6 +23,7 @@ ssh crabd.sh attach <session-id>
 
 # Or use the Go CLI.
 crabfleet new --repo openclaw/crabfleet "fix the failing check"
+crabfleet delete <session-id>
 crabfleet vnc <session-id>
 ```
 
@@ -31,7 +32,7 @@ The web app at [crabfleet.openclaw.ai/app](https://crabfleet.openclaw.ai/app/) e
 ## What Crabfleet Does
 
 - **SSH-first onboarding.** Connect through `ssh link@crabd.sh`, complete GitHub sign-in, then use linked-key auth.
-- **Crabbox control.** Create, attach, share, open WebVNC, and clean up interactive Codex sessions backed by Ghostty WASM tiles.
+- **Crabbox control.** Create, attach, share, open WebVNC, delete provider-backed runtime workspaces, stop legacy sessions locally, and clean up retained Codex session history.
 - **Fleet visibility.** The app groups all org Codex instances by person so OpenClaw can supervise live work.
 - **Repo-gated cards.** Prompt cards and GitHub issue/PR previews stay scoped to enabled OpenClaw repos.
 - **Runtime policy.** Crabfleet records runtime selection, capabilities, heartbeat, stall state, and operator intent.

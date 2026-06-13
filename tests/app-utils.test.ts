@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
+  canDeleteInteractiveWorkspace,
   humanStatus,
   isActiveRun,
   isDeadInteractiveSession,
@@ -135,6 +136,7 @@ test("interactive lifecycle helpers keep UI and terminal state aligned", () => {
   };
   const provisioning = { kind: "interactive", status: "pending_adapter" };
   const stopping = { kind: "interactive", status: "stopping" };
+  const deleting = { ...stopping, adapter: "runtime-v1" };
   const failed = { kind: "interactive", status: "failed" };
 
   assert.equal(isActiveRun(live), true);
@@ -174,6 +176,12 @@ test("interactive lifecycle helpers keep UI and terminal state aligned", () => {
     label: "Stopping",
     tone: "provisioning",
   });
+  assert.deepEqual(interactiveSessionStatus(deleting), {
+    label: "Deleting",
+    tone: "provisioning",
+  });
+  assert.equal(canDeleteInteractiveWorkspace(deleting), true);
+  assert.equal(canDeleteInteractiveWorkspace({ ...stopping, leaseId: "clawfleet:legacy" }), false);
   assert.equal(isDeadInteractiveSession(failed), true);
   assert.deepEqual(interactiveSessionStatus(failed), { label: "Failed", tone: "failed" });
   assert.equal(humanStatus("pending_adapter"), "Pending Adapter");

@@ -1,5 +1,6 @@
 import { CopyCommand } from "./components.jsx";
 import {
+  canDeleteInteractiveWorkspace,
   canMaintain,
   elapsed,
   humanStatus,
@@ -121,6 +122,8 @@ export function FleetPage(props) {
                       key={session.id}
                       session={{ ...session, fleet: fleetSessionsById.get(session.id) }}
                       openSessionGrid={props.openSessionGrid}
+                      deleteInteractiveSession={props.deleteInteractiveSession}
+                      canManage={session.canManage || canMaintain(props.state.user)}
                       sshHost={sshHost}
                     />
                   ))}
@@ -263,7 +266,7 @@ function ConnectionDeck({ signedIn, userLabel, beginLogin, sshHost, preferredRep
   );
 }
 
-function FleetBox({ session, openSessionGrid, sshHost }) {
+function FleetBox({ session, openSessionGrid, deleteInteractiveSession, canManage, sshHost }) {
   const capabilities = runCapabilities(session);
   const attachable = isFleetSessionAttachable(session);
   const archiveCount = session.logArchive?.eventCount || session.logs?.length || 0;
@@ -271,6 +274,23 @@ function FleetBox({ session, openSessionGrid, sshHost }) {
   const status = interactiveSessionStatus(session);
   const seen = session.lastSeenAt || session.updatedAt || session.createdAt;
   const desktopEligible = !["stopping", "stopped", "expired", "failed"].includes(session.status);
+  const ending = session.status === "stopping";
+  const deletesWorkspace = canDeleteInteractiveWorkspace(session);
+  const endsWorkflowSession = session.runtime === "github_actions";
+  const endLabel = ending
+    ? deletesWorkspace
+      ? "Deleting…"
+      : endsWorkflowSession
+        ? "Ending…"
+        : "Stopping…"
+    : deletesWorkspace
+      ? "Delete"
+      : endsWorkflowSession
+        ? "End"
+        : "Stop";
+  const actionable =
+    !String(session.id).startsWith("LOCAL-") &&
+    !["stopping", "stopped", "expired", "failed", "unavailable"].includes(session.status);
   return (
     <article class={`fleet-box ${status.tone || "idle"}`}>
       <header class="fleet-box-head">
@@ -331,6 +351,15 @@ function FleetBox({ session, openSessionGrid, sshHost }) {
         {!session.sharedReadOnly ? (
           <button onClick={() => window.open(sessionLogsUrl(session.id), "_blank", "noopener")}>
             Logs
+          </button>
+        ) : null}
+        {canManage && actionable ? (
+          <button class="danger" onClick={() => deleteInteractiveSession(session.id)}>
+            {endLabel}
+          </button>
+        ) : canManage && ending ? (
+          <button class="danger" disabled>
+            {endLabel}
           </button>
         ) : null}
       </div>

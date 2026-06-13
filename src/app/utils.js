@@ -128,6 +128,10 @@ export function isDeadInteractiveSession(session) {
   );
 }
 
+export function canDeleteInteractiveWorkspace(session) {
+  return session?.adapter === "runtime-v1";
+}
+
 export function isTerminalReadyInteractiveSession(session) {
   const lifecycleReady =
     session &&
@@ -170,7 +174,12 @@ export function interactiveSessionStatus(session) {
     return { label: humanStatus(session.workPhase), tone: "live" };
   }
   if (session.status === "failed") return { label: "Failed", tone: "failed" };
-  if (session.status === "stopping") return { label: "Stopping", tone: "provisioning" };
+  if (session.status === "stopping") {
+    return {
+      label: canDeleteInteractiveWorkspace(session) ? "Deleting" : "Stopping",
+      tone: "provisioning",
+    };
+  }
   if (session.status === "stopped" || session.status === "expired") {
     return { label: "Stopped", tone: "stopped" };
   }

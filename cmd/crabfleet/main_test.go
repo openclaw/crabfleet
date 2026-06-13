@@ -3,6 +3,8 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 
@@ -94,6 +96,91 @@ func TestNewRuntimeOverrideIsOptional(t *testing.T) {
 	}
 	if !found {
 		t.Fatalf("explicit runtime missing from SSH fallback: %q", args)
+	}
+}
+
+func TestDeleteCommandUsesProviderStopAction(t *testing.T) {
+	var action string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/api/ssh/interactive-sessions/IS-7/actions" {
+			t.Errorf("request = %s %s", r.Method, r.URL.Path)
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		if got := r.Header.Get("X-Crabfleet-SSH-Fingerprint"); got != "SHA256:test" {
+			t.Errorf("fingerprint = %q", got)
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		var body map[string]string
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Error(err)
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		action = body["action"]
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"session":{"id":"IS-7","status":"stopping"}}`))
+	}))
+	defer server.Close()
+
+	app := &cli{
+		API:         server.URL,
+		Token:       "gateway-token",
+		Fingerprint: "SHA256:test",
+		NoInput:     true,
+	}
+	if err := (deleteCmd{ID: "IS-7"}).Run(app, app.apiClient()); err != nil {
+		t.Fatal(err)
+	}
+	if action != "stop" {
+		t.Fatalf("action = %q, want stop", action)
+	}
+}
+
+func TestCLIUsesDeleteCanonicalNameWithStopAlias(t *testing.T) {
+	var app cli
+	parser, err := kong.New(&app, kong.Name("crabfleet"), kong.Vars{"version": version})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := parser.Parse([]string{"delete", "IS-7"}); err != nil {
+		t.Fatal(err)
+	}
+	if app.Delete.ID != "IS-7" {
+		t.Fatalf("delete id = %q", app.Delete.ID)
+	}
+	var legacy cli
+	legacyParser, err := kong.New(&legacy, kong.Name("crabfleet"), kong.Vars{"version": version})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := legacyParser.Parse([]string{"stop", "IS-8"}); err != nil {
+		t.Fatal(err)
+	}
+	if legacy.Delete.ID != "IS-8" {
+		t.Fatalf("stop alias id = %q", legacy.Delete.ID)
+	}
+}
+
+func TestLegacyProviderCleanupWarningRequiresConfirmedLegacyStop(t *testing.T) {
+	if !legacyProviderCleanupMayBeRequired(interactiveSession{Status: "stopped"}) {
+		t.Fatal("confirmed legacy stop should retain the cleanup warning")
+	}
+	for _, session := range []interactiveSession{
+		{Status: "failed"},
+		{Status: "stopped", Adapter: "runtime-v1"},
+		{Status: "stopped", Runtime: "github_actions"},
+	} {
+		if legacyProviderCleanupMayBeRequired(session) {
+			t.Fatalf("session %#v must not recommend provider cleanup", session)
+		}
+	}
+	if got := lifecycleStopNote(interactiveSession{Status: "stopped", Runtime: "github_actions"}); !strings.Contains(got, "not canceled") {
+		t.Fatalf("GitHub Actions note = %q", got)
+	}
+	if got := lifecycleStopNote(interactiveSession{Status: "failed"}); got != "" {
+		t.Fatalf("failed unowned workspace note = %q", got)
 	}
 }
 

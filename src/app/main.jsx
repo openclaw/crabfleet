@@ -4,6 +4,7 @@ import { api } from "./api.js";
 import { CopyCommand, Icon } from "./components.jsx";
 import { FleetPage } from "./fleet.jsx";
 import {
+  canDeleteInteractiveWorkspace,
   canMaintain,
   canOwn,
   elapsed,
@@ -654,16 +655,34 @@ function App() {
     return result;
   }
 
-  function closeInteractiveSession(id) {
+  function deleteInteractiveSession(id) {
     const session = findInteractiveSession(id);
     const label = session ? `${session.repo} (${session.id})` : id;
+    const deletesWorkspace = canDeleteInteractiveWorkspace(session);
+    const endsWorkflowSession = session?.runtime === "github_actions";
     openActionDialog({
       kind: "danger",
-      eyebrow: "Live session",
-      title: "End Codex session?",
-      description: "This stops the terminal. Its final status and logs stay visible in Crabfleet.",
+      eyebrow: deletesWorkspace
+        ? "Live workspace"
+        : endsWorkflowSession
+          ? "Live workflow terminal"
+          : "Live session",
+      title: deletesWorkspace
+        ? "Delete Crabbox workspace?"
+        : endsWorkflowSession
+          ? "End GitHub Actions terminal session?"
+          : "Stop Crabbox session?",
+      description: deletesWorkspace
+        ? "This releases the runtime workspace and cannot be undone. Its final status and logs stay visible in Crabfleet."
+        : endsWorkflowSession
+          ? "This ends the Crabfleet terminal session and disconnects it. It does not cancel the GitHub Actions workflow run, which may continue on GitHub. Final Crabfleet logs stay visible."
+          : "This stops Crabfleet access and marks the session stopped. This legacy backend does not expose provider deletion, so its runtime may require separate cleanup.",
       subject: label,
-      confirmLabel: "End session",
+      confirmLabel: deletesWorkspace
+        ? "Delete workspace"
+        : endsWorkflowSession
+          ? "End session"
+          : "Stop session",
       action: () => interactiveSessionAction(id, "stop"),
     });
   }
@@ -944,7 +963,7 @@ function App() {
     cardAction,
     attachCard,
     interactiveSessionAction,
-    closeInteractiveSession,
+    deleteInteractiveSession,
     cleanupInteractiveSession,
     cleanupDeadInteractiveSessions,
     shareInteractiveSession,
@@ -2061,6 +2080,22 @@ function InteractiveSessionActions(props) {
   const session = props.session;
   if (String(session.id).startsWith("LOCAL-")) return null;
   const stopped = isDeadInteractiveSession(session);
+  const ending = session.status === "stopping";
+  const deletesWorkspace = canDeleteInteractiveWorkspace(session);
+  const endsWorkflowSession = session.runtime === "github_actions";
+  const endLabel = stopped
+    ? "Clean up"
+    : ending
+      ? deletesWorkspace
+        ? "Deleting…"
+        : endsWorkflowSession
+          ? "Ending…"
+          : "Stopping…"
+      : deletesWorkspace
+        ? "Delete"
+        : endsWorkflowSession
+          ? "End"
+          : "Stop";
   const canManage = session.canManage || canMaintain(props.state.user);
   const canChangeMultiplayer = Boolean(session.canChangeMultiplayer);
   const shareAction = session.shareMode === "link_read" ? "disable_share" : "share_link";
@@ -2097,13 +2132,14 @@ function InteractiveSessionActions(props) {
         {canManage ? (
           <button
             class="danger"
+            disabled={ending}
             onClick={() =>
               stopped
                 ? props.cleanupInteractiveSession(session.id)
-                : props.closeInteractiveSession(session.id)
+                : props.deleteInteractiveSession(session.id)
             }
           >
-            {stopped ? "Clean up" : "Close"}
+            {endLabel}
           </button>
         ) : null}
       </>
@@ -2155,13 +2191,14 @@ function InteractiveSessionActions(props) {
       {canManage ? (
         <button
           class="danger"
+          disabled={ending}
           onClick={() =>
             stopped
               ? props.cleanupInteractiveSession(session.id)
-              : props.closeInteractiveSession(session.id)
+              : props.deleteInteractiveSession(session.id)
           }
         >
-          {stopped ? "Clean up" : "Close"}
+          {endLabel}
         </button>
       ) : null}
     </>

@@ -82,6 +82,8 @@ crabfleet new --repo openclaw/crabfleet "fix the failing check"
 
 The CLI omits `runtime` unless `--runtime` is passed, so the deployment chooses via `CRABFLEET_DEFAULT_RUNTIME` (`container` when unset). Set a deployment to `crabbox` when its configured adapter provides terminal and WebVNC capabilities.
 
+End a session with `crabfleet delete <session-id>`. Versioned lifecycle adapters confirm runtime release; legacy create-only and ClawFleet sessions stop only in Crabfleet and may require separate provider cleanup. Crabfleet retains the final status and logs until you clean up the dead session record.
+
 ## 6. Create a Card
 
 Click New card.
