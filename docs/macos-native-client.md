@@ -1,6 +1,6 @@
 # Native macOS client experiment
 
-Status: internal prototype. The app lives in `macos/CrabfleetMac` and provides a
+Status: early prototype. The app lives in `macos/CrabfleetMac` and provides a
 SwiftUI fleet browser plus an AppKit-hosted, Metal-rendered VNC surface.
 
 ## Product shape

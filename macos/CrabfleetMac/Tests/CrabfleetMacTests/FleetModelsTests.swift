@@ -12,10 +12,10 @@ struct FleetModelsTests {
     #expect(direct.port == 5907)
     #expect(direct.username.isEmpty)
 
-    let url = try VNCAddress.parse("vnc://peter@localhost:15909")
+    let url = try VNCAddress.parse("vnc://operator@localhost:15909")
     #expect(url.host == "localhost")
     #expect(url.port == 15909)
-    #expect(url.username == "peter")
+    #expect(url.username == "operator")
 
     let ipv6 = try VNCAddress.parse("[::1]:5901")
     #expect(ipv6.host == "::1")
@@ -61,7 +61,7 @@ struct FleetModelsTests {
 
   @Test
   func searchMatchesLeaseIdentityAndRepository() {
-    let lease = CrabboxLease.fixtures(currentUser: "peter")[0]
+    let lease = CrabboxLease.fixtures(currentUser: "operator")[0]
 
     #expect(lease.matches("blue-lobster"))
     #expect(lease.matches("CRABFLEET"))
@@ -83,7 +83,7 @@ struct FleetModelsTests {
             "repo": "openclaw/crabfleet",
             "branch": "main",
             "runtime": "crabbox",
-            "owner": "peter",
+            "owner": "operator",
             "purpose": "test",
             "summary": "test session",
             "status": "ready",
