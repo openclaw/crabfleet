@@ -4,3 +4,7 @@ src/generated.ts
 dist/
 .wrangler/
 .pnpm-store/
+macos/CrabfleetMac/.build/
+macos/CrabfleetMac/.swiftpm/
+macos/CrabfleetMac/Vendor/RoyalVNCKit/.build/
+macos/CrabfleetMac/Vendor/RoyalVNCKit/.swiftpm/
