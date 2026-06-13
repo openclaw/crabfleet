@@ -3115,7 +3115,7 @@ async function openClawRegisterActionSession(
             owner: `github-actions:${id}`,
             created_by: "service:openclaw",
             status: "ready",
-            lease_id: `github-actions:${id}`,
+            lease_id: null,
             attach_url: null,
             vnc_url: null,
             last_event: "GitHub Actions work registered",
@@ -3178,7 +3178,12 @@ async function openClawRegisterActionSession(
       summary,
       prompt: purpose,
       status: "ready",
+      lease_id: null,
       stopped_at: null,
+      terminal_status: null,
+      terminal_failure_reason: null,
+      terminal_finalize_pending: 0,
+      credential_cleanup_terminal_status: null,
       updated_at: now,
       last_seen_at: now,
       last_event: resumed ? "GitHub Actions work resumed" : "GitHub Actions work registered",
@@ -3482,6 +3487,7 @@ async function reconcileLegacyStoppingInteractiveSessionBatch(
         expression("adapter", "!=", runtimeAdapterName),
       ]),
     )
+    .where("runtime", "!=", githubActionsRuntime)
     .where("credential_cleanup_terminal_status", "is", null)
     .where(sql<boolean>`lease_id IS NULL OR lease_id NOT LIKE ${`${sandboxLeasePrefix}%`}`)
     .orderBy("updated_at", "asc")
@@ -4812,6 +4818,7 @@ async function completeLegacyInteractiveSessionStop(
   eventActor: string,
   now: number,
 ): Promise<boolean> {
+  if (owner.runtime === githubActionsRuntime) return false;
   const db = database(env);
   const revision = Math.max(now, owner.updatedAt + 1);
   const actorName = clean(eventActor, 120) || "system";
@@ -4857,13 +4864,6 @@ async function completeLegacyInteractiveSessionStop(
       control_requested_at: null,
       control_granted_at: null,
       control_expires_at: null,
-      ...(owner.runtime === githubActionsRuntime
-        ? {
-            work_state: "canceled",
-            work_phase: "canceled",
-            completion_reason: "stopped from Crabfleet",
-          }
-        : {}),
       updated_at: revision,
       last_event: finalMessage,
     })
@@ -4877,13 +4877,70 @@ async function completeLegacyInteractiveSessionStop(
   );
   const stopped = results.at(-1)?.results.some((row) => row.updated_at === revision) ?? false;
   if (stopped) {
-    if (owner.runtime === githubActionsRuntime) {
-      await disconnectGitHubActionsRunner(env, owner.id).catch(() => undefined);
-    }
     await archiveInteractiveSessionLogs(env, owner.id, now).catch(() => undefined);
     await finalizeTerminalInteractiveSession(env, owner.id, "stopped", now).catch(() => undefined);
   }
   return stopped;
+}
+
+async function stopGitHubActionsSession(
+  env: RuntimeEnv,
+  session: InteractiveSession,
+  eventActor: string,
+  now: number,
+): Promise<boolean> {
+  const revision = Math.max(now, session.updatedAt + 1);
+  const message = "GitHub Actions session canceled from Crabfleet";
+  const db = database(env);
+  const expectedOwner = sql<boolean>`
+    id = ${session.id}
+    AND runtime = ${githubActionsRuntime}
+    AND status = ${session.status}
+    AND updated_at = ${session.updatedAt}
+  `;
+  const event = sql`
+    INSERT INTO interactive_session_events (session_id, actor, message, created_at)
+    SELECT ${session.id}, ${clean(eventActor, 120) || "system"}, ${message}, ${now}
+    FROM interactive_sessions
+    WHERE ${expectedOwner}
+  `;
+  const update = db
+    .updateTable("interactive_sessions")
+    .set({
+      status: "stopped",
+      stopped_at: now,
+      reconcile_error: null,
+      terminal_status: null,
+      terminal_failure_reason: null,
+      terminal_finalize_pending: 1,
+      agent_token_hash: null,
+      attach_url: null,
+      vnc_url: null,
+      controller: null,
+      control_requested_by: null,
+      control_requested_at: null,
+      control_granted_at: null,
+      control_expires_at: null,
+      work_state: "canceled",
+      work_phase: "canceled",
+      completion_reason: "stopped from Crabfleet",
+      last_event: message,
+      updated_at: revision,
+    })
+    .where(expectedOwner)
+    .returning("updated_at");
+  const results = await env.DB.batch<{ updated_at: number }>(
+    [event, update].map((query) => {
+      const compiled = query.compile(db);
+      return env.DB.prepare(compiled.sql).bind(...compiled.parameters);
+    }),
+  );
+  const stopped = results.at(-1)?.results.some((row) => row.updated_at === revision) ?? false;
+  if (!stopped) return false;
+  await disconnectGitHubActionsRunner(env, session.id).catch(() => undefined);
+  await archiveInteractiveSessionLogs(env, session.id, now).catch(() => undefined);
+  await finalizeTerminalInteractiveSession(env, session.id, "stopped", now).catch(() => undefined);
+  return true;
 }
 
 async function mutateInteractiveSession(
@@ -5168,6 +5225,24 @@ async function mutateInteractiveSession(
         session.stoppedAt ?? now,
       ).catch(() => undefined);
       return { session: decorateInteractiveSession(session, user, env) };
+    }
+    if (session.runtime === githubActionsRuntime) {
+      if (!(await stopGitHubActionsSession(env, session, userActor, now))) {
+        const current = await readInteractiveSession(env, id);
+        if (!current) throw notFound("interactive session not found");
+        if (!deadInteractiveSessionStatuses.includes(current.status)) {
+          throw conflict("interactive session lifecycle changed; retry stop");
+        }
+        return { session: decorateInteractiveSession(current, user, env) };
+      }
+      await audit(env, user, `GitHub Actions session stopped ${id}`, now);
+      return {
+        session: decorateInteractiveSession(
+          (await readInteractiveSession(env, id)) as InteractiveSession,
+          user,
+          env,
+        ),
+      };
     }
     if (session.adapter === runtimeAdapterName) {
       if (!session.adapterWorkspaceId) {

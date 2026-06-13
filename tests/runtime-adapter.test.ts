@@ -1250,7 +1250,14 @@ test("Sandbox cleanup and legacy stops use durable terminal transitions", async 
   assert.match(completeSource, /finalizeTerminalInteractiveSession/);
   assert.doesNotMatch(completeSource, /status: "stopping"/);
   assert.match(scheduledSource, /where\("status", "=", "stopping"\)/);
+  assert.match(scheduledSource, /\.where\("runtime", "!=", githubActionsRuntime\)/);
   assert.match(scheduledSource, /completeLegacyInteractiveSessionStop/);
+  assert.match(completeSource, /if \(owner\.runtime === githubActionsRuntime\) return false/);
+  assert.match(completeSource, /async function stopGitHubActionsSession/);
+  assert.match(completeSource, /work_state: "canceled"/);
+  assert.match(completeSource, /completion_reason: "stopped from Crabfleet"/);
+  assert.match(stopSource, /session\.runtime === githubActionsRuntime/);
+  assert.match(stopSource, /stopGitHubActionsSession\(env, session, userActor, now\)/);
   assert.match(stopSource, /interactive session lifecycle changed; retry stop/);
   assert.match(stopSource, /const current = await readInteractiveSession\(env, id\)/);
   assert.match(stopSource, /current\.adapter !== runtimeAdapterName/);
