@@ -164,8 +164,10 @@ Pushes to `main` run `.github/workflows/deploy-worker.yml`, which checks, tests,
 deploys the generic product router, applies remote D1 migrations, and deploys the app
 Worker. Configure the repository secret `CLOUDFLARE_API_TOKEN` with permissions for
 Workers deploys and D1 migrations.
-`crabfleet.ai` product routing, `crabfleet.openclaw.ai`, and `crabd.sh` DNS/route
-convergence is handled by `scripts/ensure-cloudflare-domains.mjs`; set
+`crabfleet.openclaw.ai` is a Worker Custom Domain declared in the app Wrangler
+config. The `crabfleet.ai` product Custom Domains, stale classic-route cleanup,
+and `crabd.sh` DNS convergence are handled by
+`scripts/ensure-cloudflare-domains.mjs`; set
 `CLOUDFLARE_DNS_API_TOKEN` for manual deploys and when CI should manage those
 records. Without that DNS-scoped repository secret, CI skips domain convergence. The
 app Worker still proxies the generic product site for `crabfleet.ai` as a defensive
@@ -181,8 +183,8 @@ CLOUDFLARE_DNS_API_TOKEN=... \
 pnpm run deploy
 ```
 
-`pnpm deploy:product` deploys only the generic product Worker and its two public
-routes. Use `pnpm deploy:product:worker` only when route convergence runs separately.
+`pnpm deploy:product` deploys only the generic product Worker, then converges its
+two public Custom Domains and stale classic-route cleanup.
 
 ### Environment Variables
 

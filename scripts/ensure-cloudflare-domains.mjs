@@ -1,6 +1,7 @@
 const token = process.env.CLOUDFLARE_DNS_API_TOKEN || process.env.CLOUDFLARE_API_TOKEN;
 const productOnly = process.argv.includes("--product-only");
 const appHost = "crabfleet.openclaw.ai";
+const cloudflareAccountId = "91b59577e757131d68d55a471fe32aca";
 const productWorkerScript = "crabfleet-canonical-router";
 // OpenClaw app hosts are Worker Custom Domains in wrangler.jsonc; this script
 // only removes stale classic routes for them and keeps other aliases tidy.
@@ -42,61 +43,28 @@ async function zone(name) {
   return selected;
 }
 
-async function ensureProductHost(zoneName, host) {
+async function ensureProductHosts(zoneName, hosts) {
   const targetZone = await zone(zoneName);
-  const dns = await request(`/zones/${targetZone.id}/dns_records?name=${encodeURIComponent(host)}`);
-  for (const record of dns.filter((entry) => entry.type === "AAAA" || entry.type === "CNAME")) {
-    await request(`/zones/${targetZone.id}/dns_records/${record.id}`, { method: "DELETE" });
-    console.log(`deleted conflicting ${host} ${record.type} record ${record.id}`);
-  }
-
-  const refreshed = await request(
-    `/zones/${targetZone.id}/dns_records?name=${encodeURIComponent(host)}`,
-  );
-  const [primaryA, ...extraARecords] = refreshed.filter((record) => record.type === "A");
-  const body = {
-    type: "A",
-    name: host,
-    content: "192.0.2.1",
-    proxied: true,
-    ttl: 1,
-  };
-  if (primaryA) {
-    await request(`/zones/${targetZone.id}/dns_records/${primaryA.id}`, {
+  await request(
+    `/accounts/${cloudflareAccountId}/workers/scripts/${productWorkerScript}/domains/records`,
+    {
       method: "PUT",
-      body: JSON.stringify(body),
-    });
-    console.log(`set ${host} proxied placeholder`);
-  } else {
-    await request(`/zones/${targetZone.id}/dns_records`, {
-      method: "POST",
-      body: JSON.stringify(body),
-    });
-    console.log(`created ${host} proxied placeholder`);
-  }
+      body: JSON.stringify({
+        override_scope: true,
+        override_existing_origin: true,
+        override_existing_dns_record: true,
+        origins: hosts.map((hostname) => ({ hostname, zone_id: targetZone.id })),
+      }),
+    },
+  );
+  console.log(`set ${hosts.join(", ")} Worker Custom Domains`);
 
-  for (const record of extraARecords) {
-    await request(`/zones/${targetZone.id}/dns_records/${record.id}`, { method: "DELETE" });
-    console.log(`deleted extra ${host} A record ${record.id}`);
-  }
-
-  const pattern = `${host}/*`;
   const routes = await request(`/zones/${targetZone.id}/workers/routes`);
-  for (const route of routes.filter(
-    (entry) => entry.pattern === pattern && entry.script !== productWorkerScript,
+  for (const route of routes.filter((entry) =>
+    hosts.some((host) => entry.pattern === `${host}/*`),
   )) {
     await request(`/zones/${targetZone.id}/workers/routes/${route.id}`, { method: "DELETE" });
-    console.log(`deleted stale ${host} route ${route.id}`);
-  }
-  const current = await request(`/zones/${targetZone.id}/workers/routes`);
-  if (!current.some((route) => route.pattern === pattern && route.script === productWorkerScript)) {
-    const route = await request(`/zones/${targetZone.id}/workers/routes`, {
-      method: "POST",
-      body: JSON.stringify({ pattern, script: productWorkerScript }),
-    });
-    console.log(`created ${host} route ${route.id}`);
-  } else {
-    console.log(`${host} route ok`);
+    console.log(`deleted stale ${route.pattern} classic route ${route.id}`);
   }
 }
 
@@ -206,9 +174,7 @@ async function ensureCrabdSshRecord() {
 if (!productOnly) {
   await removeOpenClawClassicRoutes();
 }
-for (const host of ["crabfleet.ai", "www.crabfleet.ai"]) {
-  await ensureProductHost("crabfleet.ai", host);
-}
+await ensureProductHosts("crabfleet.ai", ["crabfleet.ai", "www.crabfleet.ai"]);
 if (!productOnly) {
   await ensureCrabfleetDocsRecord();
   await ensureCrabdSshRecord();

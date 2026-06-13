@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Move the public product hosts to safely converged Worker Custom Domains.
 - Bound Crabbox terminal output with negotiated acknowledgements and legacy-client compatibility.
 - Enable the OpenClaw deployment's versioned Crabbox runtime adapter with a stable tenant namespace.
 - Add comprehensive documentation for durable GitHub Actions sessions, including registration, runner and viewer relay, work-state heartbeats, Codex steering, resumption, completion, cancellation, authentication, archives, and troubleshooting.
