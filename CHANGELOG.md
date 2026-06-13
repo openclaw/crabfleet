@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Reject runtime-adapter redirects with Cloudflare-compatible manual redirect handling instead of using unsupported Worker fetch semantics.
 - Make create, run, and admin drawers real modal dialogs with keyboard focus containment and restoration.
 - Move the public product hosts to safely converged Worker Custom Domains and fail deploys unless app and product endpoints are reachable.
 - Bound Crabbox terminal output with negotiated acknowledgements and legacy-client compatibility.

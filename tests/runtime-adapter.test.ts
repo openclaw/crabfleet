@@ -839,6 +839,18 @@ test("runtime adapter operations stay bound to the registered control plane", as
   assert.doesNotMatch(stopSource, /response\.status === 404[\s\S]*CRABBOX_RUNTIME_ADAPTER_URL/);
 });
 
+test("runtime adapter requests reject redirects with edge-supported fetch semantics", async () => {
+  const source = await readFile(new URL("../src/index.ts", import.meta.url), "utf8");
+  const fetchStart = source.indexOf("async function runtimeAdapterFetch");
+  const fetchEnd = source.indexOf("async function readRuntimeAdapterResponseBody", fetchStart);
+  const fetchSource = source.slice(fetchStart, fetchEnd);
+
+  assert.match(fetchSource, /redirect: "manual"/);
+  assert.match(fetchSource, /response\.status >= 300 && response\.status < 400/);
+  assert.match(fetchSource, /runtime adapter redirect refused/);
+  assert.doesNotMatch(fetchSource, /redirect: "error"/);
+});
+
 test("stopping create replay owns the exact persisted lifecycle", async () => {
   const source = await readFile(new URL("../src/index.ts", import.meta.url), "utf8");
   const reconcileStart = source.indexOf("async function reconcileStoppingRuntimeAdapterWorkspace");

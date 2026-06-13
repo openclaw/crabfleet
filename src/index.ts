@@ -12051,12 +12051,16 @@ async function runtimeAdapterFetch(
   headers.set("authorization", `Bearer ${token}`);
   headers.set("accept", "application/json");
   if (init.body) headers.set("content-type", "application/json");
-  return fetch(target, {
+  const response = await fetch(target, {
     ...init,
     headers,
-    redirect: "error",
+    redirect: "manual",
     signal: AbortSignal.timeout(10_000),
   });
+  if (response.status >= 300 && response.status < 400) {
+    throw new Error("runtime adapter redirect refused");
+  }
+  return response;
 }
 
 async function readRuntimeAdapterResponseBody(response: Response): Promise<unknown> {
