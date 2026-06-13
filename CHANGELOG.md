@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Enable the OpenClaw deployment's versioned Crabbox runtime adapter with a stable tenant namespace.
 - Add comprehensive documentation for durable GitHub Actions sessions, including registration, runner and viewer relay, work-state heartbeats, Codex steering, resumption, completion, cancellation, authentication, archives, and troubleshooting.
 - Keep GitHub Actions sessions out of legacy workspace-stop reconciliation and give them a dedicated cancel lifecycle.
 - Add durable steerable GitHub Actions sessions with service registration, scoped runner URLs, work-state heartbeats, Fleet metadata, and a SessionControlDO PTY relay.

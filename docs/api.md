@@ -329,7 +329,7 @@ Target resolution:
 - Provider terminal connection: if the provision adapter returned a `wss://` URL, or literal loopback `ws://` URL, Crabfleet retains it server-side and proxies to it unchanged, including its path and signed query string.
 - `CRABBOX_CLOUDFLARE_RUNNER_URL`: for `cloudflare:<sandbox>` leases, Crabfleet proxies to `/v1/sandboxes/:sandbox/pty` on the runner.
 
-Both multiplex and legacy direct PTY routes append terminal `cols` and `rows` only to configured bridge and Cloudflare runner endpoints, never to an adapter `attachUrl`. If `CRABBOX_PTY_BRIDGE_TOKEN` or `CRABBOX_CLOUDFLARE_RUNNER_TOKEN` is set, Crabfleet sends it as a bearer token only to the upstream bridge/runner. The browser never receives runner credentials.
+Both multiplex and legacy direct PTY routes append terminal `cols` and `rows` only to configured bridge and Cloudflare runner endpoints, never to an adapter `attachUrl`. Crabfleet authenticates versioned-adapter terminal upgrades with `CRABBOX_RUNTIME_ADAPTER_TOKEN` only when the terminal shares the persisted and currently configured adapter origin; adapter URLs never carry reusable shell credentials. If `CRABBOX_PTY_BRIDGE_TOKEN` or `CRABBOX_CLOUDFLARE_RUNNER_TOKEN` is set, Crabfleet sends it as a bearer token only to the upstream bridge/runner. The browser never receives upstream credentials.
 
 ### POST /api/openclaw/action-sessions
 
