@@ -73,6 +73,7 @@ test("fleet state aggregates sessions and redacted sandbox policies", () => {
   assert.equal(fleet.totals.attachable, 1);
   assert.equal(fleet.totals.byRuntime.container, 1);
   assert.equal(fleet.totals.byRuntime.crabbox, 1);
+  assert.equal(fleet.totals.byRuntime.github_actions, 0);
   assert.equal(fleet.egress.defaultHostCount, 2);
   assert.equal(fleet.egress.policyCount, 1);
   assert.equal(fleet.egress.sessionsWithPolicy, 1);
@@ -86,6 +87,38 @@ test("fleet state aggregates sessions and redacted sandbox policies", () => {
   assert.equal(fleet.sessions[1]?.policy.hasGithubToken, true);
   assert.equal(fleet.sessions[1]?.policy.githubCredentialSource, "worker");
   assert.equal(fleet.sessions[1]?.policy.allowedHostCount, 3);
+});
+
+test("GitHub Actions sessions are attachable through the Worker relay", () => {
+  const fleet = buildFleetState(
+    [
+      {
+        ...baseSession,
+        runtime: "github_actions",
+        leaseId: "github-actions:s1",
+        attachUrl: null,
+        workKey: "openclaw/crabfleet:pr:42",
+        workKind: "pr_repair",
+        workState: "running",
+        workPhase: "fixing",
+        sourceUrl: "https://github.com/openclaw/crabfleet/pull/42",
+        githubRunUrl: "https://github.com/openclaw/crabfleet/actions/runs/123",
+        lastHeartbeatAt: 25,
+      },
+    ],
+    [],
+    {
+      canonicalUrl: "https://crabfleet.openclaw.ai",
+      defaultEgressHosts: [],
+      generatedAt: 100,
+      productUrl: "https://clawfleet.ai",
+    },
+  );
+
+  assert.equal(fleet.totals.byRuntime.github_actions, 1);
+  assert.equal(fleet.totals.attachable, 1);
+  assert.equal(fleet.sessions[0]?.workState, "running");
+  assert.equal(fleet.sessions[0]?.workPhase, "fixing");
 });
 
 test("sandbox lease parser ignores non-sandbox leases", () => {

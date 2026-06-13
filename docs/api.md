@@ -331,6 +331,59 @@ Target resolution:
 
 Both multiplex and legacy direct PTY routes append terminal `cols` and `rows` only to configured bridge and Cloudflare runner endpoints, never to an adapter `attachUrl`. If `CRABBOX_PTY_BRIDGE_TOKEN` or `CRABBOX_CLOUDFLARE_RUNNER_TOKEN` is set, Crabfleet sends it as a bearer token only to the upstream bridge/runner. The browser never receives runner credentials.
 
+### POST /api/openclaw/action-sessions
+
+Internal OpenClaw service endpoint authenticated with `Authorization: Bearer CRABBOX_OPENCLAW_TOKEN`. Registers or resumes one durable `github_actions` session per `workKey`. Re-registration returns the same logical session and rotates its scoped agent token.
+
+Request:
+
+```json
+{
+  "workKey": "openclaw/crabfleet:pr:42",
+  "workKind": "pr_repair",
+  "repo": "openclaw/crabfleet",
+  "branch": "fix/pr-42",
+  "sourceUrl": "https://github.com/openclaw/crabfleet/pull/42",
+  "runUrl": "https://github.com/openclaw/crabfleet/actions/runs/123",
+  "purpose": "repair PR 42",
+  "summary": "starting repair"
+}
+```
+
+Response:
+
+```json
+{
+  "session": {},
+  "agentToken": "rotated-session-token",
+  "runnerPtyUrl": "wss://crabfleet.openclaw.ai/api/agent/interactive-sessions/IS-123/runner-pty?agentToken=...",
+  "browserUrl": "https://crabfleet.openclaw.ai/app/sessions/IS-123"
+}
+```
+
+`runnerPtyUrl` is directly usable with Node's global `WebSocket`; no custom headers are required. The query credential is session-scoped, rotates on registration, is stored only as a hash, and is not exposed through viewer/session APIs.
+
+### GET /api/agent/interactive-sessions/:id/runner-pty
+
+WebSocket endpoint for the outbound GitHub Actions runner. Authentication uses the scoped `agentToken` query parameter embedded in `runnerPtyUrl`. The runner sends raw terminal output bytes and receives raw viewer input bytes. One runner is current; a reconnect replaces the previous runner while browser viewers remain attached.
+
+### POST /api/agent/interactive-sessions/:id/work-state
+
+Agent-authenticated heartbeat and state update. Use `Authorization: Bearer <agentToken>`.
+
+```json
+{
+  "state": "running",
+  "phase": "fixing_tests",
+  "summary": "two tests fixed; checking CI",
+  "codexThreadId": "thread-id",
+  "codexTurnId": "turn-id",
+  "completionReason": null
+}
+```
+
+Every call updates `lastHeartbeatAt`. Active states are `registered` and `running`; `phase` keeps active steps distinguishable. Terminal states are `completed`, `blocked`, `failed`, and `canceled`.
+
 ### POST /api/interactive-sessions
 
 Maintainer+. Creates a standalone Codex CLI workspace request.
@@ -356,6 +409,7 @@ Fields:
 - `branch`: optional, default `main`.
 - `runtime`: optional `crabbox` or `container`; omission uses `CRABFLEET_DEFAULT_RUNTIME`, which defaults to `container`.
 - `profile`: optional opaque adapter profile, defaulted by `CRABFLEET_DEFAULT_PROFILE`.
+- `github_actions` is service-created through `/api/openclaw/action-sessions` and is not accepted by this endpoint.
 - `command`: optional, default `codex`.
 - `prompt`: optional initial context note.
 - `parentSessionId`: optional parent session for supervision trees.

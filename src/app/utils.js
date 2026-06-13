@@ -1,3 +1,9 @@
+import {
+  githubActionsCapabilities,
+  githubActionsRuntime,
+  githubActionsRuntimeLabel,
+} from "../github-actions-runtime.ts";
+
 export const lanes = ["Todo", "Running", "Human Review", "Done"];
 export const preferredRepo = "openclaw/crabfleet";
 
@@ -69,6 +75,7 @@ export function runCapabilities(session) {
     return session.run.capabilities;
   }
   if (session.kind === "interactive" || session.capabilities) {
+    if (session.runtime === githubActionsRuntime) return { ...githubActionsCapabilities };
     const crabbox = session.runtime === "crabbox";
     const defaults = {
       terminal: true,
@@ -152,6 +159,16 @@ export function interactiveSessionStatus(session) {
   if (session.routePlaceholder && session.status === "unavailable") {
     return { label: "Unavailable", tone: "failed" };
   }
+  if (session.workState === "completed") return { label: "Completed", tone: "stopped" };
+  if (session.workState === "blocked") return { label: "Blocked", tone: "failed" };
+  if (session.workState === "canceled") return { label: "Canceled", tone: "stopped" };
+  if (session.workState === "failed") return { label: "Failed", tone: "failed" };
+  if (session.workState === "registered") {
+    return { label: "Registered", tone: "provisioning" };
+  }
+  if (session.workState === "running" && session.workPhase) {
+    return { label: humanStatus(session.workPhase), tone: "live" };
+  }
   if (session.status === "failed") return { label: "Failed", tone: "failed" };
   if (session.status === "stopping") return { label: "Stopping", tone: "provisioning" };
   if (session.status === "stopped" || session.status === "expired") {
@@ -175,10 +192,17 @@ export function sessionLogsUrl(id) {
 }
 
 export function runtimeCapabilityLabel(session) {
+  if (runRuntime(session) === githubActionsRuntime) return "GitHub Actions terminal";
   const capabilities = runCapabilities(session);
   if (capabilities.vnc) return "VNC eligible";
   if (capabilities.terminal) return "terminal";
   return runRuntime(session);
+}
+
+export function runtimeLabel(runtime) {
+  return (
+    githubActionsRuntimeLabel(runtime) || (runtime === "crabbox" ? "Crabbox" : "Cloudflare Sandbox")
+  );
 }
 
 export function sessionItems(state) {
@@ -235,6 +259,15 @@ export function terminalText(session) {
       `runtime ${session.runtime}`,
       `status ${session.status}`,
     ];
+    if (session.workKey) header.push(`work ${session.workKey}`);
+    if (session.workKind) header.push(`kind ${session.workKind}`);
+    if (session.workState) header.push(`work state ${session.workState}`);
+    if (session.workPhase) header.push(`phase ${session.workPhase}`);
+    if (session.sourceUrl) header.push(`source ${session.sourceUrl}`);
+    if (session.githubRunUrl) header.push(`run ${session.githubRunUrl}`);
+    if (session.codexThreadId) header.push(`codex thread ${session.codexThreadId}`);
+    if (session.codexTurnId) header.push(`codex turn ${session.codexTurnId}`);
+    if (session.completionReason) header.push(`completion ${session.completionReason}`);
     if (session.attachUrl) header.push(`attach ${session.attachUrl}`);
     if (session.vncUrl) header.push(`vnc ${session.vncUrl}`);
     if (session.status === "pending_adapter") header.push("runtime adapter not configured yet");
@@ -298,7 +331,7 @@ export function optimisticInteractiveSession(data, owner) {
   const branch = String(data.get("branch") || "main");
   const runtime = String(data.get("runtime") || "container");
   const profile = String(data.get("profile") || "default");
-  const runtimeLabel = runtime === "crabbox" ? "Crabbox" : "Cloudflare Sandbox";
+  const pendingRuntimeLabel = runtimeLabel(runtime);
   return {
     id: `LOCAL-${now}`,
     repo,
@@ -320,7 +353,7 @@ export function optimisticInteractiveSession(data, owner) {
     leaseId: null,
     attachUrl: null,
     vncUrl: null,
-    lastEvent: `Requesting ${runtimeLabel}...`,
+    lastEvent: `Requesting ${pendingRuntimeLabel}...`,
     createdAt: now,
     updatedAt: now,
     lastSeenAt: now,
@@ -336,7 +369,7 @@ export function optimisticInteractiveSession(data, owner) {
     canControl: true,
     canManage: true,
     canRequestControl: false,
-    logs: [`Requesting ${runtimeLabel}...`, "Waiting for session id..."],
+    logs: [`Requesting ${pendingRuntimeLabel}...`, "Waiting for session id..."],
     title: `${repo} · ${branch}`,
   };
 }

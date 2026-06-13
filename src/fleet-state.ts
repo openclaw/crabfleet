@@ -9,7 +9,7 @@ export type FleetStatus =
   | "expired"
   | "failed";
 
-export type FleetRuntime = "crabbox" | "container";
+export type FleetRuntime = "crabbox" | "container" | "github_actions";
 
 export type FleetSessionInput = {
   id: string;
@@ -23,6 +23,16 @@ export type FleetSessionInput = {
   createdBy?: string;
   purpose?: string;
   summary?: string;
+  workKey?: string | null;
+  workKind?: string | null;
+  workState?: string | null;
+  workPhase?: string;
+  sourceUrl?: string | null;
+  githubRunUrl?: string | null;
+  codexThreadId?: string | null;
+  codexTurnId?: string | null;
+  lastHeartbeatAt?: number | null;
+  completionReason?: string | null;
   status: FleetStatus;
   leaseId: string | null;
   attachUrl: string | null;
@@ -75,6 +85,16 @@ export type FleetSessionSummary = {
   createdBy: string;
   purpose: string;
   summary: string;
+  workKey: string | null;
+  workKind: string | null;
+  workState: string | null;
+  workPhase: string;
+  sourceUrl: string | null;
+  githubRunUrl: string | null;
+  codexThreadId: string | null;
+  codexTurnId: string | null;
+  lastHeartbeatAt: number | null;
+  completionReason: string | null;
   status: FleetStatus;
   active: boolean;
   attachable: boolean;
@@ -172,7 +192,11 @@ export function buildFleetState(
     FleetStatus,
     number
   >;
-  const byRuntime: Record<FleetRuntime, number> = { crabbox: 0, container: 0 };
+  const byRuntime: Record<FleetRuntime, number> = {
+    crabbox: 0,
+    container: 0,
+    github_actions: 0,
+  };
   for (const session of sessionSummaries) {
     byStatus[session.status] += 1;
     byRuntime[session.runtime] += 1;
@@ -229,19 +253,30 @@ export function fleetSessionSummary(
     createdBy: session.createdBy ?? session.owner,
     purpose: session.purpose ?? "",
     summary: session.summary ?? session.purpose ?? session.lastEvent,
+    workKey: session.workKey ?? null,
+    workKind: session.workKind ?? null,
+    workState: session.workState ?? null,
+    workPhase: session.workPhase ?? "",
+    sourceUrl: session.sourceUrl ?? null,
+    githubRunUrl: session.githubRunUrl ?? null,
+    codexThreadId: session.codexThreadId ?? null,
+    codexTurnId: session.codexTurnId ?? null,
+    lastHeartbeatAt: session.lastHeartbeatAt ?? null,
+    completionReason: session.completionReason ?? null,
     status: session.status,
     active: !inactiveStatuses.has(session.status),
     attachable:
       terminalCapable &&
       session.canControl !== false &&
-      (session.ptyAvailable ??
-        Boolean(
-          ptyRouteKind(session, {
-            sandboxAvailable: options.sandboxAvailable,
-            bridgeUrl: options.ptyBridgeUrl,
-            cloudflareRunnerUrl: options.cloudflareRunnerUrl,
-          }),
-        )) &&
+      (session.runtime === "github_actions" ||
+        (session.ptyAvailable ??
+          Boolean(
+            ptyRouteKind(session, {
+              sandboxAvailable: options.sandboxAvailable,
+              bridgeUrl: options.ptyBridgeUrl,
+              cloudflareRunnerUrl: options.cloudflareRunnerUrl,
+            }),
+          ))) &&
       ptyReadyStatuses.has(session.status),
     vnc:
       !inactiveStatuses.has(session.status) &&

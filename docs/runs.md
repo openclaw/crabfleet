@@ -94,7 +94,7 @@ The Take over action records `controlIntent = "takeover"` and operator only for 
 
 ## Interactive CLI Sessions
 
-Maintainers can create a standalone Codex CLI session without making a board card. The Worker stores the requested repo, branch, runtime, command, owner, attach/VNC URLs, status, and event log in D1. `CRABFLEET_DEFAULT_RUNTIME` selects the deployment default (`container` when unset); the CLI and SSH gateway leave runtime unspecified unless the operator passes `--runtime`.
+Maintainers can create a standalone Codex CLI session without making a board card. The Worker stores the requested repo, branch, runtime, command, owner, attach/VNC URLs, status, and event log in D1. `CRABFLEET_DEFAULT_RUNTIME` selects the deployment default (`container` when unset); the CLI and SSH gateway leave runtime unspecified unless the operator passes `--runtime`. Internal automation can also register service-owned `github_actions` sessions; this runtime is visible in Fleet but is not offered in the manual session form.
 
 Interactive sessions also store `parentSessionId`, `rootSessionId`, `createdBy`, `purpose`, and `summary`. Built-in Sandbox sessions export `CRABFLEET_SESSION_ID`, `CRABFLEET_PARENT_SESSION_ID`, `CRABFLEET_ROOT_SESSION_ID`, `CRABFLEET_AGENT_TOKEN`, and `CRABFLEET_API_URL`; the Go CLI uses those values to list sibling/child sessions, create children, send PTY messages, fetch transcripts, and update summaries without an SSH key.
 
@@ -126,6 +126,15 @@ Runner PTY contract:
 - Browser-to-Crabfleet messages use binary terminal frames for subscribe, input, resize, and stop.
 - Runner-to-browser output is wrapped in terminal output frames with session IDs.
 - The bridge receives `x-crabbox-session`, `x-crabbox-repo`, and `x-crabbox-runtime` headers plus session query parameters.
+
+GitHub Actions PTY contract:
+
+- OpenClaw registers or resumes work through `POST /api/openclaw/action-sessions`.
+- The returned `runnerPtyUrl` is a `wss:` URL with a rotated session-scoped query credential, directly usable by Node's global `WebSocket`.
+- The Actions process connects outbound and sends raw terminal output bytes. Raw Ghostty input bytes are returned on the same socket.
+- `SessionControlDO` allows one current runner and multiple viewers. A new runner replaces the previous runner; viewers remain connected and receive runner lifecycle events.
+- Browser viewers attach through the existing `/api/terminal/ws` hub. Service and agent credentials are never included in viewer responses.
+- The runner updates `state`, `phase`, `summary`, Codex thread/turn IDs, and heartbeat through the agent work-state endpoint. `completed`, `blocked`, `failed`, and `canceled` are terminal.
 
 Session sharing:
 

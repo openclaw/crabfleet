@@ -2,10 +2,12 @@ import { CopyCommand } from "./components.jsx";
 import {
   canMaintain,
   elapsed,
+  humanStatus,
   interactiveSessionStatus,
   isFleetSessionAttachable,
   isTerminalReadyInteractiveSession,
   runCapabilities,
+  runtimeLabel,
   sessionLogsUrl,
 } from "./utils.js";
 
@@ -280,16 +282,21 @@ function FleetBox({ session, openSessionGrid, sshHost }) {
       </header>
       <div class="fleet-box-meta">
         <span>{session.branch || "main"}</span>
-        <span>{session.runtime || "crabbox"}</span>
+        <span>{runtimeLabel(session.runtime || "crabbox")}</span>
+        {session.workKind ? <span>{humanStatus(session.workKind)}</span> : null}
+        {session.workState ? <span>{humanStatus(session.workState)}</span> : null}
+        {session.workPhase ? <span>{humanStatus(session.workPhase)}</span> : null}
         {capabilities.vnc ? <span>webvnc</span> : null}
         {archiveCount ? <span>{archiveCount} logs</span> : null}
         {fleetPolicy?.present ? <span>{fleetPolicy.allowedHostCount} egress</span> : null}
       </div>
-      <p class="fleet-box-event">{session.lastEvent || "Waiting for crabbox"}</p>
+      <p class="fleet-box-event">{session.summary || session.lastEvent || "Waiting for session"}</p>
       {attachable ? (
         <div class="fleet-box-command">
           <code>
-            ssh {sshHost} attach {session.id}
+            {session.runtime === "github_actions"
+              ? "GitHub Actions outbound relay"
+              : `ssh ${sshHost} attach ${session.id}`}
           </code>
           <span>{seen ? `seen ${elapsed(seen)}` : "no heartbeat"}</span>
         </div>
@@ -298,6 +305,16 @@ function FleetBox({ session, openSessionGrid, sshHost }) {
         {attachable ? (
           <button class="primary" onClick={() => openSessionGrid(session.id)}>
             Terminal
+          </button>
+        ) : null}
+        {session.sourceUrl ? (
+          <button onClick={() => window.open(session.sourceUrl, "_blank", "noopener")}>
+            Source
+          </button>
+        ) : null}
+        {session.githubRunUrl ? (
+          <button onClick={() => window.open(session.githubRunUrl, "_blank", "noopener")}>
+            Actions
           </button>
         ) : null}
         {session.vncUrl ? (

@@ -13,6 +13,7 @@ Crabfleet gives OpenClaw maintainers a fleet dashboard where every Codex crabbox
 - **Issue/PR lookup.** Type `#123` in search to preview matching GitHub issues or PRs across enabled OpenClaw repos and create a card from the match.
 - **Codex run control.** Start durable run attempts, track heartbeats, watch the Ghostty WASM session grid, and take over only when the selected runtime advertises that capability.
 - **Interactive Crabboxes.** Start a standalone Codex CLI workspace for manual cloud work and attach it in the same fullscreen Ghostty grid or WebVNC.
+- **Steerable GitHub Actions.** Register an Actions job as a durable `github_actions` session, stream its PTY outbound into Ghostty, steer it from the browser, and report work state and Codex thread/turn IDs.
 - **Worker-owned sandbox credentials.** Built-in Cloudflare Sandbox sessions get placeholder env credentials; Worker-controlled outbound routing injects model and GitHub credentials only for approved upstream requests.
 - **Diff previews.** Card tiles show changed files and totals; the run drawer shows a compact Codiff-style patch view.
 - **Multi-runtime policy.** Auto-select between the Container and Crabbox adapter surfaces based on card overrides, repo workflow defaults, and task requirements.
@@ -29,10 +30,11 @@ Crabfleet gives OpenClaw maintainers a fleet dashboard where every Codex crabbox
 - **Runtime adapter descriptors** for Container and Crabbox selection, capability display, interactive lifecycle handoff, and guarded takeover.
 - **Versioned lifecycle adapter** for idempotent external workspace creation, bounded status reconciliation, provider-backed stop, terminal attachment, and authenticated transient desktop connections.
 - **Provision endpoint** at `/api/provision/interactive` that can use the built-in Sandbox backend or retain a legacy create-only adapter or ClawFleet integration, with durable ownership and a bearer-authenticated standalone PTY route.
+- **SessionControlDO relay** for one outbound GitHub Actions runner and multiple authenticated Ghostty viewers per action session.
 - **R2 session archives** for crabbox event NDJSON, transcripts, and summaries.
 - **GitHub API** for OAuth, org/team membership, and issue/PR previews across enabled repos.
 
-Autonomous card execution, Durable Object fanout, and merge automation are adapter targets, not faked in the current Worker. External interactive terminal and desktop transport require a configured lifecycle adapter or bridge.
+Autonomous card execution, Durable Object fanout beyond the Actions relay, and merge automation are adapter targets, not faked in the current Worker. External interactive terminal and desktop transport require a configured lifecycle adapter or bridge.
 The OpenClaw fleet/orchestrator backend should run on the Hetzner `openclaw-clawsweeper` host alongside ClawSweeper; the Worker stays the app/API front door.
 
 ## Quick Start
@@ -76,6 +78,28 @@ Add users/teams to the allowlist and enable repos:
 - Without `CRABBOX_INTERACTIVE_PROVISION_URL`, sessions are stored as `pending_adapter` and still visible in the grid
 - Install or build the Go CLI, then run `crabfleet new --repo openclaw/crabfleet "fix the failing check"`
 - Inside a Crabfleet sandbox, the CLI uses `CRABFLEET_SESSION_ID` and `CRABFLEET_AGENT_TOKEN` automatically so Codex can run `crabfleet list`, spawn child sessions with `crabfleet new --purpose ...`, send `crabfleet message <id> "..."`, read `crabfleet transcript <id>`, and update `crabfleet summary <id> "..."`
+
+### 6. Attach GitHub Actions
+
+Internal OpenClaw automation registers or resumes a logical action session with:
+
+```http
+POST /api/openclaw/action-sessions
+Authorization: Bearer CRABBOX_OPENCLAW_TOKEN
+Content-Type: application/json
+
+{"workKey":"openclaw/crabfleet:pr:42","workKind":"pr_repair","repo":"openclaw/crabfleet","branch":"fix/pr-42","sourceUrl":"https://github.com/openclaw/crabfleet/pull/42","runUrl":"https://github.com/openclaw/crabfleet/actions/runs/123","purpose":"repair PR 42","summary":"starting repair"}
+```
+
+The response contains `{session, agentToken, runnerPtyUrl, browserUrl}`. `runnerPtyUrl` includes the rotated session-scoped query credential and works directly with Node's global `WebSocket`:
+
+```js
+const terminal = new WebSocket(runnerPtyUrl);
+terminal.onmessage = (event) => process.stdout.write(Buffer.from(event.data));
+process.stdin.on("data", (chunk) => terminal.send(chunk));
+```
+
+The runner reports heartbeat and durable progress with bearer `agentToken` to `POST /api/agent/interactive-sessions/:id/work-state`. Terminal states are `completed`, `blocked`, `failed`, and `canceled`; active work uses `registered` or `running` plus a specific `phase`.
 
 ## Features
 
@@ -190,7 +214,7 @@ The Crabbox namespace cutover intentionally has no old-name compatibility. Exist
 - `CRABBOX_CLAWFLEET_URL` – Optional ClawFleet dashboard/API URL used by `/api/provision/interactive` for `crabbox` sessions
 - `CRABBOX_CLAWFLEET_TOKEN` – Optional bearer token sent to ClawFleet
 - `CRABBOX_CLAWFLEET_PUBLIC_URL` – Optional public ClawFleet URL used when building attach/VNC links
-- `CRABBOX_OPENCLAW_TOKEN` – Internal bearer token for OpenClaw/Discord service crabbox creation
+- `CRABBOX_OPENCLAW_TOKEN` – Internal bearer token for OpenClaw service crabbox and GitHub Actions session registration
 - `CRABFLEET_SSH_GATEWAY_TOKEN` / `CRABBOX_SSH_GATEWAY_TOKEN` – Shared bearer token for the Go SSH gateway internal API
 - `CRABFLEET_LOCAL_SANDBOX_BACKUPS` – Optional Cloudflare Sandbox checkpoint mode override; defaults to R2 binding uploads, set `0` for SDK presigned R2 uploads
 - `CRABFLEET_LABEL` – Optional tenant label shown in the app, default `Crabfleet`

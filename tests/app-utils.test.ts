@@ -11,6 +11,8 @@ import {
   linkedInteractiveSessionPlaceholder,
   optimisticInteractiveSession,
   runCapabilities,
+  runtimeCapabilityLabel,
+  runtimeLabel,
   sessionItems,
   terminalText,
 } from "../src/app/utils.js";
@@ -109,7 +111,6 @@ test("linked session placeholders render a best-effort Codex card", () => {
   assert.match(terminalText(session), /^Preparing Codex\r\n/);
   assert.match(terminalText(session), /Loading session/);
 });
-
 test("interactive lifecycle helpers keep UI and terminal state aligned", () => {
   const live = { kind: "interactive", status: "attached" };
   const rawLive = { status: "ready" };
@@ -176,4 +177,19 @@ test("interactive lifecycle helpers keep UI and terminal state aligned", () => {
   assert.equal(isDeadInteractiveSession(failed), true);
   assert.deepEqual(interactiveSessionStatus(failed), { label: "Failed", tone: "failed" });
   assert.equal(humanStatus("pending_adapter"), "Pending Adapter");
+});
+
+test("GitHub Actions sessions expose steerable terminal UI capabilities", () => {
+  const session = { kind: "interactive", runtime: "github_actions", status: "ready" };
+
+  assert.equal(runtimeLabel(session.runtime), "GitHub Actions");
+  assert.equal(runtimeCapabilityLabel(session), "GitHub Actions terminal");
+  assert.deepEqual(runCapabilities(session), {
+    terminal: true,
+    takeover: true,
+    vnc: false,
+    desktop: false,
+    logs: true,
+    artifacts: false,
+  });
 });

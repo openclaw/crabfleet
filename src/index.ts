@@ -45,6 +45,20 @@ import {
   type FleetState,
   type PtyRouteKind,
 } from "./fleet-state";
+import {
+  buildGitHubActionsRunnerPtyUrl,
+  forwardGitHubActionsRelayMessage,
+  gitHubActionsSessionStatus,
+  gitHubActionsWorkEvent,
+  githubActionsRelayRole,
+  githubActionsRuntime,
+  isTerminalGitHubActionsWorkState,
+  notifyGitHubActionsViewers,
+  parseGitHubActionsWorkState,
+  replaceGitHubActionsRunner,
+  githubActionsCapabilities,
+  type GitHubActionsWorkState,
+} from "./github-actions-runtime";
 import { githubRequestCanUseRepoCredential, matchesAnyHost } from "./sandbox-security";
 import {
   githubOAuthCallbackRequestMatches,
@@ -101,6 +115,7 @@ import {
   safeWebSocketUrl,
   shouldReplayRuntimeAdapterCreate,
   validatedRuntimeAdapterCreatePayloadJson,
+  type AdapterProvisionRecord,
   type AdapterWorkspaceResult,
 } from "./runtime-adapter";
 import { allocateInteractiveSessionIdSql, formatInteractiveSessionId } from "./session-id";
@@ -124,6 +139,7 @@ import {
 } from "./credential-policy-fence";
 
 type Role = "viewer" | "maintainer" | "owner";
+type InteractiveRuntime = "crabbox" | "container" | "github_actions";
 
 const defaultInteractiveCommand = "codex --yolo";
 
@@ -395,7 +411,7 @@ type InteractiveSession = {
   rootSessionId: string | null;
   repo: string;
   branch: string;
-  runtime: "crabbox" | "container";
+  runtime: InteractiveRuntime;
   adapter: string | null;
   profile: string;
   adapterWorkspaceId: string | null;
@@ -427,6 +443,16 @@ type InteractiveSession = {
   controlGrantedAt: number | null;
   controlExpiresAt: number | null;
   multiplayerMode: boolean;
+  workKey: string | null;
+  workKind: string | null;
+  workState: GitHubActionsWorkState | null;
+  workPhase: string;
+  sourceUrl: string | null;
+  githubRunUrl: string | null;
+  codexThreadId: string | null;
+  codexTurnId: string | null;
+  lastHeartbeatAt: number | null;
+  completionReason: string | null;
   canControl?: boolean;
   canManage?: boolean;
   canChangeMultiplayer?: boolean;
@@ -741,7 +767,7 @@ type InteractiveSessionTable = {
   root_session_id: string | null;
   repo: string;
   branch: string;
-  runtime: "crabbox" | "container";
+  runtime: InteractiveRuntime;
   adapter: string | null;
   profile: string;
   adapter_workspace_id: string | null;
@@ -788,6 +814,16 @@ type InteractiveSessionTable = {
   control_expires_at: number | null;
   multiplayer_mode: number;
   agent_token_hash: string | null;
+  work_key: string | null;
+  work_kind: string | null;
+  work_state: string;
+  work_phase: string;
+  source_url: string | null;
+  github_run_url: string | null;
+  codex_thread_id: string | null;
+  codex_turn_id: string | null;
+  last_heartbeat_at: number | null;
+  completion_reason: string | null;
 };
 
 type InteractiveSessionRow = Selectable<InteractiveSessionTable>;
@@ -1152,6 +1188,15 @@ function sandboxControlStub(env: RuntimeEnv): DurableObjectStub<SessionControlDO
   return env.SESSION_CONTROL.get(id);
 }
 
+function githubActionsRelayStub(
+  env: RuntimeEnv,
+  sessionId: string,
+): DurableObjectStub<SessionControlDO> | null {
+  if (!env.SESSION_CONTROL) return null;
+  const id = env.SESSION_CONTROL.idFromName(`github-actions:${sessionId}`);
+  return env.SESSION_CONTROL.get(id);
+}
+
 async function sandboxCredentialPolicy(
   env: RuntimeEnv,
   sandboxId: string,
@@ -1323,6 +1368,32 @@ export class SessionControlDO extends DurableObject<RuntimeEnv> {
   override async fetch(request: Request): Promise<Response> {
     const url = new URL(request.url);
     try {
+      if (
+        request.method === "GET" &&
+        url.pathname === "/api/session-control/github-actions/runner"
+      ) {
+        return this.openGitHubActionsRelay("runner");
+      }
+
+      if (
+        request.method === "GET" &&
+        url.pathname === "/api/session-control/github-actions/viewer"
+      ) {
+        return this.openGitHubActionsRelay("viewer");
+      }
+
+      if (
+        request.method === "POST" &&
+        url.pathname === "/api/session-control/github-actions/disconnect-runner"
+      ) {
+        const disconnected = replaceGitHubActionsRunner(
+          this.ctx.getWebSockets("github-actions-runner"),
+          1000,
+          "runner disconnected",
+        );
+        return json({ disconnected });
+      }
+
       if (request.method === "POST" && url.pathname === "/api/session-control/register") {
         const registration = (await request.json()) as StoredSandboxCredentialPolicy;
         if (!validSandboxCredentialPolicyRegistration(registration)) {
@@ -1520,6 +1591,54 @@ export class SessionControlDO extends DurableObject<RuntimeEnv> {
       );
     }
     return json({ error: "not found" }, { status: 404 });
+  }
+
+  override webSocketMessage(socket: WebSocket, message: string | ArrayBuffer): void {
+    const role = githubActionsRelayRole(this.ctx.getTags(socket));
+    if (!role) {
+      socket.close(1008, "unknown relay peer");
+      return;
+    }
+    forwardGitHubActionsRelayMessage(
+      role,
+      message,
+      this.ctx.getWebSockets("github-actions-runner"),
+      this.ctx.getWebSockets("github-actions-viewer"),
+    );
+  }
+
+  override webSocketClose(socket: WebSocket): void {
+    const role = githubActionsRelayRole(this.ctx.getTags(socket));
+    if (role === "runner" && this.ctx.getWebSockets("github-actions-runner").length === 0) {
+      notifyGitHubActionsViewers(
+        this.ctx.getWebSockets("github-actions-viewer"),
+        "runner_disconnected",
+      );
+    }
+  }
+
+  override webSocketError(socket: WebSocket): void {
+    socket.close(1011, "relay peer error");
+  }
+
+  private openGitHubActionsRelay(role: "runner" | "viewer"): Response {
+    const pair = new WebSocketPair();
+    const client = pair[0];
+    const server = pair[1];
+    if (role === "runner") {
+      replaceGitHubActionsRunner(this.ctx.getWebSockets("github-actions-runner"));
+      this.ctx.acceptWebSocket(server, ["github-actions-runner"]);
+      notifyGitHubActionsViewers(
+        this.ctx.getWebSockets("github-actions-viewer"),
+        "runner_connected",
+      );
+    } else {
+      this.ctx.acceptWebSocket(server, ["github-actions-viewer"]);
+      if (this.ctx.getWebSockets("github-actions-runner").length === 0) {
+        server.send(JSON.stringify({ type: "runner_waiting" }));
+      }
+    }
+    return new Response(null, { status: 101, webSocket: client });
   }
 }
 
@@ -1873,6 +1992,30 @@ async function api(
     return json(await agentCreateInteractiveSession(request, env), { status: 201 });
   }
 
+  const agentInteractiveWorkStateMatch = url.pathname.match(
+    /^\/api\/agent\/interactive-sessions\/([^/]+)\/work-state$/,
+  );
+  if (request.method === "POST" && agentInteractiveWorkStateMatch) {
+    return json(
+      await updateGitHubActionsWorkState(
+        request,
+        env,
+        decodeURIComponent(agentInteractiveWorkStateMatch[1] ?? ""),
+      ),
+    );
+  }
+
+  const agentInteractiveRunnerPtyMatch = url.pathname.match(
+    /^\/api\/agent\/interactive-sessions\/([^/]+)\/runner-pty$/,
+  );
+  if (request.method === "GET" && agentInteractiveRunnerPtyMatch) {
+    return githubActionsRunnerPty(
+      request,
+      env,
+      decodeURIComponent(agentInteractiveRunnerPtyMatch[1] ?? ""),
+    );
+  }
+
   const sshInteractiveReadMatch = url.pathname.match(/^\/api\/ssh\/interactive-sessions\/([^/]+)$/);
   if (request.method === "GET" && sshInteractiveReadMatch) {
     const user = await requireSshGatewayUser(request, env);
@@ -2029,6 +2172,10 @@ async function api(
         decodeURIComponent(agentInteractiveSummaryMatch[1] ?? ""),
       ),
     );
+  }
+
+  if (request.method === "POST" && url.pathname === "/api/openclaw/action-sessions") {
+    return json(await openClawRegisterActionSession(request, env), { status: 201 });
   }
 
   if (request.method === "POST" && url.pathname === "/api/openclaw/crabboxes") {
@@ -2872,15 +3019,7 @@ async function openClawCreateCrabbox(
     githubToken?: string;
   }>(request);
   const owner = openClawOwner(body.owner);
-  const serviceUser: User = {
-    subject: "service:openclaw",
-    login: "openclaw",
-    email: null,
-    name: "OpenClaw",
-    role: "owner",
-    allowed: true,
-    teams: [],
-  };
+  const serviceUser = openClawServiceUser();
   const result = await createInteractiveSessionFromInput(
     env,
     serviceUser,
@@ -2897,12 +3036,222 @@ async function openClawCreateCrabbox(
   return result;
 }
 
+async function openClawRegisterActionSession(
+  request: Request,
+  env: RuntimeEnv,
+): Promise<{
+  session: InteractiveSession;
+  agentToken: string;
+  runnerPtyUrl: string;
+  browserUrl: string;
+}> {
+  requireOpenClawService(request, env);
+  const body = await readJson<{
+    workKey?: string;
+    workKind?: string;
+    repo?: string;
+    branch?: string;
+    sourceUrl?: string;
+    runUrl?: string;
+    purpose?: string;
+    summary?: string;
+  }>(request);
+  const workKey = actionWorkIdentifier(body.workKey, "workKey", 300);
+  const workKind = actionWorkIdentifier(body.workKind, "workKind", 80);
+  const repo = normalizeRepo(body.repo);
+  if (!repo) throw badRequest("repo is required");
+  await requireRepo(env, repo);
+  const branch = clean(body.branch, 120) || "main";
+  const sourceUrl = optionalHttpUrl(body.sourceUrl, "sourceUrl");
+  const runUrl = optionalHttpUrl(body.runUrl, "runUrl");
+  const serviceUser = openClawServiceUser();
+  const agentToken = newAgentToken();
+  const agentTokenHash = await sha256(agentToken);
+  const now = Date.now();
+  const db = database(env);
+  let existing = await db
+    .selectFrom("interactive_sessions")
+    .selectAll()
+    .where("work_key", "=", workKey)
+    .executeTakeFirst();
+  const purpose =
+    clean(body.purpose, 500) ||
+    existing?.purpose ||
+    `${workKind.replaceAll("_", " ")} in ${repo}@${branch}`;
+  const summary = clean(body.summary, 500) || existing?.summary || purpose;
+
+  if (!existing) {
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      const id = await nextInteractiveSessionId(env);
+      try {
+        await db
+          .insertInto("interactive_sessions")
+          .values({
+            id,
+            parent_session_id: null,
+            root_session_id: id,
+            repo,
+            branch,
+            runtime: githubActionsRuntime,
+            adapter: null,
+            profile: "github-actions",
+            adapter_workspace_id: null,
+            adapter_control_plane: null,
+            provider_resource_id: null,
+            capabilities_json: JSON.stringify(githubActionsCapabilities),
+            expires_at: null,
+            last_reconciled_at: null,
+            reconcile_error: null,
+            terminal_status: null,
+            adapter_ttl_seconds: null,
+            adapter_idle_timeout_seconds: null,
+            adapter_requested_capabilities_json: null,
+            adapter_create_payload_json: null,
+            adapter_create_pending: 0,
+            command: "codex",
+            prompt: purpose,
+            purpose,
+            summary,
+            owner: `github-actions:${id}`,
+            created_by: "service:openclaw",
+            status: "ready",
+            lease_id: `github-actions:${id}`,
+            attach_url: null,
+            vnc_url: null,
+            last_event: "GitHub Actions work registered",
+            created_at: now,
+            updated_at: now,
+            last_seen_at: now,
+            stopped_at: null,
+            share_mode: "private",
+            share_token_hash: null,
+            share_token_preview: null,
+            control_requested_by: null,
+            control_requested_at: null,
+            controller: null,
+            control_granted_at: null,
+            control_expires_at: null,
+            multiplayer_mode: 0,
+            agent_token_hash: agentTokenHash,
+            work_key: workKey,
+            work_kind: workKind,
+            work_state: "registered",
+            work_phase: "waiting_for_runner",
+            source_url: sourceUrl,
+            github_run_url: runUrl,
+            codex_thread_id: null,
+            codex_turn_id: null,
+            last_heartbeat_at: null,
+            completion_reason: null,
+          })
+          .execute();
+        existing = await db
+          .selectFrom("interactive_sessions")
+          .selectAll()
+          .where("id", "=", id)
+          .executeTakeFirst();
+        break;
+      } catch (error) {
+        if (!isConstraintError(error)) throw error;
+        existing = await db
+          .selectFrom("interactive_sessions")
+          .selectAll()
+          .where("work_key", "=", workKey)
+          .executeTakeFirst();
+        if (existing) break;
+        if (attempt === 2) throw error;
+      }
+    }
+  }
+
+  if (!existing) throw new Error("failed to register GitHub Actions session");
+  if (existing.runtime !== githubActionsRuntime) {
+    throw badRequest("workKey is already registered to a different runtime");
+  }
+  const resumed = existing.work_state !== "registered" || existing.status !== "ready";
+  await db
+    .updateTable("interactive_sessions")
+    .set({
+      repo,
+      branch,
+      purpose,
+      summary,
+      prompt: purpose,
+      status: "ready",
+      stopped_at: null,
+      updated_at: now,
+      last_seen_at: now,
+      last_event: resumed ? "GitHub Actions work resumed" : "GitHub Actions work registered",
+      agent_token_hash: agentTokenHash,
+      work_kind: workKind,
+      work_state: "registered",
+      work_phase: "waiting_for_runner",
+      source_url: body.sourceUrl === undefined ? existing.source_url : sourceUrl,
+      github_run_url: body.runUrl === undefined ? existing.github_run_url : runUrl,
+      last_heartbeat_at: null,
+      completion_reason: null,
+    })
+    .where("id", "=", existing.id)
+    .execute();
+  await disconnectGitHubActionsRunner(env, existing.id).catch(() => undefined);
+  const message = resumed ? "GitHub Actions work resumed" : "GitHub Actions work registered";
+  await appendInteractiveSessionEvent(env, existing.id, serviceUser, message, now);
+  await audit(
+    env,
+    serviceUser,
+    `openclaw action session ${resumed ? "resumed" : "registered"} ${existing.id} work=${workKey}`,
+    now,
+  );
+  const session = (await readInteractiveSession(env, existing.id)) as InteractiveSession;
+  return {
+    session: decorateInteractiveSession(session, serviceUser, env),
+    agentToken,
+    runnerPtyUrl: buildGitHubActionsRunnerPtyUrl(appCanonicalOrigin, existing.id, agentToken),
+    browserUrl: `${appCanonicalOrigin}/app/sessions/${encodeURIComponent(existing.id)}`,
+  };
+}
+
+function openClawServiceUser(): User {
+  return {
+    subject: "service:openclaw",
+    login: "openclaw",
+    email: null,
+    name: "OpenClaw",
+    role: "owner",
+    allowed: true,
+    teams: [],
+  };
+}
+
 function requireOpenClawService(request: Request, env: RuntimeEnv): void {
   if (!env.CRABBOX_OPENCLAW_TOKEN) {
     throw serviceUnavailable("OpenClaw service token is not configured");
   }
   if (request.headers.get("authorization") !== `Bearer ${env.CRABBOX_OPENCLAW_TOKEN}`) {
     throw unauthorized();
+  }
+}
+
+function actionWorkIdentifier(value: unknown, name: string, max: number): string {
+  const identifier = String(value ?? "").trim();
+  if (!identifier) throw badRequest(`${name} is required`);
+  if (identifier.length > max) throw badRequest(`${name} exceeds ${max} characters`);
+  if (!/^[A-Za-z0-9][A-Za-z0-9_.:/@+#=-]*$/.test(identifier)) {
+    throw badRequest(`${name} contains unsupported characters`);
+  }
+  return identifier;
+}
+
+function optionalHttpUrl(value: unknown, name: string): string | null {
+  const raw = String(value ?? "").trim();
+  if (!raw) return null;
+  if (raw.length > 1000) throw badRequest(`${name} exceeds 1000 characters`);
+  try {
+    const url = new URL(raw);
+    if (url.protocol !== "https:" && url.protocol !== "http:") throw new Error();
+    return url.toString();
+  } catch {
+    throw badRequest(`${name} must be an http(s) URL`);
   }
 }
 
@@ -2927,9 +3276,17 @@ async function requireSshGatewayUser(request: Request, env: RuntimeEnv): Promise
 async function requireAgentSession(
   request: Request,
   env: RuntimeEnv,
+  expectedId?: string,
+  options: { allowQueryToken?: boolean } = {},
 ): Promise<{ session: InteractiveSession; user: User }> {
-  const id = agentSessionId(request);
-  const token = bearerToken(request) || clean(request.headers.get("x-crabfleet-agent-token"), 200);
+  const presentedId = agentSessionId(request);
+  const id = clean(expectedId, 120) || presentedId;
+  if (expectedId && presentedId && presentedId !== expectedId) throw unauthorized();
+  const url = new URL(request.url);
+  const token =
+    bearerToken(request) ||
+    clean(request.headers.get("x-crabfleet-agent-token"), 200) ||
+    (options.allowQueryToken ? clean(url.searchParams.get("agentToken"), 200) : "");
   if (!id || !token) throw unauthorized();
   const row = await database(env)
     .selectFrom("interactive_sessions")
@@ -3137,6 +3494,7 @@ async function reconcileLegacyStoppingInteractiveSessionBatch(
       {
         id: session.id,
         status: session.status,
+        runtime: session.runtime,
         adapter: session.adapter,
         leaseId: session.lease_id,
         updatedAt: session.updated_at,
@@ -3742,6 +4100,16 @@ async function createInteractiveSessionFromInput(
           control_expires_at: null,
           multiplayer_mode: 0,
           agent_token_hash: initialAgentTokenHash,
+          work_key: null,
+          work_kind: null,
+          work_state: "",
+          work_phase: "",
+          source_url: null,
+          github_run_url: null,
+          codex_thread_id: null,
+          codex_turn_id: null,
+          last_heartbeat_at: null,
+          completion_reason: null,
         })
         .execute();
       await appendInteractiveSessionEvent(env, id, user, "interactive workspace requested", now);
@@ -4432,6 +4800,7 @@ async function mutateInteractiveSessionMetadataAtomically(
 type LegacyInteractiveSessionStopOwner = {
   id: string;
   status: InteractiveSessionStatus;
+  runtime: InteractiveRuntime;
   adapter: string | null;
   leaseId: string | null;
   updatedAt: number;
@@ -4449,6 +4818,7 @@ async function completeLegacyInteractiveSessionStop(
   const expectedOwner = sql<boolean>`
     id = ${owner.id}
     AND status = ${owner.status}
+    AND runtime = ${owner.runtime}
     AND updated_at = ${owner.updatedAt}
     AND adapter IS ${owner.adapter}
     AND lease_id IS ${owner.leaseId}
@@ -4487,6 +4857,13 @@ async function completeLegacyInteractiveSessionStop(
       control_requested_at: null,
       control_granted_at: null,
       control_expires_at: null,
+      ...(owner.runtime === githubActionsRuntime
+        ? {
+            work_state: "canceled",
+            work_phase: "canceled",
+            completion_reason: "stopped from Crabfleet",
+          }
+        : {}),
       updated_at: revision,
       last_event: finalMessage,
     })
@@ -4500,6 +4877,9 @@ async function completeLegacyInteractiveSessionStop(
   );
   const stopped = results.at(-1)?.results.some((row) => row.updated_at === revision) ?? false;
   if (stopped) {
+    if (owner.runtime === githubActionsRuntime) {
+      await disconnectGitHubActionsRunner(env, owner.id).catch(() => undefined);
+    }
     await archiveInteractiveSessionLogs(env, owner.id, now).catch(() => undefined);
     await finalizeTerminalInteractiveSession(env, owner.id, "stopped", now).catch(() => undefined);
   }
@@ -6330,6 +6710,16 @@ function isSandboxInteractiveSession(
   return legacyInteractiveSessionLeaseId(session)?.startsWith(sandboxLeasePrefix) === true;
 }
 
+async function disconnectGitHubActionsRunner(env: RuntimeEnv, id: string): Promise<void> {
+  const stub = githubActionsRelayStub(env, id);
+  if (!stub) return;
+  const response = await stub.fetch(
+    "https://crabfleet.internal/api/session-control/github-actions/disconnect-runner",
+    { method: "POST" },
+  );
+  if (!response.ok) throw serviceUnavailable("GitHub Actions relay is unavailable");
+}
+
 async function interactiveTerminalHub(
   request: Request,
   env: RuntimeEnv,
@@ -6630,7 +7020,10 @@ async function subscribeTerminalHubSession(
         [session.adapterWorkspaceId, session.providerResourceId],
         [session.attachUrl],
       );
-      if (isSandboxInteractiveSession(session) && env.SANDBOX) {
+      if (
+        session.runtime === githubActionsRuntime ||
+        (isSandboxInteractiveSession(session) && env.SANDBOX)
+      ) {
         await markInteractiveTerminalDetached(env, user, id, Date.now(), message);
       } else {
         await markInteractiveTerminalUnavailable(env, user, id, Date.now(), message);
@@ -6731,7 +7124,8 @@ async function subscribeTerminalHubSession(
       const message = "terminal unavailable: upstream terminal error";
       if (!isPassiveTerminalClose(closeReason)) {
         const markTerminal =
-          isSandboxInteractiveSession(session) && env.SANDBOX
+          session.runtime === githubActionsRuntime ||
+          (isSandboxInteractiveSession(session) && env.SANDBOX)
             ? markInteractiveTerminalDetached
             : markInteractiveTerminalUnavailable;
         void markTerminal(env, user, id, Date.now(), message);
@@ -6768,6 +7162,31 @@ async function openInteractiveTerminalUpstream(
     throw serviceUnavailable("session does not advertise terminal access");
   }
   const now = Date.now();
+  if (session.runtime === githubActionsRuntime) {
+    const stub = githubActionsRelayStub(env, session.id);
+    if (!stub) throw serviceUnavailable("SESSION_CONTROL Durable Object is not configured");
+    const upstreamResponse = await stub.fetch(
+      "https://crabfleet.internal/api/session-control/github-actions/viewer",
+      { headers: { upgrade: "websocket" } },
+    );
+    const upstream = upstreamResponse.webSocket;
+    if (!upstream || upstreamResponse.status !== 101) {
+      throw serviceUnavailable(`GitHub Actions relay HTTP ${upstreamResponse.status}`);
+    }
+    upstream.accept();
+    return {
+      socket: upstream,
+      markConnected: () =>
+        markInteractiveTerminalConnected(
+          env,
+          user,
+          session.id,
+          now,
+          "GitHub Actions terminal connected",
+        ),
+    };
+  }
+
   const routeKind = interactivePtyRouteKind(env, session);
   if (routeKind === "sandbox" && env.SANDBOX) {
     const runtimeSession = await sandboxSessionWithGitHubToken(request, env, user, session);
@@ -9855,6 +10274,9 @@ async function ensureCurrentSandboxLease(
   if (!isSandboxInteractiveSession(session)) {
     throw serviceUnavailable("session is not backed by a Cloudflare Sandbox lease");
   }
+  if (session.runtime === githubActionsRuntime) {
+    throw badRequest("GitHub Actions sessions do not use Cloudflare Sandbox leases");
+  }
   if (isCurrentSandboxLease(session.leaseId)) {
     await ensureSandboxCredentialPolicy(env, session, sandboxLeaseInfo(session).sandboxId);
     return session;
@@ -11002,6 +11424,13 @@ function runtimeAdapterProvisionResult(
   };
 }
 
+function runtimeAdapterRecord(session: InteractiveSessionRow): AdapterProvisionRecord {
+  if (session.runtime === githubActionsRuntime) {
+    throw new Error("GitHub Actions sessions cannot use the runtime adapter");
+  }
+  return { ...session, runtime: session.runtime };
+}
+
 async function inspectRuntimeAdapterWorkspace(
   env: RuntimeEnv,
   session: InteractiveSessionRow,
@@ -11026,7 +11455,10 @@ async function inspectRuntimeAdapterWorkspace(
   const responseBody = await readRuntimeAdapterResponseBody(response);
   if (response.status === 404) {
     if (shouldReplayRuntimeAdapterCreate(session.status, session.adapter_create_pending === 1)) {
-      return provisionWithRuntimeAdapter(env, runtimeAdapterReplayRequest(session));
+      return provisionWithRuntimeAdapter(
+        env,
+        runtimeAdapterReplayRequest(runtimeAdapterRecord(session)),
+      );
     }
     return {
       status: "expired",
@@ -11064,7 +11496,7 @@ async function inspectRuntimeAdapterWorkspace(
   }
   const result = runtimeAdapterProvisionResult(
     parsed,
-    session,
+    runtimeAdapterRecord(session),
     Date.now(),
     adapterWorkspaceId,
     false,
@@ -11166,7 +11598,7 @@ async function replayStoppingRuntimeAdapterCreate(
   session: InteractiveSessionRow,
 ): Promise<StoppingRuntimeAdapterReplay> {
   const adapterWorkspaceId = session.adapter_workspace_id;
-  const replay = runtimeAdapterReplayRequest(session);
+  const replay = runtimeAdapterReplayRequest(runtimeAdapterRecord(session));
   const requestedCapabilities = replay.adapterRequestedCapabilities;
   const ttlSeconds = persistedRuntimeAdapterSeconds(replay.adapterTtlSeconds);
   const idleTimeoutSeconds = persistedRuntimeAdapterSeconds(replay.adapterIdleTimeoutSeconds);
@@ -12553,6 +12985,133 @@ async function updateInteractiveSessionSummary(
   };
 }
 
+async function updateGitHubActionsWorkState(
+  request: Request,
+  env: RuntimeEnv,
+  id: string,
+): Promise<{ session: InteractiveSession }> {
+  const { session, user } = await requireAgentSession(request, env, id);
+  if (session.runtime !== githubActionsRuntime || !session.workKey) {
+    throw badRequest("session is not a GitHub Actions work session");
+  }
+  const body = await readJson<{
+    state?: string;
+    phase?: string;
+    summary?: string;
+    codexThreadId?: string | null;
+    codexTurnId?: string | null;
+    completionReason?: string | null;
+  }>(request);
+  const state = parseGitHubActionsWorkState(body.state);
+  if (!state) throw badRequest("invalid work state");
+  const row = await database(env)
+    .selectFrom("interactive_sessions")
+    .selectAll()
+    .where("id", "=", id)
+    .executeTakeFirst();
+  if (!row) throw notFound("interactive session not found");
+  const phase = body.phase === undefined ? row.work_phase : clean(body.phase, 160);
+  const summary = body.summary === undefined ? row.summary : clean(body.summary, 500);
+  const codexThreadId =
+    body.codexThreadId === undefined ? row.codex_thread_id : clean(body.codexThreadId, 240) || null;
+  const codexTurnId =
+    body.codexTurnId === undefined ? row.codex_turn_id : clean(body.codexTurnId, 240) || null;
+  const completionReason =
+    body.completionReason === undefined
+      ? isTerminalGitHubActionsWorkState(state)
+        ? row.completion_reason
+        : null
+      : clean(body.completionReason, 500) || null;
+  const terminal = isTerminalGitHubActionsWorkState(state);
+  const status = terminal
+    ? gitHubActionsSessionStatus(state)
+    : ["ready", "attached", "detached"].includes(row.status)
+      ? row.status
+      : "ready";
+  const lastEvent = gitHubActionsWorkEvent(state, phase);
+  const changed =
+    row.work_state !== state ||
+    row.work_phase !== phase ||
+    row.summary !== summary ||
+    row.codex_thread_id !== codexThreadId ||
+    row.codex_turn_id !== codexTurnId ||
+    row.completion_reason !== completionReason;
+  const now = Date.now();
+  await database(env)
+    .updateTable("interactive_sessions")
+    .set({
+      status,
+      summary,
+      work_state: state,
+      work_phase: phase,
+      codex_thread_id: codexThreadId,
+      codex_turn_id: codexTurnId,
+      last_heartbeat_at: now,
+      completion_reason: completionReason,
+      last_event: lastEvent,
+      last_seen_at: now,
+      updated_at: now,
+      stopped_at: terminal ? now : null,
+    })
+    .where("id", "=", id)
+    .execute();
+  if (changed) {
+    await appendInteractiveSessionEvent(env, id, user, lastEvent, now);
+  }
+  if (terminal) {
+    await disconnectGitHubActionsRunner(env, id).catch(() => undefined);
+  }
+  return {
+    session: decorateInteractiveSession(
+      (await readInteractiveSession(env, id)) as InteractiveSession,
+      user,
+      env,
+    ),
+  };
+}
+
+async function githubActionsRunnerPty(
+  request: Request,
+  env: RuntimeEnv,
+  id: string,
+): Promise<Response> {
+  if (request.headers.get("upgrade")?.toLowerCase() !== "websocket") {
+    throw badRequest("websocket upgrade required");
+  }
+  const { session, user } = await requireAgentSession(request, env, id, {
+    allowQueryToken: true,
+  });
+  if (session.runtime !== githubActionsRuntime || !session.workKey) {
+    throw badRequest("session is not a GitHub Actions work session");
+  }
+  const stub = githubActionsRelayStub(env, id);
+  if (!stub) throw serviceUnavailable("SESSION_CONTROL Durable Object is not configured");
+  const now = Date.now();
+  const state =
+    session.workState === "registered" || !session.workState ? "running" : session.workState;
+  const phase =
+    !session.workPhase || session.workPhase === "waiting_for_runner"
+      ? "runner_connected"
+      : session.workPhase;
+  await database(env)
+    .updateTable("interactive_sessions")
+    .set({
+      status: ["attached", "detached"].includes(session.status) ? session.status : "ready",
+      work_state: state,
+      work_phase: phase,
+      last_heartbeat_at: now,
+      last_seen_at: now,
+      updated_at: now,
+      last_event: "GitHub Actions runner connected",
+    })
+    .where("id", "=", id)
+    .execute();
+  await appendInteractiveSessionEvent(env, id, user, "GitHub Actions runner connected", now);
+  return stub.fetch("https://crabfleet.internal/api/session-control/github-actions/runner", {
+    headers: { upgrade: "websocket" },
+  });
+}
+
 async function readInteractiveSessionLogs(
   env: RuntimeEnv,
   ids: string[],
@@ -13524,6 +14083,16 @@ function interactiveSession(
     controlGrantedAt: row.control_granted_at,
     controlExpiresAt: row.control_expires_at,
     multiplayerMode: row.multiplayer_mode === 1,
+    workKey: row.work_key,
+    workKind: row.work_kind,
+    workState: parseGitHubActionsWorkState(row.work_state),
+    workPhase: row.work_phase,
+    sourceUrl: row.source_url,
+    githubRunUrl: row.github_run_url,
+    codexThreadId: row.codex_thread_id,
+    codexTurnId: row.codex_turn_id,
+    lastHeartbeatAt: row.last_heartbeat_at,
+    completionReason: row.completion_reason,
     logs,
     logArchive,
   };
@@ -13575,6 +14144,31 @@ function sessionLogTranscript(
     `parent: ${parentSessionId ?? "none"}`,
     `root: ${rootSessionId ?? session.id}`,
     `status: ${session.status}`,
+    ...("workKey" in session
+      ? [
+          `work_key: ${session.workKey ?? "none"}`,
+          `work_kind: ${session.workKind ?? "none"}`,
+          `work_state: ${session.workState ?? "none"}`,
+          `work_phase: ${session.workPhase || "none"}`,
+          `source_url: ${session.sourceUrl ?? "none"}`,
+          `github_run_url: ${session.githubRunUrl ?? "none"}`,
+          `codex_thread_id: ${session.codexThreadId ?? "none"}`,
+          `codex_turn_id: ${session.codexTurnId ?? "none"}`,
+          `last_heartbeat_at: ${session.lastHeartbeatAt ?? "none"}`,
+          `completion_reason: ${session.completionReason ?? "none"}`,
+        ]
+      : [
+          `work_key: ${session.work_key ?? "none"}`,
+          `work_kind: ${session.work_kind ?? "none"}`,
+          `work_state: ${session.work_state || "none"}`,
+          `work_phase: ${session.work_phase || "none"}`,
+          `source_url: ${session.source_url ?? "none"}`,
+          `github_run_url: ${session.github_run_url ?? "none"}`,
+          `codex_thread_id: ${session.codex_thread_id ?? "none"}`,
+          `codex_turn_id: ${session.codex_turn_id ?? "none"}`,
+          `last_heartbeat_at: ${session.last_heartbeat_at ?? "none"}`,
+          `completion_reason: ${session.completion_reason ?? "none"}`,
+        ]),
     `purpose: ${session.purpose}`,
     `summary: ${session.summary}`,
     "",
@@ -13603,6 +14197,16 @@ function sessionLogSummary(
     purpose: session.purpose,
     summary: session.summary,
     status: session.status,
+    workKey: session.work_key,
+    workKind: session.work_kind,
+    workState: parseGitHubActionsWorkState(session.work_state),
+    workPhase: session.work_phase,
+    sourceUrl: session.source_url,
+    githubRunUrl: session.github_run_url,
+    codexThreadId: session.codex_thread_id,
+    codexTurnId: session.codex_turn_id,
+    lastHeartbeatAt: session.last_heartbeat_at,
+    completionReason: session.completion_reason,
     eventCount: events.length,
     firstEventAt: events[0]?.created_at ?? null,
     lastEventAt: events.at(-1)?.created_at ?? null,
@@ -13907,7 +14511,12 @@ function runtimeDescriptor(
 }
 
 function runtimeCapabilities(runtime: string, value: string): RuntimeCapabilities {
-  const fallback = runtime === "crabbox" ? crabboxCapabilities : containerCapabilities;
+  const fallback =
+    runtime === githubActionsRuntime
+      ? githubActionsCapabilities
+      : runtime === "crabbox"
+        ? crabboxCapabilities
+        : containerCapabilities;
   const parsed = parseJson<Partial<RuntimeCapabilities>>(value, fallback);
   return {
     terminal: booleanCapability(parsed.terminal, fallback.terminal),

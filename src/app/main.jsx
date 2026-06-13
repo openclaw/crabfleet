@@ -2195,8 +2195,11 @@ function sessionStatus(session) {
 function sessionFooterSummary(session) {
   if (session.kind === "interactive") {
     const parts = [session.id];
-    const seen = session.lastSeenAt || session.updatedAt;
+    const seen = session.lastHeartbeatAt || session.lastSeenAt || session.updatedAt;
     if (seen) parts.push(`seen ${elapsed(seen)}`);
+    if (session.workKind) parts.push(humanStatus(session.workKind));
+    if (session.workState) parts.push(humanStatus(session.workState));
+    if (session.workPhase) parts.push(humanStatus(session.workPhase));
     if (session.status) parts.push(humanStatus(session.status));
     if (session.shareMode === "link_read" || session.sharedReadOnly) parts.push("shared");
     if (session.multiplayerMode) parts.push("multiplayer");
