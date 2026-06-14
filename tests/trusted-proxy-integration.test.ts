@@ -16,6 +16,10 @@ test("trusted proxy authentication is resolved and sanitized before routing", as
       fetchSource.indexOf("productHostResponse(request)"),
   );
   assert.ok(
+    fetchSource.indexOf('headers.delete("authorization")') <
+      fetchSource.indexOf("api(request, env, context, trustedProxy)"),
+  );
+  assert.ok(
     fetchSource.indexOf('headers.delete("cookie")') <
       fetchSource.indexOf("api(request, env, context, trustedProxy)"),
   );
@@ -52,6 +56,10 @@ test("trusted proxy requests stay sanitized on terminal forwarding paths", async
   const openEnd = source.indexOf("async function ensureSandboxTerminalPrepared", openStart);
   assert.match(source.slice(openStart, openEnd), /terminalSession\.terminal\(request, options\)/);
   assert.match(source, /request = sanitizeTrustedProxyRequest\(request, env\)/);
+  assert.match(
+    source,
+    /trustedProxy\.kind === "authenticated"[\s\S]*headers\.delete\("authorization"\)/,
+  );
 });
 
 test("trusted proxy sign-in cannot pretend that local logout will end the session", async () => {
@@ -71,6 +79,10 @@ test("service-token routes bypass only the mandatory proxy assertion", async () 
   }
   assert.match(source, /requestAuth\.kind === "missing"\) throw unauthorized\(\)/);
   assert.match(source, /trustedProxy\.kind === "rejected"/);
+  assert.match(
+    source,
+    /if \(!usesIndependentServiceAuth\(request\)\) headers\.delete\("authorization"\)/,
+  );
 });
 
 test("split-origin links use the browser-visible proxy origin", async () => {
