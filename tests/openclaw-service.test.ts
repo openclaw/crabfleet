@@ -370,6 +370,7 @@ test("OpenClaw crabbox requests reserve durable idempotency before provisioning"
 			endpointSource.indexOf("createInteractiveSessionFromInput"),
 	);
 	assert.match(source, /profile: clean\(body\.profile, 120\)/);
+	assert.match(source, /runtime,\s+profile: clean\(body\.profile, 120\)/);
 	assert.match(source, /githubTokenHash: githubToken \? await sha256\(githubToken\) : null/);
 	assert.match(replaySource, /row\.preparation_pending !== 0/);
 	assert.match(replaySource, /OpenClaw crabbox request is still preparing/);
@@ -379,7 +380,8 @@ test("OpenClaw crabbox requests reserve durable idempotency before provisioning"
 	assert.match(createSource, /openclaw_request_id: options\.openClawRequestId \?\? null/);
 	assert.match(createSource, /openclaw_request_hash: options\.openClawRequestHash \?\? null/);
 	assert.match(createSource, /\.insertInto\("openclaw_request_replays"\)/);
-	assert.match(createSource, /if \(isConstraintError\(error\) && options\.openClawRequestId/);
+	assert.match(createSource, /!reservationInserted &&\s+isConstraintError\(error\)/);
+	assert.match(createSource, /if \(reservationInserted \|\| !isConstraintError\(error\)/);
 	assert.match(rollbackSource, /\.deleteFrom\("openclaw_request_replays"\)/);
 });
 

@@ -3278,7 +3278,7 @@ async function openClawCreateCrabbox(
     throw badRequest("requestId must be at most 200 characters");
   }
   const requestId = body.requestId || null;
-  const requestHash = requestId ? await openClawCrabboxRequestHash(body, owner) : null;
+  const requestHash = requestId ? await openClawCrabboxRequestHash(env, body, owner) : null;
   if (requestId && requestHash) {
     const existing = await readOpenClawRequestSession(env, requestId, requestHash);
     if (existing) {
@@ -3334,6 +3334,7 @@ async function openClawCreateCrabbox(
 }
 
 async function openClawCrabboxRequestHash(
+  env: RuntimeEnv,
   body: {
     repo?: string;
     branch?: string;
@@ -3351,11 +3352,16 @@ async function openClawCrabboxRequestHash(
   owner: string,
 ): Promise<string> {
   const githubToken = clean(body.githubToken, 4000);
+  const runtime = oneOf(
+    body.runtime,
+    ["crabbox", "container"] as const,
+    deploymentConfig(env).defaultRuntime,
+  );
   return sha256(
     JSON.stringify({
       repo: normalizeRepo(body.repo),
       branch: clean(body.branch, 120),
-      runtime: clean(body.runtime, 40),
+      runtime,
       profile: clean(body.profile, 120),
       command: clean(body.command, 4000),
       prompt: clean(body.prompt, 4000),
@@ -5068,6 +5074,7 @@ async function createInteractiveSessionFromInput(
   const now = Date.now();
   const db = database(env);
   for (let attempt = 0; attempt < 3; attempt += 1) {
+    let reservationInserted = false;
     const id = await nextInteractiveSessionId(env);
     const rootSessionId = lineage.rootSessionId ?? id;
     const agentToken = newAgentToken();
@@ -5198,6 +5205,7 @@ async function createInteractiveSessionFromInput(
       } else {
         await insertSession.execute();
       }
+      reservationInserted = true;
       if (supervisedRootSessionId) {
         await enforceOpenClawRoomSessionLimitAfterInsert(
           env,
@@ -5381,7 +5389,12 @@ async function createInteractiveSessionFromInput(
         ),
       };
     } catch (error) {
-      if (isConstraintError(error) && options.openClawRequestId && options.openClawRequestHash) {
+      if (
+        !reservationInserted &&
+        isConstraintError(error) &&
+        options.openClawRequestId &&
+        options.openClawRequestHash
+      ) {
         const existing = await readOpenClawRequestSession(
           env,
           options.openClawRequestId,
@@ -5389,7 +5402,7 @@ async function createInteractiveSessionFromInput(
         );
         if (existing) return { session: decorateInteractiveSession(existing, user, env) };
       }
-      if (!isConstraintError(error) || attempt === 2) throw error;
+      if (reservationInserted || !isConstraintError(error) || attempt === 2) throw error;
     }
   }
   throw new Error("failed to allocate interactive session id");
