@@ -768,13 +768,17 @@ test("strict session rows and cleanup preserve terminal finalization anchors", a
   assert.match(cleanupSource, /deleteFrom\("interactive_sessions"\)/);
   assert.match(cleanupSource, /FROM interactive_session_credential_policies/);
   assert.equal(
-    cleanupSource.match(/FROM interactive_sessions AS descendant/g)?.length,
+    cleanupSource.match(/FROM interactive_sessions AS active_tree_session/g)?.length,
     2,
   );
-  assert.match(cleanupSource, /descendant\.root_session_id = interactive_sessions\.id/);
-  assert.match(cleanupSource, /descendant\.root_session_id = \$\{row\.id\}/);
+  assert.match(
+    cleanupSource,
+    /COALESCE\(active_tree_session\.root_session_id, active_tree_session\.id\)[\s\S]*COALESCE\(interactive_sessions\.root_session_id, interactive_sessions\.id\)/,
+  );
+  assert.match(cleanupSource, /= \$\{row\.root_session_id \?\? row\.id\}/);
   assert.equal(
-    cleanupSource.match(/descendant\.status NOT IN \('stopped', 'expired', 'failed'\)/g)?.length,
+    cleanupSource.match(/active_tree_session\.status NOT IN \('stopped', 'expired', 'failed'\)/g)
+      ?.length,
     2,
   );
   assert.match(source, /terminalFinalizationPendingQuery/);
