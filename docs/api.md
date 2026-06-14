@@ -551,9 +551,15 @@ Creates a repo-ready crabbox for an operator, e.g. from a Discord meeting handof
   "branch": "main",
   "runtime": "crabbox",
   "command": "codex --yolo",
-  "prompt": "prep the meeting follow-up"
+  "prompt": "prep the meeting follow-up",
+  "requestId": "multicodex-room-123-host"
 }
 ```
+
+`requestId` is optional but strongly recommended for automation. Crabfleet
+persists it with the session reservation before branch preparation or runtime
+creation. Replaying the same request returns the original crabbox; reusing the
+ID with a different request is rejected.
 
 Response:
 
@@ -581,6 +587,8 @@ using browser cookies or an individual session's agent token:
 - `GET /api/openclaw/crabboxes/:id/transcript`: read a bounded recent transcript.
 - `POST /api/openclaw/crabboxes/:id/message`: send one terminal message/nudge.
 - `POST /api/openclaw/crabboxes/:id/actions`: request the supported `stop` action.
+- `POST /api/openclaw/session-roots/:rootSessionId/actions`: freeze room-tree
+  admission and recursively stop every pending or active descendant.
 
 Room supervision endpoints require a configured service capability: the
 existing `CRABBOX_OPENCLAW_TOKEN`, or the dedicated `CRABBOX_MULTICODEX_TOKEN`
@@ -622,6 +630,18 @@ Stop request:
   "action": "stop"
 }
 ```
+
+Root stop request:
+
+```json
+{
+  "action": "stop"
+}
+```
+
+Root stop closes descendant admission before rolling back pending reservations
+and driving the remaining root tree terminal. It returns only after the tree is
+quiescent; a failed request leaves admission closed and can be retried safely.
 
 ## Admin
 
