@@ -135,6 +135,8 @@ import { readBoundedResponseText } from "./bounded-response";
 import {
   boundedUtf8Tail,
   openClawBranchPreparationCanDefer,
+  openClawRoomRootAllowed,
+  openClawRoomSessionAllowed,
   openClawServiceAuthorized,
   sessionBelongsToRoot,
 } from "./openclaw-service";
@@ -3216,7 +3218,7 @@ async function openClawCreateCrabbox(
   request: Request,
   env: RuntimeEnv,
 ): Promise<{ session: InteractiveSession; browserUrl: string }> {
-  requireOpenClawService(request, env);
+  requireOpenClawRoomService(request, env);
   const body = await readJson<{
     repo?: string;
     branch?: string;
@@ -3276,9 +3278,13 @@ async function openClawReadSessionRoot(
   rootSessionId: string;
   crabboxes: Array<{ session: InteractiveSession; browserUrl: string }>;
 }> {
-  requireOpenClawService(request, env);
+  requireOpenClawRoomService(request, env);
   const root = clean(rootSessionId, 120);
   if (!root) throw badRequest("root session id is required");
+  const rootSession = await readFreshInteractiveSession(env, root);
+  if (!rootSession || !openClawRoomRootAllowed(rootSession)) {
+    throw notFound("session root not found");
+  }
   const rows = await database(env)
     .selectFrom("interactive_sessions")
     .select("id")
@@ -3293,7 +3299,13 @@ async function openClawReadSessionRoot(
   return {
     rootSessionId: root,
     crabboxes: sessions
-      .filter((session): session is InteractiveSession => Boolean(session))
+      .filter((session): session is InteractiveSession => {
+        if (!session) return false;
+        return (
+          openClawRoomSessionAllowed(session) &&
+          sessionBelongsToRoot(session.id, session.rootSessionId, root)
+        );
+      })
       .map((session) => openClawCrabboxResponse(env, serviceUser, session)),
   };
 }
@@ -3303,7 +3315,7 @@ async function openClawReadCrabbox(
   env: RuntimeEnv,
   id: string,
 ): Promise<{ session: InteractiveSession; browserUrl: string }> {
-  requireOpenClawService(request, env);
+  requireOpenClawRoomService(request, env);
   const session = await openClawRootScopedCrabbox(request, env, id);
   return openClawCrabboxResponse(env, openClawServiceUser(), session);
 }
@@ -3319,7 +3331,7 @@ async function openClawReadCrabboxTranscript(
   eventCount: number;
   truncated: boolean;
 }> {
-  requireOpenClawService(request, env);
+  requireOpenClawRoomService(request, env);
   const session = await openClawRootScopedCrabbox(request, env, id);
   const [events, eventCount] = await Promise.all([
     readInteractiveSessionEventRows(env, id, { limit: 240, newest: true }),
@@ -3339,7 +3351,7 @@ async function openClawMessageCrabbox(
   env: RuntimeEnv,
   id: string,
 ): Promise<{ delivered: true; session: InteractiveSession; browserUrl: string }> {
-  requireOpenClawService(request, env);
+  requireOpenClawRoomService(request, env);
   const body = await readJson<{ rootSessionId?: string; message?: string; enter?: boolean }>(request);
   const session = await openClawRootScopedCrabbox(request, env, id, body.rootSessionId);
   if (["stopping", "stopped", "expired", "failed"].includes(session.status)) {
@@ -3360,7 +3372,6 @@ async function openClawMessageCrabbox(
     120,
     34,
   );
-  await upstream.markConnected();
   upstream.socket.send(encoder.encode(`${message}${body.enter === false ? "" : "\r"}`));
   upstream.socket.close(1000, "OpenClaw service nudge sent");
   const now = Date.now();
@@ -3381,7 +3392,7 @@ async function openClawMutateCrabbox(
   env: RuntimeEnv,
   id: string,
 ): Promise<{ session: InteractiveSession; browserUrl: string }> {
-  requireOpenClawService(request, env);
+  requireOpenClawRoomService(request, env);
   const body = await readJson<{ rootSessionId?: string; action?: string }>(request);
   await openClawRootScopedCrabbox(request, env, id, body.rootSessionId);
   if (body.action !== "stop") throw badRequest("only stop is supported");
@@ -3403,7 +3414,14 @@ async function openClawRootScopedCrabbox(
   );
   if (!rootSessionId) throw badRequest("root session id is required");
   const session = await readFreshInteractiveSession(env, id);
-  if (!session || !sessionBelongsToRoot(session.id, session.rootSessionId, rootSessionId)) {
+  const root = await readFreshInteractiveSession(env, rootSessionId);
+  if (
+    !session ||
+    !root ||
+    !openClawRoomRootAllowed(root) ||
+    !openClawRoomSessionAllowed(session) ||
+    !sessionBelongsToRoot(session.id, session.rootSessionId, rootSessionId)
+  ) {
     throw notFound("interactive session not found");
   }
   return session;
@@ -3429,7 +3447,7 @@ async function openClawRegisterActionSession(
   runnerPtyUrl: string;
   browserUrl: string;
 }> {
-  requireOpenClawService(request, env);
+  requireOpenClawAutomationService(request, env);
   const body = await readJson<{
     workKey?: string;
     workKind?: string;
@@ -3612,8 +3630,18 @@ function openClawServiceUser(): User {
   };
 }
 
-function requireOpenClawService(request: Request, env: RuntimeEnv): void {
-  const tokens = [env.CRABBOX_OPENCLAW_TOKEN, env.CRABBOX_MULTICODEX_TOKEN];
+function requireOpenClawAutomationService(request: Request, env: RuntimeEnv): void {
+  requireOpenClawServiceToken(request, [env.CRABBOX_OPENCLAW_TOKEN]);
+}
+
+function requireOpenClawRoomService(request: Request, env: RuntimeEnv): void {
+  requireOpenClawServiceToken(request, [env.CRABBOX_OPENCLAW_TOKEN, env.CRABBOX_MULTICODEX_TOKEN]);
+}
+
+function requireOpenClawServiceToken(
+  request: Request,
+  tokens: Array<string | null | undefined>,
+): void {
   if (!tokens.some(Boolean)) {
     throw serviceUnavailable("OpenClaw service token is not configured");
   }
@@ -3634,9 +3662,7 @@ async function ensureOpenClawServiceBranch(
   const branch = clean(branchInput, 120) || "main";
   const baseBranch = clean(baseBranchInput, 120) || "main";
   if (branch === baseBranch) return;
-  if (!env.GITHUB_TOKEN) {
-    throw serviceUnavailable("GitHub token is not configured for service branch creation");
-  }
+  if (!env.GITHUB_TOKEN) return;
   const [owner, name] = repo.split("/");
   const refPath = `/repos/${owner}/${name}/git/ref/heads/${encodeURIComponent(branch)}`;
   try {

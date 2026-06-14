@@ -580,15 +580,18 @@ using browser cookies or an individual session's agent token:
 - `POST /api/openclaw/crabboxes/:id/message`: send one terminal message/nudge.
 - `POST /api/openclaw/crabboxes/:id/actions`: request the supported `stop` action.
 
-Every endpoint requires a configured service capability: the existing
-`CRABBOX_OPENCLAW_TOKEN`, or the dedicated `CRABBOX_MULTICODEX_TOKEN` for a
-MultiCodex deployment.
+Room supervision endpoints require a configured service capability: the
+existing `CRABBOX_OPENCLAW_TOKEN`, or the dedicated `CRABBOX_MULTICODEX_TOKEN`
+for a MultiCodex deployment. Action-session registration accepts only
+`CRABBOX_OPENCLAW_TOKEN`; the narrower MultiCodex credential cannot register or
+resume GitHub Actions sessions.
 Crabbox creation can include `baseBranch`; when the requested branch is
 missing, Crabfleet creates it from that base with its deployment GitHub
 credential before provisioning the session. If that control-plane credential
 is denied with `403`, Crabfleet defers branch validation to the separately
 credentialed runtime adapter so an existing branch can still launch. A missing
-or inaccessible branch then fails during runtime checkout.
+control-plane credential is also deferrable. A missing or inaccessible branch
+then fails during runtime checkout.
 Per-crabbox reads require `X-Crabfleet-Root-Session-ID`; message and action
 bodies require `rootSessionId`. A session outside that exact root is returned
 as not found. Transcript responses contain at most the newest 240 events and
