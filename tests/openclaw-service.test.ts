@@ -347,6 +347,9 @@ test("OpenClaw crabbox requests reserve durable idempotency before provisioning"
 	const endpointStart = source.indexOf("async function openClawCreateCrabbox");
 	const endpointEnd = source.indexOf("async function openClawCrabboxRequestHash", endpointStart);
 	const endpointSource = source.slice(endpointStart, endpointEnd);
+	const replayStart = source.indexOf("async function readOpenClawRequestSession");
+	const replayEnd = source.indexOf("async function openClawReadSessionRoot", replayStart);
+	const replaySource = source.slice(replayStart, replayEnd);
 	const createStart = source.indexOf("async function createInteractiveSessionFromInput");
 	const createEnd = source.indexOf("function initialRuntimeAdapterWorkspaceId", createStart);
 	const createSource = source.slice(createStart, createEnd);
@@ -360,6 +363,8 @@ test("OpenClaw crabbox requests reserve durable idempotency before provisioning"
 			endpointSource.indexOf("createInteractiveSessionFromInput"),
 	);
 	assert.match(source, /profile: clean\(body\.profile, 120\)/);
+	assert.match(replaySource, /row\.preparation_pending !== 0/);
+	assert.match(replaySource, /OpenClaw crabbox request is still preparing/);
 	assert.match(createSource, /openclaw_request_id: options\.openClawRequestId \?\? null/);
 	assert.match(createSource, /openclaw_request_hash: options\.openClawRequestHash \?\? null/);
 	assert.match(createSource, /if \(isConstraintError\(error\) && options\.openClawRequestId/);
@@ -393,6 +398,10 @@ test("OpenClaw root stop freezes admission and drives pending descendants termin
 	);
 	assert.match(stopSource, /terminalReads >= 2/);
 	assert.match(stopSource, /preparation_pending === 0/);
+	assert.match(stopSource, /nextLifecycleAttemptAt/);
+	assert.match(stopSource, /session\.status === "stopping"/);
+	assert.match(stopSource, /reconcileExternalInteractiveSessionById/);
+	assert.match(stopSource, /Math\.min\(2_000, pollDelayMs \* 2\)/);
 	assert.doesNotMatch(stopSource, /openClawRoomSessionChainAllowed/);
 	assert.match(lineageSource, /openClawRootAdmissionOpen/);
 	assert.match(lineageSource, /room_root\.openclaw_admission_closed = 0/);
