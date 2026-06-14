@@ -1045,6 +1045,7 @@ const runtimeAdapterReconcileIntervalMs = 15_000;
 const runtimeAdapterReconcileLimit = 3;
 const runtimeAdapterReconcileConcurrency = 3;
 const runtimeAdapterReconcileForegroundBudgetMs = 750;
+const openClawPreparationTimeoutMs = 60_000;
 const interactiveSessionPreparationStaleMs = 5 * 60_000;
 const terminalCleanupDeletePending = 2;
 const credentialPolicyCleanupLimit = 8;
@@ -3247,9 +3248,13 @@ async function openClawCreateCrabbox(
       owner,
       createdBy: "service:openclaw",
       afterReserve: async () => {
+        const signal = AbortSignal.timeout(openClawPreparationTimeoutMs);
         try {
-          await ensureOpenClawServiceBranch(env, body.repo, body.branch, body.baseBranch);
+          await ensureOpenClawServiceBranch(env, body.repo, body.branch, body.baseBranch, signal);
         } catch (error) {
+          if (signal.aborted) {
+            throw serviceUnavailable("OpenClaw branch preparation timed out");
+          }
           if (
             !(error instanceof GitHubApiError) ||
             !openClawBranchPreparationCanDefer(error.status)
@@ -3515,25 +3520,25 @@ async function enforceOpenClawRoomSessionLimitAfterInsert(
   insertedAt: number,
 ): Promise<void> {
   const db = database(env);
-  const count = await db
-    .selectFrom("interactive_sessions")
-    .select(({ fn }) => fn.countAll<number>().as("count"))
-    .where((expression) =>
-      expression.or([
-        expression("root_session_id", "=", rootSessionId),
-        expression("id", "=", rootSessionId),
-      ]),
-    )
-    .where((expression) =>
-      expression.or([
-        expression("created_by", "=", "service:openclaw"),
-        expression("created_by", "like", "session:%"),
-      ]),
-    )
-    .where("runtime", "!=", "github_actions")
-    .where("work_key", "is", null)
-    .executeTakeFirst();
-  if (Number(count?.count ?? 0) <= openClawRoomMaxSessions) return;
+  const admission = await sql<{ inserted_rowid: number; position: number }>`
+    SELECT inserted.rowid AS inserted_rowid, count(candidate.rowid) AS position
+    FROM interactive_sessions AS inserted
+    JOIN interactive_sessions AS candidate
+      ON candidate.rowid <= inserted.rowid
+      AND (candidate.root_session_id = ${rootSessionId} OR candidate.id = ${rootSessionId})
+      AND (candidate.created_by = 'service:openclaw' OR candidate.created_by LIKE 'session:%')
+      AND candidate.runtime != 'github_actions'
+      AND candidate.work_key IS NULL
+    WHERE inserted.id = ${insertedSessionId}
+      AND inserted.status = 'provisioning'
+      AND inserted.preparation_pending = 1
+      AND inserted.created_at = ${insertedAt}
+      AND inserted.updated_at = ${insertedAt}
+    GROUP BY inserted.rowid
+  `.execute(db);
+  const position = Number(admission.rows[0]?.position ?? 0);
+  if (position > 0 && position <= openClawRoomMaxSessions) return;
+  if (!position) throw serviceUnavailable("session root reservation disappeared");
   await rollbackInteractiveSessionReservation(env, insertedSessionId, insertedAt);
   throw tooManyRequests("session root reached the supervision limit");
 }
@@ -3878,6 +3883,7 @@ async function ensureOpenClawServiceBranch(
   repoInput: unknown,
   branchInput: unknown,
   baseBranchInput: unknown,
+  signal?: AbortSignal,
 ): Promise<void> {
   const repo = normalizeRepo(repoInput);
   if (!repo) throw badRequest("repo is required");
@@ -3890,7 +3896,7 @@ async function ensureOpenClawServiceBranch(
   const [owner, name] = repo.split("/");
   const refPath = `/repos/${owner}/${name}/git/ref/heads/${encodeURIComponent(branch)}`;
   try {
-    await githubFetch<{ object: { sha: string } }>(refPath, env.GITHUB_TOKEN);
+    await githubFetch<{ object: { sha: string } }>(refPath, env.GITHUB_TOKEN, signal);
     return;
   } catch (error) {
     if (!(error instanceof GitHubApiError) || error.status !== 404) throw error;
@@ -3898,15 +3904,17 @@ async function ensureOpenClawServiceBranch(
   const base = await githubFetch<{ object: { sha: string } }>(
     `/repos/${owner}/${name}/git/ref/heads/${encodeURIComponent(baseBranch)}`,
     env.GITHUB_TOKEN,
+    signal,
   );
   const response = await fetch(`https://api.github.com/repos/${owner}/${name}/git/refs`, {
     method: "POST",
     body: JSON.stringify({ ref: `refs/heads/${branch}`, sha: base.object.sha }),
     headers: { ...githubHeaders(), authorization: `Bearer ${env.GITHUB_TOKEN}` },
+    ...(signal ? { signal } : {}),
   });
   if (response.ok) return;
   if (response.status === 422) {
-    await githubFetch<{ object: { sha: string } }>(refPath, env.GITHUB_TOKEN);
+    await githubFetch<{ object: { sha: string } }>(refPath, env.GITHUB_TOKEN, signal);
     return;
   }
   throw new GitHubApiError(response.status);
@@ -15140,12 +15148,13 @@ function eventInsert(
     .values({ card_id: cardId, actor: actorName, message, created_at: now });
 }
 
-async function githubFetch<T>(path: string, token: string): Promise<T> {
+async function githubFetch<T>(path: string, token: string, signal?: AbortSignal): Promise<T> {
   const response = await fetch(`https://api.github.com${path}`, {
     headers: {
       ...githubHeaders(),
       authorization: `Bearer ${token}`,
     },
+    ...(signal ? { signal } : {}),
   });
   if (!response.ok) throw new GitHubApiError(response.status);
   return response.json<T>();
