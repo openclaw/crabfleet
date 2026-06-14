@@ -3483,6 +3483,68 @@ async function openClawReadSessionChain(
   return [...chain.values()];
 }
 
+async function openClawSupervisedRootForCreate(
+  env: RuntimeEnv,
+  createdBy: string,
+  lineage: { parentSessionId: string | null; rootSessionId: string | null },
+): Promise<string | null> {
+  if (!lineage.parentSessionId || !lineage.rootSessionId) return null;
+  if (createdBy !== "service:openclaw" && createdBy !== `session:${lineage.parentSessionId}`) {
+    return null;
+  }
+  const [parent, root] = await Promise.all([
+    readFreshInteractiveSession(env, lineage.parentSessionId),
+    readFreshInteractiveSession(env, lineage.rootSessionId),
+  ]);
+  if (!parent || !root) return null;
+  const chain = await openClawReadSessionChain(env, parent, root, lineage.rootSessionId);
+  return openClawRoomSessionChainAllowed(chain, parent.id, lineage.rootSessionId)
+    ? lineage.rootSessionId
+    : null;
+}
+
+async function enforceOpenClawRoomSessionLimitAfterInsert(
+  env: RuntimeEnv,
+  rootSessionId: string,
+  insertedSessionId: string,
+  insertedAt: number,
+): Promise<void> {
+  const db = database(env);
+  const count = await db
+    .selectFrom("interactive_sessions")
+    .select(({ fn }) => fn.countAll<number>().as("count"))
+    .where((expression) =>
+      expression.or([
+        expression("root_session_id", "=", rootSessionId),
+        expression("id", "=", rootSessionId),
+      ]),
+    )
+    .where((expression) =>
+      expression.or([
+        expression("created_by", "=", "service:openclaw"),
+        expression("created_by", "like", "session:%"),
+      ]),
+    )
+    .where("runtime", "!=", "github_actions")
+    .where("work_key", "is", null)
+    .executeTakeFirst();
+  if (Number(count?.count ?? 0) <= openClawRoomMaxSessions) return;
+  await db
+    .deleteFrom("interactive_sessions")
+    .where("id", "=", insertedSessionId)
+    .where("status", "=", "provisioning")
+    .where("created_at", "=", insertedAt)
+    .where("updated_at", "=", insertedAt)
+    .execute();
+  const current = await db
+    .selectFrom("interactive_sessions")
+    .select("id")
+    .where("id", "=", insertedSessionId)
+    .executeTakeFirst();
+  if (current) throw serviceUnavailable("session root capacity rollback failed");
+  throw tooManyRequests("session root reached the supervision limit");
+}
+
 function openClawCrabboxResponse(
   env: RuntimeEnv,
   serviceUser: User,
@@ -4538,6 +4600,7 @@ async function createInteractiveSessionFromInput(
     options.rootSessionId ?? (clean(body.rootSessionId, 120) || null),
   );
   await options.beforeCreate?.();
+  const supervisedRootSessionId = await openClawSupervisedRootForCreate(env, createdBy, lineage);
   const now = Date.now();
   const db = database(env);
   for (let attempt = 0; attempt < 3; attempt += 1) {
@@ -4653,6 +4716,14 @@ async function createInteractiveSessionFromInput(
           completion_reason: null,
         })
         .execute();
+      if (supervisedRootSessionId) {
+        await enforceOpenClawRoomSessionLimitAfterInsert(
+          env,
+          supervisedRootSessionId,
+          id,
+          now,
+        );
+      }
       await appendInteractiveSessionEvent(env, id, user, "interactive workspace requested", now);
       const provisioned = await provisionInteractiveSession(
         env,
@@ -5176,12 +5247,20 @@ async function cleanupInteractiveSessions(
       )
     `).where(sql<boolean>`
       NOT EXISTS (
+        WITH RECURSIVE active_ancestor(id) AS (
+          SELECT parent_session_id
+          FROM interactive_sessions
+          WHERE status NOT IN ('stopped', 'expired', 'failed')
+            AND parent_session_id IS NOT NULL
+          UNION
+          SELECT session.parent_session_id
+          FROM interactive_sessions AS session
+          JOIN active_ancestor ON session.id = active_ancestor.id
+          WHERE session.parent_session_id IS NOT NULL
+        )
         SELECT 1
-        FROM interactive_sessions AS active_tree_session
-        WHERE COALESCE(active_tree_session.root_session_id, active_tree_session.id)
-            = COALESCE(interactive_sessions.root_session_id, interactive_sessions.id)
-          AND active_tree_session.id != interactive_sessions.id
-          AND active_tree_session.status NOT IN ('stopped', 'expired', 'failed')
+        FROM active_ancestor
+        WHERE id = interactive_sessions.id
       )
     `).where(sql<boolean>`
       ${env.SESSION_LOGS ? 1 : 0} = 0
@@ -5245,12 +5324,20 @@ async function deleteFinalizedInteractiveSession(
       )
     `).where(sql<boolean>`
       NOT EXISTS (
+        WITH RECURSIVE active_ancestor(id) AS (
+          SELECT parent_session_id
+          FROM interactive_sessions
+          WHERE status NOT IN ('stopped', 'expired', 'failed')
+            AND parent_session_id IS NOT NULL
+          UNION
+          SELECT session.parent_session_id
+          FROM interactive_sessions AS session
+          JOIN active_ancestor ON session.id = active_ancestor.id
+          WHERE session.parent_session_id IS NOT NULL
+        )
         SELECT 1
-        FROM interactive_sessions AS active_tree_session
-        WHERE COALESCE(active_tree_session.root_session_id, active_tree_session.id)
-            = ${row.root_session_id ?? row.id}
-          AND active_tree_session.id != ${row.id}
-          AND active_tree_session.status NOT IN ('stopped', 'expired', 'failed')
+        FROM active_ancestor
+        WHERE id = ${row.id}
       )
     `).where(sql<boolean>`
       ${archive ? 1 : 0} = 1
