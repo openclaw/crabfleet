@@ -222,13 +222,17 @@ test("OpenClaw room reservation precedes branch mutation, event recording, and p
 	assert.match(readSource, /\.where\("preparation_pending", "=", 0\)/);
 	assert.match(
 		createSource,
-		/adapter: adapterWorkspaceId && !sideEffectReservation \? runtimeAdapterName : null/,
+		/adapter: adapterWorkspaceId && !preparationReservation \? runtimeAdapterName : null/,
 	);
 	assert.match(
 		createSource,
-		/adapter_create_pending: adapterWorkspaceId && !sideEffectReservation \? 1 : 0/,
+		/adapter_create_pending: adapterWorkspaceId && !preparationReservation \? 1 : 0/,
 	);
-	assert.match(createSource, /preparation_pending: sideEffectReservation \? 1 : 0/);
+	assert.match(
+		createSource,
+		/const preparationReservation = Boolean\(options\.afterReserve \|\| supervisedRootSessionId\)/,
+	);
+	assert.match(createSource, /preparation_pending: preparationReservation \? 1 : 0/);
 	assert.ok(
 		createSource.indexOf("enforceOpenClawRoomSessionLimitAfterInsert") <
 			createSource.indexOf("await options.afterReserve"),

@@ -4689,7 +4689,7 @@ async function createInteractiveSessionFromInput(
     options.rootSessionId ?? (clean(body.rootSessionId, 120) || null),
   );
   const supervisedRootSessionId = await openClawSupervisedRootForCreate(env, createdBy, lineage);
-  const sideEffectReservation = Boolean(options.afterReserve);
+  const preparationReservation = Boolean(options.afterReserve || supervisedRootSessionId);
   const now = Date.now();
   const db = database(env);
   for (let attempt = 0; attempt < 3; attempt += 1) {
@@ -4751,16 +4751,16 @@ async function createInteractiveSessionFromInput(
           repo,
           branch,
           runtime,
-          adapter: adapterWorkspaceId && !sideEffectReservation ? runtimeAdapterName : null,
+          adapter: adapterWorkspaceId && !preparationReservation ? runtimeAdapterName : null,
           profile,
           adapter_workspace_id: adapterWorkspaceId,
           adapter_control_plane: adapterControlPlane,
           provider_resource_id: null,
           capabilities_json: JSON.stringify(requestedCapabilities),
           expires_at: null,
-          last_reconciled_at: adapterWorkspaceId && !sideEffectReservation ? now : null,
+          last_reconciled_at: adapterWorkspaceId && !preparationReservation ? now : null,
           reconcile_error:
-            adapterWorkspaceId && !sideEffectReservation ? "runtime adapter create pending" : null,
+            adapterWorkspaceId && !preparationReservation ? "runtime adapter create pending" : null,
           terminal_status: null,
           adapter_ttl_seconds: adapterSettings?.ttlSeconds ?? null,
           adapter_idle_timeout_seconds: adapterSettings?.idleTimeoutSeconds ?? null,
@@ -4768,8 +4768,8 @@ async function createInteractiveSessionFromInput(
             ? JSON.stringify(adapterSettings.capabilities)
             : null,
           adapter_create_payload_json: adapterCreatePayloadJson,
-          adapter_create_pending: adapterWorkspaceId && !sideEffectReservation ? 1 : 0,
-          preparation_pending: sideEffectReservation ? 1 : 0,
+          adapter_create_pending: adapterWorkspaceId && !preparationReservation ? 1 : 0,
+          preparation_pending: preparationReservation ? 1 : 0,
           command,
           prompt,
           purpose,
@@ -4821,7 +4821,7 @@ async function createInteractiveSessionFromInput(
         await rollbackInteractiveSessionReservation(env, id, now);
         throw error;
       }
-      if (sideEffectReservation) {
+      if (preparationReservation) {
         await activateInteractiveSessionReservation(env, id, now, adapterWorkspaceId);
       }
       await appendInteractiveSessionEvent(env, id, user, "interactive workspace requested", now);
