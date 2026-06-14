@@ -3338,16 +3338,18 @@ async function openClawReadCrabboxTranscript(
 }> {
   requireOpenClawRoomService(request, env);
   const session = await openClawRootScopedCrabbox(request, env, id);
-  const [events, eventCount] = await Promise.all([
-    readInteractiveSessionEventRows(env, id, { limit: 240, newest: true }),
+  const [eventWindow, eventCount] = await Promise.all([
+    readInteractiveSessionEventRows(env, id, { limit: 241, newest: true }),
     countInteractiveSessionEvents(env, id),
   ]);
+  const hasMoreEvents = eventWindow.length > 240;
+  const events = hasMoreEvents ? eventWindow.slice(1) : eventWindow;
   const transcript = boundedUtf8Tail(sessionLogTranscript(session, events));
   return {
     ...openClawCrabboxResponse(env, openClawServiceUser(), session),
     transcript: transcript.text,
     eventCount,
-    truncated: transcript.truncated || eventCount > events.length,
+    truncated: transcript.truncated || hasMoreEvents || eventCount > events.length,
   };
 }
 
