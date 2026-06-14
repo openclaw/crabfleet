@@ -183,6 +183,9 @@ test("OpenClaw room reservation precedes branch mutation, event recording, and p
 	const capacityStart = source.indexOf("async function enforceOpenClawRoomSessionLimitAfterInsert");
 	const capacityEnd = source.indexOf("function openClawCrabboxResponse", capacityStart);
 	const capacitySource = source.slice(capacityStart, capacityEnd);
+	const activationStart = source.indexOf("async function activateRuntimeAdapterReservation");
+	const activationEnd = source.indexOf("function openClawCrabboxResponse", activationStart);
+	const activationSource = source.slice(activationStart, activationEnd);
 	const createStart = source.indexOf("async function createInteractiveSessionFromInput");
 	const createEnd = source.indexOf("function initialRuntimeAdapterWorkspaceId", createStart);
 	const createSource = source.slice(createStart, createEnd);
@@ -193,16 +196,32 @@ test("OpenClaw room reservation precedes branch mutation, event recording, and p
 		capacitySource,
 		/throw tooManyRequests\("session root reached the supervision limit"\)/,
 	);
-	assert.ok(
-		createSource.indexOf("enforceOpenClawRoomSessionLimitAfterInsert") <
-			createSource.indexOf("options.afterReserve"),
+	assert.match(activationSource, /adapter: runtimeAdapterName/);
+	assert.match(activationSource, /adapter_create_pending: 1/);
+	assert.match(activationSource, /\.where\("adapter", "is", null\)/);
+	assert.match(activationSource, /\.where\("adapter_create_pending", "=", 0\)/);
+	assert.match(
+		createSource,
+		/adapter: adapterWorkspaceId && !sideEffectReservation \? runtimeAdapterName : null/,
+	);
+	assert.match(
+		createSource,
+		/adapter_create_pending: adapterWorkspaceId && !sideEffectReservation \? 1 : 0/,
 	);
 	assert.ok(
-		createSource.indexOf("options.afterReserve") <
+		createSource.indexOf("enforceOpenClawRoomSessionLimitAfterInsert") <
+			createSource.indexOf("await options.afterReserve"),
+	);
+	assert.ok(
+		createSource.indexOf("await options.afterReserve") <
+			createSource.indexOf("activateRuntimeAdapterReservation"),
+	);
+	assert.ok(
+		createSource.indexOf("activateRuntimeAdapterReservation") <
 			createSource.indexOf("appendInteractiveSessionEvent"),
 	);
 	assert.ok(
-		createSource.indexOf("options.afterReserve") <
+		createSource.indexOf("await options.afterReserve") <
 			createSource.indexOf("provisionInteractiveSession"),
 	);
 	assert.match(

@@ -3554,6 +3554,33 @@ async function rollbackInteractiveSessionReservation(
   if (current) throw serviceUnavailable("interactive session reservation rollback failed");
 }
 
+async function activateRuntimeAdapterReservation(
+  env: RuntimeEnv,
+  insertedSessionId: string,
+  insertedAt: number,
+  adapterWorkspaceId: string,
+): Promise<void> {
+  const activated = await database(env)
+    .updateTable("interactive_sessions")
+    .set({
+      adapter: runtimeAdapterName,
+      adapter_create_pending: 1,
+      last_reconciled_at: insertedAt,
+      reconcile_error: "runtime adapter create pending",
+    })
+    .where("id", "=", insertedSessionId)
+    .where("status", "=", "provisioning")
+    .where("adapter", "is", null)
+    .where("adapter_workspace_id", "=", adapterWorkspaceId)
+    .where("adapter_create_pending", "=", 0)
+    .where("created_at", "=", insertedAt)
+    .where("updated_at", "=", insertedAt)
+    .executeTakeFirst();
+  if ((activated.numUpdatedRows ?? 0n) > 0n) return;
+  await rollbackInteractiveSessionReservation(env, insertedSessionId, insertedAt);
+  throw serviceUnavailable("interactive session reservation activation failed");
+}
+
 function openClawCrabboxResponse(
   env: RuntimeEnv,
   serviceUser: User,
@@ -4609,6 +4636,7 @@ async function createInteractiveSessionFromInput(
     options.rootSessionId ?? (clean(body.rootSessionId, 120) || null),
   );
   const supervisedRootSessionId = await openClawSupervisedRootForCreate(env, createdBy, lineage);
+  const sideEffectReservation = Boolean(options.afterReserve);
   const now = Date.now();
   const db = database(env);
   for (let attempt = 0; attempt < 3; attempt += 1) {
@@ -4670,15 +4698,16 @@ async function createInteractiveSessionFromInput(
           repo,
           branch,
           runtime,
-          adapter: adapterWorkspaceId ? runtimeAdapterName : null,
+          adapter: adapterWorkspaceId && !sideEffectReservation ? runtimeAdapterName : null,
           profile,
           adapter_workspace_id: adapterWorkspaceId,
           adapter_control_plane: adapterControlPlane,
           provider_resource_id: null,
           capabilities_json: JSON.stringify(requestedCapabilities),
           expires_at: null,
-          last_reconciled_at: adapterWorkspaceId ? now : null,
-          reconcile_error: adapterWorkspaceId ? "runtime adapter create pending" : null,
+          last_reconciled_at: adapterWorkspaceId && !sideEffectReservation ? now : null,
+          reconcile_error:
+            adapterWorkspaceId && !sideEffectReservation ? "runtime adapter create pending" : null,
           terminal_status: null,
           adapter_ttl_seconds: adapterSettings?.ttlSeconds ?? null,
           adapter_idle_timeout_seconds: adapterSettings?.idleTimeoutSeconds ?? null,
@@ -4686,7 +4715,7 @@ async function createInteractiveSessionFromInput(
             ? JSON.stringify(adapterSettings.capabilities)
             : null,
           adapter_create_payload_json: adapterCreatePayloadJson,
-          adapter_create_pending: adapterWorkspaceId ? 1 : 0,
+          adapter_create_pending: adapterWorkspaceId && !sideEffectReservation ? 1 : 0,
           command,
           prompt,
           purpose,
@@ -4737,6 +4766,9 @@ async function createInteractiveSessionFromInput(
       } catch (error) {
         await rollbackInteractiveSessionReservation(env, id, now);
         throw error;
+      }
+      if (adapterWorkspaceId && sideEffectReservation) {
+        await activateRuntimeAdapterReservation(env, id, now, adapterWorkspaceId);
       }
       await appendInteractiveSessionEvent(env, id, user, "interactive workspace requested", now);
       const provisioned = await provisionInteractiveSession(
