@@ -563,7 +563,9 @@ request returns the original crabbox; reusing the ID with a different request is
 rejected. A replay while the original reservation is still preparing returns a
 retryable service-unavailable response instead of claiming the crabbox is ready.
 After finalized-session cleanup, the retained replay tombstone rejects the
-request instead of provisioning duplicate work.
+request instead of provisioning duplicate work. The fingerprint includes a
+nonreversible digest of any supplied GitHub credential; the credential itself is
+not stored in the replay ledger.
 
 Response:
 

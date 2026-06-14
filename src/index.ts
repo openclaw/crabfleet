@@ -3346,9 +3346,11 @@ async function openClawCrabboxRequestHash(
     purpose?: string;
     summary?: string;
     baseBranch?: string;
+    githubToken?: string;
   },
   owner: string,
 ): Promise<string> {
+  const githubToken = clean(body.githubToken, 4000);
   return sha256(
     JSON.stringify({
       repo: normalizeRepo(body.repo),
@@ -3362,6 +3364,7 @@ async function openClawCrabboxRequestHash(
       purpose: clean(body.purpose, 500),
       summary: clean(body.summary, 500),
       baseBranch: clean(body.baseBranch, 120),
+      githubTokenHash: githubToken ? await sha256(githubToken) : null,
       owner,
     }),
   );
@@ -3372,24 +3375,21 @@ async function readOpenClawRequestSession(
   requestId: string,
   requestHash: string,
 ): Promise<InteractiveSession | null> {
-  const db = database(env);
-  const replay = await db
-    .selectFrom("openclaw_request_replays")
-    .selectAll()
-    .where("request_id", "=", requestId)
+  const replay = await database(env)
+    .selectFrom("openclaw_request_replays as replay")
+    .leftJoin("interactive_sessions as session", "session.id", "replay.session_id")
+    .selectAll("session")
+    .select("replay.request_hash as replay_request_hash")
+    .where("replay.request_id", "=", requestId)
     .executeTakeFirst();
   if (!replay) return null;
-  if (replay.request_hash !== requestHash) {
+  if (replay.replay_request_hash !== requestHash) {
     throw conflict("OpenClaw crabbox request id already belongs to a different request");
   }
-  const row = await db
-    .selectFrom("interactive_sessions")
-    .selectAll()
-    .where("id", "=", replay.session_id)
-    .executeTakeFirst();
-  if (!row) {
+  if (!replay.id) {
     throw conflict("OpenClaw crabbox request already completed and is no longer available");
   }
+  const row = replay as InteractiveSessionRow;
   if (
     row.created_by !== "service:openclaw" ||
     row.openclaw_request_id !== requestId ||
