@@ -135,6 +135,7 @@ import { readBoundedResponseText } from "./bounded-response";
 import {
   boundedUtf8Tail,
   openClawBranchPreparationCanDefer,
+  openClawGitHubRepoParts,
   openClawRoomMaxSessions,
   openClawRoomRootAllowed,
   openClawRoomSessionChainAllowed,
@@ -3500,7 +3501,7 @@ async function openClawSupervisedRootForCreate(
     readInteractiveSession(env, lineage.parentSessionId),
     readInteractiveSession(env, lineage.rootSessionId),
   ]);
-  if (!parent || !root) return null;
+  if (!parent || !root) throw badRequest("session lineage not found");
   if (createdBy === "service:openclaw" || createdBy === `session:${lineage.parentSessionId}`) {
     const chain = await openClawReadSessionChain(env, parent, root, lineage.rootSessionId);
     if (openClawRoomSessionChainAllowed(chain, parent.id, lineage.rootSessionId)) {
@@ -3887,13 +3888,15 @@ async function ensureOpenClawServiceBranch(
 ): Promise<void> {
   const repo = normalizeRepo(repoInput);
   if (!repo) throw badRequest("repo is required");
+  const target = openClawGitHubRepoParts(repo);
+  if (!target) throw badRequest("repo must be a GitHub owner/name");
   await requireRepo(env, repo);
   const branch = clean(branchInput, 120) || "main";
   const baseBranch = clean(baseBranchInput, 120);
   if (!baseBranch) return;
   if (branch === baseBranch) return;
   if (!env.GITHUB_TOKEN) return;
-  const [owner, name] = repo.split("/");
+  const { owner, name } = target;
   const refPath = `/repos/${owner}/${name}/git/ref/heads/${encodeURIComponent(branch)}`;
   try {
     await githubFetch<{ object: { sha: string } }>(refPath, env.GITHUB_TOKEN, signal);
@@ -13649,6 +13652,7 @@ async function addRepo(
   const body = await readJson<{ repo?: string }>(request);
   const repo = normalizeRepo(body.repo);
   if (!repo) throw badRequest("repo is required");
+  if (!openClawGitHubRepoParts(repo)) throw badRequest("repo must be a GitHub owner/name");
   const now = Date.now();
   await database(env)
     .insertInto("repos")
