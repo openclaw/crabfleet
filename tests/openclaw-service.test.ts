@@ -412,7 +412,10 @@ test("OpenClaw root stop freezes admission and drives pending descendants termin
 	assert.match(stopSource, /terminalReads >= 2/);
 	assert.match(stopSource, /completion\.remaining === 0/);
 	assert.match(stopSource, /nextLifecycleAttemptAt/);
-	assert.match(stopSource, /session\.status === "stopping"/);
+	assert.match(
+		stopSource,
+		/session\.status === "stopping" && session\.adapter !== runtimeAdapterName/,
+	);
 	assert.match(stopSource, /reconcileExternalInteractiveSessionById/);
 	assert.match(stopSource, /runOpenClawRootOperationBeforeDeadline/);
 	assert.match(stopSource, /\.slice\(0, 4\)/);
