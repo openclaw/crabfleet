@@ -18,6 +18,10 @@ export function sessionBelongsToRoot(
 	return Boolean(expectedRootId) && (sessionRootId || sessionId) === expectedRootId;
 }
 
+export function openClawBranchPreparationCanDefer(status: number): boolean {
+	return status === 403;
+}
+
 export function boundedUtf8Tail(
 	value: string,
 	maxBytes = openClawTranscriptMaxBytes,

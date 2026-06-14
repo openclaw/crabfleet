@@ -3,6 +3,7 @@ import test from "node:test";
 
 import {
 	boundedUtf8Tail,
+	openClawBranchPreparationCanDefer,
 	openClawServiceAuthorized,
 	openClawTranscriptMaxBytes,
 	sessionBelongsToRoot,
@@ -13,6 +14,13 @@ test("OpenClaw service authorization accepts dedicated scoped consumers", () => 
 	assert.equal(openClawServiceAuthorized("Bearer multicodex", ["openclaw", "multicodex"]), true);
 	assert.equal(openClawServiceAuthorized("Bearer public", ["openclaw", "multicodex"]), false);
 	assert.equal(openClawServiceAuthorized(null, [undefined, null]), false);
+});
+
+test("OpenClaw branch preparation defers only control-plane permission failures", () => {
+	assert.equal(openClawBranchPreparationCanDefer(403), true);
+	assert.equal(openClawBranchPreparationCanDefer(401), false);
+	assert.equal(openClawBranchPreparationCanDefer(404), false);
+	assert.equal(openClawBranchPreparationCanDefer(500), false);
 });
 
 test("session root fences accept the root and every child only for the exact root", () => {
