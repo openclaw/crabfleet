@@ -132,6 +132,7 @@ import { sizedTerminalTargetUrl } from "./terminal-target";
 import { cachedBooleanGrant } from "./terminal-authorization";
 import { obsoleteSessionArchiveObjectKeys, sessionArchiveAttemptKeys } from "./session-archive";
 import { readBoundedResponseText } from "./bounded-response";
+import { boundedUtf8Tail, sessionBelongsToRoot } from "./openclaw-service";
 import {
   inspectTrustedProxyAssertion,
   sanitizeTrustedProxyRequest,
@@ -2270,6 +2271,67 @@ async function api(
     return json(await openClawCreateCrabbox(request, env), { status: 201 });
   }
 
+  const openClawSessionRootMatch = url.pathname.match(/^\/api\/openclaw\/session-roots\/([^/]+)$/);
+  if (request.method === "GET" && openClawSessionRootMatch) {
+    return json(
+      await openClawReadSessionRoot(
+        request,
+        env,
+        decodeURIComponent(openClawSessionRootMatch[1] ?? ""),
+      ),
+    );
+  }
+
+  const openClawCrabboxTranscriptMatch = url.pathname.match(
+    /^\/api\/openclaw\/crabboxes\/([^/]+)\/transcript$/,
+  );
+  if (request.method === "GET" && openClawCrabboxTranscriptMatch) {
+    return json(
+      await openClawReadCrabboxTranscript(
+        request,
+        env,
+        decodeURIComponent(openClawCrabboxTranscriptMatch[1] ?? ""),
+      ),
+    );
+  }
+
+  const openClawCrabboxMessageMatch = url.pathname.match(
+    /^\/api\/openclaw\/crabboxes\/([^/]+)\/message$/,
+  );
+  if (request.method === "POST" && openClawCrabboxMessageMatch) {
+    return json(
+      await openClawMessageCrabbox(
+        request,
+        env,
+        decodeURIComponent(openClawCrabboxMessageMatch[1] ?? ""),
+      ),
+    );
+  }
+
+  const openClawCrabboxActionMatch = url.pathname.match(
+    /^\/api\/openclaw\/crabboxes\/([^/]+)\/actions$/,
+  );
+  if (request.method === "POST" && openClawCrabboxActionMatch) {
+    return json(
+      await openClawMutateCrabbox(
+        request,
+        env,
+        decodeURIComponent(openClawCrabboxActionMatch[1] ?? ""),
+      ),
+    );
+  }
+
+  const openClawCrabboxReadMatch = url.pathname.match(/^\/api\/openclaw\/crabboxes\/([^/]+)$/);
+  if (request.method === "GET" && openClawCrabboxReadMatch) {
+    return json(
+      await openClawReadCrabbox(
+        request,
+        env,
+        decodeURIComponent(openClawCrabboxReadMatch[1] ?? ""),
+      ),
+    );
+  }
+
   const sshInteractivePtyMatch = url.pathname.match(
     /^\/api\/ssh\/interactive-sessions\/([^/]+)\/pty$/,
   );
@@ -3147,7 +3209,7 @@ async function agentCreateInteractiveSession(
 async function openClawCreateCrabbox(
   request: Request,
   env: RuntimeEnv,
-): Promise<{ session: InteractiveSession }> {
+): Promise<{ session: InteractiveSession; browserUrl: string }> {
   requireOpenClawService(request, env);
   const body = await readJson<{
     repo?: string;
@@ -3178,7 +3240,159 @@ async function openClawCreateCrabbox(
     `openclaw crabbox created ${result.session.id} owner=${owner}`,
     Date.now(),
   );
-  return result;
+  return openClawCrabboxResponse(env, serviceUser, result.session);
+}
+
+async function openClawReadSessionRoot(
+  request: Request,
+  env: RuntimeEnv,
+  rootSessionId: string,
+): Promise<{
+  rootSessionId: string;
+  crabboxes: Array<{ session: InteractiveSession; browserUrl: string }>;
+}> {
+  requireOpenClawService(request, env);
+  const root = clean(rootSessionId, 120);
+  if (!root) throw badRequest("root session id is required");
+  const rows = await database(env)
+    .selectFrom("interactive_sessions")
+    .select("id")
+    .where((expression) =>
+      expression.or([expression("root_session_id", "=", root), expression("id", "=", root)]),
+    )
+    .orderBy("created_at", "asc")
+    .execute();
+  if (!rows.length) throw notFound("session root not found");
+  const serviceUser = openClawServiceUser();
+  const sessions = await Promise.all(rows.map((row) => readFreshInteractiveSession(env, row.id)));
+  return {
+    rootSessionId: root,
+    crabboxes: sessions
+      .filter((session): session is InteractiveSession => Boolean(session))
+      .map((session) => openClawCrabboxResponse(env, serviceUser, session)),
+  };
+}
+
+async function openClawReadCrabbox(
+  request: Request,
+  env: RuntimeEnv,
+  id: string,
+): Promise<{ session: InteractiveSession; browserUrl: string }> {
+  requireOpenClawService(request, env);
+  const session = await openClawRootScopedCrabbox(request, env, id);
+  return openClawCrabboxResponse(env, openClawServiceUser(), session);
+}
+
+async function openClawReadCrabboxTranscript(
+  request: Request,
+  env: RuntimeEnv,
+  id: string,
+): Promise<{
+  session: InteractiveSession;
+  browserUrl: string;
+  transcript: string;
+  eventCount: number;
+  truncated: boolean;
+}> {
+  requireOpenClawService(request, env);
+  const session = await openClawRootScopedCrabbox(request, env, id);
+  const [events, eventCount] = await Promise.all([
+    readInteractiveSessionEventRows(env, id, { limit: 240, newest: true }),
+    countInteractiveSessionEvents(env, id),
+  ]);
+  const transcript = boundedUtf8Tail(sessionLogTranscript(session, events));
+  return {
+    ...openClawCrabboxResponse(env, openClawServiceUser(), session),
+    transcript: transcript.text,
+    eventCount,
+    truncated: transcript.truncated || eventCount > events.length,
+  };
+}
+
+async function openClawMessageCrabbox(
+  request: Request,
+  env: RuntimeEnv,
+  id: string,
+): Promise<{ delivered: true; session: InteractiveSession; browserUrl: string }> {
+  requireOpenClawService(request, env);
+  const body = await readJson<{ rootSessionId?: string; message?: string; enter?: boolean }>(request);
+  const session = await openClawRootScopedCrabbox(request, env, id, body.rootSessionId);
+  if (["stopping", "stopped", "expired", "failed"].includes(session.status)) {
+    throw badRequest(`session is ${session.status}`);
+  }
+  if (!session.capabilities.terminal) {
+    throw badRequest("session does not advertise terminal access");
+  }
+  const message = clean(body.message, 4000);
+  if (!message) throw badRequest("message is required");
+  const serviceUser = openClawServiceUser();
+  const terminalRequest = new Request(request.url, { headers: { upgrade: "websocket" } });
+  const upstream = await openInteractiveTerminalUpstream(
+    terminalRequest,
+    env,
+    serviceUser,
+    session,
+    120,
+    34,
+  );
+  await upstream.markConnected();
+  upstream.socket.send(encoder.encode(`${message}${body.enter === false ? "" : "\r"}`));
+  upstream.socket.close(1000, "OpenClaw service nudge sent");
+  const now = Date.now();
+  await appendInteractiveSessionEvent(env, id, serviceUser, "OpenClaw service nudge sent", now);
+  await audit(env, serviceUser, `openclaw crabbox message sent ${id}`, now);
+  return {
+    delivered: true,
+    ...openClawCrabboxResponse(
+      env,
+      serviceUser,
+      (await readInteractiveSession(env, id)) as InteractiveSession,
+    ),
+  };
+}
+
+async function openClawMutateCrabbox(
+  request: Request,
+  env: RuntimeEnv,
+  id: string,
+): Promise<{ session: InteractiveSession; browserUrl: string }> {
+  requireOpenClawService(request, env);
+  const body = await readJson<{ rootSessionId?: string; action?: string }>(request);
+  await openClawRootScopedCrabbox(request, env, id, body.rootSessionId);
+  if (body.action !== "stop") throw badRequest("only stop is supported");
+  const serviceUser = openClawServiceUser();
+  const result = await mutateInteractiveSession(request, env, serviceUser, id, body.action);
+  await audit(env, serviceUser, `openclaw crabbox stop requested ${id}`, Date.now());
+  return openClawCrabboxResponse(env, serviceUser, result.session);
+}
+
+async function openClawRootScopedCrabbox(
+  request: Request,
+  env: RuntimeEnv,
+  id: string,
+  bodyRootSessionId?: string,
+): Promise<InteractiveSession> {
+  const rootSessionId = clean(
+    bodyRootSessionId ?? request.headers.get("x-crabfleet-root-session-id"),
+    120,
+  );
+  if (!rootSessionId) throw badRequest("root session id is required");
+  const session = await readFreshInteractiveSession(env, id);
+  if (!session || !sessionBelongsToRoot(session.id, session.rootSessionId, rootSessionId)) {
+    throw notFound("interactive session not found");
+  }
+  return session;
+}
+
+function openClawCrabboxResponse(
+  env: RuntimeEnv,
+  serviceUser: User,
+  session: InteractiveSession,
+): { session: InteractiveSession; browserUrl: string } {
+  return {
+    session: decorateInteractiveSession(session, serviceUser, env),
+    browserUrl: `${browserAppOrigin(env)}/app/sessions/${encodeURIComponent(session.id)}`,
+  };
 }
 
 async function openClawRegisterActionSession(
