@@ -108,6 +108,9 @@ test("OpenClaw create preserves the already-decorated interactive session", asyn
 	assert.match(createSource, /return openClawDecoratedCrabboxResponse\(env, result\.session\)/);
 	assert.doesNotMatch(createSource, /openClawCrabboxResponse\(env, serviceUser, result\.session\)/);
 	assert.doesNotMatch(responseSource, /decorateInteractiveSession/);
+	assert.match(createSource, /AbortSignal\.timeout\(openClawPreparationTimeoutMs\)/);
+	assert.match(createSource, /ensureOpenClawServiceBranch\([\s\S]*signal\)/);
+	assert.match(createSource, /if \(signal\.aborted\)/);
 });
 
 test("OpenClaw mutations persist request evidence before consequential work", async () => {
@@ -221,7 +224,9 @@ test("OpenClaw room reservation precedes branch mutation, event recording, and p
 	const readSource = source.slice(readStart, readEnd);
 
 	assert.match(migration, /ADD COLUMN preparation_pending INTEGER NOT NULL DEFAULT 0/);
-	assert.match(capacitySource, /fn\.countAll<number>\(\)/);
+	assert.match(capacitySource, /inserted\.rowid AS inserted_rowid/);
+	assert.match(capacitySource, /candidate\.rowid <= inserted\.rowid/);
+	assert.match(capacitySource, /GROUP BY inserted\.rowid/);
 	assert.match(capacitySource, /deleteFrom\("interactive_sessions"\)/);
 	assert.match(
 		capacitySource,
