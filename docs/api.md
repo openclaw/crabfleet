@@ -580,7 +580,9 @@ using browser cookies or an individual session's agent token:
 - `POST /api/openclaw/crabboxes/:id/message`: send one terminal message/nudge.
 - `POST /api/openclaw/crabboxes/:id/actions`: request the supported `stop` action.
 
-Every endpoint requires `Authorization: Bearer CRABBOX_OPENCLAW_TOKEN`.
+Every endpoint requires a configured service capability: the existing
+`CRABBOX_OPENCLAW_TOKEN`, or the dedicated `CRABBOX_MULTICODEX_TOKEN` for a
+MultiCodex deployment.
 Per-crabbox reads require `X-Crabfleet-Root-Session-ID`; message and action
 bodies require `rootSessionId`. A session outside that exact root is returned
 as not found. Transcript responses contain at most the newest 240 events and
