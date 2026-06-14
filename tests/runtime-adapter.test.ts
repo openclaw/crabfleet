@@ -767,6 +767,12 @@ test("strict session rows and cleanup preserve terminal finalization anchors", a
   assert.match(cleanupSource, /deleteFrom\("interactive_session_log_archives"\)/);
   assert.match(cleanupSource, /deleteFrom\("interactive_sessions"\)/);
   assert.match(cleanupSource, /FROM interactive_session_credential_policies/);
+  assert.equal(
+    cleanupSource.match(/FROM interactive_sessions AS descendant/g)?.length,
+    2,
+  );
+  assert.match(cleanupSource, /descendant\.root_session_id = interactive_sessions\.id/);
+  assert.match(cleanupSource, /descendant\.root_session_id = \$\{row\.id\}/);
   assert.match(source, /terminalFinalizationPendingQuery/);
   assert.match(source, /executeBatch\(env, \[[\s\S]*interactive_session_events/);
   assert.match(source, /COALESCE\([\s\S]*event_count[\s\S]*count\(\*\)/);

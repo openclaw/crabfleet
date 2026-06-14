@@ -5129,6 +5129,13 @@ async function cleanupInteractiveSessions(
           AND archive.session_updated_at = interactive_sessions.updated_at
       )
     `).where(sql<boolean>`
+      NOT EXISTS (
+        SELECT 1
+        FROM interactive_sessions AS descendant
+        WHERE descendant.root_session_id = interactive_sessions.id
+          AND descendant.id != interactive_sessions.id
+      )
+    `).where(sql<boolean>`
       ${env.SESSION_LOGS ? 1 : 0} = 0
       OR EXISTS (
         SELECT 1
@@ -5187,6 +5194,13 @@ async function deleteFinalizedInteractiveSession(
         SELECT 1
         FROM interactive_session_credential_policies
         WHERE session_id = ${row.id}
+      )
+    `).where(sql<boolean>`
+      NOT EXISTS (
+        SELECT 1
+        FROM interactive_sessions AS descendant
+        WHERE descendant.root_session_id = ${row.id}
+          AND descendant.id != ${row.id}
       )
     `).where(sql<boolean>`
       ${archive ? 1 : 0} = 1
