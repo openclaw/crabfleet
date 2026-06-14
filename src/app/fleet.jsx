@@ -321,6 +321,12 @@ function FleetBox({ session, openSessionGrid, deleteInteractiveSession, canManag
           <span>{seen ? `seen ${elapsed(seen)}` : "no heartbeat"}</span>
         </div>
       ) : null}
+      {session.codexSsh ? (
+        <div class="fleet-box-codex">
+          <span>Codex SSH · {session.codexSsh.alias}</span>
+          <CopyCommand value={session.codexSsh.setupCommand || `ssh ${session.codexSsh.alias}`} />
+        </div>
+      ) : null}
       <div class="fleet-box-actions">
         {attachable ? (
           <button class="primary" onClick={() => openSessionGrid(session.id)}>

@@ -236,7 +236,7 @@ The Crabbox namespace cutover intentionally has no old-name compatibility. Exist
 - `CRABFLEET_PREFERRED_REPO` – Optional first/default enabled repo, default `openclaw/crabfleet`
 - `CRABFLEET_DEFAULT_RUNTIME` – Optional interactive runtime default, `container` or `crabbox`; defaults to `container`
 - `CRABFLEET_DEFAULT_PROFILE` – Optional opaque runtime-adapter profile, default `default`
-- `CRABFLEET_RUNTIME_PROFILES_JSON` – Optional bounded JSON array of generic profile descriptors (`id`, `label`, optional `target`, and optional boolean `capabilities`) shown to authenticated users when creating Crabbox sessions; when configured, `CRABFLEET_DEFAULT_PROFILE` must name one entry
+- `CRABFLEET_RUNTIME_PROFILES_JSON` – Optional bounded JSON array of generic profile descriptors (`id`, `label`, optional `target`, optional boolean `capabilities`, and optional `codexSsh`) shown to authenticated users when creating Crabbox sessions; when configured, `CRABFLEET_DEFAULT_PROFILE` must name one entry. `codexSsh.aliasTemplate` may use `{providerResourceId}`, `{workspaceId}`, `{sessionId}`, and `{profile}`. Optional `codexSsh.setupCommand` is an argv-like JSON string array: its first item and static items are shell-safe tokens, while any later item may be one complete placeholder. Crabfleet shell-quotes every substituted argument.
 - `CRABFLEET_DEV_LOGIN_ENABLED` – Explicit local-only development identity login gate; disabled unless exactly `true`, and still restricted to literal localhost requests
 - `OPENAI_API_KEY` – Required for built-in Cloudflare Sandbox Codex CLI sessions; injected by the Worker outbound path for Cloudflare Sandbox requests
 
@@ -246,12 +246,16 @@ teaching Crabfleet about either provider:
 ```dotenv
 CRABFLEET_DEFAULT_RUNTIME="crabbox"
 CRABFLEET_DEFAULT_PROFILE="linux-desktop"
-CRABFLEET_RUNTIME_PROFILES_JSON='[{"id":"linux-desktop","label":"Linux","target":"linux","capabilities":{"terminal":true,"desktop":true,"vnc":true}},{"id":"macos-desktop","label":"macOS","target":"macos","capabilities":{"terminal":true,"desktop":true,"vnc":true}}]'
+CRABFLEET_RUNTIME_PROFILES_JSON='[{"id":"linux-desktop","label":"Linux","target":"linux","capabilities":{"terminal":true,"desktop":true,"vnc":true},"codexSsh":{"aliasTemplate":"codex-{providerResourceId}","setupCommand":["fleet-connect","{providerResourceId}"]}},{"id":"macos-desktop","label":"macOS","target":"macos","capabilities":{"terminal":true,"desktop":true,"vnc":true}}]'
 CRABBOX_RUNTIME_ADAPTER_URL_TEMPLATE="https://controller.example/v1/adapters/{profile}/proxy"
 ```
 
 The route template can select one outbound lifecycle adapter per profile. Each
-adapter remains responsible for its provider mapping and real capabilities.
+adapter remains responsible for its provider mapping and real capabilities. A
+configured Codex SSH handoff appears only to a ready session's managers. The
+browser copies the deployment-local setup command; it never executes it or
+stores provider credentials. That helper must install a concrete OpenSSH alias
+whose remote login shell can find an authenticated `codex` command.
 
 ### Verify Deployment
 

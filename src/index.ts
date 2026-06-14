@@ -152,8 +152,10 @@ import {
 } from "./credential-policy-fence";
 import {
   parseRuntimeProfiles,
+  resolveRuntimeProfileCodexSsh,
   runtimeProfileByID,
   runtimeProfileCapabilities,
+  type ResolvedRuntimeProfileCodexSsh,
   type RuntimeProfileDescriptor,
 } from "./runtime-profiles";
 
@@ -488,6 +490,7 @@ type InteractiveSession = {
   canRequestControl?: boolean;
   sharedReadOnly?: boolean;
   ptyAvailable?: boolean;
+  codexSsh?: ResolvedRuntimeProfileCodexSsh | null;
   logs: string[];
   logArchive: InteractiveSessionLogArchive | null;
 };
@@ -1113,6 +1116,14 @@ function publicDeploymentConfig(env: RuntimeEnv): PublicDeploymentConfig {
     canonicalUrl: trustedProxyPublicOrigin(env) ?? canonicalUrl,
     productUrl,
     sshHost,
+  };
+}
+
+function clientDeploymentConfig(env: RuntimeEnv): DeploymentConfig {
+  const config = deploymentConfig(env);
+  return {
+    ...config,
+    runtimeProfiles: config.runtimeProfiles.map(({ codexSsh: _serverOnly, ...profile }) => profile),
   };
 }
 
@@ -4031,7 +4042,7 @@ async function readState(
   return {
     user,
     auth: authMethods(env, request),
-    deployment: deploymentConfig(env),
+    deployment: clientDeploymentConfig(env),
     org: settings.org ?? "OpenClaw",
     cap: numberSetting(settings.cap, 20),
     retention: settings.retention ?? "30",
@@ -14920,6 +14931,23 @@ function decorateInteractiveSession(
     : canControl && session.capabilities.terminal
       ? session.attachUrl
       : null;
+  const codexSshReady =
+    session.adapter === runtimeAdapterName &&
+    session.capabilities.terminal &&
+    ["ready", "attached", "detached"].includes(session.status) &&
+    Boolean(session[interactiveSessionAdapterControlPlane]) &&
+    configuredRuntimeAdapterControlPlane(env, session.profile) ===
+      session[interactiveSessionAdapterControlPlane];
+  const runtimeProfile = runtimeProfileByID(deploymentConfig(env).runtimeProfiles, session.profile);
+  const codexSsh =
+    canManage && codexSshReady
+      ? resolveRuntimeProfileCodexSsh(runtimeProfile, {
+          providerResourceId: session.providerResourceId,
+          workspaceId: session.adapterWorkspaceId,
+          sessionId: session.id,
+          profile: session.profile,
+        })
+      : null;
   return {
     ...session,
     adapter: canControl ? session.adapter : null,
@@ -14931,6 +14959,7 @@ function decorateInteractiveSession(
     leaseId: canControl ? legacyInteractiveSessionLeaseId(session) : null,
     attachUrl,
     ptyAvailable,
+    codexSsh,
     vncUrl: canControl
       ? versionedDesktopAvailable
         ? runtimeAdapterBrowserVncUrl(browserAppOrigin(env), session.id)

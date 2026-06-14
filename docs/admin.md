@@ -183,6 +183,8 @@ Crabfleet requires exact backend origin and constant-time shared-secret proof, t
 
 Authenticated proxy requests have asserted identity, proxy secret, local cookie, `Authorization`, and `Proxy-Authorization` stripped before app or terminal routing. Service-token routes keep their own scoped auth model.
 
+Runtime profiles can optionally expose a Codex SSH handoff to managers of ready provider workspaces. Treat `codexSsh.setupCommand` as trusted deployment configuration: keep credentials out of its argv-like static tokens, use only the documented complete-token placeholders, never invoke a shell evaluator, and point it at a local helper that treats dynamic arguments as data while installing a concrete SSH alias. Crabfleet displays and copies the shell-quoted command but does not run it.
+
 Proxy-only identity cannot link SSH keys. Use a separate OAuth-capable origin through `GITHUB_REDIRECT_URI` for SSH onboarding.
 
 ### Bootstrap Token

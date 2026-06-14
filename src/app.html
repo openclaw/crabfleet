@@ -1090,6 +1090,23 @@
         font-family: ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;
         font-size: 10px;
       }
+      .fleet-box-codex {
+        display: grid;
+        gap: 5px;
+        min-width: 0;
+      }
+      .fleet-box-codex > span {
+        overflow: hidden;
+        color: var(--muted);
+        font-family: ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;
+        font-size: 10px;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      .fleet-box-codex .terminal-command {
+        width: 100%;
+        justify-content: space-between;
+      }
       .fleet-box-actions {
         display: flex;
         flex-wrap: wrap;
