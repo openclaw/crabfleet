@@ -3229,9 +3229,11 @@ async function openClawCreateCrabbox(
     purpose?: string;
     summary?: string;
     githubToken?: string;
+    baseBranch?: string;
   }>(request);
   const owner = openClawOwner(body.owner);
   const serviceUser = openClawServiceUser();
+  await ensureOpenClawServiceBranch(env, body.repo, body.branch, body.baseBranch);
   const result = await createInteractiveSessionFromInput(
     env,
     serviceUser,
@@ -3600,6 +3602,46 @@ function requireOpenClawService(request: Request, env: RuntimeEnv): void {
   if (!openClawServiceAuthorized(request.headers.get("authorization"), tokens)) {
     throw unauthorized();
   }
+}
+
+async function ensureOpenClawServiceBranch(
+  env: RuntimeEnv,
+  repoInput: unknown,
+  branchInput: unknown,
+  baseBranchInput: unknown,
+): Promise<void> {
+  const repo = normalizeRepo(repoInput);
+  if (!repo) throw badRequest("repo is required");
+  await requireRepo(env, repo);
+  const branch = clean(branchInput, 120) || "main";
+  const baseBranch = clean(baseBranchInput, 120) || "main";
+  if (branch === baseBranch) return;
+  if (!env.GITHUB_TOKEN) {
+    throw serviceUnavailable("GitHub token is not configured for service branch creation");
+  }
+  const [owner, name] = repo.split("/");
+  const refPath = `/repos/${owner}/${name}/git/ref/heads/${encodeURIComponent(branch)}`;
+  try {
+    await githubFetch<{ object: { sha: string } }>(refPath, env.GITHUB_TOKEN);
+    return;
+  } catch (error) {
+    if (!(error instanceof GitHubApiError) || error.status !== 404) throw error;
+  }
+  const base = await githubFetch<{ object: { sha: string } }>(
+    `/repos/${owner}/${name}/git/ref/heads/${encodeURIComponent(baseBranch)}`,
+    env.GITHUB_TOKEN,
+  );
+  const response = await fetch(`https://api.github.com/repos/${owner}/${name}/git/refs`, {
+    method: "POST",
+    body: JSON.stringify({ ref: `refs/heads/${branch}`, sha: base.object.sha }),
+    headers: { ...githubHeaders(), authorization: `Bearer ${env.GITHUB_TOKEN}` },
+  });
+  if (response.ok) return;
+  if (response.status === 422) {
+    await githubFetch<{ object: { sha: string } }>(refPath, env.GITHUB_TOKEN);
+    return;
+  }
+  throw new GitHubApiError(response.status);
 }
 
 function actionWorkIdentifier(value: unknown, name: string, max: number): string {
