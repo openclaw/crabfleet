@@ -144,7 +144,7 @@ Sandbox checkpoints use provider backups plus a Durable Object registry. They re
 
 Crabfleet persists the canonical adapter identity, namespaced workspace ID, immutable create payload, idempotency key, lifecycle state, provider identity, capabilities, expiry, and create ambiguity before or during provider calls.
 
-Deployments may expose a bounded allowlist of generic runtime profiles through `CRABFLEET_RUNTIME_PROFILES_JSON`. Authenticated users see those labels when creating Crabbox sessions. The selected opaque profile ID is validated server-side, included in the immutable adapter request, and can seed the requested capability preview. The adapter remains responsible for mapping the profile to a provider and enforcing actual capabilities.
+Deployments may expose a bounded allowlist of generic runtime profiles through `CRABFLEET_RUNTIME_PROFILES_JSON`. Authenticated users see those labels when creating Crabbox sessions. The selected opaque profile ID is validated server-side, included in the immutable adapter request, and can seed the requested capability preview. The adapter remains responsible for mapping the profile to a provider and enforcing actual capabilities. Profiles may define a generic `codexSsh` alias and setup-command template. Crabfleet resolves only bounded non-secret identifiers, returns the handoff only to managers of ready versioned-adapter sessions, and leaves provider-specific alias installation outside the public control plane.
 
 Required properties:
 
