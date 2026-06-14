@@ -108,6 +108,7 @@ type createSessionRequest struct {
 	Repo            string `json:"repo,omitempty"`
 	Branch          string `json:"branch,omitempty"`
 	Runtime         string `json:"runtime,omitempty"`
+	Profile         string `json:"profile,omitempty"`
 	Command         string `json:"command,omitempty"`
 	Prompt          string `json:"prompt,omitempty"`
 	ParentSessionID string `json:"parentSessionId,omitempty"`
@@ -834,6 +835,7 @@ func parseCreate(args []string, client *apiClient, fingerprint string) createArg
 	fs.StringVar(&req.Repo, "repo", "", "repo")
 	fs.StringVar(&req.Branch, "branch", "main", "branch")
 	fs.StringVar(&req.Runtime, "runtime", "", "runtime override; defaults to deployment")
+	fs.StringVar(&req.Profile, "profile", "", "runtime profile override; defaults to deployment")
 	fs.StringVar(&req.Command, "command", "", "command")
 	fs.StringVar(&req.ParentSessionID, "parent", "", "parent session")
 	fs.StringVar(&req.RootSessionID, "root", "", "root session")

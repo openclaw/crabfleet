@@ -235,8 +235,21 @@ The Crabbox namespace cutover intentionally has no old-name compatibility. Exist
 - `CRABFLEET_PREFERRED_REPO` – Optional first/default enabled repo, default `openclaw/crabfleet`
 - `CRABFLEET_DEFAULT_RUNTIME` – Optional interactive runtime default, `container` or `crabbox`; defaults to `container`
 - `CRABFLEET_DEFAULT_PROFILE` – Optional opaque runtime-adapter profile, default `default`
+- `CRABFLEET_RUNTIME_PROFILES_JSON` – Optional bounded JSON array of generic profile descriptors (`id`, `label`, optional `target`, and optional boolean `capabilities`) shown to authenticated users when creating Crabbox sessions; when configured, `CRABFLEET_DEFAULT_PROFILE` must name one entry
 - `CRABFLEET_DEV_LOGIN_ENABLED` – Explicit local-only development identity login gate; disabled unless exactly `true`, and still restricted to literal localhost requests
 - `OPENAI_API_KEY` – Required for built-in Cloudflare Sandbox Codex CLI sessions; injected by the Worker outbound path for Cloudflare Sandbox requests
+
+For example, a deployment can expose two generic desktop profiles without
+teaching Crabfleet about either provider:
+
+```dotenv
+CRABFLEET_DEFAULT_RUNTIME="crabbox"
+CRABFLEET_DEFAULT_PROFILE="linux-desktop"
+CRABFLEET_RUNTIME_PROFILES_JSON='[{"id":"linux-desktop","label":"Linux","target":"linux","capabilities":{"terminal":true,"desktop":true,"vnc":true}},{"id":"macos-desktop","label":"macOS","target":"macos","capabilities":{"terminal":true,"desktop":true,"vnc":true}}]'
+```
+
+The configured lifecycle adapter remains responsible for mapping each opaque
+profile ID to a provider and enforcing its real capabilities.
 
 ### Verify Deployment
 

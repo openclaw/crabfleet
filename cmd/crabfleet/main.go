@@ -64,6 +64,7 @@ type newCmd struct {
 	Repo    string   `help:"Repository to prepare, owner/repo."`
 	Branch  string   `help:"Git branch to checkout." default:"main"`
 	Runtime *string  `help:"Runtime backend override; omit to use the deployment default." enum:"crabbox,container"`
+	Profile string   `help:"Runtime profile override; omit to use the deployment default."`
 	Command string   `help:"Command to run after checkout." default:"codex --yolo"`
 	Parent  string   `help:"Parent crabbox session id."`
 	Root    string   `help:"Root crabbox session id."`
@@ -202,6 +203,7 @@ type createSessionRequest struct {
 	Repo            string `json:"repo,omitempty"`
 	Branch          string `json:"branch,omitempty"`
 	Runtime         string `json:"runtime,omitempty"`
+	Profile         string `json:"profile,omitempty"`
 	Command         string `json:"command,omitempty"`
 	Prompt          string `json:"prompt,omitempty"`
 	ParentSessionID string `json:"parentSessionId,omitempty"`
@@ -396,6 +398,7 @@ func (cmd newCmd) sessionRequest(app *cli) createSessionRequest {
 		Repo:            cmd.Repo,
 		Branch:          cmd.Branch,
 		Runtime:         runtime,
+		Profile:         cmd.Profile,
 		Command:         cmd.Command,
 		Prompt:          prompt,
 		ParentSessionID: parent,
@@ -409,6 +412,9 @@ func (cmd newCmd) sshCreateArgs(req createSessionRequest) []string {
 	args := []string{"new", "--branch", req.Branch}
 	if req.Runtime != "" {
 		args = append(args, "--runtime", req.Runtime)
+	}
+	if req.Profile != "" {
+		args = append(args, "--profile", req.Profile)
 	}
 	if req.Repo != "" {
 		args = append(args, "--repo", req.Repo)

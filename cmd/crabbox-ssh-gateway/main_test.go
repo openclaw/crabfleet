@@ -98,6 +98,17 @@ func TestParseCreateLeavesRuntimeToDeploymentDefault(t *testing.T) {
 	}
 }
 
+func TestParseCreateAcceptsProfileOverride(t *testing.T) {
+	create := parseCreate(
+		[]string{"--repo", "openclaw/crabfleet", "--profile", "desktop-a", "fix it"},
+		nil,
+		"",
+	)
+	if create.request.Profile != "desktop-a" {
+		t.Fatalf("profile = %q, want explicit override", create.request.Profile)
+	}
+}
+
 func TestTerminalCapabilityWithdrawalSuppressesAttach(t *testing.T) {
 	if !terminalCapable(interactiveSession{}) {
 		t.Fatal("legacy session without capabilities should remain attachable")

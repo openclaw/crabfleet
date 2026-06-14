@@ -12,7 +12,9 @@ test("app actions use styled HTML dialogs instead of browser prompts", async () 
   assert.match(source, /function Drawer[\s\S]*?previousFocus\?\.focus\?\.\(\)/);
   assert.match(source, /closeAllDrawers\(\);\s*setSignedIn\(false\);/);
   assert.match(source, /async function showSharedLinkError[\s\S]*?closeAllDrawers\(\);/);
-  assert.match(source, /key=\{state\.deployment\?\.defaultRuntime \|\| "container"\}/);
+  assert.match(source, /runtimeProfiles\.map\(\(profile\) =>/);
+  assert.match(source, /runtimeProfileOptionLabel\(profile\)/);
+  assert.match(source, /onReset=\{\(\) => setRuntime\(defaultRuntime\)\}/);
   assert.match(source, /useEffect\(\(\) => setRepo\(preferred\), \[preferred\]\)/);
 });
 
