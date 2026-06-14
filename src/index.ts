@@ -3297,7 +3297,12 @@ async function openClawReadSessionRoot(
     .where((expression) =>
       expression.or([expression("root_session_id", "=", root), expression("id", "=", root)]),
     )
-    .where("created_by", "=", "service:openclaw")
+    .where((expression) =>
+      expression.or([
+        expression("created_by", "=", "service:openclaw"),
+        expression("created_by", "like", "session:%"),
+      ]),
+    )
     .where("runtime", "!=", "github_actions")
     .where("work_key", "is", null)
     .orderBy("created_at", "asc")

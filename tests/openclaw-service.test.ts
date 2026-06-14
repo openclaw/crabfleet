@@ -35,7 +35,7 @@ test("session root fences accept the root and every child only for the exact roo
 	assert.equal(sessionBelongsToRoot("IS-10", null, ""), false);
 });
 
-test("room supervision accepts only service-created non-action trees", () => {
+test("room supervision accepts service roots and their agent-created non-action descendants", () => {
 	const root = {
 		id: "IS-10",
 		rootSessionId: "IS-10",
@@ -46,6 +46,11 @@ test("room supervision accepts only service-created non-action trees", () => {
 	assert.equal(openClawRoomSessionAllowed(root), true);
 	assert.equal(openClawRoomRootAllowed(root), true);
 	assert.equal(openClawRoomRootAllowed({ ...root, id: "IS-11" }), false);
+	assert.equal(
+		openClawRoomSessionAllowed({ ...root, id: "IS-11", createdBy: "session:IS-10" }),
+		true,
+	);
+	assert.equal(openClawRoomRootAllowed({ ...root, createdBy: "session:IS-10" }), false);
 	assert.equal(openClawRoomSessionAllowed({ ...root, runtime: "github_actions" }), false);
 	assert.equal(openClawRoomSessionAllowed({ ...root, createdBy: "github:123" }), false);
 	assert.equal(openClawRoomSessionAllowed({ ...root, workKey: "repo:pr:1" }), false);
@@ -125,7 +130,8 @@ test("OpenClaw root reads are filtered, capped, concurrent, and log-free", async
 	const summaryEnd = source.indexOf("function openClawDecoratedCrabboxResponse", summaryStart);
 	const summarySource = source.slice(summaryStart, summaryEnd);
 
-	assert.match(readSource, /\.where\("created_by", "=", "service:openclaw"\)/);
+	assert.match(readSource, /expression\("created_by", "=", "service:openclaw"\)/);
+	assert.match(readSource, /expression\("created_by", "like", "session:%"\)/);
 	assert.match(readSource, /\.where\("runtime", "!=", "github_actions"\)/);
 	assert.match(readSource, /\.where\("work_key", "is", null\)/);
 	assert.match(readSource, /\.limit\(openClawRoomMaxSessions \+ 1\)/);

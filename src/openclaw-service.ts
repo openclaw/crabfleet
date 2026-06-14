@@ -29,7 +29,7 @@ export function sessionBelongsToRoot(
 
 export function openClawRoomSessionAllowed(session: OpenClawSessionFence): boolean {
 	return (
-		session.createdBy === "service:openclaw" &&
+		(session.createdBy === "service:openclaw" || session.createdBy.startsWith("session:")) &&
 		session.runtime !== "github_actions" &&
 		!session.workKey
 	);
@@ -37,7 +37,9 @@ export function openClawRoomSessionAllowed(session: OpenClawSessionFence): boole
 
 export function openClawRoomRootAllowed(session: OpenClawSessionFence): boolean {
 	return (
-		openClawRoomSessionAllowed(session) && (session.rootSessionId || session.id) === session.id
+		session.createdBy === "service:openclaw" &&
+		openClawRoomSessionAllowed(session) &&
+		(session.rootSessionId || session.id) === session.id
 	);
 }
 
