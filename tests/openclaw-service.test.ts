@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
 import test from "node:test";
 
 import {
@@ -61,4 +62,18 @@ test("bounded transcript tails remain valid UTF-8 and report truncation", () => 
 		new TextEncoder().encode(boundedUtf8Tail("\u{1F600}\u{1F600}", 5).text).byteLength <= 5,
 	);
 	assert.equal(openClawTranscriptMaxBytes, 64 * 1024);
+});
+
+test("OpenClaw create preserves the already-decorated interactive session", async () => {
+	const source = await readFile(new URL("../src/index.ts", import.meta.url), "utf8");
+	const createStart = source.indexOf("async function openClawCreateCrabbox");
+	const createEnd = source.indexOf("async function openClawReadSessionRoot", createStart);
+	const createSource = source.slice(createStart, createEnd);
+	const responseStart = source.indexOf("function openClawDecoratedCrabboxResponse");
+	const responseEnd = source.indexOf("async function openClawRegisterActionSession", responseStart);
+	const responseSource = source.slice(responseStart, responseEnd);
+
+	assert.match(createSource, /return openClawDecoratedCrabboxResponse\(env, result\.session\)/);
+	assert.doesNotMatch(createSource, /openClawCrabboxResponse\(env, serviceUser, result\.session\)/);
+	assert.doesNotMatch(responseSource, /decorateInteractiveSession/);
 });
