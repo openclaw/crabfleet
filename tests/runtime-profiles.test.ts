@@ -52,6 +52,7 @@ test("runtime profile catalog fails closed on malformed or ambiguous input", () 
     '[{"id":"a","label":" A"}]',
     '[{"id":"a","label":"A\\nB"}]',
     '[{"id":"a","label":"A","capabilities":{"desktop":"yes"}}]',
+    '[{"id":"a","label":"A","capabilities":null}]',
     '[{"id":"a","label":"A","capabilities":{"unknown":true}}]',
     '[{"id":"a","label":"A","privateProvider":"hidden"}]',
   ];
@@ -65,9 +66,12 @@ test("runtime profile catalog fails closed on malformed or ambiguous input", () 
 test("profile allowlisting and capability withdrawals stay enforced at provisioning", async () => {
   const source = await readFile(new URL("../src/index.ts", import.meta.url), "utf8");
   const selectionStart = source.indexOf("const profile = clean(body.profile");
-  const selectionEnd = source.indexOf("const command = interactiveCommand", selectionStart);
-  const selection = source.slice(selectionStart, selectionEnd);
-  assert.match(selection, /deployment\.runtimeProfiles\.length > 0 && !runtimeProfile/);
+  assert.equal(selectionStart, -1);
+  const helperStart = source.indexOf("function selectedRuntimeProfile");
+  const helperEnd = source.indexOf("function publicDeploymentConfig", helperStart);
+  const helper = source.slice(helperStart, helperEnd);
+  assert.match(helper, /deployment\.runtimeProfiles\.length > 0 && !descriptor/);
+  assert.ok(source.indexOf("selectedRuntimeProfile(deploymentConfig(env), session.profile)") > 0);
 
   const resultStart = source.indexOf("function runtimeAdapterProvisionResult");
   const resultEnd = source.indexOf(

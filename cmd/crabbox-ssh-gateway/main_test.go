@@ -215,6 +215,15 @@ func TestHelpNamesDeleteAsCanonicalCommand(t *testing.T) {
 	}
 }
 
+func TestHelpDocumentsProfileOverride(t *testing.T) {
+	var output bytes.Buffer
+	printHelp(&output, user{Login: "operator", Role: "owner"})
+	if got := output.String(); !strings.Contains(got, "[--profile name]") ||
+		!strings.Contains(got, "--profile overrides the deployment default") {
+		t.Fatalf("help = %q", got)
+	}
+}
+
 func TestLegacyProviderCleanupWarningRequiresConfirmedLegacyStop(t *testing.T) {
 	if !legacyProviderCleanupMayBeRequired(interactiveSession{Status: "stopped"}) {
 		t.Fatal("confirmed legacy stop should retain the cleanup warning")

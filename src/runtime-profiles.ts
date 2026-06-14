@@ -60,7 +60,7 @@ export function parseRuntimeProfiles(value: string | undefined): RuntimeProfileD
     seen.add(id);
     seenLabels.add(normalizedLabel);
 
-    const rawCapabilities = entry.capabilities ?? {};
+    const rawCapabilities = entry.capabilities === undefined ? {} : entry.capabilities;
     if (
       !isRecord(rawCapabilities) ||
       Object.keys(rawCapabilities).some((key) => !capabilityNameSet.has(key))
