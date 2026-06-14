@@ -2,171 +2,195 @@
 title: Architecture
 layout: default
 permalink: /architecture/
-description: "System design, data model, and runtime architecture for Crabfleet."
+description: "System design, persistence, runtime lifecycle, and security boundaries for Crabfleet."
 ---
 
 # Architecture
 
-Crabfleet is a Cloudflare Worker backed by D1. The deployed Worker is the control plane: auth, repo gates, crabboxes, cards, run attempts, workflow evaluation, issue/PR lookup, docs, the Ghostty WASM attach grid, and the same-origin PTY WebSocket proxy all run there today.
+Crabfleet is one Cloudflare Worker control plane with two user-facing views:
 
-Crabbox PTY/VNC links, Durable Object fanout, Discord/OpenClaw orchestration, and merge automation are represented by adapter metadata and product docs; backend bindings are explicit deployment work. Crabbox session events are archived to R2 when the `SESSION_LOGS` binding is configured.
+- **Fleet** shows live and retained interactive Codex sessions grouped by owner.
+- **Board** stores prompt/issue/PR cards, scheduling intent, run attempts, and policy.
+
+The OpenClaw deployment uses the built-in Cloudflare Sandbox for Container sessions and the versioned Crabbox workspace adapter for Crabbox sessions. The same public Worker and UI can front other backends through deployment configuration.
 
 ## System Overview
 
+```text
+Browser / Go CLI / SSH gateway / OpenClaw automation
+                         |
+                         v
+                Cloudflare Worker
+        app, auth, REST, terminal hub, docs
+          |          |          |        |
+          v          v          v        v
+          D1     Sandbox DO   R2 logs   GitHub API
+          |
+          +--> SessionControlDO
+          |      credential policies, checkpoints,
+          |      GitHub Actions runner/viewer relay
+          |
+          +--> versioned Crabbox lifecycle adapter
+                 create, inspect, delete, PTY, desktop
 ```
-Browser app
-  | HTTPS
-  v
-Cloudflare Worker
-  - app/docs/static assets
-  - REST API
-  - GitHub OAuth + repo/issue/PR lookup
-  - runtime selection policy
-  |
-  +-- D1: users, sessions, repos, cards, events, run_attempts, repo_workflows
-  +-- SessionControl DO: sandbox credential policy and checkpoint handles
-  +-- GitHub API: OAuth, org/team membership, CRABBOX.md, issue/PR previews
-  +-- Ghostty WASM: terminal grid asset served by Worker
-```
 
-## Core Components
+Board and Fleet state use D1-backed REST responses and poll every 15 seconds while signed in. Live terminal bytes use the multiplex WebSocket hub at `/api/terminal/ws`.
 
-### Worker
+## Worker
 
-`src/index.ts` handles the app shell, docs routes, auth, API routes, Kysely D1 queries, GitHub calls, generated asset serving, and built-in Cloudflare Sandbox lifecycle paths. Sandbox model and GitHub credentials stay in the Worker/DO control path; sandbox env receives placeholders and outbound requests get credentials injected only for approved upstreams.
+`src/index.ts` owns:
 
-### D1 + Kysely
+- GitHub OAuth, bootstrap login, trusted-proxy auth, and SSH key linking.
+- Allowlist, repo, card, workflow, session, Fleet, and admin APIs.
+- Card runtime selection and heartbeat/stall state.
+- Built-in Cloudflare Sandbox provisioning and credential routing.
+- External workspace lifecycle reconciliation.
+- Terminal and desktop authorization.
+- R2 archive finalization and cleanup.
+- GitHub Actions session registration and runner relay.
+- Generated app/docs/static assets.
 
-Structured persistence uses D1 through a small Kysely dialect.
+`src/app/` contains the Preact UI. `cmd/crabfleet` is the Go CLI. `cmd/crabbox-ssh-gateway` terminates SSH and calls the Worker's scoped internal API.
 
-- `settings`: org config such as cap, retention, and merge policy.
-- `allow_entries`: user/team allowlist with roles.
+## Persistence
+
+### D1
+
+D1 is canonical for product metadata:
+
+- `settings`: org name, concurrency cap, retention selection, merge intent.
+- `allow_entries`: direct user, email, and team allowlist roles.
 - `repos`: enabled repositories.
-- `users`: GitHub users and cached team membership.
-- `sessions`: hashed session tokens.
-- `cards`: task metadata, prompt, repo, lane, policy, diff summary, active run id.
-- `run_attempts`: durable attempt state, heartbeat, runtime, lease fields, operator, selection reason, and runtime capabilities.
-- `repo_workflows`: last `CRABBOX.md` evaluation per repo, including status, source SHA, parsed config, prompt guidance, and error.
-- `events`: card/run event log.
-- `audit_events`: admin action log.
+- `users`, `sessions`, `ssh_keys`, `ssh_link_codes`: browser and SSH identity.
+- `cards`, `run_attempts`, `events`: Board state and durable attempt evidence.
+- `repo_workflows`: evaluated `CRABBOX.md` source, parsed defaults, and errors.
+- `interactive_sessions`, `interactive_session_events`: live/retained session state.
+- `interactive_session_log_archives`: current archive snapshot metadata and object keys.
+- `id_sequences`: monotonic managed session IDs.
+- `interactive_session_credential_policies`, `standalone_sandbox_provisions`, and reconcile state: durable credential ownership and teardown.
+- `audit_events`: admin and interactive-session lifecycle/control mutations.
 
-## Runtime Adapter Contract
+### Durable Objects
 
-When a card is claimed, Crabfleet records a runtime descriptor:
+- `Sandbox` runs first-party Cloudflare Sandbox workspaces.
+- `SessionControlDO` stores generation-fenced Sandbox credential/checkpoint state and relays one current GitHub Actions runner to multiple viewers.
 
-- `runtime`: `container` or `crabbox`
-- `reason`: card override, repo workflow default, prompt-required desktop/manual/perf capability, or product default
-- `capabilities`: terminal, takeover, VNC, desktop, logs, artifacts
+There is no `BoardDO` or `RunDO`. General Board/Fleet state is D1 plus REST polling.
 
-The UI and API both use capabilities. Takeover is visible and accepted only for an active run whose descriptor advertises takeover.
+### R2
 
-Interactive sessions can use the versioned external lifecycle adapter configured by `CRABBOX_RUNTIME_ADAPTER_URL`. The public contract is provider-neutral:
+`SESSION_LOGS` stores periodically refreshed interactive-session snapshots:
 
-- `POST /v1/workspaces` creates an idempotent workspace from a stable tenant-namespaced DNS-safe adapter ID, repo/ref, opaque profile, command, ownership, TTL, and requested capabilities. Crabfleet persists the identity, canonical control-plane registration, and complete immutable lifecycle snapshot before the network request so timeouts remain recoverable without moving the workspace ID between providers.
-- `GET /v1/workspaces/:id` reconciles status, terminal connection, adapter capabilities, expiry, and the separate opaque provider resource ID.
-- `DELETE /v1/workspaces/:id` releases the provider workspace before Crabfleet marks the session stopped.
-- `POST /v1/workspaces/:id/connections/desktop` mints a current desktop connection after Crabfleet authorization.
-
-Active external sessions are reconciled with compare-and-swap updates so a stale inspect cannot overwrite a concurrent stop. The reconciliation claim and completion both fence the original session revision, and changed state commits a completion-time revision strictly newer than the snapshot; slow provider I/O therefore cannot regress `updated_at` or overwrite a concurrent same-status edit. Credential-cleanup completion and confirmed runtime release use the same ownership CAS and `MAX(updated_at + 1, now)` rule, so terminal archive versions cannot move backward. A durable create-ambiguity marker prevents a stop from becoming terminal while an idempotent request outcome is unknown; ambiguous outcomes replay the exact serialized original request, and every session-bound DELETE remains blocked until that replay resolves create ownership. Replay during `stopping` has its own exact-row path fenced by the pending marker, registered control plane, immutable payload/settings, requested terminal state, and session version; it does not pass through generic provision staging. Definitive failures of the initial create read the provider response once, redact it through the shared sanitizer, durably enter `stopping`, clear create ambiguity, and record failed terminal intent plus the actionable failure reason before the DELETE request. Once any create result is ambiguous, only an exact-ID successful replay proves ownership and clears the marker; an explicit workspace-ID conflict proves non-ownership and detaches locally without DELETE, while authentication, routing, validation, and all other replay failures remain pending. All adapter bodies use one 64 KiB bounded stream reader before parsing, including chunked responses, so oversized provider output cannot consume unbounded Worker memory or starve reconciliation. Redaction removes credential and URL structure before substituting opaque provider identifiers, preventing identifier text from masking a secret-bearing field. Redacted provider messages from successful, pending, and failed DELETE responses are persisted while release is pending and retained as events in the final archive. After confirmed release, Crabfleet re-reads and compare-and-swaps the current marker and terminal intent, preventing a pre-DELETE snapshot from either losing failed intent or leaving a resolved create stuck in `stopping`; the original reason remains in the terminal event, API state, and archive. Every terminal event insert and finalization-marker update share one D1 batch, including the finalizer's idempotent synthetic event; summary, sharing, multiplayer, and control mutations include their row update in that same batch. Legacy local stop records its request event, stopped event, terminal state, and finalization marker in one exact-owner D1 batch; cron and targeted reconciliation recover pre-existing or interrupted `stopping` rows. The winning terminal transition forces the final archive, R2 transcript, and summary; equal-count archive replacement is monotonic by mutable session version, while concurrent writers use unique object keys and delete only keys proven not to be the committed archive. Status-only inspection preserves omitted capability, expiry, and terminal fields, while explicit clears remain explicit, including explicit terminal-capability withdrawal despite a terminal URL. Raw terminal URLs, attachability, and UI terminal/SSH affordances are redacted from every outward session shape while terminal capability is false. Known signed connection URLs are also removed from JSON and common slash-escaped provider-message representations before persistence or display. Adapter failures enter provider release first and become locally failed only after release confirmation. State reads with an `ExecutionContext` have a short reconciliation budget and hand at most one three-workspace wave to the Worker background, keeping worst-case adapter timeouts inside the platform lifetime; callers without a context await completion. D1 stores the immutable adapter workspace ID and optional opaque provider resource ID separately, plus the immutable payload and TTL/idle/capability snapshot, create-ambiguity marker, current capabilities, expiry, desired terminal status, last-reconcile, and reconcile-error state. Provider resource IDs never enter legacy lease parsing. Authenticated adapter calls reject redirects. Versioned-adapter terminal and VNC bearer URLs are validated without normalization and accepted values retain their exact signed bytes. Terminal URLs remain server-side and API clients receive only the authenticated Worker PTY route; VNC URLs are never persisted, and browser, CLI, and SSH views receive an absolute canonical Crabfleet browser route which authenticates control before redirecting to the transient adapter URL. After desktop mint, Crabfleet re-reads the exact session status, control grant, capability, and adapter identity before releasing the transient redirect, so concurrent revocation discards the URL. Legacy adapters keep their existing absolute URL contract.
-
-The versioned adapter is reachable only through the durable interactive-session lifecycle, never the stateless provision hook. Existing lifecycle operations resolve through the persisted canonical control-plane identity and fail closed if the live deployment binding differs or disappears. An explicit stop that loses its initial compare-and-swap succeeds only after rereading the exact workspace in `stopping` or terminal state; a concurrent active mutation instead returns conflict. Terminal attach and recurring socket grants require the adapter's current `terminal` capability; withdrawing it closes active sockets. Direct adapter `attachUrl` values stay server-side and receive the configured adapter bearer only when their origin matches both the persisted and currently configured control plane, so reusable shell credentials never enter arbitrary origins, URLs, or the browser; only Crabfleet-owned bridge and runner endpoints receive `cols` and `rows` query parameters. A PTY transport failure leaves the lifecycle workspace detached and retryable rather than terminalizing it without provider release.
-
-Interactive session numbers come from a persistent monotonic sequence, so cleanup never reuses an adapter route or idempotency key. `CRABBOX_RUNTIME_ADAPTER_NAMESPACE` must also be unique and stable for each tenant sharing an adapter.
-
-Deployment identity is runtime configuration rather than an adapter concern. The API returns the configured label, canonical/product URLs, SSH host, preferred repo, default runtime, and opaque default profile so the same public Worker and UI can front different private adapters without source changes.
-
-The public `/api/auth` bootstrap exposes only label, canonical/product URLs, and SSH host. Preferred repo, runtime/profile defaults, and adapter routing remain in authenticated state.
-
-Runtime lifecycle reconciliation runs from the Worker cron every minute and from bounded, CAS-claimed targeted refreshes on direct session, PTY, and VNC access. Active provider inspection remains scoped to the versioned adapter, while pending terminal archives for every adapter share the same retryable finalizer. Archive metadata includes the mutable session version; pending finalization and D1 deletion proceed only when event count, terminal status, failure reason, summary, and session version all match. Enabling `SESSION_LOGS` later requeues finalized D1-only archives with null object keys, so the same finalizer backfills R2 before cleanup. WebSocket input and recurring permission checks read only cached D1 authorization state; each subscription schedules provider reconciliation separately, with one throttled request in flight, so provider latency cannot block the multiplex frame queue. Fleet polling remains an opportunistic accelerator rather than the lifecycle clock; terminal archive markers retry even when provider credentials are unavailable. Sandbox credential-policy registrations and deletions use a durable D1 outbox. Every registration begin, renewal, activation, and reference repair proves either the exact currently stored Sandbox lease or a live durable initial/refresh/standalone claim; there is no unfenced registration path. Initial and managed provision claims fence the current session revision before external effects; required bindings and token-encryption material are checked before managed claim/token rotation, and every later non-ready result atomically stages the exact claim for terminal cleanup. Their non-replayable completion instead fences the immutable lease, claim, agent-token hash, and status ownership while advancing the mutable session version monotonically, so concurrent metadata writes survive. A winning managed retry atomically adopts its new lease and retires the original Sandbox policy. Stop and failure cleanup uses an exact current or stored refresh fence, stages every current/refresh Sandbox policy in the same batch, and merges terminal intent with `failed > expired > stopped` precedence so a lower-priority race cannot erase failure evidence. Managed sessions and direct stateless Sandbox provisions first acquire durable ownership claims; standalone IDs are excluded from the managed `IS-<number>` namespace. Standalone activation bumps all matching active policy-generation rows and activates the owner in one D1 batch, with a bounded expiry. Its PTY route terminates at a Worker WebSocket proxy that periodically rechecks the exact owner revision, expiry, lease, and active policy generation; stop, expiry, or revocation closes both peers. Standalone stop always requires the provision bearer, including after backend bindings are removed. Authenticated stop, cron expiry, and expired PTY access atomically stage that exact owner and its policy cleanup, and the retryable cleanup destroys the terminal execution session before deleting the owner. Registration claims and generations are committed before any policy POST and renewed before each lookup. Same-generation Durable Object writes may renew the current claim monotonically or replace it only with a later-expiring claim, preventing a delayed abandoned POST from overwriting the newer policy. A registration error on an expected live current lease clears its claim into a retryable state instead of staging cleanup that the live owner forbids; once ownership is gone, the same transition stages cleanup. Cleanup waits for live claims, then atomically stores a generation tombstone before deleting the matching policy. Whether a late POST or cleanup reaches the Durable Object first, the tombstone prevents credential resurrection, including when a Worker dies after POST but before its D1 completion update. Cleanup discovery and alias normalization use bounded high-water pages with persisted row and group cursors; deletion retries are ordered by oldest attempt with deterministic ties, so a large or continuously growing backlog cannot keep an invocation from reaching tombstone work or starve older rows. Session or standalone-owner cleanup transitions and their policy transitions share one D1 batch, and the unregister claim revalidates that neither a current lease/refresh nor a live standalone owner still expects that Sandbox; losing the owner CAS therefore cannot tombstone a live policy. Cron retries partial or failed cleanup idempotently and finalizes only after every policy reference is gone. Dead-session cleanup captures the archive keys, then claims, revalidates, and deletes the event, archive, and session rows in one D1 batch. R2 objects are deleted only after that commit, so an object-delete failure can leak unreferenced objects but cannot leave a surviving D1 row pointing at deleted keys.
-
-Credential injection fails closed unless the generation-wrapped Durable Object policy matches the complete active D1 generation and an exact live managed or standalone owner; raw legacy records and expired standalone policies are never served. If the Worker dies after the Durable Object accepts a current registration but before D1 activation, reconciliation verifies every lookup alias and the exact live owner, then promotes the matching expired registration claim to active before cleanup scanning. A lookup or ownership error defers cleanup for that pass. Raw records discovered during upgrade remain retained but unavailable while cron promotes their migrated D1 generation under an exact current-lease registration claim. An early raw lookup synchronously invokes that same repair and retries once, so an unattended session need not wait for cron. Each alias is wrapped transactionally in the Durable Object, successful completion replaces the legacy D1 generation, and an interrupted pass resumes idempotently after its claim expires. Cleanup accepts the old wrapped generation when stop races promotion, preventing a stranded Durable Object record. Standalone terminal-destruction failures remain on that owner's cleanup row with a monotonic retry revision, while other owners, runtime-adapter reconciliation, and terminal archives continue. The managed ID allocator compares standalone reservations case-insensitively, and the upgrade migration advances its sequence beyond every numeric standalone reservation before allocating again.
-
-Current selection order:
-
-1. Explicit card runtime `container` or `crabbox`
-2. Hard prompt cues: `vnc`, `manual`, `takeover`, `gpu`, `perf`, `performance` route to Crabbox
-3. Valid repo `CRABBOX.md` runtime default
-4. Product default: Crabbox
-
-## Repo Workflow Config
-
-Owners can evaluate `CRABBOX.md` for an allowlisted repo. The Worker fetches it from GitHub, decodes UTF-8 base64 content, parses simple frontmatter, stores status/errors in D1, and applies only valid `ok` configs.
-
-For private repos, workflow refresh requires a deployment `GITHUB_TOKEN` with contents access. The Worker does not use the logged-in user's OAuth token for this fetch.
-
-```yaml
----
-runtime:
-  default: auto
-merge:
-  default_policy: open_pr
----
+```text
+orgs/openclaw/interactive-sessions/{id}/events-*.ndjson
+orgs/openclaw/interactive-sessions/{id}/transcript-*.md
+orgs/openclaw/interactive-sessions/{id}/summary-*.json
 ```
 
-Only runtime and merge defaults are effective today. `stall_ms`, `cap`, `prompt_prefix`, and the Markdown body are parsed/stored for future policy work. Invalid runtime or merge values are stored as `invalid` and do not affect card defaults.
+D1 retains compact events and committed archive pointers. Terminal completion forces a matching final snapshot before cleanup can proceed. Raw PTY-byte replay and arbitrary run artifacts are not part of the current archive contract.
 
-## Data Model
+## Cards And Runs
 
-### Card
+Cards are durable control-plane records, not autonomous workers. Starting a card:
 
-```typescript
-{
-  id: string
-  title: string
-  prompt: string
-  repo: string
-  source: "Prompt" | "Issue" | "PR"
-  runtime: "auto" | "container" | "crabbox"
-  policy: "open_pr" | "merge_when_green" | "fix_until_green_and_merge"
-  lane: "Todo" | "Running" | "Human Review" | "Done"
-  owner: string
-  startedAt: number | null
-  createdAt: number
-  logs: string[]
-  changes: CardChanges
-  run: RunAttempt | null
-}
-```
+1. Reconciles stale attempts.
+2. verifies the repo allowlist and concurrency cap.
+3. refreshes cached `CRABBOX.md` state when needed.
+4. selects a runtime descriptor.
+5. creates a `run_attempts` row.
+6. records scheduler/runtime evidence and heartbeat state.
 
-### RunAttempt
+Runtime selection order:
 
-```typescript
-{
-  id: string;
-  cardId: string;
-  attempt: number;
-  runtime: string;
-  status: "queued" |
-    "leasing" |
-    "running" |
-    "review" |
-    "completed" |
-    "failed" |
-    "stalled" |
-    "canceled";
-  controlIntent: string | null;
-  leaseId: string | null;
-  attachUrl: string | null;
-  vncUrl: string | null;
-  selectionReason: string | null;
-  capabilities: RuntimeCapabilities;
-  operator: string | null;
-  lastHeartbeatAt: number;
-  startedAt: number | null;
-  endedAt: number | null;
-  error: string | null;
-}
-```
+1. Explicit card `container` or `crabbox`.
+2. Prompt cues requiring VNC/manual/takeover/GPU/performance capability.
+3. Valid repo `CRABBOX.md` runtime default.
+4. Container fallback.
 
-## Auth Flow
+Runtime and merge defaults from `CRABBOX.md` affect new cards. Other parsed fields are retained for visibility but are not enforced.
 
-GitHub OAuth uses `read:user read:org repo`, verifies active org membership, maps teams to `@org/team`, checks the allowlist, and creates a short-lived D1-backed session with an encrypted OAuth token for runtime GitHub CLI access. Bootstrap token login creates an owner session for setup/recovery.
+## Interactive Sessions
 
-## Planned Integrations
+Interactive sessions are the live execution plane. Supported paths:
 
-- Cloudflare Container lease binding for autonomous Codex runs.
-- Crabbox lease binding for VNC/manual/heavy sessions.
-- Runner-side PTY/app-server process hosting behind the Ghostty grid.
-- R2 terminal/artifact archival with retention cleanup.
-- Durable Object fanout for lower-latency live streams.
-- Merge automation handoff once runtime output and PR state are real.
+- **Built-in Sandbox:** Worker provisions a Cloudflare Sandbox, prepares the repo, starts a Codex-capable shell, and proxies PTY traffic.
+- **Versioned runtime adapter:** Worker durably registers a tenant-namespaced workspace ID, creates and reconciles the provider workspace, proxies PTY access, mints transient desktop links, and confirms provider release before terminal state.
+- **Legacy provision hook:** create-only compatibility path. It can return terminal/VNC metadata but has no provider release lifecycle.
+- **ClawFleet compatibility:** create-only Crabbox integration retained for deployments still using it.
+- **GitHub Actions:** OpenClaw automation registers a logical work key; an Actions runner connects outbound to `SessionControlDO`, reports work state, and receives browser steering.
+
+Sessions can carry parent/root lineage, purpose, summary, share state, delegated control, multiplayer mode, archive metadata, and runtime-specific capability state.
+
+An optional `CRABFLEET_RUNTIME_PROFILES_JSON` allowlist exposes generic Crabbox profile labels and capability previews without teaching the Worker provider-specific semantics. The Worker validates the opaque profile ID; the adapter maps it to the provider and enforces the real capability set.
+
+## Versioned Adapter
+
+`CRABBOX_RUNTIME_ADAPTER_URL` enables the provider-neutral lifecycle contract:
+
+- `POST /v1/workspaces`: idempotent create using an immutable namespaced ID and request snapshot.
+- `GET /v1/workspaces/:id`: inspect status, capabilities, expiry, provider identity, and terminal connection.
+- `DELETE /v1/workspaces/:id`: release the provider workspace.
+- `POST /v1/workspaces/:id/connections/desktop`: mint a short-lived desktop URL.
+
+Important invariants:
+
+- The adapter base URL and namespace become immutable lifecycle identity.
+- Authenticated adapter requests require HTTPS, except literal loopback HTTP.
+- Redirects are rejected so bearer credentials cannot cross origins.
+- Request/response bodies are bounded before parsing.
+- Create ambiguity replays the exact original idempotent request before inspection.
+- An explicit workspace-ID conflict never adopts or deletes the existing provider workspace.
+- Provider failure is not terminal until DELETE confirms release.
+- Status, capabilities, expiry, terminal state, and cleanup use compare-and-swap ownership fences.
+- Provider terminal URLs stay server-side; browsers receive Worker-owned PTY routes.
+- Desktop URLs are transient, reauthorized after minting, never persisted, and redirected without rewriting signed bytes.
+
+Cron runs every minute. Direct state, PTY, and desktop access also schedule bounded targeted reconciliation.
+
+## Terminal And Desktop
+
+The browser opens one multiplex `/api/terminal/ws` connection and subscribes to visible sessions. The Worker:
+
+- rechecks D1 authorization without waiting on provider I/O;
+- forwards input only for the current controller;
+- closes subscriptions after control or terminal capability is revoked;
+- appends dimensions only to known bridge/runner routes, never opaque signed adapter URLs;
+- keeps runtime bearer credentials out of browser responses.
+
+Versioned adapter VNC uses the authenticated Worker route `/api/interactive-sessions/:id/vnc`, which mints a fresh provider desktop connection after authorization. Legacy sessions may expose a validated stored VNC URL.
+
+## Sandbox Credentials
+
+Built-in Sandbox environments receive placeholders, not broad model/GitHub secrets. Worker-controlled egress injects credentials only for approved hosts, methods, repositories, and GraphQL shapes.
+
+Credential policy state is generation-fenced across D1 and `SessionControlDO`. Registration, refresh, failure, stop, expiry, and cleanup all prove the exact durable owner. Tombstones prevent late Durable Object writes from resurrecting revoked credentials.
+
+## Archives And Cleanup
+
+Terminal completion records a retryable finalization marker. Archive writes use unique object keys and commit pointers only when the event count, terminal state, failure reason, summary, and mutable session version still match.
+
+Dead-session cleanup:
+
+1. claims and revalidates the exact terminal session;
+2. transactionally removes session rows, events, and archive pointers from D1;
+3. best-effort deletes the now-unreferenced R2 objects.
+
+If R2 is enabled after D1-only finalization, reconciliation requeues missing objects for backfill.
+
+## Authentication
+
+- **GitHub OAuth:** org membership plus direct/team allowlist; encrypted per-session OAuth token supports scoped runtime GitHub access.
+- **Trusted reverse proxy:** exact backend origin plus shared-secret assertion; identity still passes the existing allowlist and role model.
+- **Bootstrap token:** owner break-glass access.
+- **SSH gateway:** linked public-key fingerprint plus gateway bearer.
+- **Agent session:** session ID plus session-scoped agent token.
+- **OpenClaw service:** dedicated bearer for Crabbox and GitHub Actions registration.
+- **Standalone provision hook:** dedicated bearer, including stop after backend configuration changes.
+
+## Current Boundaries
+
+- Cards do not launch autonomous Codex execution.
+- Merge policy is stored but Crabfleet does not merge PRs or call ClawSweeper.
+- Board/Fleet updates are polling-based rather than general Durable Object fanout.
+- R2 archives normalized events, transcripts, and summaries, not raw terminal byte streams or arbitrary artifacts.
+- The native macOS VNC app remains a separately built prototype; production distribution/authentication is not part of the Worker deployment.

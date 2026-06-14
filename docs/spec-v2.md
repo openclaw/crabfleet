@@ -1,6 +1,13 @@
+---
+title: Fleet v2 Implementation Record
+layout: default
+permalink: /spec-v2/
+description: "Shipped implementation record for Crabfleet's fleet registry."
+---
+
 # Crabfleet Spec v2
 
-Status: implementation plan plus shipped v2 slice.
+Status: shipped implementation record for the fleet-registry slice. The living product contract is [Crabfleet Spec](/spec/).
 
 Canonical app/API URL: <https://crabfleet.openclaw.ai>
 
@@ -32,7 +39,7 @@ Out of scope for this slice:
 - New runtime provider.
 - New pricing model.
 - New GitHub App permission set.
-- Direct ClawSweeper merge orchestration.
+- Direct merge or ClawSweeper orchestration.
 - Cross-host remote process discovery outside the sessions already registered in Crabfleet.
 
 ## Control Plane Model
@@ -240,7 +247,7 @@ Local result:
 - Live smoke: `https://crabfleet.openclaw.ai/healthz` returned `200`.
 - Live smoke: `https://crabfleet.openclaw.ai/docs/spec-v2` returned this spec.
 - Live smoke: unauthenticated `https://crabfleet.openclaw.ai/api/fleet` returned `401`.
-- Product split: `https://crabfleet.ai/` stayed independent as the product-page host.
+- Product split at the time: `https://crabfleet.ai/` stayed independent. It now redirects to the canonical public documentation site while app/API traffic remains on `crabfleet.openclaw.ai`.
 
 Autoreview:
 
@@ -262,13 +269,12 @@ Deploy:
 - Confirm `https://crabfleet.openclaw.ai/docs/spec-v2` returns HTML.
 - Confirm `https://crabfleet.openclaw.ai/docs/spec-v2.md` returns Markdown.
 - Confirm unauthenticated `https://crabfleet.openclaw.ai/api/fleet` is rejected.
-- Confirm `https://crabfleet.ai` stays product-page host, not the app/API host.
+- Confirm `https://crabfleet.ai` redirects to `https://docs.crabfleet.ai/` and never serves the authenticated app/API.
 
-## Future Work
+## Current Follow-Up Boundaries
 
-- Add ClawSweeper handoff state into fleet cards.
 - Add provider-level remote worker discovery for Hetzner-hosted crabboxes.
 - Add sandbox sleep/idle policy display after provider billing semantics are finalized.
 - Add checkpoint counts to the fleet registry.
 - Add operator takeover audit summaries to fleet cards.
-- Add Prometheus-style fleet export for ClawSweeper.
+- Add a metrics export if an operational consumer requires it.

@@ -40,7 +40,7 @@ Roles:
 
 - `owner`: full admin.
 - `maintainer`: create/start/control cards.
-- `viewer`: read-only board and attach/watch.
+- `viewer`: read Board/Fleet state and logs, use public share links, and request delegated terminal control. Session ownership still grants that session's management access.
 
 ## 3. Enable Repos
 
@@ -68,7 +68,7 @@ merge:
 ---
 ```
 
-Invalid configs are visible and ignored. `stall_ms`, `cap`, `prompt_prefix`, and the Markdown body are parsed/stored for future policy work, but only runtime and merge defaults are effective today.
+Invalid configs are visible and ignored. Only runtime and merge defaults are enforced; `stall_ms`, `cap`, `prompt_prefix`, and the Markdown body are stored for visibility.
 
 For private repos, the Worker needs deployment `GITHUB_TOKEN` access to fetch `CRABBOX.md`; it does not use the logged-in user's OAuth token for this refresh.
 
@@ -80,9 +80,21 @@ Click New crabbox or use the CLI:
 crabfleet new --repo openclaw/crabfleet "fix the failing check"
 ```
 
-The CLI omits `runtime` unless `--runtime` is passed, so the deployment chooses via `CRABFLEET_DEFAULT_RUNTIME` (`container` when unset). Set a deployment to `crabbox` when its configured adapter provides terminal and WebVNC capabilities.
+The CLI omits `runtime` unless `--runtime` is passed, so the deployment chooses via `CRABFLEET_DEFAULT_RUNTIME` (`container` when unset). The OpenClaw deployment supports built-in Cloudflare Sandbox sessions and versioned Crabbox workspaces.
 
 End a session with `crabfleet delete <session-id>`. Versioned lifecycle adapters confirm runtime release; legacy create-only and ClawFleet sessions stop only in Crabfleet and may require separate provider cleanup. Crabfleet retains the final status and logs until you clean up the dead session record.
+
+Useful follow-up commands:
+
+```bash
+crabfleet status <session-id>
+crabfleet logs <session-id>
+crabfleet transcript <session-id>
+crabfleet message <session-id> "check CI"
+crabfleet summary <session-id> "waiting on CI"
+crabfleet vnc --open <session-id>
+crabfleet doctor
+```
 
 ## 6. Create a Card
 
@@ -119,6 +131,8 @@ The Worker will:
 - Move the card to Running and append events.
 
 Click Attach to open the Ghostty WASM session grid. The grid immediately shows D1 event replay and switches to live PTY output through the terminal hub when the session has a sandbox or bridge.
+
+The card attempt itself is scheduling/control evidence. It does not launch an autonomous Codex process; live work appears as a Fleet interactive session.
 
 ## Troubleshooting
 

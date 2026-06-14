@@ -8,6 +8,7 @@
     "command": "node scripts/generate-assets.mjs",
     "watch_dir": [
       "scripts/generate-assets.mjs",
+      "scripts/worker-markdown.mjs",
       "vite.config.mjs",
       "src/app.html",
       "src/index.ts",

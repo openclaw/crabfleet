@@ -15,15 +15,18 @@ const siteBase = cname ? `https://${cname}` : "";
 const productName = "Crabfleet";
 const productTagline = "SSH-first Codex crabbox fleet";
 const productDescription =
-  "Crabfleet is a Cloudflare Worker control plane for OpenClaw Codex crabboxes and run attempts — repo-ready workspaces, fleet visibility grouped by person, WebVNC, prompt cards, repo gates, workflow policy, and attachable Ghostty WASM session views.";
+  "Crabfleet is a Cloudflare Worker control plane for OpenClaw Codex crabboxes and run attempts - repo-ready workspaces, fleet visibility grouped by person, WebVNC, prompt cards, repo gates, workflow policy, and attachable Ghostty WASM session views.";
 const installCommand = "ssh link@crabd.sh";
 const codePlaceholder = String.fromCharCode(0);
 const codePlaceholderPattern = new RegExp(`${codePlaceholder}(\\d+)${codePlaceholder}`, "g");
 
 const sections = [
   ["Start", ["index.md", "quickstart.md", "architecture.md"]],
-  ["Features", ["cards.md", "runs.md", "admin.md"]],
-  ["Reference", ["api.md", "spec.md"]],
+  [
+    "Features",
+    ["cards.md", "runs.md", "github-actions-sessions.md", "macos-native-client.md", "admin.md"],
+  ],
+  ["Reference", ["api.md", "spec.md", "spec-v2.md"]],
 ];
 
 // Skip these from page generation (internal notes, generated subpages we don't want as their own

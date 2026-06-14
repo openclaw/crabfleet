@@ -1,3 +1,10 @@
+---
+title: Native macOS Client
+layout: default
+permalink: /macos-native-client/
+description: "Scope, integration boundary, and security notes for the native macOS prototype."
+---
+
 # Native macOS client experiment
 
 Status: early prototype. The app lives in `macos/CrabfleetMac` and provides a
@@ -87,37 +94,20 @@ Keep further changes narrow and upstreamable:
 3. Replace or isolate the process-global D3DES key schedule before concurrent
    password authentication.
 
-## Integration seam
+## Integration boundary
 
-The prototype accepts a manual loopback host, port, and in-memory credential.
-One-click operation should add two narrow, versioned Crabbox CLI contracts:
+The prototype reads Crabfleet's authenticated `/api/fleet` registry and accepts
+a manual loopback host, port, and in-memory credential for the actual RFB
+connection. The Worker browser endpoint
+`/api/interactive-sessions/:id/vnc` redirects to browser/noVNC desktop
+connections; it is not a raw-RFB contract for native clients.
 
-```text
-crabbox fleet list --state active --json
-crabbox vnc connect --id <lease> --json
-```
-
-`fleet list` should normalize the coordinator's user-visible leases and rely on
-the CLI's existing login. It must not put an administrator token in the app.
-
-`vnc connect` should be a foreground child process that owns the SSH tunnel and
-emits one versioned NDJSON readiness event:
-
-```json
-{
-  "schemaVersion": 1,
-  "type": "ready",
-  "leaseId": "lease-id",
-  "endpoint": { "host": "127.0.0.1", "port": 5907 },
-  "auth": { "kind": "vnc-password", "secret": "ephemeral-secret" },
-  "expiresAt": "2026-06-13T09:00:00Z"
-}
-```
-
-The secret crosses only the anonymous stdout pipe: never argv, URLs, logs,
-files, or defaults. Closing the viewer terminates the child and its tunnel.
-Until these contracts exist, `/api/fleet` can populate a Crabfleet-specific
-preview but is not authoritative coordinator-wide discovery.
+Automatic native connection still needs one narrow, versioned contract that
+creates an authenticated tunnel or proxy and returns a loopback endpoint plus
+an ephemeral credential without placing secrets in argv, URLs, logs, files, or
+defaults. The process owning that connection should remain foreground and end
+when the viewer closes. Until then, the fleet deck is authoritative only for
+Crabfleet-registered sessions and desktop attachment remains manual.
 
 ## Build
 

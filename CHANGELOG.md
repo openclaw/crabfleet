@@ -3,6 +3,7 @@
 ## Unreleased
 
 - Add a deployment-configured runtime profile selector with generic labels, targets, capability previews, server-side allowlisting, and CLI/SSH profile overrides.
+- Reconcile and de-duplicate the full documentation set against shipped runtime, session, persistence, security, API, native-client, and deployment behavior.
 - Strip upstream authorization credentials from authenticated trusted-proxy requests before app and terminal routing.
 - Add deployment-neutral trusted reverse-proxy identity with exact-origin and shared-secret proof, existing allowlist authorization, cross-origin mutation rejection, fail-closed assertions, cookie isolation, and downstream credential stripping.
 - Add a native macOS Crabfleet VNC control deck with generic RFB 3.3/3.7/3.8 connections, Metal rendering, six warm desktops, paced previews, fast focus transitions, saved profiles, and stabilized opt-in clipboard synchronization.

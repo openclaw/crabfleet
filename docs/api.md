@@ -19,6 +19,8 @@ Session cookie: `crabbox_session`
 
 GitHub sessions last 15 minutes. Bootstrap sessions last 1 hour. API JSON responses use `cache-control: no-store`.
 
+Deployments may instead accept a trusted reverse-proxy identity when all trusted-proxy bindings are configured. The request URL must use the exact configured backend origin, the proxy must send the shared secret and configured identity header, and the asserted user must still have a direct login/email allowlist entry. Mutations and WebSocket upgrades must also prove the configured public origin. Crabfleet strips proxy assertions, cookies, and upstream authorization credentials before app and terminal routing.
+
 ## Public Endpoints
 
 ### GET /healthz
@@ -287,7 +289,7 @@ An adapter-reported `failed` workspace is not locally terminal until Crabfleet c
 
 ### GET /api/terminal/ws
 
-Viewer+, or public shared-link token for read-only sessions. Same-origin multiplex WebSocket endpoint used by the Ghostty WASM session grid. One browser socket can subscribe to multiple interactive sessions, receive PTY output frames, resize terminals, and send input only when the current user has control.
+Session owner, maintainer/owner role, viewer with a current delegated control grant, or a public shared-link token for read-only sessions. Same-origin multiplex WebSocket endpoint used by the Ghostty WASM session grid. One browser socket can subscribe to multiple interactive sessions, receive PTY output frames, resize terminals, and send input only when the current user has control.
 
 The wire format is a compact binary frame:
 
@@ -322,7 +324,7 @@ Viewer+ with writable session control. For `runtime-v1`, Crabfleet authenticates
 
 ### GET /api/interactive-sessions/:id/pty
 
-Viewer+. Legacy single-session WebSocket endpoint. Crabfleet authenticates the browser session, verifies the interactive session is still attachable, verifies terminal control, then proxies PTY bytes to the configured runner. Owners and maintainers have control by default; other viewers require an approved control request.
+Session owner, maintainer/owner role, or viewer with a current delegated control grant. Legacy single-session WebSocket endpoint. Crabfleet authenticates the browser session, verifies the interactive session is still attachable, verifies terminal control, then proxies PTY bytes to the configured runner.
 
 Target resolution:
 
@@ -412,7 +414,7 @@ Fields:
 - `repo`: required, enabled repo.
 - `branch`: optional, default `main`.
 - `runtime`: optional `crabbox` or `container`; omission uses `CRABFLEET_DEFAULT_RUNTIME`, which defaults to `container`.
-- `profile`: optional opaque adapter profile, defaulted by `CRABFLEET_DEFAULT_PROFILE`.
+- `profile`: optional opaque adapter profile, defaulted by `CRABFLEET_DEFAULT_PROFILE`. When `CRABFLEET_RUNTIME_PROFILES_JSON` is configured, the value must name a configured profile; its capability flags seed the requested adapter capabilities for Crabbox sessions.
 - `github_actions` is service-created through `/api/openclaw/action-sessions` and is not accepted by this endpoint.
 - `command`: optional, default `codex`.
 - `prompt`: optional initial context note.
@@ -427,9 +429,29 @@ Session responses include `ptyAvailable`, the authenticated Worker's authoritati
 
 Built-in Sandbox sessions receive `CRABFLEET_SESSION_ID`, `CRABFLEET_PARENT_SESSION_ID`, `CRABFLEET_ROOT_SESSION_ID`, `CRABFLEET_AGENT_TOKEN`, and `CRABFLEET_API_URL`. The managed provision hook rotates a fresh agent token in the same durable claim that owns provisioning, then injects that exact token into the Sandbox. The agent token can call the `/api/agent/*` endpoints below for same-owner session discovery, child creation, transcripts, and summary updates.
 
+### POST /api/interactive-sessions/cleanup
+
+Viewer+. Deletes manageable stopped, expired, or failed sessions only after terminal finalization, credential-policy cleanup, and complete archive finalization. Pass an optional `ids` array to limit cleanup; an empty list considers all eligible dead sessions visible to the caller.
+
+```json
+{
+  "ids": ["IS-105", "IS-109"]
+}
+```
+
+Returns refreshed app state plus `removedIds`.
+
+### GET /api/interactive-sessions/:id
+
+Viewer+. Returns one current decorated session after a bounded lifecycle refresh.
+
+### GET /api/interactive-sessions/:id/logs
+
+Viewer+. Returns up to 5,000 recent D1 events, the total event count, truncation state, and current R2 archive snapshot metadata when available. It does not read or return the archived R2 objects.
+
 ### GET /api/interactive-sessions/:id/transcript
 
-Viewer+. Returns the Markdown transcript from R2 when archived, or a D1 event-log transcript fallback.
+Session owner or maintainer/owner role. Returns the Markdown transcript from R2 when archived, or a D1 event-log transcript fallback.
 
 ### POST /api/interactive-sessions/:id/summary
 
@@ -441,6 +463,22 @@ Viewer+ with owner/maintainer access. Updates `purpose` and/or `summary`.
   "summary": "waiting on CI"
 }
 ```
+
+### GET /api/interactive-sessions/:id/diagnostics
+
+Viewer+ with writable control. Runs a bounded environment, checkout, GitHub, Codex, and tool inventory inside a Cloudflare Sandbox session. Other backends return an unavailable result instead of executing diagnostics.
+
+### GET /api/interactive-sessions/:id/checkpoints
+
+Session owner or maintainer. Lists registered Cloudflare Sandbox checkpoints without exposing provider backup material.
+
+### POST /api/interactive-sessions/:id/checkpoints
+
+Session owner or maintainer. Creates a backup of the current Sandbox worktree and returns `201`. Checkpoint storage requires the configured backup R2 binding and, for presigned backups, the matching Cloudflare account and R2 credentials.
+
+### POST /api/interactive-sessions/:id/checkpoints/:checkpoint/restore
+
+Session owner or maintainer. Restores a registered checkpoint into the active Cloudflare Sandbox session.
 
 ### POST /api/interactive-sessions/:id/actions
 
@@ -474,9 +512,14 @@ CRABBOX_SSH_GATEWAY_TOKEN`. These endpoints are not browser APIs.
 - `POST /api/ssh/auth`: checks a public-key fingerprint. Unknown keys receive a short `/ssh/link/:code` GitHub OAuth URL only when the gateway is in explicit link mode, e.g. `ssh link@host`.
 - `GET /api/ssh/state`: returns the same board/session state for the linked SSH user.
 - `POST /api/ssh/interactive-sessions`: creates an interactive Codex session for the linked SSH user.
+- `GET /api/ssh/interactive-sessions/:id`: reads one visible session.
+- `POST /api/ssh/interactive-sessions/:id/actions`: performs the same authorized session actions as the browser API.
 - `GET /api/ssh/interactive-sessions/:id/logs`: returns the D1 event stream plus R2 archive metadata for a visible crabbox session.
 - `GET /api/ssh/interactive-sessions/:id/transcript`: returns the Markdown transcript.
 - `POST /api/ssh/interactive-sessions/:id/summary`: updates `purpose` and/or `summary`.
+- `GET /api/ssh/interactive-sessions/:id/checkpoints`: lists Cloudflare Sandbox checkpoints.
+- `POST /api/ssh/interactive-sessions/:id/checkpoints`: creates a Cloudflare Sandbox checkpoint.
+- `POST /api/ssh/interactive-sessions/:id/checkpoints/:checkpoint/restore`: restores a checkpoint.
 - `GET /api/ssh/interactive-sessions/:id/pty`: WebSocket PTY attach for the gateway, scoped by linked key fingerprint.
 
 ## Agent Session API
@@ -634,4 +677,8 @@ Common statuses:
 - `401`: missing/expired session.
 - `403`: insufficient role, repo blocked, or no longer allowlisted.
 - `404`: missing card or route.
+- `409`: lifecycle or immutable workspace identity conflict.
+- `413`: request or upstream response exceeded its bounded size.
+- `429`: rate limit.
+- `502`: runtime adapter returned an invalid or failed response.
 - `503`: GitHub dependency unavailable or rate limited.

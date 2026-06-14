@@ -7,11 +7,11 @@ description: "Durable, resumable, browser-steerable GitHub Actions sessions."
 
 # GitHub Actions Sessions
 
-CrabFleet can represent a GitHub Actions job as a durable interactive session.
-The Action remains the execution host; CrabFleet supplies identity, status,
+Crabfleet can represent a GitHub Actions job as a durable interactive session.
+The Action remains the execution host; Crabfleet supplies identity, status,
 terminal relay, browser steering, event history, and terminal finalization.
 
-This document defines the CrabFleet side of the integration. The ClawSweeper
+This document defines the Crabfleet side of the integration. The ClawSweeper
 workflow, repair policy, GitCrawl intake, mutation gates, and operator flow are
 documented in
 [`openclaw/clawsweeper/docs/steerable-repair-automation.md`](https://github.com/openclaw/clawsweeper/blob/main/docs/steerable-repair-automation.md).
@@ -28,14 +28,14 @@ It is also difficult to answer:
 - Does a later planning or execution runner continue the same work?
 - Why did the work stop?
 
-GitHub Actions sessions add those capabilities without turning CrabFleet into
+GitHub Actions sessions add those capabilities without turning Crabfleet into
 the workflow runner.
 
 ## Architecture
 
 ```mermaid
 flowchart LR
-  A[OpenClaw service] -->|register work key| B[CrabFleet Worker]
+  A[OpenClaw service] -->|register work key| B[Crabfleet Worker]
   B --> C[(D1 interactive session)]
   B --> D[SessionControlDO]
   E[GitHub Actions runner] -->|outbound WebSocket| D
@@ -55,8 +55,8 @@ Components:
   browser viewers.
 - **Terminal hub**: existing browser multiplex transport used by the Ghostty
   session grid.
-- **R2**: finalized event NDJSON, transcript, and summary objects when the
-  `SESSION_LOGS` binding is configured.
+- **R2**: periodically refreshed event NDJSON, transcript, and summary snapshots
+  when the `SESSION_LOGS` binding is configured, finalized at terminal completion.
 
 ## Session Identity
 
@@ -121,7 +121,7 @@ Optional fields:
 - `purpose`
 - `summary`
 
-The repository must be enabled in CrabFleet. Identifier fields use a bounded,
+The repository must be enabled in Crabfleet. Identifier fields use a bounded,
 restricted grammar; source and run links must be HTTP(S).
 
 Response:
@@ -146,7 +146,7 @@ session APIs.
 
 ## Work Kinds
 
-CrabFleet treats `workKind` as an operator-facing classifier:
+Crabfleet treats `workKind` as an operator-facing classifier:
 
 | Work kind        | Fleet label    |
 | ---------------- | -------------- |
@@ -205,7 +205,7 @@ ClawSweeper include:
 - `action_failed`
 - `workflow_canceled`
 
-CrabFleet records the state transition as a session event and exposes the
+Crabfleet records the state transition as a session event and exposes the
 latest state in Fleet, Sessions, API, CLI, and logs.
 
 ## Runner PTY
@@ -242,7 +242,7 @@ The runner-side integration decides how terminal input maps to model steering.
 
 ## Browser Attach
 
-Signed-in viewers attach through the normal CrabFleet terminal hub. A
+Authorized signed-in session owners, maintainers/owners, or delegated controllers attach through the normal Crabfleet terminal hub. A
 `github_actions` session advertises:
 
 ```json
@@ -274,7 +274,7 @@ instead of inventing a local shell.
 
 ## Steering Semantics
 
-CrabFleet itself forwards terminal input bytes. In the ClawSweeper integration,
+Crabfleet itself forwards terminal input bytes. In the ClawSweeper integration,
 the runner:
 
 1. Collects printable input until Enter.
@@ -290,9 +290,9 @@ translated into the integration's explicit steering protocol.
 
 ## Resumption
 
-CrabFleet resumption and Codex thread resumption are complementary.
+Crabfleet resumption and Codex thread resumption are complementary.
 
-CrabFleet preserves:
+Crabfleet preserves:
 
 - logical `IS-<number>` session;
 - work key;
@@ -309,19 +309,19 @@ ClawSweeper preserves:
 On a new Action attempt:
 
 1. ClawSweeper registers the same work key.
-2. CrabFleet rotates credentials and marks the session waiting.
+2. Crabfleet rotates credentials and marks the session waiting.
 3. The runner restores its cached Codex state.
 4. Codex attempts `thread/resume`.
 5. The runner connects the new outbound PTY.
 6. Work-state updates replace stale phase and heartbeat data.
 
 If Codex cannot resume the stored thread, the runner can start a new thread
-without creating a new CrabFleet session.
+without creating a new Crabfleet session.
 
 ## Heartbeats
 
 The ClawSweeper runner posts active work state every 60 seconds while a Codex
-turn is running. CrabFleet records:
+turn is running. Crabfleet records:
 
 - `lastHeartbeatAt`;
 - state and phase;
@@ -329,14 +329,14 @@ turn is running. CrabFleet records:
 - Codex thread ID;
 - Codex turn ID.
 
-CrabFleet does not declare a GitHub Actions task successful merely because a
+Crabfleet does not declare a GitHub Actions task successful merely because a
 heartbeat stops. The workflow must post a terminal state and completion reason.
 The GitHub Actions run conclusion remains an independent source of truth.
 
 ## Completion
 
 A session is logically complete when the caller posts a terminal work state.
-CrabFleet exposes the final state, phase, and reason and closes the runner-side
+Crabfleet exposes the final state, phase, and reason and closes the runner-side
 relay as the workflow exits.
 
 For ClawSweeper:
@@ -349,7 +349,7 @@ For ClawSweeper:
 - A user-ended Crabfleet terminal session does not claim a terminal workflow
   state. The GitHub run remains authoritative and may continue.
 
-CrabFleet completion is status evidence, not GitHub mutation authority. The
+Crabfleet completion is status evidence, not GitHub mutation authority. The
 ClawSweeper result ledger and target repository state describe what was
 actually changed.
 
@@ -391,7 +391,7 @@ must not be exposed to Codex or browsers.
 
 ### Agent Authentication
 
-Each registration generates a fresh random agent token. CrabFleet stores its
+Each registration generates a fresh random agent token. Crabfleet stores its
 SHA-256 hash and accepts the plaintext token only through:
 
 - bearer auth for work-state updates;
@@ -401,7 +401,7 @@ Re-registering the work key invalidates the old agent token.
 
 ### Viewer Authentication
 
-Normal Fleet and terminal viewers use CrabFleet browser authentication and
+Normal Fleet and terminal viewers use Crabfleet browser authentication and
 allowlist roles. The browser never receives the service or agent token.
 
 Read-only share links use a separate hashed share token and do not grant input.
@@ -452,13 +452,13 @@ GitHub Actions work resumed
 
 Viewer terminal attaches are also recorded.
 
-When `SESSION_LOGS` is configured, finalized sessions produce:
+When `SESSION_LOGS` is configured, session events periodically refresh:
 
 - NDJSON event archive;
 - Markdown transcript;
 - JSON summary.
 
-D1 keeps the compact event list and archive pointers used by the app and API.
+D1 keeps the compact event list and archive pointers used by the app and API. Terminal completion forces a current snapshot before finalization clears.
 
 ## Operational Checks
 
@@ -565,5 +565,5 @@ disconnect alone.
 - Terminal states require explicit caller updates.
 - Cancellation is separate from provider workspace teardown.
 - `github_actions` sessions never enter legacy workspace-stop reconciliation.
-- CrabFleet reports status and control; the caller owns task policy and external
+- Crabfleet reports status and control; the caller owns task policy and external
   mutations.

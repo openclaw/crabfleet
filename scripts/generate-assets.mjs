@@ -3,6 +3,7 @@ import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { promisify } from "node:util";
 
 import { css, js, preThemeScript, themeToggleHtml } from "./docs-site-assets.mjs";
+import { escapeHtml, markdownToHtml } from "./worker-markdown.mjs";
 
 const run = promisify(execFile);
 const appBuildRoot = new URL("../dist/app-bundle/", import.meta.url);
@@ -188,8 +189,8 @@ function renderSpecPage(markdown, options = {}) {
       <label class="search"><span>Search</span><input id="doc-search" type="search" placeholder="cards, runs, admin"></label>
       <nav>
         <section><h2>Start</h2><a class="nav-link" href="https://docs.crabfleet.ai/">Overview</a><a class="nav-link" href="https://docs.crabfleet.ai/quickstart/">Quickstart</a><a class="nav-link" href="https://docs.crabfleet.ai/architecture/">Architecture</a></section>
-        <section><h2>Features</h2><a class="nav-link" href="https://docs.crabfleet.ai/cards/">Cards</a><a class="nav-link" href="https://docs.crabfleet.ai/runs/">Runs</a><a class="nav-link" href="https://docs.crabfleet.ai/admin/">Admin</a></section>
-        <section><h2>Reference</h2><a class="nav-link${markdownPath === "/docs/spec.md" ? " active" : ""}" href="/docs/spec.md">Spec markdown</a><a class="nav-link${activePath === "/docs/spec" ? " active" : ""}" href="/docs/spec">Spec</a><a class="nav-link${markdownPath === "/docs/spec-v2.md" ? " active" : ""}" href="/docs/spec-v2.md">Spec v2 markdown</a><a class="nav-link${activePath === "/docs/spec-v2" ? " active" : ""}" href="/docs/spec-v2">Spec v2</a><a class="nav-link" href="https://github.com/openclaw/crabfleet">GitHub</a><a class="nav-link" href="/app/">App</a></section>
+        <section><h2>Features</h2><a class="nav-link" href="https://docs.crabfleet.ai/cards/">Cards</a><a class="nav-link" href="https://docs.crabfleet.ai/runs/">Runs</a><a class="nav-link" href="https://docs.crabfleet.ai/github-actions-sessions/">GitHub Actions</a><a class="nav-link" href="https://docs.crabfleet.ai/macos-native-client/">macOS client</a><a class="nav-link" href="https://docs.crabfleet.ai/admin/">Admin</a></section>
+        <section><h2>Reference</h2><a class="nav-link${markdownPath === "/docs/spec.md" ? " active" : ""}" href="/docs/spec.md">Spec markdown</a><a class="nav-link${activePath === "/docs/spec" ? " active" : ""}" href="/docs/spec">Spec</a><a class="nav-link${markdownPath === "/docs/spec-v2.md" ? " active" : ""}" href="/docs/spec-v2.md">Fleet v2 record markdown</a><a class="nav-link${activePath === "/docs/spec-v2" ? " active" : ""}" href="/docs/spec-v2">Fleet v2 record</a><a class="nav-link" href="https://docs.crabfleet.ai/api/">API reference</a><a class="nav-link" href="https://github.com/openclaw/crabfleet">GitHub</a><a class="nav-link" href="/app/">App</a></section>
       </nav>
     </aside>
     <main>
@@ -212,82 +213,4 @@ function renderSpecPage(markdown, options = {}) {
   <script>${js()}</script>
 </body>
 </html>`;
-}
-
-function markdownToHtml(markdown) {
-  const lines = markdown.split("\n");
-  const html = [];
-  let listTag;
-  let inCode = false;
-  let codeBuffer = [];
-
-  for (const line of lines) {
-    if (line.startsWith("```")) {
-      if (inCode) {
-        html.push(`<pre><code>${escapeHtml(codeBuffer.join("\n"))}</code></pre>`);
-        codeBuffer = [];
-        inCode = false;
-      } else {
-        closeList();
-        inCode = true;
-      }
-      continue;
-    }
-
-    if (inCode) {
-      codeBuffer.push(line);
-      continue;
-    }
-
-    if (line.startsWith("# ")) {
-      closeList();
-      html.push(`<h1>${inline(line.slice(2))}</h1>`);
-    } else if (line.startsWith("## ")) {
-      closeList();
-      html.push(`<h2>${inline(line.slice(3))}</h2>`);
-    } else if (line.startsWith("### ")) {
-      closeList();
-      html.push(`<h3>${inline(line.slice(4))}</h3>`);
-    } else if (line.startsWith("- ")) {
-      openList("ul");
-      html.push(`<li>${inline(line.slice(2))}</li>`);
-    } else if (/^\d+\. /.test(line)) {
-      openList("ol");
-      html.push(`<li>${inline(line.replace(/^\d+\. /, ""))}</li>`);
-    } else if (line.trim() === "") {
-      closeList();
-    } else {
-      closeList();
-      html.push(`<p>${inline(line)}</p>`);
-    }
-  }
-
-  closeList();
-  return html.join("\n");
-
-  function openList(tag) {
-    if (listTag === tag) return;
-    closeList();
-    html.push(`<${tag}>`);
-    listTag = tag;
-  }
-
-  function closeList() {
-    if (!listTag) return;
-    html.push(`</${listTag}>`);
-    listTag = undefined;
-  }
-}
-
-function inline(value) {
-  const escaped = escapeHtml(value);
-  return escaped.replace(/`([^`]+)`/g, "<code>$1</code>");
-}
-
-function escapeHtml(value) {
-  return value
-    .replaceAll("&", "&amp;")
-    .replaceAll("<", "&lt;")
-    .replaceAll(">", "&gt;")
-    .replaceAll('"', "&quot;");
 }

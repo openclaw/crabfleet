@@ -7,7 +7,7 @@ description: "Runtime execution, logs, attach/takeover, and debugging for Codex 
 
 # Runs
 
-A run is a durable attempt to execute a card. Today Crabfleet records attempts, heartbeats, runtime selection evidence, operator intent, and event logs in D1. Interactive Crabboxes can attach to live PTYs through the Worker terminal hub and expose WebVNC when the Crabbox adapter returns a URL.
+A card run is a durable scheduling attempt. Crabfleet records heartbeats, runtime selection evidence, operator intent, and event logs in D1; the run row does not launch a process. Live execution is represented by Fleet interactive sessions, which attach to PTYs through the Worker terminal hub and can expose authorized desktop access.
 
 ## Run Lifecycle
 
@@ -17,7 +17,7 @@ Current statuses:
 queued -> leasing -> running -> review | completed | failed | stalled | canceled
 ```
 
-The MVP creates a `queued` run attempt when a card is claimed and pulses it to `running` on activity. Moving the card to Human Review or Done finishes the active run as `review` or `completed`; moving away from a running card cancels it.
+Claiming creates a `queued` run attempt and pulses it to `running` on activity. Moving the card to Human Review or Done finishes the active run as `review` or `completed`; moving away from a running card cancels it.
 
 ## Claiming
 
@@ -67,7 +67,7 @@ merge:
 ---
 ```
 
-Supported runtime values are `auto`, `container`, and `crabbox`. Supported merge policies are `open_pr`, `merge_when_green`, and `fix_until_green_and_merge`. `stall_ms`, `cap`, `prompt_prefix`, and the Markdown body are parsed/stored for future policy work, but only runtime and merge defaults are effective today. Invalid files are visible in Admin and ignored for defaults.
+Supported runtime values are `auto`, `container`, and `crabbox`. Supported merge policies are `open_pr`, `merge_when_green`, and `fix_until_green_and_merge`. Only runtime and merge defaults are enforced. `stall_ms`, `cap`, `prompt_prefix`, and the Markdown body are parsed and stored for visibility. Invalid files are visible in Admin and ignored for defaults.
 
 ## Heartbeats and Stalls
 
@@ -96,6 +96,8 @@ The Take over action records `controlIntent = "takeover"` and operator only for 
 
 Maintainers can create a standalone Codex CLI session without making a board card. The Worker stores the requested repo, branch, runtime, command, owner, attach/VNC URLs, status, and event log in D1. `CRABFLEET_DEFAULT_RUNTIME` selects the deployment default (`container` when unset); the CLI and SSH gateway leave runtime unspecified unless the operator passes `--runtime`. Internal automation can also register service-owned `github_actions` sessions; this runtime is visible in Fleet but is not offered in the manual session form.
 
+Deployments can expose an allowlisted set of generic Crabbox profiles. The create drawer, Go CLI, and SSH gateway pass the selected opaque profile ID to Crabfleet; the Worker validates it and includes it in the immutable adapter create request. Profile capability flags are previews and requested capabilities, not a substitute for provider enforcement.
+
 Interactive sessions also store `parentSessionId`, `rootSessionId`, `createdBy`, `purpose`, and `summary`. Built-in Sandbox sessions export `CRABFLEET_SESSION_ID`, `CRABFLEET_PARENT_SESSION_ID`, `CRABFLEET_ROOT_SESSION_ID`, `CRABFLEET_AGENT_TOKEN`, and `CRABFLEET_API_URL`; the Go CLI uses those values to list sibling/child sessions, create children, send PTY messages, fetch transcripts, and update summaries without an SSH key.
 
 Adapter capability arrays are authoritative: omitting `terminal`, `pty`, or `ssh` withdraws terminal access. A valid WSS (or literal-loopback WS) terminal URL implies terminal access only when capabilities are omitted entirely or an object omits all terminal-related keys. `ptyAvailable` additionally requires a ready lifecycle state and a resolvable configured Sandbox, bridge, direct WebSocket, or Cloudflare runner route.
@@ -104,9 +106,9 @@ Session events are mirrored into the `SESSION_LOGS` R2 binding when configured. 
 
 Sandbox credential policies have a separate durable cleanup lifecycle. Registration commits a generation and expiring claim in D1 before any external POST. If the Durable Object accepted every alias before the Worker crashed, reconciliation verifies that matching generation and the exact live owner, clears the expired D1 claim, and promotes the group to active before cleanup scanning; transient lookup or ownership failures defer cleanup. The upgrade migration seeds active legacy policies for proactive repair: cron claims each exact live lease, atomically generation-wraps every retained raw Durable Object policy, and activates all lookup aliases. A raw lookup also runs this fenced repair synchronously and retries once, avoiding a credential gap before the first cron pass. A crash before D1 completion leaves an expiring repair claim; the next pass resumes the same generation idempotently, while stop can still stage cleanup. Raw records remain unserved but retained until this repair or authorized cleanup. Credential injection rechecks that complete active generation and its exact D1 owner, so raw legacy Durable Object records, expired standalone policies, and orphaned generations fail closed. A registration error for an expected live current lease clears into a retryable registration state; an owner transition instead stages that generation for cleanup. Stop, expiry, provisioning failure, and superseded-resource cleanup atomically pair the durable owner transition with policy staging, revoke the session agent token and terminal control, terminate standalone terminal execution sessions, wait out live registration claims, and revalidate that no live owner still expects the Sandbox before persisting a matching generation tombstone; this makes both lost owner CAS operations and late POSTs harmless across Worker termination. Bounded persisted scan/group cursors keep large cleanup backlogs fair. Failed or partial deletes remain `stopping` and retry from cron until every recorded policy lookup is gone, then enter normal terminal archive finalization with the original failure reason intact. A standalone terminal-destruction failure is recorded on that owner and retried without blocking other cleanup owners, runtime-adapter reconciliation, or terminal archives.
 
-If `CRABBOX_INTERACTIVE_PROVISION_URL` is not set, new sessions stay `pending_adapter` and remain visible in the Ghostty grid. If it is set, Crabfleet posts the session request to that endpoint with optional bearer auth from `CRABBOX_INTERACTIVE_PROVISION_TOKEN`; the response can set `status`, `leaseId`, `attachUrl`, `vncUrl`, and `message`.
+Managed session creation first uses the built-in Sandbox when `runtime=container` and the `SANDBOX` binding is available. Otherwise a configured versioned adapter owns the durable lifecycle; a legacy create-only provision URL remains available for compatibility. If no usable path exists, the session stays `pending_adapter` and remains visible in the Ghostty grid.
 
-Crabfleet also ships a built-in provision hook at `/api/provision/interactive`. Point `CRABBOX_INTERACTIVE_PROVISION_URL` at that route to use Worker-side backend selection. Set `CRABBOX_INTERACTIVE_PROVISION_TOKEN` for backend-enabled deployments; the route fails closed without it when a backend is configured. Direct built-in standalone Sandboxes reject the reserved `IS-<number>` namespace, expire after the bounded `CRABBOX_STANDALONE_SANDBOX_TTL_SECONDS`, and can be stopped through the bearer-authenticated `/api/provision/interactive/:id/stop` route. The route delegates to `CRABBOX_RUNTIME_PROVISION_URL` when set, creates a Cloudflare Container sandbox for `container` sessions through `CRABBOX_CLOUDFLARE_RUNNER_URL` when configured, or creates a ClawFleet OpenClaw instance for `crabbox` sessions through `CRABBOX_CLAWFLEET_URL`; without a matching backend it returns `pending_adapter` with a clear setup message.
+Crabfleet also ships a stateless provision hook at `/api/provision/interactive`. The OpenClaw deployment points `CRABBOX_INTERACTIVE_PROVISION_URL` at this in-process route. `CRABBOX_INTERACTIVE_PROVISION_TOKEN` is required when a backend is configured. Direct standalone Sandboxes reject the reserved `IS-<number>` namespace, expire after the bounded `CRABBOX_STANDALONE_SANDBOX_TTL_SECONDS`, and stop through `/api/provision/interactive/:id/stop`. The hook can delegate to a legacy generic runtime backend, a Cloudflare runner, or a ClawFleet compatibility backend; versioned lifecycle workspaces are deliberately created through the managed session API instead.
 
 Cloudflare runner configuration:
 
@@ -133,7 +135,7 @@ GitHub Actions PTY contract:
 - The returned `runnerPtyUrl` is a `wss:` URL with a rotated session-scoped query credential, directly usable by Node's global `WebSocket`.
 - The Actions process connects outbound and sends raw terminal output bytes. Raw Ghostty input bytes are returned on the same socket.
 - `SessionControlDO` allows one current runner and multiple viewers. A new runner replaces the previous runner; viewers remain connected and receive runner lifecycle events.
-- Browser viewers attach through the existing `/api/terminal/ws` hub. Service and agent credentials are never included in viewer responses.
+- Authorized browser viewers attach through the existing `/api/terminal/ws` hub. Service and agent credentials are never included in viewer responses.
 - The runner updates `state`, `phase`, `summary`, Codex thread/turn IDs, and heartbeat through the agent work-state endpoint. `completed`, `blocked`, `failed`, and `canceled` are terminal.
 
 See [GitHub Actions Sessions](/github-actions-sessions/) for the full lifecycle,
@@ -146,6 +148,14 @@ Session sharing:
 - The share token is stored as a hash; generating a new link rotates the old one.
 - Public viewers can scroll the persisted session event buffer without signing in.
 - Writable PTY access still requires a signed-in allowlisted viewer and owner/maintainer approval.
+
+Sandbox checkpoints:
+
+- The session owner, maintainers, and owners can list, create, and restore checkpoints for supported Sandbox sessions.
+- Delegated terminal control alone does not grant checkpoint access.
+- Browser APIs use `/api/interactive-sessions/:id/checkpoints`.
+- CLI and SSH use `checkpoints`, `checkpoint`, and `restore`.
+- `CRABFLEET_LOCAL_SANDBOX_BACKUPS=0` selects SDK-presigned R2 uploads; otherwise the deployment uses the bound backup bucket path.
 
 ## Run APIs
 
@@ -184,5 +194,5 @@ Returns all attempts for the card, newest first.
 
 - `pnpm run check`: asset generation, `tsgo --noEmit`, `oxlint`, `oxfmt --check`.
 - SQLite migration smoke with migrations applied in order.
-- `codex-review` per feature until no accepted/actionable findings remain.
+- Structured autoreview per non-trivial change until no accepted/actionable findings remain.
 - Browser/live smoke after deploy for `/app`, `/docs/`, auth surface, and docs subdomain.

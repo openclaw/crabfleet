@@ -42,22 +42,31 @@ The web app at [crabfleet.openclaw.ai/app](https://crabfleet.openclaw.ai/app/) e
 ## What Works Today
 
 - GitHub OAuth plus bootstrap login.
+- Deployment-neutral trusted reverse-proxy identity with existing allowlist roles.
 - User/team allowlists and repo allowlists.
 - Empty-by-default board backed by D1.
 - Cards from prompts or `#number` issue/PR previews across enabled repos.
 - Optional title generation from prompt.
 - Durable run attempts with heartbeat, stall handling, operator, runtime reason, and capabilities.
-- Ghostty WASM fullscreen session grid with D1 event replay, live multiplex PTY attach, WebVNC links for Crabbox leases, and text fallback.
+- Built-in Cloudflare Sandbox Codex workspaces and versioned provider-backed Crabbox workspaces.
+- Deployment-configured Crabbox runtime profiles with generic labels, server-side allowlisting, and capability previews.
+- Ghostty WASM fullscreen session grid with live multiplex PTY attach, D1 replay, sharing, delegated control, multiplayer attribution, and clipboard upload for Sandbox sessions.
+- Provider-backed workspace inspection, reconciliation, transient desktop connection minting, and confirmed deletion.
+- Session supervision trees, summaries, transcripts, direct PTY messaging, checkpoints, and restore.
+- Durable GitHub Actions sessions with outbound runner PTYs, work-state heartbeats, and browser steering.
+- R2 event, transcript, and summary archives with retryable finalization and cleanup.
 - Card diff metadata and compact patch view.
 - Owner workflow evaluation for repo `CRABBOX.md`.
+- Fleet registry with runtime, readiness, archive, VNC, and redacted credential-policy state.
 - Worker-served docs at `/docs/` and generated docs at `docs.crabfleet.ai`.
 
-## Not Wired Yet
+## Current Boundaries
 
-- Full OpenClaw supervisor orchestration over Discord-originated meetings and handoffs.
-- R2 artifact/terminal archival.
-- Durable Object WebSocket fanout.
-- Direct merge execution and ClawSweeper handoff.
+- Cards store scheduling intent, run evidence, and policy; they do not launch an autonomous executor.
+- Merge policy is stored and displayed, but Crabfleet does not merge PRs or hand work to ClawSweeper.
+- Interactive-session archives contain normalized events, Markdown transcripts, and summaries. Raw terminal byte replay and arbitrary artifact retention are not implemented.
+- Board and Fleet state refresh through REST polling. WebSockets are used for terminal traffic and the GitHub Actions runner relay, not general board fanout.
+- OpenClaw service endpoints can create Crabboxes and register Actions work, but higher-level Discord meeting orchestration remains outside Crabfleet.
 
 ## Pick Your Path
 
@@ -67,7 +76,7 @@ The web app at [crabfleet.openclaw.ai/app](https://crabfleet.openclaw.ai/app/) e
 - **Steerable Actions.** [GitHub Actions Sessions](/github-actions-sessions/) covers durable work keys, outbound runner PTYs, browser steering, work-state heartbeats, resumption, completion, and cancellation.
 - **Managing access.** [Admin](/admin/) covers users, teams, repos, roles, caps, and policy defaults.
 - **Building against it.** [API Reference](/api/) lists REST and internal SSH gateway endpoints.
-- **Reading the roadmap.** [Complete Spec](/spec/) tracks product decisions and planned integrations.
+- **Reading the contract.** [Complete Spec](/spec/) separates shipped behavior from explicit product boundaries.
 
 ## Core Concepts
 
@@ -84,17 +93,17 @@ Cards represent task intent and policy:
 
 ### Runs
 
-When a card enters Running, Crabfleet creates a `run_attempts` row, selects a runtime descriptor, records the selection reason and capabilities, and starts heartbeat/stall tracking. Current output is event-log backed; live external execution is the next adapter binding.
+When a card enters Running, Crabfleet creates a `run_attempts` row, selects a runtime descriptor, records the selection reason and capabilities, and starts heartbeat/stall tracking. This is durable scheduling/control evidence, not an autonomous process launch. Live work is represented by interactive sessions, including built-in Sandbox, versioned Crabbox, legacy adapter, ClawFleet, and GitHub Actions-backed sessions.
 
 ### Repo Workflows
 
-Owners can evaluate `CRABBOX.md` for enabled repos. Valid workflow config can set runtime and merge defaults for new cards and future scheduler policy.
+Owners can evaluate `CRABBOX.md` for enabled repos. Valid workflow config sets runtime and merge defaults for new cards. Other parsed fields remain informational.
 
 ### Roles
 
 - **Owner**: manage allowlists, repos, caps, retention, workflow evaluations.
 - **Maintainer**: create cards, start runs, attach, watch, take over capable active runs.
-- **Viewer**: view board and attach/watch read-only surfaces.
+- **Viewer**: view Board/Fleet state and logs, use public share links, and request delegated terminal control. Session ownership grants management access independently of role.
 
 ## Tech Stack
 
@@ -108,4 +117,4 @@ Owners can evaluate `CRABBOX.md` for enabled repos. Valid workflow config can se
 
 ## Status
 
-MVP deployed. The control-plane data model is real; Crabfleet is the only product surface.
+Deployed and actively used by OpenClaw. See [Current Boundaries](#current-boundaries) for the remaining deliberately unimplemented product behaviors.

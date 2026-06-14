@@ -4,7 +4,7 @@
 
 **Mission control for Agent runs.**
 
-Crabfleet gives OpenClaw maintainers a fleet dashboard where every Codex crabbox is visible by operator, repo, terminal, and WebVNC state. The OpenClaw app/API canonical URL is `https://crabfleet.openclaw.ai`; `https://crabfleet.ai` is the public product site.
+Crabfleet gives OpenClaw maintainers a fleet dashboard where every Codex crabbox is visible by operator, repo, terminal, and WebVNC state. The OpenClaw app/API canonical URL is `https://crabfleet.openclaw.ai`; `https://crabfleet.ai` is the public product/docs entrypoint.
 
 ## What It Does
 
@@ -18,7 +18,7 @@ Crabfleet gives OpenClaw maintainers a fleet dashboard where every Codex crabbox
 - **Diff previews.** Card tiles show changed files and totals; the run drawer shows a compact Codiff-style patch view.
 - **Multi-runtime policy.** Auto-select between the Container and Crabbox adapter surfaces based on card overrides, repo workflow defaults, and task requirements.
 - **Allowlist controls.** Restrict access to OpenClaw org members and specific repos through admin-managed allowlists.
-- **Session logs.** D1-backed card/run event history with a 30-day product retention setting.
+- **Session history.** D1-backed card/run events plus periodically refreshed R2 event, transcript, and summary snapshots with terminal finalization guarantees.
 - **Repo workflow config.** Owners can evaluate `CRABBOX.md` per repo and use it for runtime and merge defaults.
 
 ## Architecture
@@ -27,15 +27,14 @@ Crabfleet gives OpenClaw maintainers a fleet dashboard where every Codex crabbox
 - **D1 + Kysely** for typed persistence: users, sessions, allowlists, repos, cards, events, run attempts, interactive sessions, diffs, and repo workflow evaluations.
 - **Ghostty WebAssembly** for the fullscreen attach grid and run log replay.
 - **Cloudflare Sandbox containers** for standalone interactive Codex CLI workspaces with live PTY attach.
-- **Runtime adapter descriptors** for Container and Crabbox selection, capability display, interactive lifecycle handoff, and guarded takeover.
+- **Runtime descriptors** for card scheduling evidence and capability display.
 - **Versioned lifecycle adapter** for idempotent external workspace creation, bounded status reconciliation, provider-backed deletion, terminal attachment, and authenticated transient desktop connections.
 - **Provision endpoint** at `/api/provision/interactive` that can use the built-in Sandbox backend or retain a legacy create-only adapter or ClawFleet integration, with durable ownership and a bearer-authenticated standalone PTY route.
 - **SessionControlDO relay** for one outbound GitHub Actions runner and multiple authenticated Ghostty viewers per action session.
-- **R2 session archives** for crabbox event NDJSON, transcripts, and summaries.
+- **R2 session archives** for periodically refreshed interactive-session event NDJSON, transcripts, and summaries, finalized at terminal completion.
 - **GitHub API** for OAuth, org/team membership, and issue/PR previews across enabled repos.
 
-Autonomous card execution, Durable Object fanout beyond the Actions relay, and merge automation are adapter targets, not faked in the current Worker. External interactive terminal and desktop transport require a configured lifecycle adapter or bridge.
-The OpenClaw fleet/orchestrator backend should run on the Hetzner `openclaw-clawsweeper` host alongside ClawSweeper; the Worker stays the app/API front door.
+Cards currently record scheduling intent, runtime selection, heartbeats, operator actions, and result metadata; they do not launch an autonomous executor. Merge policy is stored but not executed. Interactive sessions are the live execution plane, backed by the built-in Cloudflare Sandbox or a configured lifecycle adapter. Terminal transport uses the Worker multiplex hub; board and fleet state refresh through REST polling.
 
 ## Quick Start
 
@@ -75,7 +74,8 @@ Add users/teams to the allowlist and enable repos:
 
 - Click "New crabbox" to request a standalone Codex CLI workspace
 - Default runtime is Cloudflare Sandbox; choose Crabbox only when a VNC/desktop adapter is configured
-- Without `CRABBOX_INTERACTIVE_PROVISION_URL`, sessions are stored as `pending_adapter` and still visible in the grid
+- The OpenClaw deployment routes Container sessions to the built-in Cloudflare Sandbox and Crabbox sessions to the versioned lifecycle adapter
+- Deployments without a usable backend retain the session as `pending_adapter` with a visible setup message
 - Install or build the Go CLI, then run `crabfleet new --repo openclaw/crabfleet "fix the failing check"`
 - Inside a Crabfleet sandbox, the CLI uses `CRABFLEET_SESSION_ID` and `CRABFLEET_AGENT_TOKEN` automatically so Codex can run `crabfleet list`, spawn child sessions with `crabfleet new --purpose ...`, send `crabfleet message <id> "..."`, read `crabfleet transcript <id>`, and update `crabfleet summary <id> "..."`
 
@@ -112,7 +112,7 @@ cancellation, authentication, archive, and troubleshooting contract is in
 - Kanban-style lanes: Todo, Running, Human Review, Done
 - Card filtering: all, mine, live
 - Search cards by title, repo, or ID
-- Real-time updates via WebSockets
+- REST state refresh every 15 seconds, plus immediate refresh after mutations
 
 ### Card Policies
 
@@ -138,15 +138,15 @@ merge:
 - User and team allowlists with role-based access
 - Repo allowlists
 - Manual `CRABBOX.md` evaluation with status/error visibility
-- Concurrent run caps (default: 20)
-- Log retention (14, 30, 60 days)
-- Direct merge permissions (guarded, maintainers, disabled)
+- Concurrent Running-card cap (default: 20)
+- Stored retention selection (14, 30, 60 days); cleanup is explicit and state-driven
+- Stored merge intent (guarded, maintainers, disabled); Crabfleet does not execute merges
 
 ### Auth
 
 - GitHub OAuth for org members
 - Bootstrap token for admin setup and recovery
-- Short-lived sessions with automatic refresh
+- Short-lived D1-backed sessions; users reauthenticate after expiry
 - Role-based access control (owner, maintainer, viewer)
 
 ## Deployment
@@ -290,7 +290,7 @@ pnpm format
 - `oxlint` for linting
 - `oxfmt --check` for formatting
 - SQLite migration smoke checks for D1 schema compatibility
-- `codex-review` before feature commits
+- Structured autoreview before non-trivial commits
 - Browser/live smoke checks after deploy
 
 ### Local Development
@@ -336,9 +336,18 @@ brew install crabfleet
 go run ./cmd/crabfleet login
 go run ./cmd/crabfleet list
 go run ./cmd/crabfleet new --repo openclaw/crabfleet "start on the release checklist"
+go run ./cmd/crabfleet status <session-id>
 go run ./cmd/crabfleet attach <session-id>
 go run ./cmd/crabfleet delete <session-id>
 go run ./cmd/crabfleet vnc --open <session-id>
+go run ./cmd/crabfleet logs <session-id>
+go run ./cmd/crabfleet transcript <session-id>
+go run ./cmd/crabfleet message <session-id> "check CI"
+go run ./cmd/crabfleet summary <session-id> "waiting on CI"
+go run ./cmd/crabfleet checkpoints <session-id>
+go run ./cmd/crabfleet checkpoint <session-id>
+go run ./cmd/crabfleet restore <session-id> <checkpoint-id>
+go run ./cmd/crabfleet doctor
 ```
 
 `crabfleet stop <session-id>` remains a compatibility alias for `delete`.
@@ -365,7 +374,7 @@ curl -fsS https://crabfleet.openclaw.ai/api/openclaw/crabboxes \
   -d '{"owner":"@steipete","repo":"openclaw/crabfleet","prompt":"prep the meeting follow-up"}'
 ```
 
-The created crabbox appears in the fleet grid under the requested owner. Provisioning still flows through the configured Crabbox/ClawFleet adapter, so VNC and terminal URLs come from the runtime backend.
+The created crabbox appears in the fleet grid under the requested owner. Provisioning follows normal interactive-session routing: built-in Sandbox for Container, the versioned adapter for Crabbox, or an intentionally configured legacy path.
 
 ### Project Structure
 
@@ -394,6 +403,8 @@ Full documentation available at [docs.crabfleet.ai](https://docs.crabfleet.ai):
 - [Architecture](https://docs.crabfleet.ai/architecture) – System design and data model
 - [Cards](https://docs.crabfleet.ai/cards) – Card lifecycle and policies
 - [Runs](https://docs.crabfleet.ai/runs) – Runtime selection and execution
+- [GitHub Actions Sessions](https://docs.crabfleet.ai/github-actions-sessions) – Durable runner relay and steering
+- [Native macOS Client](https://docs.crabfleet.ai/macos-native-client) – Prototype scope and security boundary
 - [Admin](https://docs.crabfleet.ai/admin) – Access control and policies
 - [API](https://docs.crabfleet.ai/api) – REST and WebSocket APIs
 - [Spec](https://docs.crabfleet.ai/spec) – Complete product specification
@@ -402,18 +413,18 @@ Full documentation available at [docs.crabfleet.ai](https://docs.crabfleet.ai):
 
 - All state-changing operations require authentication
 - Repo operations require allowlist membership
-- Direct merge requires maintainer role and policy approval
+- Merge policy is stored as intent; Crabfleet does not currently perform merges
 - Runtime tokens are scoped and short-lived
 - Secrets never logged or stored in D1/R2
-- Audit events for all admin and merge operations
+- Audit events cover admin changes and interactive-session lifecycle/control mutations
 
 ## Status
 
 Active development. See [CHANGELOG.md](CHANGELOG.md) for recent updates.
 
-Current phase: MVP deployed with auth, board UI, admin controls, card management, Kysely-backed D1 persistence, durable run attempts, repo workflow evaluation, card diffs, Ghostty WASM terminal grid, R2 session log archives, authenticated PTY WebSocket proxying, and first-party Cloudflare Sandbox Codex CLI sessions.
+Current phase: deployed OpenClaw control plane with auth, Fleet and Board views, admin controls, durable card attempts, repo workflow evaluation, live interactive sessions, session supervision, GitHub Actions relays, provider-backed Crabbox lifecycle management, R2 archives, and authenticated terminal/desktop access.
 
-Next: bind autonomous card execution and merge automation to the same runtime layer.
+Current product boundary: Cards do not yet launch autonomous work or execute merge policy. Those fields remain explicit control-plane intent rather than simulated automation.
 
 ## License
 

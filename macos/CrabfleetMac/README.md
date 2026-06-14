@@ -28,7 +28,7 @@ current Crabfleet fleet endpoint during development:
 
 ```sh
 CRABFLEET_API_URL=https://example.test \
-CRABFLEET_SESSION_COOKIE='crabfleet_session=…' \
+CRABFLEET_SESSION_COOKIE='crabbox_session=…' \
 swift run --package-path macos/CrabfleetMac CrabfleetMac
 ```
 

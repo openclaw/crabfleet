@@ -7,7 +7,7 @@ description: "Card lifecycle, policies, and source types in Crabfleet."
 
 # Cards
 
-Cards are the autonomous work unit in Crabfleet. Interactive Crabboxes are the default manual work unit; cards keep prompt, repo, source, policy, lane, event log, optional diff metadata, and optional active run state.
+Cards are the durable task-intent and scheduling unit in Crabfleet. Interactive sessions are the live execution unit. Cards keep prompt, repo, source, policy, lane, event log, optional diff metadata, and optional active run state.
 
 ## Card Shape
 
@@ -85,6 +85,8 @@ Current lanes:
 
 Manual Advance cycles through the lanes. Starting a Todo card claims capacity and creates a run attempt. Moving a Running card to Human Review or Done closes the active run as `review` or `completed`.
 
+A run attempt records scheduling evidence and heartbeat state. It does not itself start a Codex process. Use a Fleet interactive session for live execution and terminal access.
+
 ## Actions
 
 - Start: claim a card or pulse heartbeat if already active.
@@ -98,7 +100,7 @@ Manual Advance cycles through the lanes. Starting a Todo card claims capacity an
 
 Use `auto` unless you need a hard override.
 
-- `container`: fastest default adapter surface for autonomous work.
+- `container`: default card descriptor and lightweight runtime intent.
 - `crabbox`: desktop/VNC/manual/heavy adapter surface.
 - `auto`: card prompt cues, repo workflow defaults, then Container fallback.
 
@@ -107,10 +109,10 @@ Hard prompt cues that force Crabbox under `auto`: `vnc`, `manual`, `takeover`, `
 ## Merge Policy
 
 - `open_pr`: create or hand off a PR for human review.
-- `merge_when_green`: intended direct merge once checks are green.
-- `fix_until_green_and_merge`: intended autonomous repair loop then merge.
+- `merge_when_green`: records intent to merge once checks are green.
+- `fix_until_green_and_merge`: records intent for a repair-and-merge loop.
 
-Current Worker stores and displays policy. Actual merge execution is a planned integration and is not faked.
+The Worker stores and displays merge policy. It does not currently inspect PR checks, merge, or hand work to ClawSweeper.
 
 ## Repo Defaults
 
@@ -125,4 +127,4 @@ merge:
 ---
 ```
 
-Only runtime and merge defaults are effective today. `stall_ms`, `cap`, `prompt_prefix`, and the Markdown body are parsed/stored for future policy work. Invalid workflow values are visible in Admin and ignored when creating cards or selecting runtimes.
+Only runtime and merge defaults are enforced. `stall_ms`, `cap`, `prompt_prefix`, and the Markdown body are parsed and stored for visibility but do not change scheduling. Invalid workflow values are visible in Admin and ignored when creating cards or selecting runtimes.
