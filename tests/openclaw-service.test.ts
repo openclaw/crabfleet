@@ -107,6 +107,7 @@ test("OpenClaw transcript reads a sentinel event before reporting completeness",
 	assert.match(transcriptSource, /limit: 241, newest: true/);
 	assert.match(transcriptSource, /const hasMoreEvents = eventWindow\.length > 240/);
 	assert.match(transcriptSource, /eventWindow\.slice\(1\)/);
+	assert.match(transcriptSource, /session: \{ \.\.\.response\.session, logs: \[\] \}/);
 	assert.match(
 		transcriptSource,
 		/transcript\.truncated \|\| hasMoreEvents \|\| eventCount > events\.length/,

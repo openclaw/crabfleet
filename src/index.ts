@@ -3345,8 +3345,10 @@ async function openClawReadCrabboxTranscript(
   const hasMoreEvents = eventWindow.length > 240;
   const events = hasMoreEvents ? eventWindow.slice(1) : eventWindow;
   const transcript = boundedUtf8Tail(sessionLogTranscript(session, events));
+  const response = openClawCrabboxResponse(env, openClawServiceUser(), session);
   return {
-    ...openClawCrabboxResponse(env, openClawServiceUser(), session),
+    ...response,
+    session: { ...response.session, logs: [] },
     transcript: transcript.text,
     eventCount,
     truncated: transcript.truncated || hasMoreEvents || eventCount > events.length,
