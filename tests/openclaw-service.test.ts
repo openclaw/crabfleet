@@ -5,6 +5,7 @@ import test from "node:test";
 import {
 	boundedUtf8Tail,
 	openClawBranchPreparationCanDefer,
+	openClawRoomMaxSessions,
 	openClawRoomRootAllowed,
 	openClawRoomSessionAllowed,
 	openClawServiceAuthorized,
@@ -62,6 +63,7 @@ test("bounded transcript tails remain valid UTF-8 and report truncation", () => 
 		new TextEncoder().encode(boundedUtf8Tail("\u{1F600}\u{1F600}", 5).text).byteLength <= 5,
 	);
 	assert.equal(openClawTranscriptMaxBytes, 64 * 1024);
+	assert.equal(openClawRoomMaxSessions, 64);
 });
 
 test("OpenClaw create preserves the already-decorated interactive session", async () => {
@@ -107,9 +109,27 @@ test("OpenClaw transcript reads a sentinel event before reporting completeness",
 	assert.match(transcriptSource, /limit: 241, newest: true/);
 	assert.match(transcriptSource, /const hasMoreEvents = eventWindow\.length > 240/);
 	assert.match(transcriptSource, /eventWindow\.slice\(1\)/);
-	assert.match(transcriptSource, /session: \{ \.\.\.response\.session, logs: \[\] \}/);
+	assert.match(transcriptSource, /openClawCrabboxSummaryResponse/);
 	assert.match(
 		transcriptSource,
 		/transcript\.truncated \|\| hasMoreEvents \|\| eventCount > events\.length/,
 	);
+});
+
+test("OpenClaw root reads are filtered, capped, concurrent, and log-free", async () => {
+	const source = await readFile(new URL("../src/index.ts", import.meta.url), "utf8");
+	const readStart = source.indexOf("async function openClawReadSessionRoot");
+	const readEnd = source.indexOf("async function openClawReadCrabbox", readStart);
+	const readSource = source.slice(readStart, readEnd);
+	const summaryStart = source.indexOf("function openClawCrabboxSummaryResponse");
+	const summaryEnd = source.indexOf("function openClawDecoratedCrabboxResponse", summaryStart);
+	const summarySource = source.slice(summaryStart, summaryEnd);
+
+	assert.match(readSource, /\.where\("created_by", "=", "service:openclaw"\)/);
+	assert.match(readSource, /\.where\("runtime", "!=", "github_actions"\)/);
+	assert.match(readSource, /\.where\("work_key", "is", null\)/);
+	assert.match(readSource, /\.limit\(openClawRoomMaxSessions \+ 1\)/);
+	assert.match(readSource, /mapWithConcurrency\(/);
+	assert.match(readSource, /openClawCrabboxSummaryResponse/);
+	assert.match(summarySource, /session: \{ \.\.\.response\.session, logs: \[\] \}/);
 });

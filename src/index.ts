@@ -135,6 +135,7 @@ import { readBoundedResponseText } from "./bounded-response";
 import {
   boundedUtf8Tail,
   openClawBranchPreparationCanDefer,
+  openClawRoomMaxSessions,
   openClawRoomRootAllowed,
   openClawRoomSessionAllowed,
   openClawServiceAuthorized,
@@ -3296,11 +3297,25 @@ async function openClawReadSessionRoot(
     .where((expression) =>
       expression.or([expression("root_session_id", "=", root), expression("id", "=", root)]),
     )
+    .where("created_by", "=", "service:openclaw")
+    .where("runtime", "!=", "github_actions")
+    .where("work_key", "is", null)
     .orderBy("created_at", "asc")
+    .limit(openClawRoomMaxSessions + 1)
     .execute();
   if (!rows.length) throw notFound("session root not found");
+  if (rows.length > openClawRoomMaxSessions) {
+    throw serviceUnavailable("session root exceeds the supervision limit");
+  }
   const serviceUser = openClawServiceUser();
-  const sessions = await Promise.all(rows.map((row) => readFreshInteractiveSession(env, row.id)));
+  const sessions: Array<InteractiveSession | null> = Array.from({ length: rows.length }, () => null);
+  await mapWithConcurrency(
+    rows.map((row, index) => ({ row, index })),
+    4,
+    async ({ row, index }) => {
+      sessions[index] = await readFreshInteractiveSession(env, row.id);
+    },
+  );
   return {
     rootSessionId: root,
     crabboxes: sessions
@@ -3311,7 +3326,7 @@ async function openClawReadSessionRoot(
           sessionBelongsToRoot(session.id, session.rootSessionId, root)
         );
       })
-      .map((session) => openClawCrabboxResponse(env, serviceUser, session)),
+      .map((session) => openClawCrabboxSummaryResponse(env, serviceUser, session)),
   };
 }
 
@@ -3322,7 +3337,7 @@ async function openClawReadCrabbox(
 ): Promise<{ session: InteractiveSession; browserUrl: string }> {
   requireOpenClawRoomService(request, env);
   const session = await openClawRootScopedCrabbox(request, env, id);
-  return openClawCrabboxResponse(env, openClawServiceUser(), session);
+  return openClawCrabboxSummaryResponse(env, openClawServiceUser(), session);
 }
 
 async function openClawReadCrabboxTranscript(
@@ -3345,10 +3360,9 @@ async function openClawReadCrabboxTranscript(
   const hasMoreEvents = eventWindow.length > 240;
   const events = hasMoreEvents ? eventWindow.slice(1) : eventWindow;
   const transcript = boundedUtf8Tail(sessionLogTranscript(session, events));
-  const response = openClawCrabboxResponse(env, openClawServiceUser(), session);
+  const response = openClawCrabboxSummaryResponse(env, openClawServiceUser(), session);
   return {
     ...response,
-    session: { ...response.session, logs: [] },
     transcript: transcript.text,
     eventCount,
     truncated: transcript.truncated || hasMoreEvents || eventCount > events.length,
@@ -3405,7 +3419,7 @@ async function openClawMessageCrabbox(
   }
   return {
     delivered: true,
-    ...openClawCrabboxResponse(env, serviceUser, session),
+    ...openClawCrabboxSummaryResponse(env, serviceUser, session),
   };
 }
 
@@ -3421,7 +3435,7 @@ async function openClawMutateCrabbox(
   const serviceUser = openClawServiceUser();
   await audit(env, serviceUser, `openclaw crabbox stop requested ${id}`, Date.now());
   const result = await mutateInteractiveSession(request, env, serviceUser, id, body.action);
-  return openClawCrabboxResponse(env, serviceUser, result.session);
+  return openClawCrabboxSummaryResponse(env, serviceUser, result.session);
 }
 
 async function openClawRootScopedCrabbox(
@@ -3458,6 +3472,15 @@ function openClawCrabboxResponse(
     env,
     decorateInteractiveSession(session, serviceUser, env),
   );
+}
+
+function openClawCrabboxSummaryResponse(
+  env: RuntimeEnv,
+  serviceUser: User,
+  session: InteractiveSession,
+): { session: InteractiveSession; browserUrl: string } {
+  const response = openClawCrabboxResponse(env, serviceUser, session);
+  return { ...response, session: { ...response.session, logs: [] } };
 }
 
 function openClawDecoratedCrabboxResponse(
@@ -5134,6 +5157,7 @@ async function cleanupInteractiveSessions(
         FROM interactive_sessions AS descendant
         WHERE descendant.root_session_id = interactive_sessions.id
           AND descendant.id != interactive_sessions.id
+          AND descendant.status NOT IN ('stopped', 'expired', 'failed')
       )
     `).where(sql<boolean>`
       ${env.SESSION_LOGS ? 1 : 0} = 0
@@ -5201,6 +5225,7 @@ async function deleteFinalizedInteractiveSession(
         FROM interactive_sessions AS descendant
         WHERE descendant.root_session_id = ${row.id}
           AND descendant.id != ${row.id}
+          AND descendant.status NOT IN ('stopped', 'expired', 'failed')
       )
     `).where(sql<boolean>`
       ${archive ? 1 : 0} = 1

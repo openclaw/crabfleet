@@ -2,6 +2,7 @@ const encoder = new TextEncoder();
 const decoder = new TextDecoder();
 
 export const openClawTranscriptMaxBytes = 64 * 1024;
+export const openClawRoomMaxSessions = 64;
 
 type OpenClawSessionFence = {
 	id: string;
