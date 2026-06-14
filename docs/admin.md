@@ -344,7 +344,7 @@ Check the repo allowlist, Running-card cap, and existing active run. Card start 
 Check the selected runtime and deployment backend:
 
 - built-in `SANDBOX` binding for Container;
-- `CRABBOX_RUNTIME_ADAPTER_URL`, token, and namespace for versioned Crabbox;
+- `CRABBOX_RUNTIME_ADAPTER_URL` or `CRABBOX_RUNTIME_ADAPTER_URL_TEMPLATE`, plus token and namespace, for versioned Crabbox;
 - legacy provision/runner/ClawFleet settings only when intentionally used.
 
 ### Delete Remains `stopping`

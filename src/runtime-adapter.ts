@@ -1,6 +1,8 @@
 export const runtimeAdapterVersion = "crabfleet/v1";
 export const runtimeAdapterName = "runtime-v1";
 export const runtimeAdapterDesktopMaxTtlMs = 15 * 60 * 1000;
+const runtimeAdapterProfileRoutePlaceholder = "{profile}";
+const runtimeAdapterProfileRoutePattern = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/;
 
 export type AdapterSessionStatus =
   | "provisioning"
@@ -167,6 +169,41 @@ export function runtimeAdapterControlPlaneIdentity(value: unknown): string | nul
   if (url.search || url.hash) return null;
   url.pathname = url.pathname.replace(/\/+$/, "") || "/";
   return url.toString();
+}
+
+export function runtimeAdapterControlPlaneForProfile(
+  directValue: unknown,
+  templateValue: unknown,
+  profile: unknown,
+): string | null {
+  const hasDirect = typeof directValue === "string" && directValue.length > 0;
+  const hasTemplate = typeof templateValue === "string" && templateValue.length > 0;
+  if (hasDirect === hasTemplate) return null;
+  if (hasDirect) return runtimeAdapterControlPlaneIdentity(directValue);
+  if (
+    typeof templateValue !== "string" ||
+    typeof profile !== "string" ||
+    !runtimeAdapterProfileRoutePattern.test(profile) ||
+    templateValue.includes("?") ||
+    templateValue.includes("#") ||
+    templateValue.split(runtimeAdapterProfileRoutePlaceholder).length !== 2 ||
+    !/(?:^|\/)\{profile\}(?:\/|$)/u.test(templateValue)
+  ) {
+    return null;
+  }
+  const routeSentinel = "crabfleet-profile-route";
+  const sentinelControlPlane = runtimeAdapterControlPlaneIdentity(
+    templateValue.replace(runtimeAdapterProfileRoutePlaceholder, routeSentinel),
+  );
+  if (
+    !sentinelControlPlane ||
+    !new URL(sentinelControlPlane).pathname.split("/").includes(routeSentinel)
+  ) {
+    return null;
+  }
+  return runtimeAdapterControlPlaneIdentity(
+    templateValue.replace(runtimeAdapterProfileRoutePlaceholder, profile),
+  );
 }
 
 export function runtimeAdapterTerminalOriginMatches(

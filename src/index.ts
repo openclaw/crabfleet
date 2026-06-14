@@ -103,7 +103,7 @@ import {
   redactedAdapterResponseMessage,
   runtimeAdapterCreatePayload,
   runtimeAdapterCollectionUrl,
-  runtimeAdapterControlPlaneIdentity,
+  runtimeAdapterControlPlaneForProfile,
   runtimeAdapterBrowserVncUrl,
   runtimeAdapterDesktopUrl,
   runtimeAdapterName,
@@ -196,6 +196,7 @@ type RuntimeEnv = Env & {
   CRABBOX_RUNTIME_PROVISION_URL?: string;
   CRABBOX_RUNTIME_PROVISION_TOKEN?: string;
   CRABBOX_RUNTIME_ADAPTER_URL?: string;
+  CRABBOX_RUNTIME_ADAPTER_URL_TEMPLATE?: string;
   CRABBOX_RUNTIME_ADAPTER_TOKEN?: string;
   CRABBOX_RUNTIME_ADAPTER_NAMESPACE?: string;
   CRABBOX_RUNTIME_ADAPTER_TTL_SECONDS?: string;
@@ -4124,8 +4125,8 @@ async function createInteractiveSessionFromInput(
   const runtime = oneOf(body.runtime, ["crabbox", "container"], deployment.defaultRuntime) as
     | "crabbox"
     | "container";
-  requireRuntimeAdapterCreatePreflight(env, runtime);
   const { profile, descriptor: runtimeProfile } = selectedRuntimeProfile(deployment, body.profile);
+  requireRuntimeAdapterCreatePreflight(env, runtime, profile);
   const requestedCapabilities = runtimeProfileCapabilities(
     runtime === "crabbox" ? runtimeProfile : undefined,
     runtime === "crabbox" ? crabboxCapabilities : containerCapabilities,
@@ -4158,7 +4159,7 @@ async function createInteractiveSessionFromInput(
       : null;
     const adapterWorkspaceId = initialRuntimeAdapterWorkspaceId(env, runtime, id);
     const adapterControlPlane = adapterWorkspaceId
-      ? configuredRuntimeAdapterControlPlane(env)
+      ? configuredRuntimeAdapterControlPlane(env, profile)
       : null;
     const adapterSettings = adapterWorkspaceId
       ? runtimeAdapterCreateSettings(env, requestedCapabilities)
@@ -4434,7 +4435,9 @@ function initialRuntimeAdapterWorkspaceId(
   runtime: "crabbox" | "container",
   sessionId: string,
 ): string | null {
-  if (!env.CRABBOX_RUNTIME_ADAPTER_URL || (runtime === "container" && env.SANDBOX)) return null;
+  if (!runtimeAdapterConfigurationPresent(env) || (runtime === "container" && env.SANDBOX)) {
+    return null;
+  }
   const namespace = normalizeAdapterNamespace(env.CRABBOX_RUNTIME_ADAPTER_NAMESPACE ?? "");
   if (!namespace) {
     throw serviceUnavailable(
@@ -4449,28 +4452,40 @@ function initialRuntimeAdapterWorkspaceId(
 function requireRuntimeAdapterCreatePreflight(
   env: RuntimeEnv,
   runtime: "crabbox" | "container",
+  profile: string,
 ): void {
-  if (!env.CRABBOX_RUNTIME_ADAPTER_URL || (runtime === "container" && env.SANDBOX)) return;
-  if (!configuredRuntimeAdapterControlPlane(env)) {
-    throw serviceUnavailable("runtime adapter URL must use HTTPS or literal loopback HTTP");
+  if (!runtimeAdapterConfigurationPresent(env) || (runtime === "container" && env.SANDBOX)) return;
+  if (!configuredRuntimeAdapterControlPlane(env, profile)) {
+    throw serviceUnavailable(
+      "runtime adapter URL or profile route template must be valid and unambiguous",
+    );
   }
   if (!runtimeAdapterToken(env)) {
     throw serviceUnavailable("runtime adapter token is not configured");
   }
 }
 
-function configuredRuntimeAdapterControlPlane(env: RuntimeEnv): string | null {
-  return runtimeAdapterControlPlaneIdentity(env.CRABBOX_RUNTIME_ADAPTER_URL);
+function runtimeAdapterConfigurationPresent(env: RuntimeEnv): boolean {
+  return Boolean(env.CRABBOX_RUNTIME_ADAPTER_URL || env.CRABBOX_RUNTIME_ADAPTER_URL_TEMPLATE);
+}
+
+function configuredRuntimeAdapterControlPlane(env: RuntimeEnv, profile: string): string | null {
+  return runtimeAdapterControlPlaneForProfile(
+    env.CRABBOX_RUNTIME_ADAPTER_URL,
+    env.CRABBOX_RUNTIME_ADAPTER_URL_TEMPLATE,
+    profile,
+  );
 }
 
 function requireRegisteredRuntimeAdapterControlPlane(
   env: RuntimeEnv,
+  profile: string,
   registeredControlPlane: string | null | undefined,
 ): string {
   if (!registeredControlPlane) {
     throw new Error("runtime adapter control-plane registration is missing");
   }
-  const configuredControlPlane = configuredRuntimeAdapterControlPlane(env);
+  const configuredControlPlane = configuredRuntimeAdapterControlPlane(env, profile);
   if (!configuredControlPlane) {
     throw new Error("runtime adapter control plane is unavailable");
   }
@@ -4488,12 +4503,16 @@ async function registeredRuntimeAdapterControlPlaneForSession(
 ): Promise<string> {
   const registration = await database(env)
     .selectFrom("interactive_sessions")
-    .select("adapter_control_plane")
+    .select(["adapter_control_plane", "profile"])
     .where("id", "=", sessionId)
     .where("adapter", "=", runtimeAdapterName)
     .where("adapter_workspace_id", "=", adapterWorkspaceId)
     .executeTakeFirst();
-  return requireRegisteredRuntimeAdapterControlPlane(env, registration?.adapter_control_plane);
+  return requireRegisteredRuntimeAdapterControlPlane(
+    env,
+    registration?.profile ?? "",
+    registration?.adapter_control_plane,
+  );
 }
 
 async function stopSupersededRuntimeAdapterProvision(
@@ -8358,6 +8377,7 @@ function interactiveTerminalTarget(
     if (session.adapter === runtimeAdapterName) {
       const authorization = runtimeAdapterTerminalAuthorization(
         env,
+        session.profile,
         session[interactiveSessionAdapterControlPlane],
         attachUrl,
       );
@@ -8394,11 +8414,16 @@ function interactiveTerminalTarget(
 
 function runtimeAdapterTerminalAuthorization(
   env: RuntimeEnv,
+  profile: string,
   registeredControlPlane: string | null,
   attachUrl: string,
 ): string | null {
   try {
-    const controlPlane = requireRegisteredRuntimeAdapterControlPlane(env, registeredControlPlane);
+    const controlPlane = requireRegisteredRuntimeAdapterControlPlane(
+      env,
+      profile,
+      registeredControlPlane,
+    );
     if (!runtimeAdapterTerminalOriginMatches(controlPlane, attachUrl)) return null;
     return bearer(runtimeAdapterToken(env));
   } catch {
@@ -8698,7 +8723,7 @@ async function provisionInteractiveSession(
       sandboxProvision.ownership,
     );
   }
-  if (env.CRABBOX_RUNTIME_ADAPTER_URL) {
+  if (runtimeAdapterConfigurationPresent(env)) {
     return provisionWithRuntimeAdapter(env, session, agentToken);
   }
   if (!env.CRABBOX_INTERACTIVE_PROVISION_URL) return null;
@@ -9610,7 +9635,7 @@ async function provisionInteractivePayload(
   if (payload.runtime === "container" && env.SANDBOX) {
     return failedProvision("Cloudflare Sandbox provision requires durable ownership");
   }
-  if (env.CRABBOX_RUNTIME_ADAPTER_URL) {
+  if (runtimeAdapterConfigurationPresent(env)) {
     return failedProvision(
       "versioned runtime adapter requires a durable interactive session lifecycle",
     );
@@ -9637,7 +9662,7 @@ async function provisionInteractivePayload(
 function authorizeProvisionEndpoint(request: Request, env: RuntimeEnv): void {
   const hasBackend = Boolean(
     env.SANDBOX ||
-    env.CRABBOX_RUNTIME_ADAPTER_URL ||
+    runtimeAdapterConfigurationPresent(env) ||
     env.CRABBOX_RUNTIME_PROVISION_URL ||
     env.CRABBOX_CLOUDFLARE_RUNNER_URL ||
     env.CRABBOX_CLAWFLEET_URL,
@@ -11313,7 +11338,11 @@ async function provisionWithRuntimeAdapter(
     session.runtime === "crabbox" ? crabboxCapabilities : containerCapabilities;
   let baseUrl: string;
   try {
-    baseUrl = requireRegisteredRuntimeAdapterControlPlane(env, session.adapterControlPlane);
+    baseUrl = requireRegisteredRuntimeAdapterControlPlane(
+      env,
+      session.profile,
+      session.adapterControlPlane,
+    );
   } catch (error) {
     return unresolvedRuntimeAdapterProvision(
       session,
@@ -11503,6 +11532,14 @@ async function provisionWithRuntimeAdapter(
       adapterWorkspaceId,
       requestedCapabilities,
       "runtime adapter create outcome unknown: workspace identity mismatch",
+    );
+  }
+  if (parsed.profile !== session.profile) {
+    return ambiguousRuntimeAdapterProvision(
+      session,
+      adapterWorkspaceId,
+      requestedCapabilities,
+      "runtime adapter create outcome unknown: workspace profile mismatch",
     );
   }
   const result = runtimeAdapterProvisionResult(
@@ -11941,7 +11978,7 @@ function runtimeAdapterProvisionResult(
     vncUrl: null,
     message: result.message,
     adapter: runtimeAdapterName,
-    profile: result.profile ?? session.profile,
+    profile: session.profile,
     adapterWorkspaceId,
     providerResourceId: result.providerResourceId,
     ...(capabilities === undefined ? {} : { capabilities, capabilitiesPresent: true }),
@@ -11973,6 +12010,7 @@ async function inspectRuntimeAdapterWorkspace(
   }
   const controlPlane = requireRegisteredRuntimeAdapterControlPlane(
     env,
+    session.profile,
     session.adapter_control_plane,
   );
   if (session.status === "stopping") {
@@ -12032,6 +12070,9 @@ async function inspectRuntimeAdapterWorkspace(
   if (!adapterWorkspaceIdMatches(parsed, adapterWorkspaceId)) {
     throw new Error("runtime adapter inspect returned a different workspace id");
   }
+  if (parsed.profile !== session.profile) {
+    throw new Error("runtime adapter inspect returned a different workspace profile");
+  }
   const result = runtimeAdapterProvisionResult(
     parsed,
     runtimeAdapterRecord(session),
@@ -12081,7 +12122,12 @@ async function reconcileStoppingRuntimeAdapterWorkspace(
   try {
     release = await stopRuntimeAdapterWorkspace(
       env,
-      requireRegisteredRuntimeAdapterControlPlane(env, session.adapter_control_plane),
+      session.profile,
+      requireRegisteredRuntimeAdapterControlPlane(
+        env,
+        session.profile,
+        session.adapter_control_plane,
+      ),
       adapterWorkspaceId,
     );
   } catch (error) {
@@ -12176,7 +12222,11 @@ async function replayStoppingRuntimeAdapterCreate(
   }
   let controlPlane: string;
   try {
-    controlPlane = requireRegisteredRuntimeAdapterControlPlane(env, session.adapter_control_plane);
+    controlPlane = requireRegisteredRuntimeAdapterControlPlane(
+      env,
+      session.profile,
+      session.adapter_control_plane,
+    );
   } catch (error) {
     return {
       message: safeProviderError(error, [adapterWorkspaceId]),
@@ -12345,10 +12395,15 @@ async function replayStoppingRuntimeAdapterCreate(
 
 async function stopRuntimeAdapterWorkspace(
   env: RuntimeEnv,
+  profile: string,
   registeredControlPlane: string,
   adapterWorkspaceId: string,
 ): Promise<RuntimeAdapterStopResult> {
-  const controlPlane = requireRegisteredRuntimeAdapterControlPlane(env, registeredControlPlane);
+  const controlPlane = requireRegisteredRuntimeAdapterControlPlane(
+    env,
+    profile,
+    registeredControlPlane,
+  );
   const response = await runtimeAdapterFetch(
     env,
     runtimeAdapterWorkspaceUrl(controlPlane, adapterWorkspaceId),
@@ -12388,13 +12443,14 @@ async function stopRuntimeAdapterWorkspaceForSession(
 ): Promise<RuntimeAdapterStopResult> {
   const registration = await database(env)
     .selectFrom("interactive_sessions")
-    .select(["adapter_control_plane", "adapter_create_pending"])
+    .select(["adapter_control_plane", "adapter_create_pending", "profile"])
     .where("id", "=", sessionId)
     .where("adapter", "=", runtimeAdapterName)
     .where("adapter_workspace_id", "=", adapterWorkspaceId)
     .executeTakeFirst();
   const controlPlane = requireRegisteredRuntimeAdapterControlPlane(
     env,
+    registration?.profile ?? "",
     registration?.adapter_control_plane,
   );
   if (registration?.adapter_create_pending !== 0) {
@@ -12403,7 +12459,12 @@ async function stopRuntimeAdapterWorkspaceForSession(
       message: "runtime adapter stop waiting for create resolution",
     };
   }
-  return stopRuntimeAdapterWorkspace(env, controlPlane, adapterWorkspaceId);
+  return stopRuntimeAdapterWorkspace(
+    env,
+    registration?.profile ?? "",
+    controlPlane,
+    adapterWorkspaceId,
+  );
 }
 
 async function runtimeAdapterFetch(
@@ -12447,7 +12508,9 @@ function runtimeAdapterToken(env: RuntimeEnv): string {
 }
 
 function runtimeAdapterProviderConfigured(env: RuntimeEnv): boolean {
-  return Boolean(configuredRuntimeAdapterControlPlane(env) && runtimeAdapterToken(env));
+  return Boolean(
+    configuredRuntimeAdapterControlPlane(env, "profile-route") && runtimeAdapterToken(env),
+  );
 }
 
 async function forwardRuntimeProvision(

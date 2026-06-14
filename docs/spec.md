@@ -140,7 +140,7 @@ Sandbox checkpoints use provider backups plus a Durable Object registry. They re
 
 ### Versioned Runtime Adapter
 
-`CRABBOX_RUNTIME_ADAPTER_URL` enables the durable `/v1/workspaces` contract.
+`CRABBOX_RUNTIME_ADAPTER_URL` or the mutually exclusive profile-routed `CRABBOX_RUNTIME_ADAPTER_URL_TEMPLATE` enables the durable `/v1/workspaces` contract.
 
 Crabfleet persists the canonical adapter identity, namespaced workspace ID, immutable create payload, idempotency key, lifecycle state, provider identity, capabilities, expiry, and create ambiguity before or during provider calls.
 
