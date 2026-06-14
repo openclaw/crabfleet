@@ -177,3 +177,28 @@ test("interactive lineage rejects caller-claimed roots without a parent", async 
 		/if \(rootId\) throw badRequest\("root session id requires a parent session id"\)/,
 	);
 });
+
+test("OpenClaw room capacity rolls back before event recording or provisioning", async () => {
+	const source = await readFile(new URL("../src/index.ts", import.meta.url), "utf8");
+	const capacityStart = source.indexOf("async function enforceOpenClawRoomSessionLimitAfterInsert");
+	const capacityEnd = source.indexOf("function openClawCrabboxResponse", capacityStart);
+	const capacitySource = source.slice(capacityStart, capacityEnd);
+	const createStart = source.indexOf("async function createInteractiveSessionFromInput");
+	const createEnd = source.indexOf("function initialRuntimeAdapterWorkspaceId", createStart);
+	const createSource = source.slice(createStart, createEnd);
+
+	assert.match(capacitySource, /fn\.countAll<number>\(\)/);
+	assert.match(capacitySource, /deleteFrom\("interactive_sessions"\)/);
+	assert.match(
+		capacitySource,
+		/throw tooManyRequests\("session root reached the supervision limit"\)/,
+	);
+	assert.ok(
+		createSource.indexOf("enforceOpenClawRoomSessionLimitAfterInsert") <
+			createSource.indexOf("appendInteractiveSessionEvent"),
+	);
+	assert.ok(
+		createSource.indexOf("enforceOpenClawRoomSessionLimitAfterInsert") <
+			createSource.indexOf("provisionInteractiveSession"),
+	);
+});

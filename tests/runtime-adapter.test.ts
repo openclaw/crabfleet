@@ -768,19 +768,13 @@ test("strict session rows and cleanup preserve terminal finalization anchors", a
   assert.match(cleanupSource, /deleteFrom\("interactive_sessions"\)/);
   assert.match(cleanupSource, /FROM interactive_session_credential_policies/);
   assert.equal(
-    cleanupSource.match(/FROM interactive_sessions AS active_tree_session/g)?.length,
+    cleanupSource.match(/WITH RECURSIVE active_ancestor\(id\)/g)?.length,
     2,
   );
-  assert.match(
-    cleanupSource,
-    /COALESCE\(active_tree_session\.root_session_id, active_tree_session\.id\)[\s\S]*COALESCE\(interactive_sessions\.root_session_id, interactive_sessions\.id\)/,
-  );
-  assert.match(cleanupSource, /= \$\{row\.root_session_id \?\? row\.id\}/);
-  assert.equal(
-    cleanupSource.match(/active_tree_session\.status NOT IN \('stopped', 'expired', 'failed'\)/g)
-      ?.length,
-    2,
-  );
+  assert.match(cleanupSource, /SELECT parent_session_id[\s\S]*FROM interactive_sessions/);
+  assert.match(cleanupSource, /JOIN active_ancestor ON session\.id = active_ancestor\.id/);
+  assert.match(cleanupSource, /WHERE id = interactive_sessions\.id/);
+  assert.match(cleanupSource, /WHERE id = \$\{row\.id\}/);
   assert.match(source, /terminalFinalizationPendingQuery/);
   assert.match(source, /executeBatch\(env, \[[\s\S]*interactive_session_events/);
   assert.match(source, /COALESCE\([\s\S]*event_count[\s\S]*count\(\*\)/);

@@ -598,7 +598,9 @@ not mutate GitHub. A missing or inaccessible branch then fails during runtime
 checkout.
 Per-crabbox reads require `X-Crabfleet-Root-Session-ID`; message and action
 bodies require `rootSessionId`. A session outside that exact root is returned
-as not found. Transcript responses contain at most the newest 240 events and
+as not found. Creation rejects a supervised descendant that would exceed the
+64-session room-tree limit before runtime provisioning begins. Transcript
+responses contain at most the newest 240 events and
 64 KiB of UTF-8 text and report whether evidence was truncated. Every message
 and stop request writes an audit event.
 
