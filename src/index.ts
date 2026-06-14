@@ -3272,7 +3272,7 @@ async function openClawCreateCrabbox(
     `openclaw crabbox created ${result.session.id} owner=${owner}`,
     Date.now(),
   );
-  return openClawCrabboxResponse(env, serviceUser, result.session);
+  return openClawDecoratedCrabboxResponse(env, result.session);
 }
 
 async function openClawReadSessionRoot(
@@ -3437,8 +3437,18 @@ function openClawCrabboxResponse(
   serviceUser: User,
   session: InteractiveSession,
 ): { session: InteractiveSession; browserUrl: string } {
+  return openClawDecoratedCrabboxResponse(
+    env,
+    decorateInteractiveSession(session, serviceUser, env),
+  );
+}
+
+function openClawDecoratedCrabboxResponse(
+  env: RuntimeEnv,
+  session: InteractiveSession,
+): { session: InteractiveSession; browserUrl: string } {
   return {
-    session: decorateInteractiveSession(session, serviceUser, env),
+    session,
     browserUrl: `${browserAppOrigin(env)}/app/sessions/${encodeURIComponent(session.id)}`,
   };
 }
