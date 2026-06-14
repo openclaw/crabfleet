@@ -184,7 +184,7 @@ test("OpenClaw transcript reads a sentinel event before reporting completeness",
 test("OpenClaw root reads are filtered, capped, D1-only, and log-free", async () => {
 	const source = await readFile(new URL("../src/index.ts", import.meta.url), "utf8");
 	const readStart = source.indexOf("async function openClawReadSessionRoot");
-	const readEnd = source.indexOf("async function openClawReadCrabbox", readStart);
+	const readEnd = source.indexOf("async function openClawMutateSessionRoot", readStart);
 	const readSource = source.slice(readStart, readEnd);
 	const summaryStart = source.indexOf("function openClawCrabboxSummaryResponse");
 	const summaryEnd = source.indexOf("function openClawDecoratedCrabboxResponse", summaryStart);
@@ -336,4 +336,65 @@ test("invalid descendants below an OpenClaw root fail closed before insertion", 
 		/if \(createdBy === "service:openclaw" \|\| openClawRoomRootAllowed\(root\)\)/,
 	);
 	assert.match(lineageSource, /throw badRequest\("invalid OpenClaw room lineage"\)/);
+});
+
+test("OpenClaw crabbox requests reserve durable idempotency before provisioning", async () => {
+	const source = await readFile(new URL("../src/index.ts", import.meta.url), "utf8");
+	const migration = await readFile(
+		new URL("../migrations/0026_openclaw_lifecycle_guarantees.sql", import.meta.url),
+		"utf8",
+	);
+	const endpointStart = source.indexOf("async function openClawCreateCrabbox");
+	const endpointEnd = source.indexOf("async function openClawCrabboxRequestHash", endpointStart);
+	const endpointSource = source.slice(endpointStart, endpointEnd);
+	const createStart = source.indexOf("async function createInteractiveSessionFromInput");
+	const createEnd = source.indexOf("function initialRuntimeAdapterWorkspaceId", createStart);
+	const createSource = source.slice(createStart, createEnd);
+
+	assert.match(migration, /ADD COLUMN openclaw_request_id TEXT/);
+	assert.match(migration, /UNIQUE INDEX IF NOT EXISTS idx_interactive_sessions_openclaw_request/);
+	assert.match(endpointSource, /readOpenClawRequestSession/);
+	assert.ok(
+		endpointSource.indexOf("readOpenClawRequestSession") <
+			endpointSource.indexOf("createInteractiveSessionFromInput"),
+	);
+	assert.match(createSource, /openclaw_request_id: options\.openClawRequestId \?\? null/);
+	assert.match(createSource, /openclaw_request_hash: options\.openClawRequestHash \?\? null/);
+	assert.match(createSource, /if \(isConstraintError\(error\) && options\.openClawRequestId/);
+});
+
+test("OpenClaw root stop freezes admission and drives pending descendants terminal", async () => {
+	const source = await readFile(new URL("../src/index.ts", import.meta.url), "utf8");
+	const routeStart = source.indexOf("const openClawSessionRootActionMatch");
+	const routeEnd = source.indexOf("const openClawCrabboxTranscriptMatch", routeStart);
+	const routeSource = source.slice(routeStart, routeEnd);
+	const stopStart = source.indexOf("async function openClawMutateSessionRoot");
+	const stopEnd = source.indexOf("async function openClawReadCrabbox", stopStart);
+	const stopSource = source.slice(stopStart, stopEnd);
+	const lineageStart = source.indexOf("async function openClawSupervisedRootForCreate");
+	const lineageEnd = source.indexOf("async function openClawRoomReservationLineageAllowed");
+	const lineageSource = source.slice(lineageStart, lineageEnd);
+
+	assert.match(routeSource, /openClawMutateSessionRoot/);
+	assert.match(stopSource, /openclaw_admission_closed: 1/);
+	assert.ok(
+		stopSource.indexOf("openclaw_admission_closed: 1") <
+			stopSource.indexOf("rollbackInteractiveSessionReservation"),
+	);
+	assert.ok(
+		stopSource.indexOf("rollbackInteractiveSessionReservation") <
+			stopSource.indexOf("mutateInteractiveSession"),
+	);
+	assert.match(stopSource, /terminalReads >= 2/);
+	assert.match(stopSource, /preparation_pending === 0/);
+	assert.doesNotMatch(stopSource, /openClawRoomSessionChainAllowed/);
+	assert.match(lineageSource, /openClawRootAdmissionOpen/);
+	assert.match(lineageSource, /room_root\.openclaw_admission_closed = 0/);
+});
+
+test("OpenClaw lifecycle guarantees are documented", async () => {
+	const docs = await readFile(new URL("../docs/api.md", import.meta.url), "utf8");
+	assert.match(docs, /requestId/);
+	assert.match(docs, /session-roots\/:rootSessionId\/actions/);
+	assert.match(docs, /freeze room-tree\s+admission/);
 });

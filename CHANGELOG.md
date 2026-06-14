@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Make OpenClaw room trees recoverable with idempotent Crabbox creation and root-level admission freeze plus recursive stop.
 - Add root-fenced OpenClaw service supervision for Crabbox room trees, including current state, bounded transcript evidence, targeted terminal nudges, audited stop requests, and canonical browser URLs.
 - Allow MultiCodex to use a dedicated service capability without rotating the existing OpenClaw automation token.
 - Safely reserve room capacity and prepare missing service-requested branches from an explicit base branch before Crabbox provisioning.
