@@ -91,6 +91,7 @@ function App() {
     github: false,
     token: false,
     devIdentity: false,
+    trustedProxy: false,
   });
   const [loginMessage, setLoginMessage] = useState("");
   const [filter, setFilter] = useState("all");
@@ -323,7 +324,7 @@ function App() {
       setAuthMethods(methods);
       return methods;
     } catch {
-      const methods = { github: false, token: true, devIdentity: false };
+      const methods = { github: false, token: true, devIdentity: false, trustedProxy: false };
       setAuthMethods(methods);
       return methods;
     }
@@ -1161,6 +1162,7 @@ function AppShell(props) {
     props.state.fleet?.totals?.attachable ??
     (props.state.interactiveSessions || []).filter(isFleetSessionAttachable).length;
   const user = props.state.user;
+  const trustedProxyUser = props.signedIn && user?.subject?.startsWith("proxy:");
   const userLabel =
     !props.signedIn && user?.subject === "shared"
       ? "Sign in for control"
@@ -1243,7 +1245,11 @@ function AppShell(props) {
           </div>
           <button
             class="ghost user-chip"
-            onClick={props.signedIn ? props.logout : props.beginLogin}
+            title={trustedProxyUser ? "Signed in by your organization" : undefined}
+            disabled={trustedProxyUser}
+            onClick={
+              trustedProxyUser ? undefined : props.signedIn ? props.logout : props.beginLogin
+            }
           >
             {userLabel}
           </button>

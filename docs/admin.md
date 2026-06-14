@@ -312,6 +312,16 @@ Only runtime and merge defaults in `ok` configs influence card defaults and runt
 
 ## Auth
 
+### Trusted Reverse Proxy
+
+Crabfleet can accept identity from an authenticating reverse proxy without a deployment-specific fork. Configure the exact backend `CRABFLEET_TRUSTED_PROXY_ORIGIN` and `CRABFLEET_TRUSTED_PROXY_SECRET`, have the proxy remove caller-supplied identity and secret headers, preserve the browser `Origin`, then inject `X-Authenticated-User` and the same secret as `X-Crabfleet-Proxy-Secret`. Use `CRABFLEET_TRUSTED_USER_HEADER` for a different identity header. When the browser-visible and backend origins differ, set `CRABFLEET_TRUSTED_PROXY_PUBLIC_ORIGIN` to the browser origin.
+
+Proxy authentication does not grant a role. Add the asserted email or login to Crabfleet's existing allowlist with the intended role. Proxy assertions accept only direct email/login syntax and cannot claim a team allowlist entry. A missing or incorrect secret, missing identity, non-allowlisted identity, invalid or partial configuration, wrong backend origin, cross-origin mutation, or partial proxy assertion fails closed. The configured backend origin never falls back to a local cookie; other origins retain GitHub OAuth and break-glass token sessions. Keep the backend inaccessible to untrusted networks. Crabfleet strips the asserted identity, proxy secret, and any local cookie before routing an authenticated proxy request downstream.
+
+The existing SSH gateway, agent, OpenClaw service, and standalone-provision API routes continue to accept their own scoped credentials without a browser proxy assertion. Any partial proxy assertion on those routes still fails closed.
+
+SSH key linking still requires a GitHub-authenticated browser session, not a proxy-only identity. If the gateway is enabled with trusted-proxy mode, set `GITHUB_REDIRECT_URI` to a separate OAuth-capable origin outside the authoritative proxy backend origin; generated SSH onboarding links use that origin.
+
 ### GitHub OAuth
 
 Recommended for production.
