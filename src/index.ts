@@ -134,6 +134,7 @@ import { obsoleteSessionArchiveObjectKeys, sessionArchiveAttemptKeys } from "./s
 import { readBoundedResponseText } from "./bounded-response";
 import {
   boundedUtf8Tail,
+  openClawBranchPreparationCanDefer,
   openClawServiceAuthorized,
   sessionBelongsToRoot,
 } from "./openclaw-service";
@@ -3233,7 +3234,24 @@ async function openClawCreateCrabbox(
   }>(request);
   const owner = openClawOwner(body.owner);
   const serviceUser = openClawServiceUser();
-  await ensureOpenClawServiceBranch(env, body.repo, body.branch, body.baseBranch);
+  try {
+    await ensureOpenClawServiceBranch(env, body.repo, body.branch, body.baseBranch);
+  } catch (error) {
+    if (
+      !(error instanceof GitHubApiError) ||
+      !openClawBranchPreparationCanDefer(error.status)
+    ) {
+      throw error;
+    }
+    console.warn(
+      JSON.stringify({
+        event: "openclaw_branch_preparation_deferred",
+        repo: normalizeRepo(body.repo),
+        branch: clean(body.branch, 120) || "main",
+        status: error.status,
+      }),
+    );
+  }
   const result = await createInteractiveSessionFromInput(
     env,
     serviceUser,

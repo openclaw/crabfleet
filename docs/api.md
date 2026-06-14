@@ -585,7 +585,10 @@ Every endpoint requires a configured service capability: the existing
 MultiCodex deployment.
 Crabbox creation can include `baseBranch`; when the requested branch is
 missing, Crabfleet creates it from that base with its deployment GitHub
-credential before provisioning the session.
+credential before provisioning the session. If that control-plane credential
+is denied with `403`, Crabfleet defers branch validation to the separately
+credentialed runtime adapter so an existing branch can still launch. A missing
+or inaccessible branch then fails during runtime checkout.
 Per-crabbox reads require `X-Crabfleet-Root-Session-ID`; message and action
 bodies require `rootSessionId`. A session outside that exact root is returned
 as not found. Transcript responses contain at most the newest 240 events and
