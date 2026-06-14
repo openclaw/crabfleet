@@ -7,6 +7,7 @@ import {
 	openClawBranchPreparationCanDefer,
 	openClawRoomMaxSessions,
 	openClawRoomRootAllowed,
+	openClawRoomSessionChainAllowed,
 	openClawRoomSessionAllowed,
 	openClawServiceAuthorized,
 	openClawTranscriptMaxBytes,
@@ -38,6 +39,7 @@ test("session root fences accept the root and every child only for the exact roo
 test("room supervision accepts service roots and their agent-created non-action descendants", () => {
 	const root = {
 		id: "IS-10",
+		parentSessionId: null,
 		rootSessionId: "IS-10",
 		runtime: "container",
 		createdBy: "service:openclaw",
@@ -47,13 +49,36 @@ test("room supervision accepts service roots and their agent-created non-action 
 	assert.equal(openClawRoomRootAllowed(root), true);
 	assert.equal(openClawRoomRootAllowed({ ...root, id: "IS-11" }), false);
 	assert.equal(
-		openClawRoomSessionAllowed({ ...root, id: "IS-11", createdBy: "session:IS-10" }),
+		openClawRoomSessionAllowed({
+			...root,
+			id: "IS-11",
+			parentSessionId: "IS-10",
+			createdBy: "session:IS-10",
+		}),
 		true,
 	);
 	assert.equal(openClawRoomRootAllowed({ ...root, createdBy: "session:IS-10" }), false);
 	assert.equal(openClawRoomSessionAllowed({ ...root, runtime: "github_actions" }), false);
 	assert.equal(openClawRoomSessionAllowed({ ...root, createdBy: "github:123" }), false);
 	assert.equal(openClawRoomSessionAllowed({ ...root, workKey: "repo:pr:1" }), false);
+
+	const child = { ...root, id: "IS-11", parentSessionId: "IS-10" };
+	const agent = {
+		...root,
+		id: "IS-12",
+		parentSessionId: "IS-11",
+		createdBy: "session:IS-11",
+	};
+	assert.equal(openClawRoomSessionChainAllowed([root, child, agent], agent.id, root.id), true);
+	assert.equal(openClawRoomSessionChainAllowed([root, agent], agent.id, root.id), false);
+	assert.equal(
+		openClawRoomSessionChainAllowed(
+			[root, { ...child, createdBy: "github:123" }, agent],
+			agent.id,
+			root.id,
+		),
+		false,
+	);
 });
 
 test("bounded transcript tails remain valid UTF-8 and report truncation", () => {
@@ -136,6 +161,19 @@ test("OpenClaw root reads are filtered, capped, concurrent, and log-free", async
 	assert.match(readSource, /\.where\("work_key", "is", null\)/);
 	assert.match(readSource, /\.limit\(openClawRoomMaxSessions \+ 1\)/);
 	assert.match(readSource, /mapWithConcurrency\(/);
+	assert.match(readSource, /openClawRoomSessionChainAllowed/);
 	assert.match(readSource, /openClawCrabboxSummaryResponse/);
 	assert.match(summarySource, /session: \{ \.\.\.response\.session, logs: \[\] \}/);
+});
+
+test("interactive lineage rejects caller-claimed roots without a parent", async () => {
+	const source = await readFile(new URL("../src/index.ts", import.meta.url), "utf8");
+	const start = source.indexOf("async function resolveInteractiveSessionLineage");
+	const end = source.indexOf("function interactiveSessionPurpose", start);
+	const lineageSource = source.slice(start, end);
+
+	assert.match(
+		lineageSource,
+		/if \(rootId\) throw badRequest\("root session id requires a parent session id"\)/,
+	);
 });
