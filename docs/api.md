@@ -575,7 +575,8 @@ Internal OpenClaw automation can supervise a created room/session tree without
 using browser cookies or an individual session's agent token:
 
 - `GET /api/openclaw/session-roots/:rootSessionId`: list the exact root and up to
-  63 children, with logs omitted from each session summary.
+  63 service-created or agent-created descendants, with logs omitted from each
+  session summary.
 - `GET /api/openclaw/crabboxes/:id`: read one current crabbox.
 - `GET /api/openclaw/crabboxes/:id/transcript`: read a bounded recent transcript.
 - `POST /api/openclaw/crabboxes/:id/message`: send one terminal message/nudge.
