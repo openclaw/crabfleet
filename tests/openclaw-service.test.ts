@@ -77,3 +77,23 @@ test("OpenClaw create preserves the already-decorated interactive session", asyn
 	assert.doesNotMatch(createSource, /openClawCrabboxResponse\(env, serviceUser, result\.session\)/);
 	assert.doesNotMatch(responseSource, /decorateInteractiveSession/);
 });
+
+test("OpenClaw mutations persist request evidence before consequential work", async () => {
+	const source = await readFile(new URL("../src/index.ts", import.meta.url), "utf8");
+	const messageStart = source.indexOf("async function openClawMessageCrabbox");
+	const messageEnd = source.indexOf("async function openClawMutateCrabbox", messageStart);
+	const messageSource = source.slice(messageStart, messageEnd);
+	const stopStart = messageEnd;
+	const stopEnd = source.indexOf("async function openClawRootScopedCrabbox", stopStart);
+	const stopSource = source.slice(stopStart, stopEnd);
+
+	assert.ok(
+		messageSource.indexOf("OpenClaw service nudge requested") <
+			messageSource.indexOf("openInteractiveTerminalUpstream"),
+	);
+	assert.match(messageSource, /Promise\.allSettled/);
+	assert.ok(
+		stopSource.indexOf("openclaw crabbox stop requested") <
+			stopSource.indexOf("mutateInteractiveSession"),
+	);
+});

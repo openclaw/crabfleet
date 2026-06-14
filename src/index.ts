@@ -3368,6 +3368,9 @@ async function openClawMessageCrabbox(
   const message = clean(body.message, 4000);
   if (!message) throw badRequest("message is required");
   const serviceUser = openClawServiceUser();
+  const now = Date.now();
+  await appendInteractiveSessionEvent(env, id, serviceUser, "OpenClaw service nudge requested", now);
+  await audit(env, serviceUser, `openclaw crabbox message requested ${id}`, now);
   const terminalRequest = new Request(request.url, { headers: { upgrade: "websocket" } });
   const upstream = await openInteractiveTerminalUpstream(
     terminalRequest,
@@ -3378,17 +3381,27 @@ async function openClawMessageCrabbox(
     34,
   );
   upstream.socket.send(encoder.encode(`${message}${body.enter === false ? "" : "\r"}`));
-  upstream.socket.close(1000, "OpenClaw service nudge sent");
-  const now = Date.now();
-  await appendInteractiveSessionEvent(env, id, serviceUser, "OpenClaw service nudge sent", now);
-  await audit(env, serviceUser, `openclaw crabbox message sent ${id}`, now);
+  try {
+    upstream.socket.close(1000, "OpenClaw service nudge sent");
+  } catch {
+    console.warn(JSON.stringify({ event: "openclaw_message_socket_close_failed", sessionId: id }));
+  }
+  const deliveredAt = Date.now();
+  const deliveryRecords = await Promise.allSettled([
+    appendInteractiveSessionEvent(env, id, serviceUser, "OpenClaw service nudge sent", deliveredAt),
+    audit(env, serviceUser, `openclaw crabbox message sent ${id}`, deliveredAt),
+  ]);
+  if (deliveryRecords.some((record) => record.status === "rejected")) {
+    console.warn(
+      JSON.stringify({
+        event: "openclaw_message_delivery_record_failed",
+        sessionId: id,
+      }),
+    );
+  }
   return {
     delivered: true,
-    ...openClawCrabboxResponse(
-      env,
-      serviceUser,
-      (await readInteractiveSession(env, id)) as InteractiveSession,
-    ),
+    ...openClawCrabboxResponse(env, serviceUser, session),
   };
 }
 
@@ -3402,8 +3415,8 @@ async function openClawMutateCrabbox(
   await openClawRootScopedCrabbox(request, env, id, body.rootSessionId);
   if (body.action !== "stop") throw badRequest("only stop is supported");
   const serviceUser = openClawServiceUser();
-  const result = await mutateInteractiveSession(request, env, serviceUser, id, body.action);
   await audit(env, serviceUser, `openclaw crabbox stop requested ${id}`, Date.now());
+  const result = await mutateInteractiveSession(request, env, serviceUser, id, body.action);
   return openClawCrabboxResponse(env, serviceUser, result.session);
 }
 
