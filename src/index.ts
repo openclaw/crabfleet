@@ -878,6 +878,14 @@ type InteractiveSessionTable = {
 
 type InteractiveSessionRow = Selectable<InteractiveSessionTable>;
 
+type OpenClawRequestReplayTable = {
+  request_id: string;
+  request_hash: string;
+  session_id: string;
+  created_at: number;
+  updated_at: number;
+};
+
 type RepoWorkflowTable = {
   repo: string;
   status: WorkflowStatus;
@@ -1004,6 +1012,7 @@ type Database = {
   cards: CardTable;
   run_attempts: RunAttemptTable;
   interactive_sessions: InteractiveSessionTable;
+  openclaw_request_replays: OpenClawRequestReplayTable;
   interactive_session_events: InteractiveSessionEventTable;
   interactive_session_log_archives: InteractiveSessionLogArchiveTable;
   interactive_session_credential_policies: InteractiveSessionCredentialPolicyTable;
@@ -3363,14 +3372,30 @@ async function readOpenClawRequestSession(
   requestId: string,
   requestHash: string,
 ): Promise<InteractiveSession | null> {
-  const row = await database(env)
+  const db = database(env);
+  const replay = await db
+    .selectFrom("openclaw_request_replays")
+    .selectAll()
+    .where("request_id", "=", requestId)
+    .executeTakeFirst();
+  if (!replay) return null;
+  if (replay.request_hash !== requestHash) {
+    throw conflict("OpenClaw crabbox request id already belongs to a different request");
+  }
+  const row = await db
     .selectFrom("interactive_sessions")
     .selectAll()
-    .where("openclaw_request_id", "=", requestId)
+    .where("id", "=", replay.session_id)
     .executeTakeFirst();
-  if (!row) return null;
-  if (row.created_by !== "service:openclaw" || row.openclaw_request_hash !== requestHash) {
-    throw conflict("OpenClaw crabbox request id already belongs to a different request");
+  if (!row) {
+    throw conflict("OpenClaw crabbox request already completed and is no longer available");
+  }
+  if (
+    row.created_by !== "service:openclaw" ||
+    row.openclaw_request_id !== requestId ||
+    row.openclaw_request_hash !== requestHash
+  ) {
+    throw serviceUnavailable("OpenClaw crabbox replay record is inconsistent");
   }
   if (row.preparation_pending !== 0) {
     throw serviceUnavailable("OpenClaw crabbox request is still preparing");
@@ -3465,19 +3490,21 @@ async function openClawMutateSessionRoot(
   const nextLifecycleAttemptAt = new Map<string, number>();
   while (Date.now() < deadline) {
     let rows = await readOpenClawRootRows(env, root);
-    const pending = rows.filter((row) => row.preparation_pending !== 0);
+    const pending = rows.filter((row) => row.preparation_pending !== 0).slice(0, 4);
     await mapWithConcurrency(pending, 4, async (row) => {
-      await rollbackInteractiveSessionReservation(env, row.id, row.created_at).catch(
-        () => undefined,
+      await runOpenClawRootOperationBeforeDeadline(deadline, () =>
+        rollbackInteractiveSessionReservation(env, row.id, row.created_at),
       );
     });
+    if (Date.now() >= deadline) break;
     rows = await readOpenClawRootRows(env, root);
     const sessions = rows.map((row) => interactiveSession(row, []));
     const now = Date.now();
     const actionable = sessions
       .filter((session) => !deadInteractiveSessionStatuses.includes(session.status))
       .filter((session) => (nextLifecycleAttemptAt.get(session.id) ?? 0) <= now)
-      .reverse();
+      .reverse()
+      .slice(0, 4);
     await mapWithConcurrency(actionable, 4, async (session) => {
       const attempt = (lifecycleAttempts.get(session.id) ?? 0) + 1;
       lifecycleAttempts.set(session.id, attempt);
@@ -3486,20 +3513,19 @@ async function openClawMutateSessionRoot(
         now + Math.min(10_000, 500 * 2 ** Math.min(attempt - 1, 5)),
       );
       if (session.status === "stopping") {
-        await reconcileExternalInteractiveSessionById(env, session.id, now).catch(() => undefined);
+        await runOpenClawRootOperationBeforeDeadline(deadline, () =>
+          reconcileExternalInteractiveSessionById(env, session.id, now),
+        );
         return;
       }
-      await mutateInteractiveSession(request, env, serviceUser, session.id, "stop").catch(
-        () => undefined,
+      await runOpenClawRootOperationBeforeDeadline(deadline, () =>
+        mutateInteractiveSession(request, env, serviceUser, session.id, "stop").then(() => undefined),
       );
     });
+    if (Date.now() >= deadline) break;
     rows = await readOpenClawRootRows(env, root);
-    const complete =
-      rows.length > 0 &&
-      rows.every(
-        (row) =>
-          row.preparation_pending === 0 && deadInteractiveSessionStatuses.includes(row.status),
-      );
+    const completion = await readOpenClawRootCompletion(env, root);
+    const complete = completion.remaining === 0;
     terminalReads = complete ? terminalReads + 1 : 0;
     if (terminalReads >= 2) {
       const sessions = rows.map((row) => interactiveSession(row, []));
@@ -3512,21 +3538,40 @@ async function openClawMutateSessionRoot(
         ),
       };
     }
-    const currentState = rows
+    const currentState = `${completion.total}:${completion.remaining}:${rows
       .map((row) => `${row.id}:${row.status}:${row.preparation_pending}`)
-      .join("|");
+      .join("|")}`;
     pollDelayMs = currentState === previousState ? Math.min(2_000, pollDelayMs * 2) : 250;
     previousState = currentState;
-    await sleep(pollDelayMs);
+    const remaining = deadline - Date.now();
+    if (remaining <= 0) break;
+    await sleep(Math.min(pollDelayMs, remaining));
   }
   throw serviceUnavailable("OpenClaw session root cleanup did not reach a terminal state");
+}
+
+async function runOpenClawRootOperationBeforeDeadline(
+  deadline: number,
+  operation: () => Promise<void>,
+): Promise<void> {
+  const remaining = deadline - Date.now();
+  if (remaining <= 0) return;
+  await new Promise<void>((resolve) => {
+    const timer = setTimeout(resolve, remaining);
+    void operation()
+      .catch(() => undefined)
+      .finally(() => {
+        clearTimeout(timer);
+        resolve();
+      });
+  });
 }
 
 async function readOpenClawRootRows(
   env: RuntimeEnv,
   rootSessionId: string,
 ): Promise<InteractiveSessionRow[]> {
-  const rows = await database(env)
+  return database(env)
     .selectFrom("interactive_sessions")
     .selectAll()
     .where((expression) =>
@@ -3543,13 +3588,42 @@ async function readOpenClawRootRows(
     )
     .where("runtime", "!=", "github_actions")
     .where("work_key", "is", null)
+    .orderBy(
+      sql<number>`CASE
+        WHEN preparation_pending != 0 THEN 0
+        WHEN status NOT IN ('stopped', 'expired', 'failed') THEN 1
+        ELSE 2
+      END`,
+      "asc",
+    )
     .orderBy("created_at", "asc")
-    .limit(openClawRoomMaxSessions + 1)
+    .limit(openClawRoomMaxSessions)
     .execute();
-  if (rows.length > openClawRoomMaxSessions) {
-    throw serviceUnavailable("session root exceeds the supervision limit");
-  }
-  return rows;
+}
+
+async function readOpenClawRootCompletion(
+  env: RuntimeEnv,
+  rootSessionId: string,
+): Promise<{ total: number; remaining: number }> {
+  const result = await sql<{ total: number; remaining: number }>`
+    SELECT
+      count(*) AS total,
+      sum(
+        CASE
+          WHEN preparation_pending != 0 OR status NOT IN ('stopped', 'expired', 'failed') THEN 1
+          ELSE 0
+        END
+      ) AS remaining
+    FROM interactive_sessions
+    WHERE (root_session_id = ${rootSessionId} OR id = ${rootSessionId})
+      AND (created_by = 'service:openclaw' OR created_by LIKE 'session:%')
+      AND runtime != 'github_actions'
+      AND work_key IS NULL
+  `.execute(database(env));
+  return {
+    total: Number(result.rows[0]?.total ?? 0),
+    remaining: Number(result.rows[0]?.remaining ?? 0),
+  };
 }
 
 async function openClawReadCrabbox(
@@ -3837,6 +3911,10 @@ async function rollbackInteractiveSessionReservation(
       AND updated_at = ${insertedAt}
   )`;
   await executeBatch(env, [
+    db
+      .deleteFrom("openclaw_request_replays")
+      .where("session_id", "=", insertedSessionId)
+      .where(ownsReservation),
     db
       .deleteFrom("interactive_session_events")
       .where("session_id", "=", insertedSessionId)
@@ -5039,7 +5117,7 @@ async function createInteractiveSessionFromInput(
       ? JSON.stringify(adapterCreatePayload)
       : null;
     try {
-      await db
+      const insertSession = db
         .insertInto("interactive_sessions")
         .values({
           id,
@@ -5105,8 +5183,21 @@ async function createInteractiveSessionFromInput(
           codex_turn_id: null,
           last_heartbeat_at: null,
           completion_reason: null,
-        })
-        .execute();
+        });
+      if (options.openClawRequestId && options.openClawRequestHash) {
+        await executeBatch(env, [
+          db.insertInto("openclaw_request_replays").values({
+            request_id: options.openClawRequestId,
+            request_hash: options.openClawRequestHash,
+            session_id: id,
+            created_at: now,
+            updated_at: now,
+          }),
+          insertSession,
+        ]);
+      } else {
+        await insertSession.execute();
+      }
       if (supervisedRootSessionId) {
         await enforceOpenClawRoomSessionLimitAfterInsert(
           env,

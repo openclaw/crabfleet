@@ -556,12 +556,14 @@ Creates a repo-ready crabbox for an operator, e.g. from a Discord meeting handof
 }
 ```
 
-`requestId` is optional, limited to 200 characters, and strongly recommended for automation. Crabfleet
-persists it with the session reservation before branch preparation or runtime
-creation. Replaying the same request returns the original crabbox; reusing the
-ID with a different request is rejected. A replay while the original reservation
-is still preparing returns a retryable service-unavailable response instead of
-claiming the crabbox is ready.
+`requestId` is optional, limited to 200 characters, and strongly recommended for
+automation. Crabfleet persists it in a durable replay ledger with the session
+reservation before branch preparation or runtime creation. Replaying the same
+request returns the original crabbox; reusing the ID with a different request is
+rejected. A replay while the original reservation is still preparing returns a
+retryable service-unavailable response instead of claiming the crabbox is ready.
+After finalized-session cleanup, the retained replay tombstone rejects the
+request instead of provisioning duplicate work.
 
 Response:
 
@@ -642,8 +644,10 @@ Root stop request:
 ```
 
 Root stop closes descendant admission before rolling back pending reservations
-and driving the remaining root tree terminal. It returns only after the tree is
-quiescent; a failed request leaves admission closed and can be retried safely.
+and driving the remaining root tree terminal in bounded batches, including a
+legacy tree above the normal supervision limit. It returns only after the whole
+tree is quiescent; a failed request leaves admission closed and can be retried
+safely.
 
 ## Admin
 
