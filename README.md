@@ -207,7 +207,8 @@ The Crabbox namespace cutover intentionally has no old-name compatibility. Exist
 - `CRABBOX_INTERACTIVE_PROVISION_URL` – Optional adapter endpoint for standalone Codex CLI workspaces
 - `CRABBOX_INTERACTIVE_PROVISION_TOKEN` – Optional bearer token sent to the interactive provision endpoint; required when backend URLs below are configured and always required to stop an existing standalone Sandbox
 - `CRABBOX_STANDALONE_SANDBOX_TTL_SECONDS` – Optional built-in standalone Sandbox lifetime, default `14400`, bounded to 300–86400 seconds
-- `CRABBOX_RUNTIME_ADAPTER_URL` – Optional base URL for the versioned workspace lifecycle adapter; takes precedence over the legacy create-only runtime provision URL and becomes immutable registration identity for each created lifecycle. Nested base paths are preserved; raw query or fragment delimiters are rejected.
+- `CRABBOX_RUNTIME_ADAPTER_URL` – Optional fixed base URL for the versioned workspace lifecycle adapter; mutually exclusive with `CRABBOX_RUNTIME_ADAPTER_URL_TEMPLATE`, takes precedence over the legacy create-only runtime provision URL, and becomes immutable registration identity for each created lifecycle. Nested base paths are preserved; raw query or fragment delimiters are rejected.
+- `CRABBOX_RUNTIME_ADAPTER_URL_TEMPLATE` – Optional profile-routed alternative containing exactly one `{profile}` full path segment. Selected profile IDs must be lowercase DNS labels; the resolved URL is validated and persisted with the same immutable lifecycle fence as a fixed adapter URL.
 - `CRABBOX_RUNTIME_ADAPTER_TOKEN` – Required bearer token for the versioned lifecycle adapter; sent only over HTTPS or literal loopback HTTP
 - `CRABBOX_RUNTIME_ADAPTER_NAMESPACE` – Required stable tenant namespace when the versioned adapter is enabled; a DNS-safe label of at most 32 characters used in every workspace ID and idempotency key
 - `CRABBOX_RUNTIME_ADAPTER_TTL_SECONDS` – Optional requested workspace TTL, default `14400`
@@ -246,10 +247,11 @@ teaching Crabfleet about either provider:
 CRABFLEET_DEFAULT_RUNTIME="crabbox"
 CRABFLEET_DEFAULT_PROFILE="linux-desktop"
 CRABFLEET_RUNTIME_PROFILES_JSON='[{"id":"linux-desktop","label":"Linux","target":"linux","capabilities":{"terminal":true,"desktop":true,"vnc":true}},{"id":"macos-desktop","label":"macOS","target":"macos","capabilities":{"terminal":true,"desktop":true,"vnc":true}}]'
+CRABBOX_RUNTIME_ADAPTER_URL_TEMPLATE="https://controller.example/v1/adapters/{profile}/proxy"
 ```
 
-The configured lifecycle adapter remains responsible for mapping each opaque
-profile ID to a provider and enforcing its real capabilities.
+The route template can select one outbound lifecycle adapter per profile. Each
+adapter remains responsible for its provider mapping and real capabilities.
 
 ### Verify Deployment
 

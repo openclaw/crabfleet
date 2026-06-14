@@ -121,11 +121,11 @@ Interactive sessions are the live execution plane. Supported paths:
 
 Sessions can carry parent/root lineage, purpose, summary, share state, delegated control, multiplayer mode, archive metadata, and runtime-specific capability state.
 
-An optional `CRABFLEET_RUNTIME_PROFILES_JSON` allowlist exposes generic Crabbox profile labels and capability previews without teaching the Worker provider-specific semantics. The Worker validates the opaque profile ID; the adapter maps it to the provider and enforces the real capability set.
+An optional `CRABFLEET_RUNTIME_PROFILES_JSON` allowlist exposes generic Crabbox profile labels and capability previews without teaching the Worker provider-specific semantics. The Worker validates the opaque profile ID. A fixed adapter maps it internally, or `CRABBOX_RUNTIME_ADAPTER_URL_TEMPLATE` selects a distinct outbound adapter by lowercase DNS-label profile; each adapter enforces its real provider capabilities.
 
 ## Versioned Adapter
 
-`CRABBOX_RUNTIME_ADAPTER_URL` enables the provider-neutral lifecycle contract:
+`CRABBOX_RUNTIME_ADAPTER_URL`, or the mutually exclusive profile-routed `CRABBOX_RUNTIME_ADAPTER_URL_TEMPLATE`, enables the provider-neutral lifecycle contract:
 
 - `POST /v1/workspaces`: idempotent create using an immutable namespaced ID and request snapshot.
 - `GET /v1/workspaces/:id`: inspect status, capabilities, expiry, provider identity, and terminal connection.
@@ -134,7 +134,7 @@ An optional `CRABFLEET_RUNTIME_PROFILES_JSON` allowlist exposes generic Crabbox 
 
 Important invariants:
 
-- The adapter base URL and namespace become immutable lifecycle identity.
+- The fixed or profile-resolved adapter base URL and namespace become immutable lifecycle identity.
 - Authenticated adapter requests require HTTPS, except literal loopback HTTP.
 - Redirects are rejected so bearer credentials cannot cross origins.
 - Request/response bodies are bounded before parsing.

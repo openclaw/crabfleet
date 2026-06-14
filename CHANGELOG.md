@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Route generic runtime profiles to distinct versioned adapters through a validated deployment URL template, reject profile-rewriting responses, and preserve immutable lifecycle control-plane fences.
 - Add a deployment-configured runtime profile selector with generic labels, targets, capability previews, server-side allowlisting, and CLI/SSH profile overrides.
 - Reconcile and de-duplicate the full documentation set against shipped runtime, session, persistence, security, API, native-client, and deployment behavior.
 - Strip upstream authorization credentials from authenticated trusted-proxy requests before app and terminal routing.

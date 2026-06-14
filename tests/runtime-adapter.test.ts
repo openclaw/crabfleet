@@ -18,6 +18,7 @@ import {
   parseAdapterWorkspaceResult,
   redactedAdapterMessage,
   redactedAdapterResponseMessage,
+  runtimeAdapterControlPlaneForProfile,
   runtimeAdapterControlPlaneIdentity,
   runtimeAdapterCreatePayload,
   runtimeAdapterBrowserVncUrl,
@@ -123,6 +124,26 @@ test("configured profiles fence every adapter runtime and preserve requested cap
   assert.match(createSource, /selectedRuntimeProfile\(deployment, body\.profile\)/);
   assert.match(profileSource, /deployment\.runtimeProfiles\.length > 0 && !descriptor/);
   assert.match(resultSource, /session\.adapterRequestedCapabilities \?\?/);
+  assert.match(resultSource, /profile: session\.profile/);
+  assert.doesNotMatch(resultSource, /profile: result\.profile/);
+});
+
+test("profile-routed adapter responses cannot rewrite their lifecycle route", async () => {
+  const source = await readFile(new URL("../src/index.ts", import.meta.url), "utf8");
+  const createStart = source.indexOf("async function provisionWithRuntimeAdapter");
+  const createEnd = source.indexOf("function persistedRuntimeAdapterSeconds", createStart);
+  const createSource = source.slice(createStart, createEnd);
+  const inspectStart = source.indexOf("async function inspectRuntimeAdapterWorkspace");
+  const inspectEnd = source.indexOf(
+    "async function reconcileStoppingRuntimeAdapterWorkspace",
+    inspectStart,
+  );
+  const inspectSource = source.slice(inspectStart, inspectEnd);
+
+  assert.match(createSource, /parsed\.profile !== session\.profile/);
+  assert.match(createSource, /workspace profile mismatch/);
+  assert.match(inspectSource, /parsed\.profile !== session\.profile/);
+  assert.match(inspectSource, /different workspace profile/);
 });
 
 test("adapter workspace id stays distinct from provider resource id", () => {
@@ -822,16 +843,17 @@ test("runtime adapter credentials are preflighted before session allocation", as
   const preflightSource = source.slice(preflightStart, preflightEnd);
 
   assert.ok(
-    createSource.indexOf("requireRuntimeAdapterCreatePreflight(env, runtime)") <
+    createSource.indexOf("requireRuntimeAdapterCreatePreflight(env, runtime, profile)") <
       createSource.indexOf("nextInteractiveSessionId(env)"),
   );
   assert.ok(
-    createSource.indexOf("requireRuntimeAdapterCreatePreflight(env, runtime)") <
+    createSource.indexOf("requireRuntimeAdapterCreatePreflight(env, runtime, profile)") <
       createSource.indexOf('.insertInto("interactive_sessions")'),
   );
   assert.match(preflightSource, /runtime === "container" && env\.SANDBOX/);
   assert.match(preflightSource, /runtimeAdapterToken\(env\)/);
-  assert.match(preflightSource, /configuredRuntimeAdapterControlPlane\(env\)/);
+  assert.match(preflightSource, /configuredRuntimeAdapterControlPlane\(env, profile\)/);
+  assert.match(preflightSource, /runtimeAdapterControlPlaneForProfile/);
   assert.match(preflightSource, /runtime adapter token is not configured/);
 });
 
@@ -863,6 +885,7 @@ test("runtime adapter operations stay bound to the registered control plane", as
   assert.match(migration, /ADD COLUMN adapter_control_plane TEXT/);
   assert.match(source, /adapter_control_plane: adapterControlPlane/);
   assert.match(bindingSource, /configuredControlPlane !== registeredControlPlane/);
+  assert.match(bindingSource, /configuredRuntimeAdapterControlPlane\(env, profile\)/);
   assert.match(bindingSource, /control plane differs from workspace registration/);
   assert.match(provisionSource, /requireRegisteredRuntimeAdapterControlPlane/);
   assert.match(provisionSource, /runtimeAdapterCollectionUrl\(baseUrl\)/);
@@ -958,11 +981,12 @@ test("every session-bound adapter delete waits for create ambiguity to clear", a
   const releaseEnd = source.indexOf("async function runtimeAdapterFetch", releaseStart);
   const releaseSource = source.slice(releaseStart, releaseEnd);
   const pendingGateIndex = releaseSource.indexOf("if (registration?.adapter_create_pending !== 0)");
-  const providerDeleteIndex = releaseSource.indexOf(
-    "stopRuntimeAdapterWorkspace(env, controlPlane, adapterWorkspaceId)",
-  );
+  const providerDeleteIndex = releaseSource.indexOf("return stopRuntimeAdapterWorkspace(");
 
-  assert.match(releaseSource, /select\(\["adapter_control_plane", "adapter_create_pending"\]\)/);
+  assert.match(
+    releaseSource,
+    /select\(\["adapter_control_plane", "adapter_create_pending", "profile"\]\)/,
+  );
   assert.ok(pendingGateIndex >= 0);
   assert.ok(providerDeleteIndex >= 0);
   assert.ok(pendingGateIndex < providerDeleteIndex);
@@ -1931,6 +1955,77 @@ test("runtime adapter control-plane identity is canonical and origin-bound", () 
   assert.equal(
     runtimeAdapterWorkspaceUrl("https://controller.example/root/adapter", "fleet-is-1"),
     "https://controller.example/root/adapter/v1/workspaces/fleet-is-1",
+  );
+});
+
+test("runtime adapter profile routes expand one allowlisted path segment", () => {
+  assert.equal(
+    runtimeAdapterControlPlaneForProfile(
+      undefined,
+      "https://controller.example/v1/adapters/{profile}/proxy/",
+      "linux-desktop",
+    ),
+    "https://controller.example/v1/adapters/linux-desktop/proxy",
+  );
+  assert.equal(
+    runtimeAdapterControlPlaneForProfile(
+      undefined,
+      "https://controller.example/v1/adapters/{profile}/proxy",
+      "macos-desktop",
+    ),
+    "https://controller.example/v1/adapters/macos-desktop/proxy",
+  );
+  assert.equal(
+    runtimeAdapterControlPlaneForProfile(
+      "https://controller.example/default",
+      undefined,
+      "legacy.profile",
+    ),
+    "https://controller.example/default",
+  );
+  assert.equal(
+    runtimeAdapterControlPlaneForProfile(
+      "https://controller.example/default",
+      "https://controller.example/{profile}",
+      "linux-desktop",
+    ),
+    null,
+  );
+  assert.equal(
+    runtimeAdapterControlPlaneForProfile(
+      undefined,
+      "https://{profile}.controller.example/proxy",
+      "linux-desktop",
+    ),
+    null,
+  );
+  assert.equal(
+    runtimeAdapterControlPlaneForProfile(undefined, "https://{profile}/proxy", "linux-desktop"),
+    null,
+  );
+  assert.equal(
+    runtimeAdapterControlPlaneForProfile(
+      undefined,
+      "https://controller.example/{profile}/proxy?tenant=fleet",
+      "linux-desktop",
+    ),
+    null,
+  );
+  assert.equal(
+    runtimeAdapterControlPlaneForProfile(
+      undefined,
+      "https://controller.example/{profile}/{profile}",
+      "linux-desktop",
+    ),
+    null,
+  );
+  assert.equal(
+    runtimeAdapterControlPlaneForProfile(
+      undefined,
+      "https://controller.example/{profile}/proxy",
+      "macos_desktop",
+    ),
+    null,
   );
 });
 
