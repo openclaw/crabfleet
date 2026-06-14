@@ -3512,7 +3512,7 @@ async function openClawMutateSessionRoot(
         session.id,
         now + Math.min(10_000, 500 * 2 ** Math.min(attempt - 1, 5)),
       );
-      if (session.status === "stopping") {
+      if (session.status === "stopping" && session.adapter !== runtimeAdapterName) {
         await runOpenClawRootOperationBeforeDeadline(deadline, () =>
           reconcileExternalInteractiveSessionById(env, session.id, now),
         );
