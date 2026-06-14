@@ -354,10 +354,12 @@ test("OpenClaw crabbox requests reserve durable idempotency before provisioning"
 	assert.match(migration, /ADD COLUMN openclaw_request_id TEXT/);
 	assert.match(migration, /UNIQUE INDEX IF NOT EXISTS idx_interactive_sessions_openclaw_request/);
 	assert.match(endpointSource, /readOpenClawRequestSession/);
+	assert.match(endpointSource, /requestId must be at most 200 characters/);
 	assert.ok(
 		endpointSource.indexOf("readOpenClawRequestSession") <
 			endpointSource.indexOf("createInteractiveSessionFromInput"),
 	);
+	assert.match(source, /profile: clean\(body\.profile, 120\)/);
 	assert.match(createSource, /openclaw_request_id: options\.openClawRequestId \?\? null/);
 	assert.match(createSource, /openclaw_request_hash: options\.openClawRequestHash \?\? null/);
 	assert.match(createSource, /if \(isConstraintError\(error\) && options\.openClawRequestId/);
@@ -378,6 +380,10 @@ test("OpenClaw root stop freezes admission and drives pending descendants termin
 	assert.match(routeSource, /openClawMutateSessionRoot/);
 	assert.match(stopSource, /openclaw_admission_closed: 1/);
 	assert.ok(
+		stopSource.indexOf("openclaw session root stop requested") <
+			stopSource.indexOf("openclaw_admission_closed: 1"),
+	);
+	assert.ok(
 		stopSource.indexOf("openclaw_admission_closed: 1") <
 			stopSource.indexOf("rollbackInteractiveSessionReservation"),
 	);
@@ -390,6 +396,10 @@ test("OpenClaw root stop freezes admission and drives pending descendants termin
 	assert.doesNotMatch(stopSource, /openClawRoomSessionChainAllowed/);
 	assert.match(lineageSource, /openClawRootAdmissionOpen/);
 	assert.match(lineageSource, /room_root\.openclaw_admission_closed = 0/);
+	assert.match(
+		lineageSource,
+		/if \(!position\) \{\s+await rollbackInteractiveSessionReservation[\s\S]+throw conflict\("OpenClaw room root is stopping"\)/,
+	);
 });
 
 test("OpenClaw lifecycle guarantees are documented", async () => {
