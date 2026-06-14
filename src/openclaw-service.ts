@@ -6,6 +6,7 @@ export const openClawRoomMaxSessions = 64;
 
 type OpenClawSessionFence = {
 	id: string;
+	parentSessionId: string | null;
 	rootSessionId: string | null;
 	runtime: string;
 	createdBy: string;
@@ -29,7 +30,9 @@ export function sessionBelongsToRoot(
 
 export function openClawRoomSessionAllowed(session: OpenClawSessionFence): boolean {
 	return (
-		(session.createdBy === "service:openclaw" || session.createdBy.startsWith("session:")) &&
+		(session.createdBy === "service:openclaw" ||
+			(Boolean(session.parentSessionId) &&
+				session.createdBy === `session:${session.parentSessionId}`)) &&
 		session.runtime !== "github_actions" &&
 		!session.workKey
 	);
@@ -41,6 +44,31 @@ export function openClawRoomRootAllowed(session: OpenClawSessionFence): boolean 
 		openClawRoomSessionAllowed(session) &&
 		(session.rootSessionId || session.id) === session.id
 	);
+}
+
+export function openClawRoomSessionChainAllowed(
+	sessions: OpenClawSessionFence[],
+	sessionId: string,
+	expectedRootId: string,
+): boolean {
+	const byId = new Map(sessions.map((session) => [session.id, session]));
+	const root = byId.get(expectedRootId);
+	if (!root || !openClawRoomRootAllowed(root)) return false;
+	let current = byId.get(sessionId);
+	const visited = new Set<string>();
+	while (current && !visited.has(current.id)) {
+		visited.add(current.id);
+		if (
+			!openClawRoomSessionAllowed(current) ||
+			!sessionBelongsToRoot(current.id, current.rootSessionId, expectedRootId)
+		) {
+			return false;
+		}
+		if (current.id === expectedRootId) return true;
+		if (!current.parentSessionId) return false;
+		current = byId.get(current.parentSessionId);
+	}
+	return false;
 }
 
 export function openClawBranchPreparationCanDefer(status: number): boolean {
