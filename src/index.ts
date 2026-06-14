@@ -828,6 +828,7 @@ type InteractiveSessionTable = {
   adapter_requested_capabilities_json: string | null;
   adapter_create_payload_json: string | null;
   adapter_create_pending: number;
+  preparation_pending: Generated<number>;
   terminal_finalize_pending: Generated<number>;
   credential_cleanup_terminal_status: Generated<"stopped" | "expired" | "failed" | null>;
   sandbox_refresh_sandbox_id: Generated<string | null>;
@@ -1044,6 +1045,7 @@ const runtimeAdapterReconcileIntervalMs = 15_000;
 const runtimeAdapterReconcileLimit = 3;
 const runtimeAdapterReconcileConcurrency = 3;
 const runtimeAdapterReconcileForegroundBudgetMs = 750;
+const interactiveSessionPreparationStaleMs = 5 * 60_000;
 const terminalCleanupDeletePending = 2;
 const credentialPolicyCleanupLimit = 8;
 const credentialPolicyScanLimit = 32;
@@ -3304,6 +3306,7 @@ async function openClawReadSessionRoot(
     )
     .where("runtime", "!=", "github_actions")
     .where("work_key", "is", null)
+    .where("preparation_pending", "=", 0)
     .orderBy("created_at", "asc")
     .limit(openClawRoomMaxSessions + 1)
     .execute();
@@ -3489,18 +3492,21 @@ async function openClawSupervisedRootForCreate(
   lineage: { parentSessionId: string | null; rootSessionId: string | null },
 ): Promise<string | null> {
   if (!lineage.parentSessionId || !lineage.rootSessionId) return null;
-  if (createdBy !== "service:openclaw" && createdBy !== `session:${lineage.parentSessionId}`) {
-    return null;
-  }
   const [parent, root] = await Promise.all([
     readFreshInteractiveSession(env, lineage.parentSessionId),
     readFreshInteractiveSession(env, lineage.rootSessionId),
   ]);
   if (!parent || !root) return null;
-  const chain = await openClawReadSessionChain(env, parent, root, lineage.rootSessionId);
-  return openClawRoomSessionChainAllowed(chain, parent.id, lineage.rootSessionId)
-    ? lineage.rootSessionId
-    : null;
+  if (createdBy === "service:openclaw" || createdBy === `session:${lineage.parentSessionId}`) {
+    const chain = await openClawReadSessionChain(env, parent, root, lineage.rootSessionId);
+    if (openClawRoomSessionChainAllowed(chain, parent.id, lineage.rootSessionId)) {
+      return lineage.rootSessionId;
+    }
+  }
+  if (openClawRoomRootAllowed(root)) {
+    throw badRequest("invalid OpenClaw room lineage");
+  }
+  return null;
 }
 
 async function enforceOpenClawRoomSessionLimitAfterInsert(
@@ -3539,13 +3545,32 @@ async function rollbackInteractiveSessionReservation(
   insertedAt: number,
 ): Promise<void> {
   const db = database(env);
-  await db
-    .deleteFrom("interactive_sessions")
-    .where("id", "=", insertedSessionId)
-    .where("status", "=", "provisioning")
-    .where("created_at", "=", insertedAt)
-    .where("updated_at", "=", insertedAt)
-    .execute();
+  const ownsReservation = sql<boolean>`EXISTS (
+    SELECT 1
+    FROM interactive_sessions
+    WHERE id = ${insertedSessionId}
+      AND status = 'provisioning'
+      AND preparation_pending = 1
+      AND created_at = ${insertedAt}
+      AND updated_at = ${insertedAt}
+  )`;
+  await executeBatch(env, [
+    db
+      .deleteFrom("interactive_session_events")
+      .where("session_id", "=", insertedSessionId)
+      .where(ownsReservation),
+    db
+      .deleteFrom("interactive_session_log_archives")
+      .where("session_id", "=", insertedSessionId)
+      .where(ownsReservation),
+    db
+      .deleteFrom("interactive_sessions")
+      .where("id", "=", insertedSessionId)
+      .where("status", "=", "provisioning")
+      .where("preparation_pending", "=", 1)
+      .where("created_at", "=", insertedAt)
+      .where("updated_at", "=", insertedAt),
+  ]);
   const current = await db
     .selectFrom("interactive_sessions")
     .select("id")
@@ -3554,24 +3579,50 @@ async function rollbackInteractiveSessionReservation(
   if (current) throw serviceUnavailable("interactive session reservation rollback failed");
 }
 
-async function activateRuntimeAdapterReservation(
+async function cleanupAbandonedInteractiveSessionPreparations(
+  env: RuntimeEnv,
+  now: number,
+): Promise<void> {
+  const rows = await database(env)
+    .selectFrom("interactive_sessions")
+    .select(["id", "created_at"])
+    .where("status", "=", "provisioning")
+    .where("preparation_pending", "=", 1)
+    .where("updated_at", "<=", now - interactiveSessionPreparationStaleMs)
+    .orderBy("updated_at", "asc")
+    .limit(runtimeAdapterReconcileLimit)
+    .execute();
+  await mapWithConcurrency(rows, runtimeAdapterReconcileConcurrency, async (row) => {
+    await rollbackInteractiveSessionReservation(env, row.id, row.created_at).catch((error) => {
+      console.error(`interactive session preparation cleanup failed for ${row.id}`, error);
+    });
+  });
+}
+
+async function activateInteractiveSessionReservation(
   env: RuntimeEnv,
   insertedSessionId: string,
   insertedAt: number,
-  adapterWorkspaceId: string,
+  adapterWorkspaceId: string | null,
 ): Promise<void> {
   const activated = await database(env)
     .updateTable("interactive_sessions")
     .set({
-      adapter: runtimeAdapterName,
-      adapter_create_pending: 1,
-      last_reconciled_at: insertedAt,
-      reconcile_error: "runtime adapter create pending",
+      preparation_pending: 0,
+      ...(adapterWorkspaceId
+        ? {
+            adapter: runtimeAdapterName,
+            adapter_create_pending: 1,
+            last_reconciled_at: insertedAt,
+            reconcile_error: "runtime adapter create pending",
+          }
+        : {}),
     })
     .where("id", "=", insertedSessionId)
     .where("status", "=", "provisioning")
+    .where("preparation_pending", "=", 1)
     .where("adapter", "is", null)
-    .where("adapter_workspace_id", "=", adapterWorkspaceId)
+    .where(sql<boolean>`adapter_workspace_id IS ${adapterWorkspaceId}`)
     .where("adapter_create_pending", "=", 0)
     .where("created_at", "=", insertedAt)
     .where("updated_at", "=", insertedAt)
@@ -3922,6 +3973,7 @@ async function requireAgentSession(
     .selectFrom("interactive_sessions")
     .selectAll()
     .where("id", "=", id)
+    .where("preparation_pending", "=", 0)
     .executeTakeFirst();
   if (!row?.agent_token_hash || row.agent_token_hash !== (await sha256(token))) {
     throw unauthorized();
@@ -4092,6 +4144,7 @@ async function reconcileInteractiveSessionLifecycleBatch(
   env: RuntimeEnv,
   now: number,
 ): Promise<void> {
+  await cleanupAbandonedInteractiveSessionPreparations(env, now);
   await reconcileCredentialPolicyCleanupBatch(env, now);
   await reconcileLegacyStoppingInteractiveSessionBatch(env, now);
   await reconcileExternalInteractiveSessionBatch(env, now);
@@ -4716,6 +4769,7 @@ async function createInteractiveSessionFromInput(
             : null,
           adapter_create_payload_json: adapterCreatePayloadJson,
           adapter_create_pending: adapterWorkspaceId && !sideEffectReservation ? 1 : 0,
+          preparation_pending: sideEffectReservation ? 1 : 0,
           command,
           prompt,
           purpose,
@@ -4767,8 +4821,8 @@ async function createInteractiveSessionFromInput(
         await rollbackInteractiveSessionReservation(env, id, now);
         throw error;
       }
-      if (adapterWorkspaceId && sideEffectReservation) {
-        await activateRuntimeAdapterReservation(env, id, now, adapterWorkspaceId);
+      if (sideEffectReservation) {
+        await activateInteractiveSessionReservation(env, id, now, adapterWorkspaceId);
       }
       await appendInteractiveSessionEvent(env, id, user, "interactive workspace requested", now);
       const provisioned = await provisionInteractiveSession(
@@ -14023,6 +14077,7 @@ async function readInteractiveSessions(env: RuntimeEnv, user: User): Promise<Int
   const rows = await database(env)
     .selectFrom("interactive_sessions")
     .selectAll()
+    .where("preparation_pending", "=", 0)
     .orderBy("updated_at", "desc")
     .limit(80)
     .execute();
@@ -14052,6 +14107,7 @@ async function readInteractiveSession(
     .selectFrom("interactive_sessions")
     .selectAll()
     .where("id", "=", id)
+    .where("preparation_pending", "=", 0)
     .executeTakeFirst();
   if (!row) return null;
   const logs = await readInteractiveSessionLogs(env, [id]);
@@ -14078,6 +14134,7 @@ async function readSharedInteractiveSession(
     .selectFrom("interactive_sessions")
     .selectAll()
     .where("id", "=", id)
+    .where("preparation_pending", "=", 0)
     .where("share_mode", "=", "link_read")
     .executeTakeFirst();
   if (!row || !row.share_token_hash || !token) throw notFound("shared session not found");

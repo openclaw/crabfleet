@@ -159,6 +159,7 @@ test("OpenClaw root reads are filtered, capped, concurrent, and log-free", async
 	assert.match(readSource, /expression\("created_by", "like", "session:%"\)/);
 	assert.match(readSource, /\.where\("runtime", "!=", "github_actions"\)/);
 	assert.match(readSource, /\.where\("work_key", "is", null\)/);
+	assert.match(readSource, /\.where\("preparation_pending", "=", 0\)/);
 	assert.match(readSource, /\.limit\(openClawRoomMaxSessions \+ 1\)/);
 	assert.match(readSource, /mapWithConcurrency\(/);
 	assert.match(readSource, /openClawRoomSessionChainAllowed/);
@@ -180,16 +181,27 @@ test("interactive lineage rejects caller-claimed roots without a parent", async 
 
 test("OpenClaw room reservation precedes branch mutation, event recording, and provisioning", async () => {
 	const source = await readFile(new URL("../src/index.ts", import.meta.url), "utf8");
+	const migration = await readFile(
+		new URL("../migrations/0025_interactive_session_preparation.sql", import.meta.url),
+		"utf8",
+	);
 	const capacityStart = source.indexOf("async function enforceOpenClawRoomSessionLimitAfterInsert");
 	const capacityEnd = source.indexOf("function openClawCrabboxResponse", capacityStart);
 	const capacitySource = source.slice(capacityStart, capacityEnd);
-	const activationStart = source.indexOf("async function activateRuntimeAdapterReservation");
+	const activationStart = source.indexOf("async function activateInteractiveSessionReservation");
 	const activationEnd = source.indexOf("function openClawCrabboxResponse", activationStart);
 	const activationSource = source.slice(activationStart, activationEnd);
+	const rollbackStart = source.indexOf("async function rollbackInteractiveSessionReservation");
+	const rollbackEnd = source.indexOf("async function activateInteractiveSessionReservation");
+	const rollbackSource = source.slice(rollbackStart, rollbackEnd);
 	const createStart = source.indexOf("async function createInteractiveSessionFromInput");
 	const createEnd = source.indexOf("function initialRuntimeAdapterWorkspaceId", createStart);
 	const createSource = source.slice(createStart, createEnd);
+	const readStart = source.indexOf("async function readInteractiveSessions");
+	const readEnd = source.indexOf("async function readSharedInteractiveSession", readStart);
+	const readSource = source.slice(readStart, readEnd);
 
+	assert.match(migration, /ADD COLUMN preparation_pending INTEGER NOT NULL DEFAULT 0/);
 	assert.match(capacitySource, /fn\.countAll<number>\(\)/);
 	assert.match(capacitySource, /deleteFrom\("interactive_sessions"\)/);
 	assert.match(
@@ -198,8 +210,16 @@ test("OpenClaw room reservation precedes branch mutation, event recording, and p
 	);
 	assert.match(activationSource, /adapter: runtimeAdapterName/);
 	assert.match(activationSource, /adapter_create_pending: 1/);
+	assert.match(activationSource, /preparation_pending: 0/);
+	assert.match(activationSource, /\.where\("preparation_pending", "=", 1\)/);
 	assert.match(activationSource, /\.where\("adapter", "is", null\)/);
 	assert.match(activationSource, /\.where\("adapter_create_pending", "=", 0\)/);
+	assert.match(rollbackSource, /executeBatch\(env,/);
+	assert.match(rollbackSource, /deleteFrom\("interactive_session_events"\)/);
+	assert.match(rollbackSource, /deleteFrom\("interactive_session_log_archives"\)/);
+	assert.match(capacitySource, /cleanupAbandonedInteractiveSessionPreparations/);
+	assert.match(capacitySource, /interactiveSessionPreparationStaleMs/);
+	assert.match(readSource, /\.where\("preparation_pending", "=", 0\)/);
 	assert.match(
 		createSource,
 		/adapter: adapterWorkspaceId && !sideEffectReservation \? runtimeAdapterName : null/,
@@ -208,16 +228,17 @@ test("OpenClaw room reservation precedes branch mutation, event recording, and p
 		createSource,
 		/adapter_create_pending: adapterWorkspaceId && !sideEffectReservation \? 1 : 0/,
 	);
+	assert.match(createSource, /preparation_pending: sideEffectReservation \? 1 : 0/);
 	assert.ok(
 		createSource.indexOf("enforceOpenClawRoomSessionLimitAfterInsert") <
 			createSource.indexOf("await options.afterReserve"),
 	);
 	assert.ok(
 		createSource.indexOf("await options.afterReserve") <
-			createSource.indexOf("activateRuntimeAdapterReservation"),
+			createSource.indexOf("activateInteractiveSessionReservation"),
 	);
 	assert.ok(
-		createSource.indexOf("activateRuntimeAdapterReservation") <
+		createSource.indexOf("activateInteractiveSessionReservation") <
 			createSource.indexOf("appendInteractiveSessionEvent"),
 	);
 	assert.ok(
@@ -228,4 +249,17 @@ test("OpenClaw room reservation precedes branch mutation, event recording, and p
 		createSource,
 		/catch \(error\) \{\s+await rollbackInteractiveSessionReservation\(env, id, now\);\s+throw error;/,
 	);
+});
+
+test("invalid descendants below an OpenClaw root fail closed before insertion", async () => {
+	const source = await readFile(new URL("../src/index.ts", import.meta.url), "utf8");
+	const lineageStart = source.indexOf("async function openClawSupervisedRootForCreate");
+	const lineageEnd = source.indexOf(
+		"async function enforceOpenClawRoomSessionLimitAfterInsert",
+		lineageStart,
+	);
+	const lineageSource = source.slice(lineageStart, lineageEnd);
+
+	assert.match(lineageSource, /if \(openClawRoomRootAllowed\(root\)\)/);
+	assert.match(lineageSource, /throw badRequest\("invalid OpenClaw room lineage"\)/);
 });
