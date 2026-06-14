@@ -1836,6 +1836,7 @@ export default {
       request = sanitizeTrustedProxyRequest(request, env);
       if (trustedProxy.kind === "authenticated") {
         const headers = new Headers(request.headers);
+        if (!usesIndependentServiceAuth(request)) headers.delete("authorization");
         headers.delete("cookie");
         request = new Request(request, { headers });
       }
