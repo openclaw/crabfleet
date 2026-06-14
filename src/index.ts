@@ -9433,6 +9433,9 @@ async function provisionInteractiveEndpoint(
     .selectAll()
     .where("id", "=", payload.id)
     .executeTakeFirst();
+  if (managed && managed.preparation_pending !== 0) {
+    return failedProvision("interactive provision failed: managed session preparation is pending");
+  }
   if (managed) {
     if (payload.runtime !== "container" || !env.SANDBOX) {
       return failedProvision(
@@ -9481,6 +9484,7 @@ async function provisionManagedSandboxEndpoint(
   if (
     !managedSandboxProvisionPayloadMatches(payload, session) ||
     !["provisioning", "pending_adapter"].includes(session.status) ||
+    session.preparation_pending !== 0 ||
     session.adapter === runtimeAdapterName ||
     session.credential_cleanup_terminal_status !== null
   ) {
@@ -9514,6 +9518,7 @@ async function provisionManagedSandboxEndpoint(
     .where("id", "=", session.id)
     .where("updated_at", "=", session.updated_at)
     .where("status", "in", ["provisioning", "pending_adapter"])
+    .where("preparation_pending", "=", 0)
     .where(sql<boolean>`parent_session_id IS ${payload.parentSessionId}`)
     .where(sql<boolean>`COALESCE(root_session_id, id) = ${payload.rootSessionId}`)
     .where("runtime", "=", payload.runtime)
