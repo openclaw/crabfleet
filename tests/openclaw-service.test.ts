@@ -146,7 +146,7 @@ test("OpenClaw transcript reads a sentinel event before reporting completeness",
 	);
 });
 
-test("OpenClaw root reads are filtered, capped, concurrent, and log-free", async () => {
+test("OpenClaw root reads are filtered, capped, D1-only, and log-free", async () => {
 	const source = await readFile(new URL("../src/index.ts", import.meta.url), "utf8");
 	const readStart = source.indexOf("async function openClawReadSessionRoot");
 	const readEnd = source.indexOf("async function openClawReadCrabbox", readStart);
@@ -161,10 +161,29 @@ test("OpenClaw root reads are filtered, capped, concurrent, and log-free", async
 	assert.match(readSource, /\.where\("work_key", "is", null\)/);
 	assert.match(readSource, /\.where\("preparation_pending", "=", 0\)/);
 	assert.match(readSource, /\.limit\(openClawRoomMaxSessions \+ 1\)/);
-	assert.match(readSource, /mapWithConcurrency\(/);
+	assert.doesNotMatch(readSource, /readFreshInteractiveSession/);
+	assert.doesNotMatch(readSource, /mapWithConcurrency\(/);
 	assert.match(readSource, /openClawRoomSessionChainAllowed/);
 	assert.match(readSource, /openClawCrabboxSummaryResponse/);
 	assert.match(summarySource, /session: \{ \.\.\.response\.session, logs: \[\] \}/);
+});
+
+test("OpenClaw target authorization precedes targeted reconciliation", async () => {
+	const source = await readFile(new URL("../src/index.ts", import.meta.url), "utf8");
+	const scopedStart = source.indexOf("async function openClawRootScopedCrabbox");
+	const scopedEnd = source.indexOf("async function openClawReadSessionChain", scopedStart);
+	const scopedSource = source.slice(scopedStart, scopedEnd);
+	const chainStart = scopedEnd;
+	const chainEnd = source.indexOf("async function openClawSupervisedRootForCreate", chainStart);
+	const chainSource = source.slice(chainStart, chainEnd);
+
+	assert.ok(
+		scopedSource.indexOf("openClawRoomSessionChainAllowed") <
+			scopedSource.indexOf("readFreshInteractiveSession"),
+	);
+	assert.match(scopedSource, /const session = await readInteractiveSession/);
+	assert.match(scopedSource, /const root = await readInteractiveSession/);
+	assert.doesNotMatch(chainSource, /readFreshInteractiveSession/);
 });
 
 test("interactive lineage rejects caller-claimed roots without a parent", async () => {
