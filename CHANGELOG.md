@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Add deployment-neutral trusted reverse-proxy identity with exact-origin and shared-secret proof, existing allowlist authorization, cross-origin mutation rejection, fail-closed assertions, cookie isolation, and downstream credential stripping.
 - Add a native macOS Crabfleet VNC control deck with generic RFB 3.3/3.7/3.8 connections, Metal rendering, six warm desktops, paced previews, fast focus transitions, saved profiles, and stabilized opt-in clipboard synchronization.
 - Redirect `crabfleet.ai`, `www.crabfleet.ai`, and product aliases to the canonical Crabfleet docs while keeping login and app traffic on `crabfleet.openclaw.ai`.
 - Reject runtime-adapter redirects with Cloudflare-compatible manual redirect handling instead of using unsupported Worker fetch semantics.

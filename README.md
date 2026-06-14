@@ -194,6 +194,10 @@ Configure these in Cloudflare Workers dashboard. `CRABBOX_*` names are the runti
 The Crabbox namespace cutover intentionally has no old-name compatibility. Existing browser sessions expire, linked SSH keys must be relinked with `ssh link@crabd.sh`, and in-flight interactive workspaces should be recreated.
 
 - `CRABBOX_BOOTSTRAP_TOKEN` – Optional owner break-glass token for setup/recovery
+- `CRABFLEET_TRUSTED_PROXY_ORIGIN` – Exact HTTPS backend origin on which trusted reverse-proxy assertions are authoritative
+- `CRABFLEET_TRUSTED_PROXY_PUBLIC_ORIGIN` – Optional browser-visible HTTPS origin required on mutations and WebSocket upgrades; defaults to `CRABFLEET_TRUSTED_PROXY_ORIGIN`
+- `CRABFLEET_TRUSTED_PROXY_SECRET` – Shared secret required on `X-Crabfleet-Proxy-Secret` for trusted reverse-proxy identity
+- `CRABFLEET_TRUSTED_USER_HEADER` – Optional trusted identity header name, default `X-Authenticated-User`; the proxy must remove caller-supplied copies before injecting it
 - `GITHUB_CLIENT_ID` – GitHub OAuth app client ID (optional)
 - `GITHUB_CLIENT_SECRET` – GitHub OAuth app secret (optional)
 - `GITHUB_REDIRECT_URI` – Optional authoritative GitHub OAuth callback URL; when set it must be an absolute HTTPS URL with no credentials, query, or fragment and the exact `/auth/github/callback` path. Requests on another host restart login on this configured origin. When absent, the callback defaults to the HTTPS request origin (or literal-loopback HTTP for local development).

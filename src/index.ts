@@ -126,11 +126,20 @@ import { allocateInteractiveSessionIdSql, formatInteractiveSessionId } from "./s
 import { configuredHttpOrigin, developmentIdentityEnabled } from "./url-security";
 import { D1Connection } from "./d1-execution";
 import { preferredEnabledRepo } from "./repo-selection";
+import { sandboxGitAuthorEmail } from "./git-identity";
 import { completeTerminalFinalization } from "./terminal-finalization";
 import { sizedTerminalTargetUrl } from "./terminal-target";
 import { cachedBooleanGrant } from "./terminal-authorization";
 import { obsoleteSessionArchiveObjectKeys, sessionArchiveAttemptKeys } from "./session-archive";
 import { readBoundedResponseText } from "./bounded-response";
+import {
+  inspectTrustedProxyAssertion,
+  sanitizeTrustedProxyRequest,
+  trustedProxyConfigured,
+  trustedProxyPublicOrigin,
+  type TrustedProxyAuthResult,
+  type TrustedProxyIdentity,
+} from "./trusted-proxy-auth";
 import {
   credentialPolicyCleanupMatches,
   credentialPolicyMigrationCleanupMatches,
@@ -210,6 +219,10 @@ type RuntimeEnv = Env & {
   CRABFLEET_DEFAULT_RUNTIME?: string;
   CRABFLEET_DEFAULT_PROFILE?: string;
   CRABFLEET_DEV_LOGIN_ENABLED?: string;
+  CRABFLEET_TRUSTED_PROXY_ORIGIN?: string;
+  CRABFLEET_TRUSTED_PROXY_PUBLIC_ORIGIN?: string;
+  CRABFLEET_TRUSTED_USER_HEADER?: string;
+  CRABFLEET_TRUSTED_PROXY_SECRET?: string;
   OPENAI_API_KEY?: string;
   OPENAI_BASE_URL?: string;
   OPENAI_ORG_ID?: string;
@@ -1068,7 +1081,16 @@ function deploymentConfig(env: RuntimeEnv): DeploymentConfig {
 
 function publicDeploymentConfig(env: RuntimeEnv): PublicDeploymentConfig {
   const { label, canonicalUrl, productUrl, sshHost } = deploymentConfig(env);
-  return { label, canonicalUrl, productUrl, sshHost };
+  return {
+    label,
+    canonicalUrl: trustedProxyPublicOrigin(env) ?? canonicalUrl,
+    productUrl,
+    sshHost,
+  };
+}
+
+function browserAppOrigin(env: RuntimeEnv): string {
+  return trustedProxyPublicOrigin(env) ?? deploymentConfig(env).canonicalUrl;
 }
 
 class D1Dialect implements Dialect {
@@ -1809,14 +1831,30 @@ export default {
     const url = new URL(request.url);
 
     try {
+      const trustedProxy = inspectTrustedProxyAssertion(request, env);
+      if (trustedProxy.kind === "rejected") throw unauthorized();
+      request = sanitizeTrustedProxyRequest(request, env);
+      if (trustedProxy.kind === "authenticated") {
+        const headers = new Headers(request.headers);
+        headers.delete("cookie");
+        request = new Request(request, { headers });
+      }
+
       const productResponse = await productHostResponse(request);
       if (productResponse) return productResponse;
 
-      const canonicalRedirect = canonicalAppRedirect(url);
-      if (canonicalRedirect) return canonicalRedirect;
-
       if (url.pathname === "/healthz") {
+        const canonicalRedirect = canonicalAppRedirect(url);
+        if (canonicalRedirect) return canonicalRedirect;
         return text("ok\n", "text/plain; charset=utf-8");
+      }
+
+      if (trustedProxy.kind === "missing" && !usesIndependentServiceAuth(request)) {
+        throw unauthorized();
+      }
+      if (trustedProxy.kind !== "authenticated") {
+        const canonicalRedirect = canonicalAppRedirect(url);
+        if (canonicalRedirect) return canonicalRedirect;
       }
 
       if (url.pathname === "/crabbox-logo.png") {
@@ -1884,11 +1922,11 @@ export default {
 
       const sshLinkMatch = url.pathname.match(/^\/ssh\/link\/([^/]+)$/);
       if (sshLinkMatch && (request.method === "GET" || request.method === "POST")) {
-        return await sshLink(request, env, decodeURIComponent(sshLinkMatch[1] ?? ""));
+        return await sshLink(request, env, decodeURIComponent(sshLinkMatch[1] ?? ""), trustedProxy);
       }
 
       if (url.pathname.startsWith("/api/")) {
-        return await api(request, env, context);
+        return await api(request, env, context, trustedProxy);
       }
 
       if (
@@ -1935,6 +1973,7 @@ async function api(
   request: Request,
   env: RuntimeEnv,
   context: ExecutionContext,
+  requestAuth: TrustedProxyAuthResult,
 ): Promise<Response> {
   const url = new URL(request.url);
 
@@ -2230,10 +2269,10 @@ async function api(
   }
 
   if (request.method === "GET" && url.pathname === "/api/terminal/ws") {
-    return interactiveTerminalHub(request, env, await optionalUser(request, env));
+    return interactiveTerminalHub(request, env, await optionalUser(request, env, requestAuth));
   }
 
-  const user = await requireUser(request, env);
+  const user = await requireUser(request, env, requestAuth);
 
   if (request.method === "GET" && url.pathname === "/api/session") {
     return json({ user, auth: authMethods(env, request) });
@@ -2292,7 +2331,7 @@ async function api(
     /^\/api\/interactive-sessions\/([^/]+)\/transcript$/,
   );
   if (request.method === "GET" && interactiveSessionTranscriptMatch) {
-    const user = await requireUser(request, env);
+    const user = await requireUser(request, env, requestAuth);
     return interactiveSessionTranscriptResponse(
       env,
       user,
@@ -2304,7 +2343,7 @@ async function api(
     /^\/api\/interactive-sessions\/([^/]+)\/summary$/,
   );
   if (request.method === "POST" && interactiveSessionSummaryMatch) {
-    const user = await requireUser(request, env);
+    const user = await requireUser(request, env, requestAuth);
     return json(
       await updateInteractiveSessionSummary(
         request,
@@ -2472,6 +2511,13 @@ async function api(
   return json({ error: "not found" }, { status: 404 });
 }
 
+function usesIndependentServiceAuth(request: Request): boolean {
+  const pathname = new URL(request.url).pathname;
+  return ["/api/ssh/", "/api/agent/", "/api/openclaw/", "/api/provision/"].some((prefix) =>
+    pathname.startsWith(prefix),
+  );
+}
+
 async function tokenLogin(request: Request, env: RuntimeEnv): Promise<Response> {
   const { token } = await readJson<{ token?: string }>(request);
   if (!env.CRABBOX_BOOTSTRAP_TOKEN || token !== env.CRABBOX_BOOTSTRAP_TOKEN) {
@@ -2630,7 +2676,12 @@ async function githubCallback(request: Request, env: RuntimeEnv): Promise<Respon
   );
 }
 
-async function sshLink(request: Request, env: RuntimeEnv, code: string): Promise<Response> {
+async function sshLink(
+  request: Request,
+  env: RuntimeEnv,
+  code: string,
+  requestAuth: TrustedProxyAuthResult,
+): Promise<Response> {
   const canonicalLinkUrl = githubOAuthCanonicalSshLinkUrl(
     request.url,
     code,
@@ -2655,11 +2706,11 @@ async function sshLink(request: Request, env: RuntimeEnv, code: string): Promise
   }
 
   if (request.method === "POST") {
-    const user = await requireUser(request, env);
+    const user = await requireUser(request, env, requestAuth);
     if (!user.subject.startsWith("github:")) {
       throw forbidden("Sign in with GitHub before linking an SSH key");
     }
-    const githubToken = await sessionGitHubToken(request, env);
+    const githubToken = await sessionGitHubToken(request, env, user.subject);
     if (!githubToken) {
       throw forbidden("Sign in with GitHub again before linking an SSH key");
     }
@@ -2669,7 +2720,7 @@ async function sshLink(request: Request, env: RuntimeEnv, code: string): Promise
     });
   }
 
-  const user = await optionalUser(request, env);
+  const user = await optionalUser(request, env, requestAuth);
   if (user) {
     if (!user.subject.startsWith("github:")) {
       return text(
@@ -2778,7 +2829,16 @@ async function logout(request: Request, env: RuntimeEnv): Promise<Response> {
   return json({ ok: true }, { headers: { "set-cookie": cookie(request, sessionCookie, "", 0) } });
 }
 
-async function requireUser(request: Request, env: RuntimeEnv): Promise<User> {
+async function requireUser(
+  request: Request,
+  env: RuntimeEnv,
+  requestAuth: TrustedProxyAuthResult,
+): Promise<User> {
+  if (requestAuth.kind === "authenticated") {
+    return requireTrustedProxyUser(env, requestAuth.identity);
+  }
+  if (requestAuth.kind === "missing") throw unauthorized();
+
   const token = cookies(request).get(sessionCookie);
   if (!token) throw unauthorized();
   const tokenHash = await sha256(token);
@@ -2831,9 +2891,13 @@ async function requireUser(request: Request, env: RuntimeEnv): Promise<User> {
   return authorized;
 }
 
-async function optionalUser(request: Request, env: RuntimeEnv): Promise<User | null> {
+async function optionalUser(
+  request: Request,
+  env: RuntimeEnv,
+  requestAuth: TrustedProxyAuthResult,
+): Promise<User | null> {
   try {
-    return await requireUser(request, env);
+    return await requireUser(request, env, requestAuth);
   } catch (error) {
     const status =
       typeof error === "object" && error && "status" in error ? Number(error.status) : 0;
@@ -2846,6 +2910,39 @@ async function optionalUser(request: Request, env: RuntimeEnv): Promise<User | n
     }
     throw error;
   }
+}
+
+async function requireTrustedProxyUser(
+  env: RuntimeEnv,
+  identity: TrustedProxyIdentity,
+): Promise<User> {
+  const user = await authorize(env, {
+    subject: identity.subject,
+    login: identity.login,
+    email: identity.email,
+    name: identity.name,
+    role: "viewer",
+    allowed: false,
+    teams: [],
+  });
+  if (!user.allowed) throw forbidden("trusted proxy user is not allowlisted");
+
+  const existing = await database(env)
+    .selectFrom("users")
+    .select(["login", "email", "name", "role", "allowed"])
+    .where("subject", "=", user.subject)
+    .executeTakeFirst();
+  if (
+    !existing ||
+    existing.login !== user.login ||
+    existing.email !== user.email ||
+    existing.name !== user.name ||
+    existing.role !== user.role ||
+    existing.allowed !== 1
+  ) {
+    await upsertUser(env, user, Date.now());
+  }
+  return user;
 }
 
 async function sshAuth(request: Request, env: RuntimeEnv): Promise<Record<string, unknown>> {
@@ -2913,9 +3010,8 @@ async function sshAuth(request: Request, env: RuntimeEnv): Promise<Record<string
       created_at: now,
     })
     .execute();
-  const linkUrl = new URL(request.url);
-  linkUrl.pathname = `/ssh/link/${encodeURIComponent(code)}`;
-  linkUrl.search = "";
+  const oauthOrigin = new URL(githubOAuthRedirectUri(request.url, env.GITHUB_REDIRECT_URI)).origin;
+  const linkUrl = new URL(`/ssh/link/${encodeURIComponent(code)}`, oauthOrigin);
   return {
     authorized: false,
     linkUrl: linkUrl.toString(),
@@ -3222,7 +3318,7 @@ async function openClawRegisterActionSession(
     session: decorateInteractiveSession(session, serviceUser, env),
     agentToken,
     runnerPtyUrl: buildGitHubActionsRunnerPtyUrl(appCanonicalOrigin, existing.id, agentToken),
-    browserUrl: `${appCanonicalOrigin}/app/sessions/${encodeURIComponent(existing.id)}`,
+    browserUrl: `${browserAppOrigin(env)}/app/sessions/${encodeURIComponent(existing.id)}`,
   };
 }
 
@@ -3934,7 +4030,7 @@ async function readFleetState(
     readSandboxFleetPolicies(env),
   ]);
   return buildFleetState(interactiveSessions, policyResult.policies, {
-    canonicalUrl: deployment.canonicalUrl,
+    canonicalUrl: browserAppOrigin(env),
     productUrl: deployment.productUrl,
     defaultEgressHosts: defaultSandboxEgressHosts,
     generatedAt: Date.now(),
@@ -3961,7 +4057,9 @@ async function createInteractiveSession(
     purpose?: string;
     summary?: string;
   }>(request);
-  const githubToken = await sessionGitHubToken(request, env);
+  const githubToken = user.subject.startsWith("github:")
+    ? await sessionGitHubToken(request, env, user.subject)
+    : undefined;
   if (user.subject.startsWith("github:") && !githubToken) {
     throw forbidden("GitHub PR credentials are not connected; sign in with GitHub again");
   }
@@ -5032,7 +5130,7 @@ async function mutateInteractiveSession(
         user,
         env,
       ),
-      shareUrl: shareUrl(request, id, token),
+      shareUrl: shareUrl(request, env, id, token),
     };
   }
 
@@ -9401,7 +9499,7 @@ async function standaloneSandboxPty(
   let response: Response;
   try {
     const terminalSession = await sandbox.getSession(lease.terminalSessionId);
-    const terminalHeaders = new Headers(request.headers);
+    const terminalHeaders = new Headers(sanitizeTrustedProxyRequest(request, env).headers);
     terminalHeaders.delete("authorization");
     terminalHeaders.delete("cookie");
     response = await terminalSession.terminal(new Request(request, { headers: terminalHeaders }), {
@@ -10518,7 +10616,7 @@ async function ensureCurrentSandboxLease(
     throw serviceUnavailable("session owner must reconnect to refresh Cloudflare Sandbox lease");
   }
   const githubToken = user?.subject.startsWith("github:")
-    ? (session.githubToken ?? (await sessionGitHubToken(request, env)))
+    ? (session.githubToken ?? (await sessionGitHubToken(request, env, user.subject)))
     : undefined;
   if (user.subject.startsWith("github:") && !githubToken) {
     throw forbidden("GitHub PR credentials are not connected; sign in with GitHub again");
@@ -10918,7 +11016,7 @@ rm -rf "$HOME/.config/gh" "$HOME/.local/share/gh" 2>/dev/null || true
 git config --global --unset-all credential.helper 2>/dev/null || true
 git config --global credential.helper "!f() { test \\"\\$1\\" = get || exit 0; printf 'username=x-access-token\\n'; printf 'password=%s\\n' ${shellQuote(sandboxPlaceholderGitHubToken)}; }; f"
 git config --global user.name ${shellQuote(session.owner)}
-git config --global user.email ${shellQuote(`${session.owner}@users.noreply.github.com`)}
+git config --global user.email ${shellQuote(sandboxGitAuthorEmail(session.owner))}
 mkdir -p "$(dirname ${shellQuote(autostartScript)})"
 cat > ${shellQuote(autostartScript)} <<'EOF'
 export CODEX_HOME="$HOME/.codex"
@@ -14050,13 +14148,18 @@ async function createSession(
   return cookie(request, sessionCookie, token, maxAgeSeconds);
 }
 
-async function sessionGitHubToken(request: Request, env: RuntimeEnv): Promise<string | undefined> {
+async function sessionGitHubToken(
+  request: Request,
+  env: RuntimeEnv,
+  expectedSubject: string,
+): Promise<string | undefined> {
   const token = cookies(request).get(sessionCookie);
   if (!token) return undefined;
   const row = await database(env)
     .selectFrom("sessions")
     .select("github_token_ciphertext")
     .where("token_hash", "=", await sha256(token))
+    .where("subject", "=", expectedSubject)
     .where("expires_at", ">", Date.now())
     .executeTakeFirst();
   return row?.github_token_ciphertext
@@ -14073,7 +14176,7 @@ async function sandboxSessionWithGitHubToken(
   if (!user?.subject.startsWith("github:")) return session;
   if (actor(user) !== session.owner) return session;
   const githubToken =
-    (await sessionGitHubToken(request, env)) ??
+    (await sessionGitHubToken(request, env, user.subject)) ??
     (await sshGatewayKeyGitHubToken(request, env, user));
   return githubToken ? { ...session, githubToken } : session;
 }
@@ -14420,6 +14523,7 @@ function authMethods(env: RuntimeEnv, request?: Request): Record<string, boolean
     github: Boolean(env.GITHUB_CLIENT_ID && env.GITHUB_CLIENT_SECRET),
     token: Boolean(env.CRABBOX_BOOTSTRAP_TOKEN),
     devIdentity: request ? devIdentityEnabled(env, request) : false,
+    trustedProxy: trustedProxyConfigured(env),
   };
 }
 
@@ -14735,7 +14839,7 @@ function decorateInteractiveSession(
     ptyAvailable,
     vncUrl: canControl
       ? versionedDesktopAvailable
-        ? runtimeAdapterBrowserVncUrl(deploymentConfig(env).canonicalUrl, session.id)
+        ? runtimeAdapterBrowserVncUrl(browserAppOrigin(env), session.id)
         : legacyDesktopUrl
       : null,
     controller: activeController,
@@ -14823,9 +14927,12 @@ function shareToken(): string {
   return `${first}${second}`;
 }
 
-function shareUrl(request: Request, id: string, token: string): string {
-  const url = new URL(request.url);
-  return `${url.origin}/sessions/${encodeURIComponent(id)}?token=${encodeURIComponent(token)}`;
+function shareUrl(request: Request, env: RuntimeEnv, id: string, token: string): string {
+  return `${externalRequestOrigin(request, env)}/sessions/${encodeURIComponent(id)}?token=${encodeURIComponent(token)}`;
+}
+
+function externalRequestOrigin(request: Request, env: RuntimeEnv): string {
+  return trustedProxyPublicOrigin(env) ?? new URL(request.url).origin;
 }
 
 function repoWorkflow(row: RepoWorkflowTable): RepoWorkflow {
