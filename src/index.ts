@@ -135,6 +135,7 @@ import { readBoundedResponseText } from "./bounded-response";
 import {
   boundedUtf8Tail,
   openClawBranchPreparationCanDefer,
+  openClawGitBranchAllowed,
   openClawGitHubRepoParts,
   openClawRoomMaxSessions,
   openClawRoomRootAllowed,
@@ -3239,6 +3240,10 @@ async function openClawCreateCrabbox(
     baseBranch?: string;
   }>(request);
   const owner = openClawOwner(body.owner);
+  body.branch = openClawServiceBranch(body.branch, "branch", "main");
+  const baseBranch = openClawServiceBranch(body.baseBranch, "baseBranch");
+  if (baseBranch) body.baseBranch = baseBranch;
+  else delete body.baseBranch;
   const serviceUser = openClawServiceUser();
   const result = await createInteractiveSessionFromInput(
     env,
@@ -3920,6 +3925,14 @@ function requireOpenClawServiceToken(
   }
 }
 
+function openClawServiceBranch(value: unknown, name: string, fallback = ""): string {
+  if (value === undefined || value === null || value === "") return fallback;
+  if (typeof value !== "string" || !openClawGitBranchAllowed(value)) {
+    throw badRequest(`${name} must be a valid Git branch of at most 120 characters`);
+  }
+  return value;
+}
+
 async function ensureOpenClawServiceBranch(
   env: RuntimeEnv,
   repoInput: unknown,
@@ -3932,8 +3945,8 @@ async function ensureOpenClawServiceBranch(
   const target = openClawGitHubRepoParts(repo);
   if (!target) throw badRequest("repo must be a GitHub owner/name");
   await requireRepo(env, repo);
-  const branch = clean(branchInput, 120) || "main";
-  const baseBranch = clean(baseBranchInput, 120);
+  const branch = openClawServiceBranch(branchInput, "branch", "main");
+  const baseBranch = openClawServiceBranch(baseBranchInput, "baseBranch");
   if (!baseBranch) return;
   if (branch === baseBranch) return;
   if (!env.GITHUB_TOKEN) return;
