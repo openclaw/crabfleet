@@ -3513,7 +3513,7 @@ async function openClawSupervisedRootForCreate(
       return lineage.rootSessionId;
     }
   }
-  if (openClawRoomRootAllowed(root)) {
+  if (createdBy === "service:openclaw" || openClawRoomRootAllowed(root)) {
     throw badRequest("invalid OpenClaw room lineage");
   }
   return null;
