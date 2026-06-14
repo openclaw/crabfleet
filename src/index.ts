@@ -3262,7 +3262,13 @@ async function openClawCreateCrabbox(
   if (baseBranch) body.baseBranch = baseBranch;
   else delete body.baseBranch;
   const serviceUser = openClawServiceUser();
-  const requestId = clean(body.requestId, 200) || null;
+  if (body.requestId !== undefined && typeof body.requestId !== "string") {
+    throw badRequest("requestId must be a string");
+  }
+  if (body.requestId && body.requestId.length > 200) {
+    throw badRequest("requestId must be at most 200 characters");
+  }
+  const requestId = body.requestId || null;
   const requestHash = requestId ? await openClawCrabboxRequestHash(body, owner) : null;
   if (requestId && requestHash) {
     const existing = await readOpenClawRequestSession(env, requestId, requestHash);
@@ -3339,7 +3345,7 @@ async function openClawCrabboxRequestHash(
       repo: normalizeRepo(body.repo),
       branch: clean(body.branch, 120),
       runtime: clean(body.runtime, 40),
-      profile: clean(body.profile, 80),
+      profile: clean(body.profile, 120),
       command: clean(body.command, 4000),
       prompt: clean(body.prompt, 4000),
       parentSessionId: clean(body.parentSessionId, 120),
@@ -3441,12 +3447,13 @@ async function openClawMutateSessionRoot(
   if (!rootSession || !openClawRoomRootAllowed(rootSession)) {
     throw notFound("session root not found");
   }
+  const serviceUser = openClawServiceUser();
+  await audit(env, serviceUser, `openclaw session root stop requested ${root}`, Date.now());
   await database(env)
     .updateTable("interactive_sessions")
     .set({ openclaw_admission_closed: 1 })
     .where("id", "=", root)
     .execute();
-  const serviceUser = openClawServiceUser();
   const deadline = Date.now() + 60_000;
   let terminalReads = 0;
   while (Date.now() < deadline) {
@@ -3733,7 +3740,13 @@ async function enforceOpenClawRoomSessionLimitAfterInsert(
   `.execute(db);
   const position = Number(admission.rows[0]?.position ?? 0);
   if (position > 0 && position <= openClawRoomMaxSessions) return;
-  if (!position) throw serviceUnavailable("session root reservation disappeared");
+  if (!position) {
+    await rollbackInteractiveSessionReservation(env, insertedSessionId, insertedAt);
+    if (!(await openClawRootAdmissionOpen(env, rootSessionId))) {
+      throw conflict("OpenClaw room root is stopping");
+    }
+    throw serviceUnavailable("session root reservation disappeared");
+  }
   await rollbackInteractiveSessionReservation(env, insertedSessionId, insertedAt);
   throw tooManyRequests("session root reached the supervision limit");
 }
