@@ -3520,6 +3520,10 @@ async function enforceOpenClawRoomSessionLimitAfterInsert(
   insertedSessionId: string,
   insertedAt: number,
 ): Promise<void> {
+  if (!(await openClawRoomReservationLineageAllowed(env, insertedSessionId, rootSessionId))) {
+    await rollbackInteractiveSessionReservation(env, insertedSessionId, insertedAt);
+    throw badRequest("invalid OpenClaw room lineage");
+  }
   const db = database(env);
   const admission = await sql<{ inserted_rowid: number; position: number }>`
     SELECT inserted.rowid AS inserted_rowid, count(candidate.rowid) AS position
@@ -3542,6 +3546,43 @@ async function enforceOpenClawRoomSessionLimitAfterInsert(
   if (!position) throw serviceUnavailable("session root reservation disappeared");
   await rollbackInteractiveSessionReservation(env, insertedSessionId, insertedAt);
   throw tooManyRequests("session root reached the supervision limit");
+}
+
+async function openClawRoomReservationLineageAllowed(
+  env: RuntimeEnv,
+  insertedSessionId: string,
+  rootSessionId: string,
+): Promise<boolean> {
+  const [session, root] = await Promise.all([
+    readOpenClawLineageSession(env, insertedSessionId, 1),
+    readOpenClawLineageSession(env, rootSessionId, 0),
+  ]);
+  if (!session || !root) return false;
+  const chain = new Map<string, InteractiveSession>([[root.id, root]]);
+  let current = session;
+  for (let depth = 0; depth < openClawRoomMaxSessions && !chain.has(current.id); depth += 1) {
+    chain.set(current.id, current);
+    if (current.id === rootSessionId || !current.parentSessionId) break;
+    if (chain.has(current.parentSessionId)) break;
+    const parent = await readOpenClawLineageSession(env, current.parentSessionId, 0);
+    if (!parent) break;
+    current = parent;
+  }
+  return openClawRoomSessionChainAllowed([...chain.values()], session.id, rootSessionId);
+}
+
+async function readOpenClawLineageSession(
+  env: RuntimeEnv,
+  id: string,
+  preparationPending: 0 | 1,
+): Promise<InteractiveSession | null> {
+  const row = await database(env)
+    .selectFrom("interactive_sessions")
+    .selectAll()
+    .where("id", "=", id)
+    .where("preparation_pending", "=", preparationPending)
+    .executeTakeFirst();
+  return row ? interactiveSession(row, []) : null;
 }
 
 async function rollbackInteractiveSessionReservation(
