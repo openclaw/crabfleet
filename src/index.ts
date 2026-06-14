@@ -3288,13 +3288,20 @@ async function openClawReadSessionRoot(
   requireOpenClawRoomService(request, env);
   const root = clean(rootSessionId, 120);
   if (!root) throw badRequest("root session id is required");
-  const rootSession = await readFreshInteractiveSession(env, root);
+  const db = database(env);
+  const rootRow = await db
+    .selectFrom("interactive_sessions")
+    .selectAll()
+    .where("id", "=", root)
+    .where("preparation_pending", "=", 0)
+    .executeTakeFirst();
+  const rootSession = rootRow ? interactiveSession(rootRow, []) : null;
   if (!rootSession || !openClawRoomRootAllowed(rootSession)) {
     throw notFound("session root not found");
   }
-  const rows = await database(env)
+  const rows = await db
     .selectFrom("interactive_sessions")
-    .select("id")
+    .selectAll()
     .where((expression) =>
       expression.or([expression("root_session_id", "=", root), expression("id", "=", root)]),
     )
@@ -3315,21 +3322,11 @@ async function openClawReadSessionRoot(
     throw serviceUnavailable("session root exceeds the supervision limit");
   }
   const serviceUser = openClawServiceUser();
-  const sessions: Array<InteractiveSession | null> = Array.from({ length: rows.length }, () => null);
-  await mapWithConcurrency(
-    rows.map((row, index) => ({ row, index })),
-    4,
-    async ({ row, index }) => {
-      sessions[index] = await readFreshInteractiveSession(env, row.id);
-    },
-  );
-  const validSessions = sessions.filter(
-    (session): session is InteractiveSession => Boolean(session),
-  );
+  const sessions = rows.map((row) => interactiveSession(row, []));
   return {
     rootSessionId: root,
-    crabboxes: validSessions
-      .filter((session) => openClawRoomSessionChainAllowed(validSessions, session.id, root))
+    crabboxes: sessions
+      .filter((session) => openClawRoomSessionChainAllowed(sessions, session.id, root))
       .map((session) => openClawCrabboxSummaryResponse(env, serviceUser, session)),
   };
 }
@@ -3453,8 +3450,8 @@ async function openClawRootScopedCrabbox(
     120,
   );
   if (!rootSessionId) throw badRequest("root session id is required");
-  const session = await readFreshInteractiveSession(env, id);
-  const root = await readFreshInteractiveSession(env, rootSessionId);
+  const session = await readInteractiveSession(env, id);
+  const root = await readInteractiveSession(env, rootSessionId);
   const chain =
     session && root ? await openClawReadSessionChain(env, session, root, rootSessionId) : [];
   if (
@@ -3464,7 +3461,9 @@ async function openClawRootScopedCrabbox(
   ) {
     throw notFound("interactive session not found");
   }
-  return session;
+  const refreshed = await readFreshInteractiveSession(env, id);
+  if (!refreshed) throw notFound("interactive session not found");
+  return refreshed;
 }
 
 async function openClawReadSessionChain(
@@ -3479,7 +3478,7 @@ async function openClawReadSessionChain(
     chain.set(current.id, current);
     if (current.id === rootSessionId || !current.parentSessionId) break;
     if (chain.has(current.parentSessionId)) break;
-    const parent = await readFreshInteractiveSession(env, current.parentSessionId);
+    const parent = await readInteractiveSession(env, current.parentSessionId);
     if (!parent) break;
     current = parent;
   }
@@ -3493,8 +3492,8 @@ async function openClawSupervisedRootForCreate(
 ): Promise<string | null> {
   if (!lineage.parentSessionId || !lineage.rootSessionId) return null;
   const [parent, root] = await Promise.all([
-    readFreshInteractiveSession(env, lineage.parentSessionId),
-    readFreshInteractiveSession(env, lineage.rootSessionId),
+    readInteractiveSession(env, lineage.parentSessionId),
+    readInteractiveSession(env, lineage.rootSessionId),
   ]);
   if (!parent || !root) return null;
   if (createdBy === "service:openclaw" || createdBy === `session:${lineage.parentSessionId}`) {
