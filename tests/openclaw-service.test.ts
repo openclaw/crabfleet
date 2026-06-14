@@ -239,6 +239,13 @@ test("OpenClaw room reservation precedes branch mutation, event recording, and p
 	assert.match(capacitySource, /inserted\.rowid AS inserted_rowid/);
 	assert.match(capacitySource, /candidate\.rowid <= inserted\.rowid/);
 	assert.match(capacitySource, /GROUP BY inserted\.rowid/);
+	assert.match(capacitySource, /openClawRoomReservationLineageAllowed/);
+	assert.match(capacitySource, /readOpenClawLineageSession\(env, insertedSessionId, 1\)/);
+	assert.match(capacitySource, /readOpenClawLineageSession\(env, rootSessionId, 0\)/);
+	assert.ok(
+		capacitySource.indexOf("openClawRoomReservationLineageAllowed") <
+			capacitySource.indexOf("inserted.rowid AS inserted_rowid"),
+	);
 	assert.match(capacitySource, /deleteFrom\("interactive_sessions"\)/);
 	assert.match(
 		capacitySource,
