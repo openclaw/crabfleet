@@ -5177,10 +5177,11 @@ async function cleanupInteractiveSessions(
     `).where(sql<boolean>`
       NOT EXISTS (
         SELECT 1
-        FROM interactive_sessions AS descendant
-        WHERE descendant.root_session_id = interactive_sessions.id
-          AND descendant.id != interactive_sessions.id
-          AND descendant.status NOT IN ('stopped', 'expired', 'failed')
+        FROM interactive_sessions AS active_tree_session
+        WHERE COALESCE(active_tree_session.root_session_id, active_tree_session.id)
+            = COALESCE(interactive_sessions.root_session_id, interactive_sessions.id)
+          AND active_tree_session.id != interactive_sessions.id
+          AND active_tree_session.status NOT IN ('stopped', 'expired', 'failed')
       )
     `).where(sql<boolean>`
       ${env.SESSION_LOGS ? 1 : 0} = 0
@@ -5245,10 +5246,11 @@ async function deleteFinalizedInteractiveSession(
     `).where(sql<boolean>`
       NOT EXISTS (
         SELECT 1
-        FROM interactive_sessions AS descendant
-        WHERE descendant.root_session_id = ${row.id}
-          AND descendant.id != ${row.id}
-          AND descendant.status NOT IN ('stopped', 'expired', 'failed')
+        FROM interactive_sessions AS active_tree_session
+        WHERE COALESCE(active_tree_session.root_session_id, active_tree_session.id)
+            = ${row.root_session_id ?? row.id}
+          AND active_tree_session.id != ${row.id}
+          AND active_tree_session.status NOT IN ('stopped', 'expired', 'failed')
       )
     `).where(sql<boolean>`
       ${archive ? 1 : 0} = 1
