@@ -3,9 +3,17 @@ import test from "node:test";
 
 import {
 	boundedUtf8Tail,
+	openClawServiceAuthorized,
 	openClawTranscriptMaxBytes,
 	sessionBelongsToRoot,
 } from "../src/openclaw-service.ts";
+
+test("OpenClaw service authorization accepts dedicated scoped consumers", () => {
+	assert.equal(openClawServiceAuthorized("Bearer openclaw", ["openclaw", "multicodex"]), true);
+	assert.equal(openClawServiceAuthorized("Bearer multicodex", ["openclaw", "multicodex"]), true);
+	assert.equal(openClawServiceAuthorized("Bearer public", ["openclaw", "multicodex"]), false);
+	assert.equal(openClawServiceAuthorized(null, [undefined, null]), false);
+});
 
 test("session root fences accept the root and every child only for the exact root", () => {
 	assert.equal(sessionBelongsToRoot("IS-10", "IS-10", "IS-10"), true);

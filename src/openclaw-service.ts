@@ -3,6 +3,13 @@ const decoder = new TextDecoder();
 
 export const openClawTranscriptMaxBytes = 64 * 1024;
 
+export function openClawServiceAuthorized(
+	authorization: string | null,
+	tokens: Array<string | null | undefined>,
+): boolean {
+	return tokens.some((token) => Boolean(token) && authorization === `Bearer ${token}`);
+}
+
 export function sessionBelongsToRoot(
 	sessionId: string,
 	sessionRootId: string | null,

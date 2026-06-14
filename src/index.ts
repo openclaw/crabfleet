@@ -132,7 +132,11 @@ import { sizedTerminalTargetUrl } from "./terminal-target";
 import { cachedBooleanGrant } from "./terminal-authorization";
 import { obsoleteSessionArchiveObjectKeys, sessionArchiveAttemptKeys } from "./session-archive";
 import { readBoundedResponseText } from "./bounded-response";
-import { boundedUtf8Tail, sessionBelongsToRoot } from "./openclaw-service";
+import {
+  boundedUtf8Tail,
+  openClawServiceAuthorized,
+  sessionBelongsToRoot,
+} from "./openclaw-service";
 import {
   inspectTrustedProxyAssertion,
   sanitizeTrustedProxyRequest,
@@ -218,6 +222,7 @@ type RuntimeEnv = Env & {
   CRABBOX_SSH_GATEWAY_TOKEN?: string;
   CRABFLEET_SSH_GATEWAY_TOKEN?: string;
   CRABBOX_OPENCLAW_TOKEN?: string;
+  CRABBOX_MULTICODEX_TOKEN?: string;
   CRABBOX_TOKEN_ENCRYPTION_KEY?: string;
   BACKUP_BUCKET_NAME?: string;
   CLOUDFLARE_ACCOUNT_ID?: string;
@@ -3588,10 +3593,11 @@ function openClawServiceUser(): User {
 }
 
 function requireOpenClawService(request: Request, env: RuntimeEnv): void {
-  if (!env.CRABBOX_OPENCLAW_TOKEN) {
+  const tokens = [env.CRABBOX_OPENCLAW_TOKEN, env.CRABBOX_MULTICODEX_TOKEN];
+  if (!tokens.some(Boolean)) {
     throw serviceUnavailable("OpenClaw service token is not configured");
   }
-  if (request.headers.get("authorization") !== `Bearer ${env.CRABBOX_OPENCLAW_TOKEN}`) {
+  if (!openClawServiceAuthorized(request.headers.get("authorization"), tokens)) {
     throw unauthorized();
   }
 }

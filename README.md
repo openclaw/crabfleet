@@ -227,6 +227,7 @@ The Crabbox namespace cutover intentionally has no old-name compatibility. Exist
 - `CRABBOX_CLAWFLEET_TOKEN` – Optional bearer token sent to ClawFleet
 - `CRABBOX_CLAWFLEET_PUBLIC_URL` – Optional public ClawFleet URL used when building attach/VNC links
 - `CRABBOX_OPENCLAW_TOKEN` – Internal bearer token for OpenClaw service crabbox and GitHub Actions session registration
+- `CRABBOX_MULTICODEX_TOKEN` – Optional dedicated bearer token for MultiCodex room supervision
 - `CRABFLEET_SSH_GATEWAY_TOKEN` / `CRABBOX_SSH_GATEWAY_TOKEN` – Shared bearer token for the Go SSH gateway internal API
 - `CRABFLEET_LOCAL_SANDBOX_BACKUPS` – Optional Cloudflare Sandbox checkpoint mode override; defaults to R2 binding uploads, set `0` for SDK presigned R2 uploads
 - `CRABFLEET_LABEL` – Optional tenant label shown in the app, default `Crabfleet`
