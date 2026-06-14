@@ -5,6 +5,7 @@ import test from "node:test";
 import {
 	boundedUtf8Tail,
 	openClawBranchPreparationCanDefer,
+	openClawGitBranchAllowed,
 	openClawGitHubRepoParts,
 	openClawRoomMaxSessions,
 	openClawRoomRootAllowed,
@@ -27,6 +28,17 @@ test("OpenClaw branch preparation defers masked control-plane permission failure
 	assert.equal(openClawBranchPreparationCanDefer(404), true);
 	assert.equal(openClawBranchPreparationCanDefer(401), false);
 	assert.equal(openClawBranchPreparationCanDefer(500), false);
+});
+
+test("OpenClaw GitHub branch writes reject lossy or invalid refs", () => {
+	assert.equal(openClawGitBranchAllowed("main"), true);
+	assert.equal(openClawGitBranchAllowed("feature/team-room"), true);
+	assert.equal(openClawGitBranchAllowed("x".repeat(120)), true);
+	assert.equal(openClawGitBranchAllowed("x".repeat(121)), false);
+	assert.equal(openClawGitBranchAllowed("feature/team-room "), false);
+	assert.equal(openClawGitBranchAllowed("feature//team-room"), false);
+	assert.equal(openClawGitBranchAllowed("feature/../team-room"), false);
+	assert.equal(openClawGitBranchAllowed("feature/team-room.lock"), false);
 });
 
 test("OpenClaw GitHub writes require one exact owner/name pair", () => {
@@ -123,6 +135,14 @@ test("OpenClaw create preserves the already-decorated interactive session", asyn
 	assert.match(createSource, /AbortSignal\.timeout\(openClawPreparationTimeoutMs\)/);
 	assert.match(createSource, /ensureOpenClawServiceBranch\([\s\S]*signal\)/);
 	assert.match(createSource, /if \(signal\.aborted\)/);
+	assert.match(createSource, /openClawServiceBranch\(body\.branch, "branch", "main"\)/);
+
+	const branchStart = source.indexOf("async function ensureOpenClawServiceBranch");
+	const branchEnd = source.indexOf("function actionWorkIdentifier", branchStart);
+	const branchSource = source.slice(branchStart, branchEnd);
+	assert.match(branchSource, /openClawServiceBranch\(branchInput, "branch", "main"\)/);
+	assert.match(branchSource, /openClawServiceBranch\(baseBranchInput, "baseBranch"\)/);
+	assert.doesNotMatch(branchSource, /clean\(branch/);
 });
 
 test("OpenClaw mutations persist request evidence before consequential work", async () => {

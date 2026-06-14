@@ -75,6 +75,35 @@ export function openClawBranchPreparationCanDefer(status: number): boolean {
 	return status === 403 || status === 404;
 }
 
+export function openClawGitBranchAllowed(branch: string): boolean {
+	if (!branch || branch.length > 120 || branch !== branch.trim()) return false;
+	if (
+		branch === "@" ||
+		branch.startsWith("-") ||
+		branch.startsWith("/") ||
+		branch.endsWith("/") ||
+		branch.endsWith(".") ||
+		branch.includes("..") ||
+		branch.includes("@{") ||
+		branch.includes("//")
+	) {
+		return false;
+	}
+	if (
+		[...branch].some(
+			(character) =>
+				character.charCodeAt(0) <= 32 ||
+				character.charCodeAt(0) === 127 ||
+				"~^:?*[\\".includes(character),
+		)
+	) {
+		return false;
+	}
+	return branch
+		.split("/")
+		.every((part) => Boolean(part) && !part.startsWith(".") && !part.endsWith(".lock"));
+}
+
 export function openClawGitHubRepoParts(repo: string): { owner: string; name: string } | null {
 	const parts = repo.split("/");
 	if (parts.length !== 2) return null;
