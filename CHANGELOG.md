@@ -4,7 +4,7 @@
 
 - Add root-fenced OpenClaw service supervision for Crabbox room trees, including current state, bounded transcript evidence, targeted terminal nudges, audited stop requests, and canonical browser URLs.
 - Allow MultiCodex to use a dedicated service capability without rotating the existing OpenClaw automation token.
-- Prepare missing service-requested branches from an explicit base branch before Crabbox provisioning.
+- Safely reserve room capacity and prepare missing service-requested branches from an explicit base branch before Crabbox provisioning.
 - Add deployment-configured Codex SSH handoffs for ready provider workspaces, with safe alias templating, manager-only session metadata, and copyable local setup commands that keep provider behavior outside Crabfleet.
 - Route generic runtime profiles to distinct versioned adapters through a validated deployment URL template, reject profile-rewriting responses, and preserve immutable lifecycle control-plane fences.
 - Add a deployment-configured runtime profile selector with generic labels, targets, capability previews, server-side allowlisting, and CLI/SSH profile overrides.
