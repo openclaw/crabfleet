@@ -327,10 +327,13 @@ test("invalid descendants below an OpenClaw root fail closed before insertion", 
 	);
 	const lineageSource = source.slice(lineageStart, lineageEnd);
 
-	assert.match(lineageSource, /if \(openClawRoomRootAllowed\(root\)\)/);
 	assert.match(
 		lineageSource,
 		/if \(!parent \|\| !root\) throw badRequest\("session lineage not found"\)/,
+	);
+	assert.match(
+		lineageSource,
+		/if \(createdBy === "service:openclaw" \|\| openClawRoomRootAllowed\(root\)\)/,
 	);
 	assert.match(lineageSource, /throw badRequest\("invalid OpenClaw room lineage"\)/);
 });
