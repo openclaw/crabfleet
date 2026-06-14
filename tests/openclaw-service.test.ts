@@ -5,6 +5,7 @@ import test from "node:test";
 import {
 	boundedUtf8Tail,
 	openClawBranchPreparationCanDefer,
+	openClawGitHubRepoParts,
 	openClawRoomMaxSessions,
 	openClawRoomRootAllowed,
 	openClawRoomSessionChainAllowed,
@@ -26,6 +27,17 @@ test("OpenClaw branch preparation defers masked control-plane permission failure
 	assert.equal(openClawBranchPreparationCanDefer(404), true);
 	assert.equal(openClawBranchPreparationCanDefer(401), false);
 	assert.equal(openClawBranchPreparationCanDefer(500), false);
+});
+
+test("OpenClaw GitHub writes require one exact owner/name pair", () => {
+	assert.deepEqual(openClawGitHubRepoParts("openclaw/crabfleet"), {
+		owner: "openclaw",
+		name: "crabfleet",
+	});
+	assert.equal(openClawGitHubRepoParts("openclaw/crabfleet/extra"), null);
+	assert.equal(openClawGitHubRepoParts("openclaw/crabfleet?ref=main"), null);
+	assert.equal(openClawGitHubRepoParts("open_claw/crabfleet"), null);
+	assert.equal(openClawGitHubRepoParts("openclaw/"), null);
 });
 
 test("session root fences accept the root and every child only for the exact root", () => {
@@ -289,5 +301,9 @@ test("invalid descendants below an OpenClaw root fail closed before insertion", 
 	const lineageSource = source.slice(lineageStart, lineageEnd);
 
 	assert.match(lineageSource, /if \(openClawRoomRootAllowed\(root\)\)/);
+	assert.match(
+		lineageSource,
+		/if \(!parent \|\| !root\) throw badRequest\("session lineage not found"\)/,
+	);
 	assert.match(lineageSource, /throw badRequest\("invalid OpenClaw room lineage"\)/);
 });
