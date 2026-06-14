@@ -3372,6 +3372,9 @@ async function readOpenClawRequestSession(
   if (row.created_by !== "service:openclaw" || row.openclaw_request_hash !== requestHash) {
     throw conflict("OpenClaw crabbox request id already belongs to a different request");
   }
+  if (row.preparation_pending !== 0) {
+    throw serviceUnavailable("OpenClaw crabbox request is still preparing");
+  }
   return interactiveSession(row, []);
 }
 
@@ -3456,6 +3459,10 @@ async function openClawMutateSessionRoot(
     .execute();
   const deadline = Date.now() + 60_000;
   let terminalReads = 0;
+  let pollDelayMs = 250;
+  let previousState = "";
+  const lifecycleAttempts = new Map<string, number>();
+  const nextLifecycleAttemptAt = new Map<string, number>();
   while (Date.now() < deadline) {
     let rows = await readOpenClawRootRows(env, root);
     const pending = rows.filter((row) => row.preparation_pending !== 0);
@@ -3466,10 +3473,22 @@ async function openClawMutateSessionRoot(
     });
     rows = await readOpenClawRootRows(env, root);
     const sessions = rows.map((row) => interactiveSession(row, []));
-    const active = sessions
+    const now = Date.now();
+    const actionable = sessions
       .filter((session) => !deadInteractiveSessionStatuses.includes(session.status))
+      .filter((session) => (nextLifecycleAttemptAt.get(session.id) ?? 0) <= now)
       .reverse();
-    await mapWithConcurrency(active, 4, async (session) => {
+    await mapWithConcurrency(actionable, 4, async (session) => {
+      const attempt = (lifecycleAttempts.get(session.id) ?? 0) + 1;
+      lifecycleAttempts.set(session.id, attempt);
+      nextLifecycleAttemptAt.set(
+        session.id,
+        now + Math.min(10_000, 500 * 2 ** Math.min(attempt - 1, 5)),
+      );
+      if (session.status === "stopping") {
+        await reconcileExternalInteractiveSessionById(env, session.id, now).catch(() => undefined);
+        return;
+      }
       await mutateInteractiveSession(request, env, serviceUser, session.id, "stop").catch(
         () => undefined,
       );
@@ -3493,7 +3512,12 @@ async function openClawMutateSessionRoot(
         ),
       };
     }
-    await sleep(250);
+    const currentState = rows
+      .map((row) => `${row.id}:${row.status}:${row.preparation_pending}`)
+      .join("|");
+    pollDelayMs = currentState === previousState ? Math.min(2_000, pollDelayMs * 2) : 250;
+    previousState = currentState;
+    await sleep(pollDelayMs);
   }
   throw serviceUnavailable("OpenClaw session root cleanup did not reach a terminal state");
 }

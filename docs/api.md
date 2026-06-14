@@ -559,7 +559,9 @@ Creates a repo-ready crabbox for an operator, e.g. from a Discord meeting handof
 `requestId` is optional, limited to 200 characters, and strongly recommended for automation. Crabfleet
 persists it with the session reservation before branch preparation or runtime
 creation. Replaying the same request returns the original crabbox; reusing the
-ID with a different request is rejected.
+ID with a different request is rejected. A replay while the original reservation
+is still preparing returns a retryable service-unavailable response instead of
+claiming the crabbox is ready.
 
 Response:
 
