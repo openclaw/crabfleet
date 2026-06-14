@@ -542,7 +542,7 @@ Internal automation uses `Authorization: Bearer CRABBOX_OPENCLAW_TOKEN`.
 
 ### POST /api/openclaw/crabboxes
 
-Creates a repo-ready crabbox for an operator, e.g. from a Discord meeting handoff.
+Creates a repo-ready crabbox for an operator, e.g. from a Discord meeting handoff or a MultiCodex room.
 
 ```json
 {
@@ -564,7 +564,45 @@ Response:
     "owner": "@steipete",
     "runtime": "crabbox",
     "vncUrl": "https://..."
-  }
+  },
+  "browserUrl": "https://crabfleet.openclaw.ai/app/sessions/IS-105"
+}
+```
+
+### OpenClaw crabbox supervision
+
+Internal OpenClaw automation can supervise a created room/session tree without
+using browser cookies or an individual session's agent token:
+
+- `GET /api/openclaw/session-roots/:rootSessionId`: list the exact root and its children.
+- `GET /api/openclaw/crabboxes/:id`: read one current crabbox.
+- `GET /api/openclaw/crabboxes/:id/transcript`: read a bounded recent transcript.
+- `POST /api/openclaw/crabboxes/:id/message`: send one terminal message/nudge.
+- `POST /api/openclaw/crabboxes/:id/actions`: request the supported `stop` action.
+
+Every endpoint requires `Authorization: Bearer CRABBOX_OPENCLAW_TOKEN`.
+Per-crabbox reads require `X-Crabfleet-Root-Session-ID`; message and action
+bodies require `rootSessionId`. A session outside that exact root is returned
+as not found. Transcript responses contain at most the newest 240 events and
+64 KiB of UTF-8 text and report whether evidence was truncated. Every message
+and stop request writes an audit event.
+
+Message request:
+
+```json
+{
+  "rootSessionId": "IS-100",
+  "message": "Align the response contract with the frontend lane.",
+  "enter": true
+}
+```
+
+Stop request:
+
+```json
+{
+  "rootSessionId": "IS-100",
+  "action": "stop"
 }
 ```
 
