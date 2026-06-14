@@ -105,6 +105,23 @@ test("adapter create payload matches the strict controller contract", () => {
   );
 });
 
+test("configured profiles fence every adapter runtime and preserve requested capabilities", async () => {
+  const source = await readFile(new URL("../src/index.ts", import.meta.url), "utf8");
+  const createStart = source.indexOf("async function createInteractiveSessionFromInput");
+  const createEnd = source.indexOf("function initialRuntimeAdapterWorkspaceId", createStart);
+  const createSource = source.slice(createStart, createEnd);
+  const resultStart = source.indexOf("function runtimeAdapterProvisionResult");
+  const resultEnd = source.indexOf(
+    "async function reconcileStoppingRuntimeAdapterWorkspace",
+    resultStart,
+  );
+  const resultSource = source.slice(resultStart, resultEnd);
+
+  assert.match(createSource, /deployment\.runtimeProfiles\.length > 0 && !runtimeProfile/);
+  assert.doesNotMatch(createSource, /runtime === "crabbox" && deployment\.runtimeProfiles/);
+  assert.match(resultSource, /session\.adapterRequestedCapabilities \?\?/);
+});
+
 test("adapter workspace id stays distinct from provider resource id", () => {
   const result = parseAdapterWorkspaceResult({
     id: "fleet-a-is-101",

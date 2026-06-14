@@ -13,6 +13,7 @@ import {
   optimisticInteractiveSession,
   runCapabilities,
   runtimeCapabilityLabel,
+  runtimeProfileOptionLabel,
   runtimeLabel,
   sessionItems,
   terminalText,
@@ -89,6 +90,47 @@ test("optimistic interactive sessions use runtime-specific pending copy", () => 
   assert.equal(session.runtime, "crabbox");
   assert.equal(session.lastEvent, "Requesting Crabbox...");
   assert.deepEqual(session.logs, ["Requesting Crabbox...", "Waiting for session id..."]);
+});
+
+test("optimistic interactive sessions use configured profile capabilities", () => {
+  const data = new FormData();
+  data.set("repo", "openclaw/crabfleet");
+  data.set("runtime", "crabbox");
+  data.set("profile", "terminal-only");
+
+  const session = optimisticInteractiveSession(data, "operator", [
+    {
+      id: "terminal-only",
+      label: "Terminal only",
+      capabilities: { desktop: false, vnc: false },
+    },
+  ]);
+
+  assert.equal(session.profile, "terminal-only");
+  assert.equal(session.capabilities.terminal, true);
+  assert.equal(session.capabilities.desktop, false);
+  assert.equal(session.capabilities.vnc, false);
+});
+
+test("runtime profile options expose target and enabled capabilities", () => {
+  assert.equal(
+    runtimeProfileOptionLabel({
+      id: "desktop-a",
+      label: "Desktop A",
+      target: "platform-a",
+      capabilities: { terminal: true, desktop: true, vnc: true },
+    }),
+    "Desktop A — platform-a · terminal, desktop, VNC",
+  );
+  assert.equal(
+    runtimeProfileOptionLabel({
+      id: "linux",
+      label: "Linux",
+      target: "linux",
+      capabilities: {},
+    }),
+    "Linux",
+  );
 });
 
 test("interactive command defaults to yolo without sandbox suffix", () => {

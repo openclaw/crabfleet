@@ -23,6 +23,7 @@ import {
   preferredRepos,
   runCapabilities,
   runtimeCapabilityLabel,
+  runtimeProfileOptionLabel,
   sessionLogsUrl,
   sessionItems,
   statusLabel,
@@ -50,6 +51,7 @@ const defaultDeployment = {
   preferredRepo,
   defaultRuntime: "container",
   defaultProfile: "default",
+  runtimeProfiles: [],
 };
 const loginReturnKey = "crabbox-login-return";
 const skipAutoGithubLoginKey = "crabbox-skip-auto-github-login";
@@ -852,7 +854,11 @@ function App() {
 
   async function createInteractiveSession(form) {
     const data = new FormData(form);
-    const optimistic = optimisticInteractiveSession(data, state.user?.login);
+    const optimistic = optimisticInteractiveSession(
+      data,
+      state.user?.login,
+      state.deployment?.runtimeProfiles,
+    );
     upsertInteractiveSession(optimistic);
     closeDrawer("interactive");
     setFocusedSessionId(optimistic.id);
@@ -1631,6 +1637,11 @@ function CardDrawer({ drawers, closeDrawer, createCard, state }) {
 
 function InteractiveDrawer({ drawers, closeDrawer, createInteractiveSession, state }) {
   const [busy, setBusy] = useState(false);
+  const defaultRuntime = state.deployment?.defaultRuntime || "container";
+  const defaultProfile = state.deployment?.defaultProfile || "default";
+  const runtimeProfiles = state.deployment?.runtimeProfiles || [];
+  const [runtime, setRuntime] = useState(defaultRuntime);
+  useEffect(() => setRuntime(defaultRuntime), [defaultRuntime]);
   return (
     <Drawer
       id="interactive-drawer"
@@ -1641,6 +1652,7 @@ function InteractiveDrawer({ drawers, closeDrawer, createInteractiveSession, sta
       <form
         class="form-grid"
         aria-busy={busy ? "true" : "false"}
+        onReset={() => setRuntime(defaultRuntime)}
         onSubmit={async (event) => {
           event.preventDefault();
           setBusy(true);
@@ -1659,15 +1671,28 @@ function InteractiveDrawer({ drawers, closeDrawer, createInteractiveSession, sta
         <label>
           Runtime
           <select
-            key={state.deployment?.defaultRuntime || "container"}
             name="runtime"
-            defaultValue={state.deployment?.defaultRuntime || "container"}
+            value={runtime}
+            onChange={(event) => setRuntime(event.currentTarget.value)}
           >
             <option value="container">Cloudflare Sandbox</option>
             <option value="crabbox">Crabbox</option>
           </select>
         </label>
-        <input type="hidden" name="profile" value={state.deployment?.defaultProfile || "default"} />
+        {runtime === "crabbox" && runtimeProfiles.length > 0 ? (
+          <label>
+            Profile
+            <select key={defaultProfile} name="profile" defaultValue={defaultProfile}>
+              {runtimeProfiles.map((profile) => (
+                <option key={profile.id} value={profile.id}>
+                  {runtimeProfileOptionLabel(profile)}
+                </option>
+              ))}
+            </select>
+          </label>
+        ) : (
+          <input type="hidden" name="profile" value={defaultProfile} />
+        )}
         <label>
           Command
           <input name="command" defaultValue="codex --yolo" placeholder="codex --yolo" />

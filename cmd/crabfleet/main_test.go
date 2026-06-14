@@ -45,7 +45,7 @@ func TestFirstLineSkipsBlankLines(t *testing.T) {
 	}
 }
 
-func TestNewRuntimeOverrideIsOptional(t *testing.T) {
+func TestNewRuntimeAndProfileOverridesAreOptional(t *testing.T) {
 	t.Setenv("CRABFLEET_ROOT_SESSION_ID", "")
 	parse := func(args ...string) cli {
 		var app cli
@@ -69,12 +69,18 @@ func TestNewRuntimeOverrideIsOptional(t *testing.T) {
 	if req.Runtime != "" {
 		t.Fatalf("runtime = %q, want deployment default", req.Runtime)
 	}
+	if req.Profile != "" {
+		t.Fatalf("profile = %q, want deployment default", req.Profile)
+	}
 	encoded, err := json.Marshal(req)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if bytes.Contains(encoded, []byte(`"runtime"`)) {
 		t.Fatalf("omitted runtime was serialized: %s", encoded)
+	}
+	if bytes.Contains(encoded, []byte(`"profile"`)) {
+		t.Fatalf("omitted profile was serialized: %s", encoded)
 	}
 	for _, arg := range cmd.sshCreateArgs(req) {
 		if arg == "--runtime" {
@@ -96,6 +102,22 @@ func TestNewRuntimeOverrideIsOptional(t *testing.T) {
 	}
 	if !found {
 		t.Fatalf("explicit runtime missing from SSH fallback: %q", args)
+	}
+
+	cmd = parse("new", "--profile", "desktop-a").New
+	req = cmd.sessionRequest(&cli{})
+	if req.Profile != "desktop-a" {
+		t.Fatalf("profile = %q, want explicit override", req.Profile)
+	}
+	args = cmd.sshCreateArgs(req)
+	found = false
+	for index := 0; index+1 < len(args); index++ {
+		if args[index] == "--profile" && args[index+1] == "desktop-a" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("explicit profile missing from SSH fallback: %q", args)
 	}
 }
 

@@ -150,6 +150,12 @@ import {
   type CredentialPolicyGenerationTombstone,
   type CredentialPolicyLegacyMigration,
 } from "./credential-policy-fence";
+import {
+  parseRuntimeProfiles,
+  runtimeProfileByID,
+  runtimeProfileCapabilities,
+  type RuntimeProfileDescriptor,
+} from "./runtime-profiles";
 
 type Role = "viewer" | "maintainer" | "owner";
 type InteractiveRuntime = "crabbox" | "container" | "github_actions";
@@ -164,6 +170,7 @@ type DeploymentConfig = {
   preferredRepo: string;
   defaultRuntime: "crabbox" | "container";
   defaultProfile: string;
+  runtimeProfiles: RuntimeProfileDescriptor[];
 };
 
 type PublicDeploymentConfig = Pick<
@@ -218,6 +225,7 @@ type RuntimeEnv = Env & {
   CRABFLEET_PREFERRED_REPO?: string;
   CRABFLEET_DEFAULT_RUNTIME?: string;
   CRABFLEET_DEFAULT_PROFILE?: string;
+  CRABFLEET_RUNTIME_PROFILES_JSON?: string;
   CRABFLEET_DEV_LOGIN_ENABLED?: string;
   CRABFLEET_TRUSTED_PROXY_ORIGIN?: string;
   CRABFLEET_TRUSTED_PROXY_PUBLIC_ORIGIN?: string;
@@ -1050,7 +1058,7 @@ const crabboxCapabilities: RuntimeCapabilities = {
 };
 function runtimeAdapterCreateSettings(
   env: RuntimeEnv,
-  runtime: "crabbox" | "container",
+  capabilities: RuntimeCapabilities,
 ): {
   ttlSeconds: number;
   idleTimeoutSeconds: number;
@@ -1059,11 +1067,16 @@ function runtimeAdapterCreateSettings(
   return {
     ttlSeconds: clampedSeconds(env.CRABBOX_RUNTIME_ADAPTER_TTL_SECONDS, 14_400),
     idleTimeoutSeconds: clampedSeconds(env.CRABBOX_RUNTIME_ADAPTER_IDLE_SECONDS, 1_800),
-    capabilities: runtime === "crabbox" ? crabboxCapabilities : containerCapabilities,
+    capabilities,
   };
 }
 
 function deploymentConfig(env: RuntimeEnv): DeploymentConfig {
+  const defaultProfile = clean(env.CRABFLEET_DEFAULT_PROFILE, 120) || "default";
+  const runtimeProfiles = parseRuntimeProfiles(env.CRABFLEET_RUNTIME_PROFILES_JSON);
+  if (runtimeProfiles.length > 0 && !runtimeProfileByID(runtimeProfiles, defaultProfile)) {
+    throw new TypeError("CRABFLEET_DEFAULT_PROFILE must name a configured runtime profile");
+  }
   return {
     label: clean(env.CRABFLEET_LABEL, 80) || "Crabfleet",
     canonicalUrl: configuredHttpOrigin(env.CRABFLEET_CANONICAL_URL, appCanonicalOrigin),
@@ -1075,7 +1088,8 @@ function deploymentConfig(env: RuntimeEnv): DeploymentConfig {
       ["crabbox", "container"] as const,
       "container",
     ),
-    defaultProfile: clean(env.CRABFLEET_DEFAULT_PROFILE, 120) || "default",
+    defaultProfile,
+    runtimeProfiles,
   };
 }
 
@@ -4100,6 +4114,14 @@ async function createInteractiveSessionFromInput(
     | "container";
   requireRuntimeAdapterCreatePreflight(env, runtime);
   const profile = clean(body.profile, 120) || deployment.defaultProfile;
+  const runtimeProfile = runtimeProfileByID(deployment.runtimeProfiles, profile);
+  if (deployment.runtimeProfiles.length > 0 && !runtimeProfile) {
+    throw badRequest("profile is not configured");
+  }
+  const requestedCapabilities = runtimeProfileCapabilities(
+    runtime === "crabbox" ? runtimeProfile : undefined,
+    runtime === "crabbox" ? crabboxCapabilities : containerCapabilities,
+  );
   const command = interactiveCommand(body.command);
   const prompt = clean(body.prompt, 4000);
   const purpose = interactiveSessionPurpose(body.purpose, prompt, repo, branch, command);
@@ -4130,7 +4152,9 @@ async function createInteractiveSessionFromInput(
     const adapterControlPlane = adapterWorkspaceId
       ? configuredRuntimeAdapterControlPlane(env)
       : null;
-    const adapterSettings = adapterWorkspaceId ? runtimeAdapterCreateSettings(env, runtime) : null;
+    const adapterSettings = adapterWorkspaceId
+      ? runtimeAdapterCreateSettings(env, requestedCapabilities)
+      : null;
     const adapterCreatePayload =
       adapterWorkspaceId && adapterSettings
         ? runtimeAdapterCreatePayload(
@@ -4176,9 +4200,7 @@ async function createInteractiveSessionFromInput(
           adapter_workspace_id: adapterWorkspaceId,
           adapter_control_plane: adapterControlPlane,
           provider_resource_id: null,
-          capabilities_json: JSON.stringify(
-            runtime === "crabbox" ? crabboxCapabilities : containerCapabilities,
-          ),
+          capabilities_json: JSON.stringify(requestedCapabilities),
           expires_at: null,
           last_reconciled_at: adapterWorkspaceId ? now : null,
           reconcile_error: adapterWorkspaceId ? "runtime adapter create pending" : null,
@@ -4282,10 +4304,7 @@ async function createInteractiveSessionFromInput(
             profile: provisioned.profile ?? profile,
             adapter_workspace_id: provisioned.adapterWorkspaceId ?? null,
             provider_resource_id: provisioned.providerResourceId ?? null,
-            capabilities_json: JSON.stringify(
-              provisioned.capabilities ??
-                (runtime === "crabbox" ? crabboxCapabilities : containerCapabilities),
-            ),
+            capabilities_json: JSON.stringify(provisioned.capabilities ?? requestedCapabilities),
             expires_at: provisioned.expiresAt ?? null,
             last_reconciled_at: provisioned.reconciledAt ?? null,
             reconcile_error: provisioned.reconcileError ?? null,
@@ -11890,17 +11909,20 @@ async function stageFailedRuntimeAdapterRelease(
 function runtimeAdapterProvisionResult(
   result: AdapterWorkspaceResult,
   session: Pick<InteractiveProvisionRequest, "runtime" | "profile"> & {
+    adapterRequestedCapabilities?: RuntimeCapabilities | null;
     capabilities_json?: string;
   },
   reconciledAt: number,
   adapterWorkspaceId: string,
   initialCreate: boolean,
 ): InteractiveProvisionResult {
-  const defaultCapabilities = session.capabilities_json
-    ? runtimeCapabilities(session.runtime, session.capabilities_json)
-    : session.runtime === "crabbox"
-      ? crabboxCapabilities
-      : containerCapabilities;
+  const defaultCapabilities =
+    session.adapterRequestedCapabilities ??
+    (session.capabilities_json
+      ? runtimeCapabilities(session.runtime, session.capabilities_json)
+      : session.runtime === "crabbox"
+        ? crabboxCapabilities
+        : containerCapabilities);
   const capabilities = effectiveAdapterCapabilities(result, defaultCapabilities, initialCreate);
   return {
     status: result.status,

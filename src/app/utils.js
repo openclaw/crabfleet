@@ -334,13 +334,17 @@ export function clipboardExtension(mediaType) {
   );
 }
 
-export function optimisticInteractiveSession(data, owner) {
+export function optimisticInteractiveSession(data, owner, runtimeProfiles = []) {
   const now = Date.now();
   const repo = String(data.get("repo") || preferredRepo);
   const branch = String(data.get("branch") || "main");
   const runtime = String(data.get("runtime") || "container");
   const profile = String(data.get("profile") || "default");
   const pendingRuntimeLabel = runtimeLabel(runtime);
+  const configuredCapabilities =
+    runtime === "crabbox"
+      ? runtimeProfiles.find((candidate) => candidate.id === profile)?.capabilities
+      : undefined;
   return {
     id: `LOCAL-${now}`,
     repo,
@@ -354,6 +358,7 @@ export function optimisticInteractiveSession(data, owner) {
       desktop: runtime === "crabbox",
       logs: true,
       artifacts: false,
+      ...configuredCapabilities,
     },
     command: interactiveCommand(data.get("command")),
     prompt: String(data.get("prompt") || ""),
@@ -381,6 +386,23 @@ export function optimisticInteractiveSession(data, owner) {
     logs: [`Requesting ${pendingRuntimeLabel}...`, "Waiting for session id..."],
     title: `${repo} · ${branch}`,
   };
+}
+
+export function runtimeProfileOptionLabel(profile) {
+  const label = String(profile?.label || profile?.id || "Profile");
+  const details = [];
+  if (profile?.target && String(profile.target).toLowerCase() !== label.toLowerCase()) {
+    details.push(String(profile.target));
+  }
+  const capabilities = [
+    ["terminal", "terminal"],
+    ["desktop", "desktop"],
+    ["vnc", "VNC"],
+  ]
+    .filter(([name]) => profile?.capabilities?.[name] === true)
+    .map(([, name]) => name);
+  if (capabilities.length > 0) details.push(capabilities.join(", "));
+  return details.length > 0 ? `${label} — ${details.join(" · ")}` : label;
 }
 
 export function interactiveCommand(value) {
