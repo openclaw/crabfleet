@@ -1093,6 +1093,18 @@ function deploymentConfig(env: RuntimeEnv): DeploymentConfig {
   };
 }
 
+function selectedRuntimeProfile(
+  deployment: DeploymentConfig,
+  value: unknown,
+): { profile: string; descriptor: RuntimeProfileDescriptor | undefined } {
+  const profile = clean(value, 120) || deployment.defaultProfile;
+  const descriptor = runtimeProfileByID(deployment.runtimeProfiles, profile);
+  if (deployment.runtimeProfiles.length > 0 && !descriptor) {
+    throw badRequest("profile is not configured");
+  }
+  return { profile, descriptor };
+}
+
 function publicDeploymentConfig(env: RuntimeEnv): PublicDeploymentConfig {
   const { label, canonicalUrl, productUrl, sshHost } = deploymentConfig(env);
   return {
@@ -4113,11 +4125,7 @@ async function createInteractiveSessionFromInput(
     | "crabbox"
     | "container";
   requireRuntimeAdapterCreatePreflight(env, runtime);
-  const profile = clean(body.profile, 120) || deployment.defaultProfile;
-  const runtimeProfile = runtimeProfileByID(deployment.runtimeProfiles, profile);
-  if (deployment.runtimeProfiles.length > 0 && !runtimeProfile) {
-    throw badRequest("profile is not configured");
-  }
+  const { profile, descriptor: runtimeProfile } = selectedRuntimeProfile(deployment, body.profile);
   const requestedCapabilities = runtimeProfileCapabilities(
     runtime === "crabbox" ? runtimeProfile : undefined,
     runtime === "crabbox" ? crabboxCapabilities : containerCapabilities,
@@ -8767,7 +8775,7 @@ async function provisionInteractiveEndpoint(
     | "crabbox"
     | "container";
   const command = interactiveCommand(session.command);
-  const profile = clean(session.profile, 120) || deploymentConfig(env).defaultProfile;
+  const { profile } = selectedRuntimeProfile(deploymentConfig(env), session.profile);
   const prompt = clean(session.prompt, 4000);
   const purpose = interactiveSessionPurpose(session.purpose, prompt, repo, branch, command);
   const summary = interactiveSessionSummary(session.summary, purpose, prompt);

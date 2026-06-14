@@ -394,14 +394,20 @@ export function runtimeProfileOptionLabel(profile) {
   if (profile?.target && String(profile.target).toLowerCase() !== label.toLowerCase()) {
     details.push(String(profile.target));
   }
+  const effectiveCapabilities = {
+    terminal: true,
+    desktop: true,
+    vnc: true,
+    ...profile?.capabilities,
+  };
   const capabilities = [
     ["terminal", "terminal"],
     ["desktop", "desktop"],
     ["vnc", "VNC"],
   ]
-    .filter(([name]) => profile?.capabilities?.[name] === true)
+    .filter(([name]) => effectiveCapabilities[name] === true)
     .map(([, name]) => name);
-  if (capabilities.length > 0) details.push(capabilities.join(", "));
+  details.push(capabilities.length > 0 ? capabilities.join(", ") : "no terminal or desktop");
   return details.length > 0 ? `${label} — ${details.join(" · ")}` : label;
 }
 

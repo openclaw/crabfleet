@@ -129,7 +129,7 @@ test("runtime profile options expose target and enabled capabilities", () => {
       target: "linux",
       capabilities: {},
     }),
-    "Linux",
+    "Linux — terminal, desktop, VNC",
   );
 });
 

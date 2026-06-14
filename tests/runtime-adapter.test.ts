@@ -110,6 +110,9 @@ test("configured profiles fence every adapter runtime and preserve requested cap
   const createStart = source.indexOf("async function createInteractiveSessionFromInput");
   const createEnd = source.indexOf("function initialRuntimeAdapterWorkspaceId", createStart);
   const createSource = source.slice(createStart, createEnd);
+  const profileStart = source.indexOf("function selectedRuntimeProfile");
+  const profileEnd = source.indexOf("function publicDeploymentConfig", profileStart);
+  const profileSource = source.slice(profileStart, profileEnd);
   const resultStart = source.indexOf("function runtimeAdapterProvisionResult");
   const resultEnd = source.indexOf(
     "async function reconcileStoppingRuntimeAdapterWorkspace",
@@ -117,8 +120,8 @@ test("configured profiles fence every adapter runtime and preserve requested cap
   );
   const resultSource = source.slice(resultStart, resultEnd);
 
-  assert.match(createSource, /deployment\.runtimeProfiles\.length > 0 && !runtimeProfile/);
-  assert.doesNotMatch(createSource, /runtime === "crabbox" && deployment\.runtimeProfiles/);
+  assert.match(createSource, /selectedRuntimeProfile\(deployment, body\.profile\)/);
+  assert.match(profileSource, /deployment\.runtimeProfiles\.length > 0 && !descriptor/);
   assert.match(resultSource, /session\.adapterRequestedCapabilities \?\?/);
 });
 
