@@ -41,7 +41,7 @@ export function openClawRoomRootAllowed(session: OpenClawSessionFence): boolean 
 }
 
 export function openClawBranchPreparationCanDefer(status: number): boolean {
-	return status === 403;
+	return status === 403 || status === 404;
 }
 
 export function boundedUtf8Tail(

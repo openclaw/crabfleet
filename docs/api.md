@@ -585,13 +585,15 @@ existing `CRABBOX_OPENCLAW_TOKEN`, or the dedicated `CRABBOX_MULTICODEX_TOKEN`
 for a MultiCodex deployment. Action-session registration accepts only
 `CRABBOX_OPENCLAW_TOKEN`; the narrower MultiCodex credential cannot register or
 resume GitHub Actions sessions.
-Crabbox creation can include `baseBranch`; when the requested branch is
-missing, Crabfleet creates it from that base with its deployment GitHub
-credential before provisioning the session. If that control-plane credential
-is denied with `403`, Crabfleet defers branch validation to the separately
-credentialed runtime adapter so an existing branch can still launch. A missing
-control-plane credential is also deferrable. A missing or inaccessible branch
-then fails during runtime checkout.
+Crabbox creation can explicitly include `baseBranch`; after request validation,
+when the requested branch is missing, Crabfleet creates it from that base with
+its deployment GitHub credential before provisioning the session. If that
+control-plane credential is denied with `403` or GitHub's masked `404`,
+Crabfleet defers branch validation to the separately credentialed runtime
+adapter so an existing branch can still launch. A missing control-plane
+credential is also deferrable. Without an explicit `baseBranch`, Crabfleet does
+not mutate GitHub. A missing or inaccessible branch then fails during runtime
+checkout.
 Per-crabbox reads require `X-Crabfleet-Root-Session-ID`; message and action
 bodies require `rootSessionId`. A session outside that exact root is returned
 as not found. Transcript responses contain at most the newest 240 events and

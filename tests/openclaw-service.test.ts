@@ -18,10 +18,10 @@ test("OpenClaw service authorization accepts dedicated scoped consumers", () => 
 	assert.equal(openClawServiceAuthorized(null, [undefined, null]), false);
 });
 
-test("OpenClaw branch preparation defers only control-plane permission failures", () => {
+test("OpenClaw branch preparation defers masked control-plane permission failures", () => {
 	assert.equal(openClawBranchPreparationCanDefer(403), true);
+	assert.equal(openClawBranchPreparationCanDefer(404), true);
 	assert.equal(openClawBranchPreparationCanDefer(401), false);
-	assert.equal(openClawBranchPreparationCanDefer(404), false);
 	assert.equal(openClawBranchPreparationCanDefer(500), false);
 });
 

@@ -3236,30 +3236,35 @@ async function openClawCreateCrabbox(
   }>(request);
   const owner = openClawOwner(body.owner);
   const serviceUser = openClawServiceUser();
-  try {
-    await ensureOpenClawServiceBranch(env, body.repo, body.branch, body.baseBranch);
-  } catch (error) {
-    if (
-      !(error instanceof GitHubApiError) ||
-      !openClawBranchPreparationCanDefer(error.status)
-    ) {
-      throw error;
-    }
-    console.warn(
-      JSON.stringify({
-        event: "openclaw_branch_preparation_deferred",
-        repo: normalizeRepo(body.repo),
-        branch: clean(body.branch, 120) || "main",
-        status: error.status,
-      }),
-    );
-  }
   const result = await createInteractiveSessionFromInput(
     env,
     serviceUser,
     body,
     clean(body.githubToken, 4000) || undefined,
-    { owner, createdBy: "service:openclaw" },
+    {
+      owner,
+      createdBy: "service:openclaw",
+      beforeCreate: async () => {
+        try {
+          await ensureOpenClawServiceBranch(env, body.repo, body.branch, body.baseBranch);
+        } catch (error) {
+          if (
+            !(error instanceof GitHubApiError) ||
+            !openClawBranchPreparationCanDefer(error.status)
+          ) {
+            throw error;
+          }
+          console.warn(
+            JSON.stringify({
+              event: "openclaw_branch_preparation_deferred",
+              repo: normalizeRepo(body.repo),
+              branch: clean(body.branch, 120) || "main",
+              status: error.status,
+            }),
+          );
+        }
+      },
+    },
   );
   await audit(
     env,
@@ -3660,7 +3665,8 @@ async function ensureOpenClawServiceBranch(
   if (!repo) throw badRequest("repo is required");
   await requireRepo(env, repo);
   const branch = clean(branchInput, 120) || "main";
-  const baseBranch = clean(baseBranchInput, 120) || "main";
+  const baseBranch = clean(baseBranchInput, 120);
+  if (!baseBranch) return;
   if (branch === baseBranch) return;
   if (!env.GITHUB_TOKEN) return;
   const [owner, name] = repo.split("/");
@@ -4432,6 +4438,7 @@ async function createInteractiveSessionFromInput(
     owner?: string;
     parentSessionId?: string | null;
     rootSessionId?: string | null;
+    beforeCreate?: () => Promise<void>;
   } = {},
 ): Promise<{ session: InteractiveSession }> {
   const repo = normalizeRepo(body.repo);
@@ -4460,6 +4467,7 @@ async function createInteractiveSessionFromInput(
     options.parentSessionId ?? (clean(body.parentSessionId, 120) || null),
     options.rootSessionId ?? (clean(body.rootSessionId, 120) || null),
   );
+  await options.beforeCreate?.();
   const now = Date.now();
   const db = database(env);
   for (let attempt = 0; attempt < 3; attempt += 1) {
