@@ -3244,7 +3244,7 @@ async function openClawCreateCrabbox(
     {
       owner,
       createdBy: "service:openclaw",
-      beforeCreate: async () => {
+      afterReserve: async () => {
         try {
           await ensureOpenClawServiceBranch(env, body.repo, body.branch, body.baseBranch);
         } catch (error) {
@@ -3529,6 +3529,16 @@ async function enforceOpenClawRoomSessionLimitAfterInsert(
     .where("work_key", "is", null)
     .executeTakeFirst();
   if (Number(count?.count ?? 0) <= openClawRoomMaxSessions) return;
+  await rollbackInteractiveSessionReservation(env, insertedSessionId, insertedAt);
+  throw tooManyRequests("session root reached the supervision limit");
+}
+
+async function rollbackInteractiveSessionReservation(
+  env: RuntimeEnv,
+  insertedSessionId: string,
+  insertedAt: number,
+): Promise<void> {
+  const db = database(env);
   await db
     .deleteFrom("interactive_sessions")
     .where("id", "=", insertedSessionId)
@@ -3541,8 +3551,7 @@ async function enforceOpenClawRoomSessionLimitAfterInsert(
     .select("id")
     .where("id", "=", insertedSessionId)
     .executeTakeFirst();
-  if (current) throw serviceUnavailable("session root capacity rollback failed");
-  throw tooManyRequests("session root reached the supervision limit");
+  if (current) throw serviceUnavailable("interactive session reservation rollback failed");
 }
 
 function openClawCrabboxResponse(
@@ -4570,7 +4579,7 @@ async function createInteractiveSessionFromInput(
     owner?: string;
     parentSessionId?: string | null;
     rootSessionId?: string | null;
-    beforeCreate?: () => Promise<void>;
+    afterReserve?: () => Promise<void>;
   } = {},
 ): Promise<{ session: InteractiveSession }> {
   const repo = normalizeRepo(body.repo);
@@ -4599,7 +4608,6 @@ async function createInteractiveSessionFromInput(
     options.parentSessionId ?? (clean(body.parentSessionId, 120) || null),
     options.rootSessionId ?? (clean(body.rootSessionId, 120) || null),
   );
-  await options.beforeCreate?.();
   const supervisedRootSessionId = await openClawSupervisedRootForCreate(env, createdBy, lineage);
   const now = Date.now();
   const db = database(env);
@@ -4723,6 +4731,12 @@ async function createInteractiveSessionFromInput(
           id,
           now,
         );
+      }
+      try {
+        await options.afterReserve?.();
+      } catch (error) {
+        await rollbackInteractiveSessionReservation(env, id, now);
+        throw error;
       }
       await appendInteractiveSessionEvent(env, id, user, "interactive workspace requested", now);
       const provisioned = await provisionInteractiveSession(

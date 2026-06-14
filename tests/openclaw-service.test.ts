@@ -178,7 +178,7 @@ test("interactive lineage rejects caller-claimed roots without a parent", async 
 	);
 });
 
-test("OpenClaw room capacity rolls back before event recording or provisioning", async () => {
+test("OpenClaw room reservation precedes branch mutation, event recording, and provisioning", async () => {
 	const source = await readFile(new URL("../src/index.ts", import.meta.url), "utf8");
 	const capacityStart = source.indexOf("async function enforceOpenClawRoomSessionLimitAfterInsert");
 	const capacityEnd = source.indexOf("function openClawCrabboxResponse", capacityStart);
@@ -195,10 +195,18 @@ test("OpenClaw room capacity rolls back before event recording or provisioning",
 	);
 	assert.ok(
 		createSource.indexOf("enforceOpenClawRoomSessionLimitAfterInsert") <
+			createSource.indexOf("options.afterReserve"),
+	);
+	assert.ok(
+		createSource.indexOf("options.afterReserve") <
 			createSource.indexOf("appendInteractiveSessionEvent"),
 	);
 	assert.ok(
-		createSource.indexOf("enforceOpenClawRoomSessionLimitAfterInsert") <
+		createSource.indexOf("options.afterReserve") <
 			createSource.indexOf("provisionInteractiveSession"),
+	);
+	assert.match(
+		createSource,
+		/catch \(error\) \{\s+await rollbackInteractiveSessionReservation\(env, id, now\);\s+throw error;/,
 	);
 });
