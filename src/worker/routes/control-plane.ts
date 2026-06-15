@@ -1,4 +1,10 @@
 import { requireRole } from "../auth.ts";
+import type {
+  AdminAllowEntryInput,
+  AdminPolicyInput,
+  AdminRepoInput,
+  AdminWorkflowInput,
+} from "../admin-service.ts";
 import { json, notFound, readJson } from "../http.ts";
 import type { User } from "../models.ts";
 
@@ -9,12 +15,12 @@ export type ControlPlaneRouteDependencies = {
   createCard(request: Request, user: User): Promise<unknown>;
   readCardRuns(cardId: string): Promise<unknown[] | null>;
   mutateCard(user: User, cardId: string, action: string): Promise<unknown>;
-  updatePolicy(request: Request, user: User): Promise<unknown>;
-  evaluateWorkflow(request: Request, user: User): Promise<unknown>;
-  addAllowEntry(request: Request, user: User): Promise<unknown>;
-  removeAllowEntry(request: Request, user: User, entry: string): Promise<unknown>;
-  addRepo(request: Request, user: User): Promise<unknown>;
-  removeRepo(request: Request, user: User, repo: string): Promise<unknown>;
+  updatePolicy(input: AdminPolicyInput, user: User): Promise<void>;
+  evaluateWorkflow(input: AdminWorkflowInput, user: User): Promise<void>;
+  addAllowEntry(input: AdminAllowEntryInput, user: User): Promise<void>;
+  removeAllowEntry(user: User, entry: string): Promise<void>;
+  addRepo(input: AdminRepoInput, user: User): Promise<void>;
+  removeRepo(user: User, repo: string): Promise<void>;
 };
 
 export async function handleControlPlaneRoute(
@@ -56,31 +62,37 @@ export async function handleControlPlaneRoute(
 
   if (request.method === "PUT" && url.pathname === "/api/admin/policy") {
     requireRole(user, "owner");
-    return json(await dependencies.updatePolicy(request, user));
+    await dependencies.updatePolicy(await readJson<AdminPolicyInput>(request), user);
+    return json(await dependencies.readState(request, user));
   }
   if (request.method === "POST" && url.pathname === "/api/admin/workflows/evaluate") {
     requireRole(user, "owner");
-    return json(await dependencies.evaluateWorkflow(request, user));
+    await dependencies.evaluateWorkflow(await readJson<AdminWorkflowInput>(request), user);
+    return json(await dependencies.readState(request, user));
   }
   if (request.method === "POST" && url.pathname === "/api/admin/allow") {
     requireRole(user, "owner");
-    return json(await dependencies.addAllowEntry(request, user), { status: 201 });
+    await dependencies.addAllowEntry(await readJson<AdminAllowEntryInput>(request), user);
+    return json(await dependencies.readState(request, user), { status: 201 });
   }
 
   const allowMatch = url.pathname.match(/^\/api\/admin\/allow\/(.+)$/);
   if (request.method === "DELETE" && allowMatch) {
     requireRole(user, "owner");
-    return json(await dependencies.removeAllowEntry(request, user, decoded(allowMatch[1])));
+    await dependencies.removeAllowEntry(user, decoded(allowMatch[1]));
+    return json(await dependencies.readState(request, user));
   }
   if (request.method === "POST" && url.pathname === "/api/admin/repos") {
     requireRole(user, "owner");
-    return json(await dependencies.addRepo(request, user), { status: 201 });
+    await dependencies.addRepo(await readJson<AdminRepoInput>(request), user);
+    return json(await dependencies.readState(request, user), { status: 201 });
   }
 
   const repoMatch = url.pathname.match(/^\/api\/admin\/repos\/(.+)$/);
   if (request.method === "DELETE" && repoMatch) {
     requireRole(user, "owner");
-    return json(await dependencies.removeRepo(request, user, decoded(repoMatch[1])));
+    await dependencies.removeRepo(user, decoded(repoMatch[1]));
+    return json(await dependencies.readState(request, user));
   }
 
   return null;

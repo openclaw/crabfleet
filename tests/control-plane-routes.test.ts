@@ -57,29 +57,23 @@ function dependencies(calls: string[]): ControlPlaneRouteDependencies {
       calls.push(`card:mutate:${user.login}:${cardId}:${action}`);
       return { handler: "card:mutate" };
     },
-    async updatePolicy(_request, user) {
-      calls.push(`policy:${user.login}`);
-      return { handler: "policy" };
+    async updatePolicy(input, user) {
+      calls.push(`policy:${user.login}:${input.cap}`);
     },
-    async evaluateWorkflow(_request, user) {
-      calls.push(`workflow:${user.login}`);
-      return { handler: "workflow" };
+    async evaluateWorkflow(input, user) {
+      calls.push(`workflow:${user.login}:${input.repo}`);
     },
-    async addAllowEntry(_request, user) {
-      calls.push(`allow:add:${user.login}`);
-      return { handler: "allow:add" };
+    async addAllowEntry(input, user) {
+      calls.push(`allow:add:${user.login}:${input.value}:${input.role}`);
     },
-    async removeAllowEntry(_request, user, entry) {
+    async removeAllowEntry(user, entry) {
       calls.push(`allow:remove:${user.login}:${entry}`);
-      return { handler: "allow:remove" };
     },
-    async addRepo(_request, user) {
-      calls.push(`repo:add:${user.login}`);
-      return { handler: "repo:add" };
+    async addRepo(input, user) {
+      calls.push(`repo:add:${user.login}:${input.repo}`);
     },
-    async removeRepo(_request, user, repo) {
+    async removeRepo(user, repo) {
       calls.push(`repo:remove:${user.login}:${repo}`);
-      return { handler: "repo:remove" };
     },
   };
 }
@@ -170,15 +164,31 @@ test("card actions derive viewer or maintainer authorization from the action", a
 
 test("control-plane admin routes are owner-only and decode path identities", async () => {
   const cases: Array<[Request, number, string[]]> = [
-    [request("PUT", "/api/admin/policy", {}), 200, ["policy:owner"]],
-    [request("POST", "/api/admin/workflows/evaluate", {}), 200, ["workflow:owner"]],
-    [request("POST", "/api/admin/allow", {}), 201, ["allow:add:owner"]],
-    [request("DELETE", "/api/admin/allow/team%2Fcore"), 200, ["allow:remove:owner:team/core"]],
-    [request("POST", "/api/admin/repos", {}), 201, ["repo:add:owner"]],
+    [request("PUT", "/api/admin/policy", { cap: 42 }), 200, ["policy:owner:42", "state:owner"]],
+    [
+      request("POST", "/api/admin/workflows/evaluate", { repo: "openclaw/crabfleet" }),
+      200,
+      ["workflow:owner:openclaw/crabfleet", "state:owner"],
+    ],
+    [
+      request("POST", "/api/admin/allow", { value: "team/core", role: "viewer" }),
+      201,
+      ["allow:add:owner:team/core:viewer", "state:owner"],
+    ],
+    [
+      request("DELETE", "/api/admin/allow/team%2Fcore"),
+      200,
+      ["allow:remove:owner:team/core", "state:owner"],
+    ],
+    [
+      request("POST", "/api/admin/repos", { repo: "openclaw/crabfleet" }),
+      201,
+      ["repo:add:owner:openclaw/crabfleet", "state:owner"],
+    ],
     [
       request("DELETE", "/api/admin/repos/openclaw%2Fcrabfleet"),
       200,
-      ["repo:remove:owner:openclaw/crabfleet"],
+      ["repo:remove:owner:openclaw/crabfleet", "state:owner"],
     ],
   ];
 

@@ -6,7 +6,6 @@ import {
   boundedUtf8Tail,
   openClawBranchPreparationCanDefer,
   openClawGitBranchAllowed,
-  openClawGitHubRepoParts,
   openClawRoomMaxSessions,
   openClawRoomRootAllowed,
   openClawRoomSessionChainAllowed,
@@ -15,6 +14,7 @@ import {
   openClawTranscriptMaxBytes,
   sessionBelongsToRoot,
 } from "../src/openclaw-service.ts";
+import { githubRepoParts } from "../src/worker/repositories.ts";
 import { openClawRequestId } from "../src/worker/openclaw-request.ts";
 
 test("OpenClaw service authorization accepts dedicated scoped consumers", () => {
@@ -43,14 +43,14 @@ test("OpenClaw GitHub branch writes reject lossy or invalid refs", () => {
 });
 
 test("OpenClaw GitHub writes require one exact owner/name pair", () => {
-  assert.deepEqual(openClawGitHubRepoParts("openclaw/crabfleet"), {
+  assert.deepEqual(githubRepoParts("openclaw/crabfleet"), {
     owner: "openclaw",
     name: "crabfleet",
   });
-  assert.equal(openClawGitHubRepoParts("openclaw/crabfleet/extra"), null);
-  assert.equal(openClawGitHubRepoParts("openclaw/crabfleet?ref=main"), null);
-  assert.equal(openClawGitHubRepoParts("open_claw/crabfleet"), null);
-  assert.equal(openClawGitHubRepoParts("openclaw/"), null);
+  assert.equal(githubRepoParts("openclaw/crabfleet/extra"), null);
+  assert.equal(githubRepoParts("openclaw/crabfleet?ref=main"), null);
+  assert.equal(githubRepoParts("open_claw/crabfleet"), null);
+  assert.equal(githubRepoParts("openclaw/"), null);
 });
 
 test("session root fences accept the root and every child only for the exact root", () => {

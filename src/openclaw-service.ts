@@ -104,21 +104,6 @@ export function openClawGitBranchAllowed(branch: string): boolean {
     .every((part) => Boolean(part) && !part.startsWith(".") && !part.endsWith(".lock"));
 }
 
-export function openClawGitHubRepoParts(repo: string): { owner: string; name: string } | null {
-  const parts = repo.split("/");
-  if (parts.length !== 2) return null;
-  const [owner, name] = parts;
-  if (
-    !owner ||
-    !name ||
-    !/^[a-z0-9](?:[a-z0-9-]{0,37}[a-z0-9])?$/i.test(owner) ||
-    !/^[a-z0-9._-]{1,100}$/i.test(name)
-  ) {
-    return null;
-  }
-  return { owner, name };
-}
-
 export function boundedUtf8Tail(
   value: string,
   maxBytes = openClawTranscriptMaxBytes,

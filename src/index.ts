@@ -22,13 +22,12 @@ import {
   resolveCreateAfterStopRace,
 } from "./runtime-adapter";
 import { allocateInteractiveSessionIdSql, formatInteractiveSessionId } from "./session-id";
-import { openClawGitHubRepoParts, openClawRoomMaxSessions } from "./openclaw-service";
+import { openClawRoomMaxSessions } from "./openclaw-service";
 import { trustedProxyPublicOrigin, type TrustedProxyAuthResult } from "./trusted-proxy-auth";
 import {
   browserAppOrigin,
   browserSessionUrl,
   clientDeploymentConfig,
-  defaultPreferredRepo,
   deploymentConfig,
   publicDeploymentConfig,
 } from "./worker/deployment";
@@ -40,7 +39,7 @@ import {
   type Database,
   type InteractiveSessionRow,
 } from "./worker/database";
-import { type Role, type User } from "./worker/models";
+import type { User } from "./worker/models";
 import {
   badRequest,
   conflict,
@@ -95,8 +94,10 @@ import {
 } from "./worker/session-model";
 import { CardLifecycleService, type CardCreateInput } from "./worker/card-lifecycle-service";
 import { CardRepository } from "./worker/card-repository";
+import { AdminRepository } from "./worker/admin-repository";
+import { AdminService } from "./worker/admin-service";
 import { createWorkflowService, type WorkflowService } from "./worker/workflow-service";
-import { normalizeRepo } from "./worker/repositories";
+import { githubRepoParts, normalizeRepo, sortRepoNames, sortRepos } from "./worker/repositories";
 import { handlePublicAuthRoute, handleSessionAuthRoute } from "./worker/routes/auth";
 import {
   handleBrowserSessionRoute,
@@ -551,6 +552,7 @@ function controlPlaneRouteDependencies(
   env: RuntimeEnv,
   context: ExecutionContext,
 ): ControlPlaneRouteDependencies {
+  const admin = adminService(env);
   return {
     readState: (request, user) => readState(request, env, user, context),
     readFleet: (user) => readFleetState(env, user, undefined, context),
@@ -559,12 +561,24 @@ function controlPlaneRouteDependencies(
       cardLifecycleService(env).create(await readJson<CardCreateInput>(request), user),
     readCardRuns: (cardId) => cardLifecycleService(env).runs(cardId),
     mutateCard: (user, cardId, action) => cardLifecycleService(env).mutate(user, cardId, action),
-    updatePolicy: (request, user) => updatePolicy(request, env, user),
-    evaluateWorkflow: (request, user) => evaluateWorkflow(request, env, user),
-    addAllowEntry: (request, user) => addAllowEntry(request, env, user),
-    removeAllowEntry: (request, user, entry) => removeAllowEntry(request, env, user, entry),
-    addRepo: (request, user) => addRepo(request, env, user),
-    removeRepo: (request, user, repo) => removeRepo(request, env, user, repo),
+    updatePolicy: async (input, user) => {
+      await admin.updatePolicy(input, user);
+    },
+    evaluateWorkflow: async (input, user) => {
+      await admin.evaluateWorkflow(input, user);
+    },
+    addAllowEntry: async (input, user) => {
+      await admin.addAllowEntry(input, user);
+    },
+    removeAllowEntry: async (user, entry) => {
+      await admin.removeAllowEntry(entry, user);
+    },
+    addRepo: async (input, user) => {
+      await admin.addRepo(input, user);
+    },
+    removeRepo: async (user, repo) => {
+      await admin.removeRepo(repo, user);
+    },
   };
 }
 
@@ -691,11 +705,12 @@ function sandboxSessionResourceService(env: RuntimeEnv) {
 }
 
 function cardLifecycleService(env: RuntimeEnv): CardLifecycleService {
+  const admin = new AdminRepository(env);
   return new CardLifecycleService({
     store: new CardRepository(env),
     now: Date.now,
-    requireRepo: (repo) => requireRepo(env, repo),
-    readSettings: () => readSettings(env),
+    requireRepo: (repo) => admin.requireRepo(repo),
+    readSettings: () => admin.readSettings(),
     ensureWorkflow: (repo, now) => workflowService(env).ensure(repo, now),
     isConstraintError,
   });
@@ -703,6 +718,16 @@ function cardLifecycleService(env: RuntimeEnv): CardLifecycleService {
 
 function workflowService(env: RuntimeEnv): WorkflowService {
   return createWorkflowService(env);
+}
+
+function adminService(env: RuntimeEnv): AdminService {
+  return new AdminService({
+    store: new AdminRepository(env),
+    preferredRepo: deploymentConfig(env).preferredRepo,
+    now: Date.now,
+    refreshWorkflow: (repo, now) => workflowService(env).refresh(repo, now),
+    audit: (user, message, now) => audit(env, user, message, now),
+  });
 }
 
 function sshGateway(env: RuntimeEnv): SshGateway {
@@ -919,11 +944,12 @@ function openClawActionSessionRegistrationService(
   serviceUser: User,
 ): GitHubActionsSessionRegistrationService {
   const db = database(env);
+  const admin = new AdminRepository(env);
   const store: GitHubActionsSessionRegistrationStore = {
     now: () => Date.now(),
     newAgentToken,
     hashToken: sha256,
-    requireRepo: (repo) => requireRepo(env, repo),
+    requireRepo: (repo) => admin.requireRepo(repo),
     readByWorkKey: async (workKey) =>
       (await db
         .selectFrom("interactive_sessions")
@@ -974,9 +1000,9 @@ async function ensureOpenClawServiceBranch(
 ): Promise<void> {
   const repo = normalizeRepo(repoInput);
   if (!repo) throw badRequest("repo is required");
-  const target = openClawGitHubRepoParts(repo);
+  const target = githubRepoParts(repo);
   if (!target) throw badRequest("repo must be a GitHub owner/name");
-  await requireRepo(env, repo);
+  await new AdminRepository(env).requireRepo(repo);
   const branch = openClawServiceBranch(branchInput, "branch", "main");
   const baseBranch = openClawServiceBranch(baseBranchInput, "baseBranch");
   if (!baseBranch) return;
@@ -1159,21 +1185,16 @@ async function readState(
 ): Promise<Record<string, unknown>> {
   await cardLifecycleService(env).reconcileStalledRuns();
   await reconcileExternalInteractiveSessions(env, Date.now(), context);
-  const db = database(env);
+  const admin = new AdminRepository(env);
   const [settings, allow, repos, cards, interactiveSessions, workflows] = await Promise.all([
-    readSettings(env),
-    user.role === "owner"
-      ? db.selectFrom("allow_entries").select(["value", "role"]).orderBy("value").execute()
-      : Promise.resolve([]),
-    db.selectFrom("repos").select("repo").where("enabled", "=", 1).orderBy("repo").execute(),
+    admin.readSettings(),
+    user.role === "owner" ? admin.readAllowEntries() : Promise.resolve([]),
+    admin.readEnabledRepos(),
     cardLifecycleService(env).list(),
     readInteractiveSessions(env, user),
     user.role === "owner" ? workflowService(env).summaries() : Promise.resolve([]),
   ]);
-  const repoNames = sortRepos(
-    repos.map((row) => row.repo),
-    deploymentConfig(env).preferredRepo,
-  );
+  const repoNames = sortRepos(repos, deploymentConfig(env).preferredRepo);
   const fleet = await readFleetState(env, user, interactiveSessions);
 
   return {
@@ -1272,7 +1293,7 @@ async function createInteractiveSessionFromInput(
     owner,
     createdBy,
   } = request;
-  await requireRepo(env, repo);
+  await new AdminRepository(env).requireRepo(repo);
   const lineage = await interactiveSessionLineageService(env).resolve(
     user,
     options.parentSessionId ?? (clean(body.parentSessionId, 120) || null),
@@ -1997,108 +2018,6 @@ function interactiveProvisioningEndpoints(env: RuntimeEnv): InteractiveProvision
   });
 }
 
-async function updatePolicy(
-  request: Request,
-  env: RuntimeEnv,
-  user: User,
-): Promise<Record<string, unknown>> {
-  const body = await readJson<{ cap?: number; retention?: string; merge?: string }>(request);
-  const cap = Math.min(200, Math.max(1, Number.isFinite(body.cap) ? Number(body.cap) : 20));
-  const retention = oneOf(body.retention, ["14", "30", "60"], "30");
-  const merge = oneOf(body.merge, ["guarded", "maintainers", "disabled"], "guarded");
-  const now = Date.now();
-  await database(env)
-    .insertInto("settings")
-    .values([
-      { key: "cap", value: String(cap) },
-      { key: "retention", value: retention },
-      { key: "merge", value: merge },
-    ])
-    .onConflict((oc) => oc.column("key").doUpdateSet({ value: sql<string>`excluded.value` }))
-    .execute();
-  await audit(env, user, `policy updated cap=${cap} retention=${retention} merge=${merge}`, now);
-  return readState(request, env, user);
-}
-
-async function evaluateWorkflow(
-  request: Request,
-  env: RuntimeEnv,
-  user: User,
-): Promise<Record<string, unknown>> {
-  const body = await readJson<{ repo?: string }>(request);
-  const repo = normalizeRepo(body.repo) || deploymentConfig(env).preferredRepo;
-  await requireRepo(env, repo);
-  const workflow = await workflowService(env).refresh(repo, Date.now());
-  await audit(env, user, `workflow evaluated ${repo} status=${workflow.status}`, Date.now());
-  return readState(request, env, user);
-}
-
-async function addAllowEntry(
-  request: Request,
-  env: RuntimeEnv,
-  user: User,
-): Promise<Record<string, unknown>> {
-  const body = await readJson<{ value?: string; role?: Role }>(request);
-  const value = normalizeAllow(body.value);
-  if (!value) throw badRequest("allow value is required");
-  const role = oneOf(body.role, ["viewer", "maintainer", "owner"], "maintainer") as Role;
-  const now = Date.now();
-  await database(env)
-    .insertInto("allow_entries")
-    .values({ value, role, created_at: now, updated_at: now })
-    .onConflict((oc) => oc.column("value").doUpdateSet({ role, updated_at: now }))
-    .execute();
-  await audit(env, user, `allowlist updated ${value} role=${role}`, now);
-  return readState(request, env, user);
-}
-
-async function removeAllowEntry(
-  request: Request,
-  env: RuntimeEnv,
-  user: User,
-  value: string,
-): Promise<Record<string, unknown>> {
-  const normalized = normalizeAllow(value);
-  await database(env).deleteFrom("allow_entries").where("value", "=", normalized).execute();
-  await audit(env, user, `allowlist removed ${normalized}`, Date.now());
-  return readState(request, env, user);
-}
-
-async function addRepo(
-  request: Request,
-  env: RuntimeEnv,
-  user: User,
-): Promise<Record<string, unknown>> {
-  const body = await readJson<{ repo?: string }>(request);
-  const repo = normalizeRepo(body.repo);
-  if (!repo) throw badRequest("repo is required");
-  if (!openClawGitHubRepoParts(repo)) throw badRequest("repo must be a GitHub owner/name");
-  const now = Date.now();
-  await database(env)
-    .insertInto("repos")
-    .values({ repo, enabled: 1, created_at: now, updated_at: now })
-    .onConflict((oc) => oc.column("repo").doUpdateSet({ enabled: 1, updated_at: now }))
-    .execute();
-  await audit(env, user, `repo allowlisted ${repo}`, now);
-  return readState(request, env, user);
-}
-
-async function removeRepo(
-  request: Request,
-  env: RuntimeEnv,
-  user: User,
-  repo: string,
-): Promise<Record<string, unknown>> {
-  const normalized = normalizeRepo(repo);
-  await database(env)
-    .updateTable("repos")
-    .set({ enabled: 0, updated_at: Date.now() })
-    .where("repo", "=", normalized)
-    .execute();
-  await audit(env, user, `repo removed ${normalized}`, Date.now());
-  return readState(request, env, user);
-}
-
 async function searchGitHubRefs(
   request: Request,
   env: RuntimeEnv,
@@ -2107,12 +2026,11 @@ async function searchGitHubRefs(
   const number = Number(url.searchParams.get("number"));
   if (!Number.isInteger(number) || number < 1) throw badRequest("issue or PR number is required");
 
-  const rows = await database(env)
-    .selectFrom("repos")
-    .select("repo")
-    .where("enabled", "=", 1)
-    .execute();
-  const repos = sortRepos(rows.map((row) => row.repo)).slice(0, 160);
+  const preferredRepo = deploymentConfig(env).preferredRepo;
+  const repos = sortRepos(await new AdminRepository(env).readEnabledRepos(), preferredRepo).slice(
+    0,
+    160,
+  );
   const matches = env.GITHUB_TOKEN
     ? await fetchGitHubReferences(env, repos, number)
     : await fetchPublicGitHubReferences(env, repos, number);
@@ -2424,11 +2342,6 @@ async function appendInteractiveSessionEvent(
   });
 }
 
-async function readSettings(env: RuntimeEnv): Promise<Record<string, string>> {
-  const rows = await database(env).selectFrom("settings").select(["key", "value"]).execute();
-  return Object.fromEntries(rows.map((row) => [row.key, row.value]));
-}
-
 async function sandboxSessionWithGitHubToken(
   request: Request,
   env: RuntimeEnv,
@@ -2457,16 +2370,6 @@ async function nextInteractiveSessionId(env: RuntimeEnv): Promise<string> {
     if (!standalone) return id;
   }
   throw new Error("failed to allocate an unreserved interactive session id");
-}
-
-async function requireRepo(env: RuntimeEnv, repo: string): Promise<void> {
-  const row = await database(env)
-    .selectFrom("repos")
-    .select("repo")
-    .where("repo", "=", repo)
-    .where("enabled", "=", 1)
-    .executeTakeFirst();
-  if (!row) throw forbidden(`repo blocked by allowlist: ${repo}`);
 }
 
 async function audit(env: RuntimeEnv, user: User, message: string, now: number): Promise<void> {
@@ -2511,36 +2414,15 @@ function externalRequestOrigin(request: Request, env: RuntimeEnv): string {
   return trustedProxyPublicOrigin(env) ?? new URL(request.url).origin;
 }
 
-function normalizeAllow(value: unknown): string {
-  const raw = String(value ?? "").trim();
-  if (!raw) return "";
-  if (raw.includes("@")) return raw.toLowerCase();
-  return `@${raw.toLowerCase()}`;
-}
-
 function clean(value: unknown, max: number): string {
   return String(value ?? "")
     .trim()
     .slice(0, max);
 }
 
-function oneOf<T extends string>(value: unknown, options: readonly T[], fallback: T): T {
-  return options.includes(value as T) ? (value as T) : fallback;
-}
-
 function numberSetting(value: string | undefined, fallback: number): number {
   const parsed = Number(value);
   return Number.isFinite(parsed) ? parsed : fallback;
-}
-
-function sortRepos(repos: string[], preferred = defaultPreferredRepo): string[] {
-  return [...repos].sort((left, right) => sortRepoNames(left, right, preferred));
-}
-
-function sortRepoNames(left: string, right: string, preferred = defaultPreferredRepo): number {
-  if (left === preferred) return -1;
-  if (right === preferred) return 1;
-  return left.localeCompare(right);
 }
 
 function isConstraintError(error: unknown): boolean {
