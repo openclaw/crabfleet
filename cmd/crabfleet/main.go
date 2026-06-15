@@ -37,7 +37,7 @@ type cli struct {
 
 	Login       loginCmd       `cmd:"" help:"Link this machine through SSH onboarding."`
 	Whoami      whoamiCmd      `cmd:"" help:"Show the linked Crabfleet user."`
-	List        listCmd        `cmd:"" aliases:"ls" help:"List crabboxes as an owner/session tree."`
+	List        listCmd        `cmd:"" help:"List crabboxes as an owner/session tree."`
 	New         newCmd         `cmd:"" help:"Create a repo-ready crabbox and attach."`
 	Attach      attachCmd      `cmd:"" help:"Attach to a crabbox terminal."`
 	Status      statusCmd      `cmd:"" help:"Show one crabbox lifecycle state."`

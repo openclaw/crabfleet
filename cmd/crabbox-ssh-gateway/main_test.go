@@ -166,9 +166,6 @@ func TestDeleteCommandUsesWorkspaceStopAction(t *testing.T) {
 	if action != "stop" {
 		t.Fatalf("action=%q, want stop", action)
 	}
-	if !strings.Contains(output.String(), "provider deletion was not confirmed") {
-		t.Fatalf("missing legacy cleanup warning: %q", output.String())
-	}
 	if got := output.String(); !strings.Contains(got, "session: IS-7\nstatus: stopping\n") {
 		t.Fatalf("output=%q", got)
 	}

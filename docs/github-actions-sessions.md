@@ -374,9 +374,9 @@ The browser, CLI, and SSH surfaces warn that the GitHub Actions workflow run
 may continue. Cancel the run in GitHub when provider-side cancellation is
 required.
 
-`github_actions` sessions are excluded from the legacy workspace-stop
-reconciler. They do not have a provider workspace lease for that reconciler to
-release.
+`github_actions` sessions are excluded from runtime-adapter workspace
+reconciliation. They do not have a provider workspace lease for that
+reconciler to release.
 
 Registration after an earlier terminal state explicitly clears stale terminal
 and cleanup markers before accepting the resumed runner.
@@ -564,6 +564,6 @@ disconnect alone.
 - Terminal input is interpreted by the runner integration.
 - Terminal states require explicit caller updates.
 - Cancellation is separate from provider workspace teardown.
-- `github_actions` sessions never enter legacy workspace-stop reconciliation.
+- `github_actions` sessions never enter runtime-adapter workspace reconciliation.
 - Crabfleet reports status and control; the caller owns task policy and external
   mutations.

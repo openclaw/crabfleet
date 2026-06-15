@@ -181,6 +181,26 @@ func TestCLIUsesDeleteCanonicalNameWithoutStopAlias(t *testing.T) {
 	}
 }
 
+func TestCLIUsesListCanonicalNameWithoutAlias(t *testing.T) {
+	var app cli
+	parser, err := kong.New(&app, kong.Name("crabfleet"), kong.Vars{"version": version})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := parser.Parse([]string{"list"}); err != nil {
+		t.Fatal(err)
+	}
+
+	var rejected cli
+	rejectedParser, err := kong.New(&rejected, kong.Name("crabfleet"), kong.Vars{"version": version})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := rejectedParser.Parse([]string{"ls"}); err == nil {
+		t.Fatal("list alias unexpectedly parsed")
+	}
+}
+
 func splitForTest(command string) ([]string, error) {
 	var args []string
 	var current []rune

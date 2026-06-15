@@ -154,7 +154,7 @@ merge:
 ### Prerequisites
 
 - Cloudflare account
-- `crabfleet.openclaw.ai` route in Cloudflare; legacy OpenClaw app hosts redirect here
+- `crabfleet.openclaw.ai` route in Cloudflare
 - GitHub OAuth app (optional but recommended)
 - Bootstrap token secret
 
@@ -164,15 +164,14 @@ Pushes to `main` run `.github/workflows/deploy-worker.yml`, which checks, tests,
 deploys the generic product router, applies remote D1 migrations, and deploys the app
 Worker. Configure the repository secret `CLOUDFLARE_API_TOKEN` with permissions for
 Workers deploys and D1 migrations.
-`crabfleet.openclaw.ai` is a Worker Custom Domain declared in the app Wrangler
-config. The `crabfleet.ai` product Custom Domains, stale classic-route cleanup,
-and `crabd.sh` DNS convergence are handled by
+`crabfleet.openclaw.ai` is the only app Worker Custom Domain declared in the app
+Wrangler config. The `crabfleet.ai` product Custom Domain and `crabd.sh` DNS
+convergence are handled by
 `scripts/ensure-cloudflare-domains.mjs`; set `CLOUDFLARE_DNS_API_TOKEN` for
 manual deploys and when CI should manage those records. Without that
 DNS-scoped repository secret, CI skips domain convergence but still fails the
-deploy unless the app health endpoint is reachable and both product hosts resolve
-to `docs.crabfleet.ai`. The app Worker keeps the same public-docs redirect as a
-defensive fallback, never the authenticated app.
+deploy unless the app health endpoint is reachable and `crabfleet.ai` resolves
+to `docs.crabfleet.ai`.
 The product router source and deploy configuration live in `src/product-router.ts` and
 `wrangler.product.jsonc`.
 
@@ -184,8 +183,8 @@ CLOUDFLARE_DNS_API_TOKEN=... \
 pnpm run deploy
 ```
 
-`pnpm deploy:product` deploys only the generic product Worker, then converges its
-two public Custom Domains and stale classic-route cleanup.
+`pnpm deploy:product` deploys only the generic product Worker, then converges
+the canonical product Custom Domain.
 
 ### Environment Variables
 

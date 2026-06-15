@@ -6,7 +6,8 @@
 - Remove the configurable PTY bridge so managed terminal upstreams are limited to built-in Sandbox, versioned runtime-adapter attach, and GitHub Actions relay behind the multiplex terminal protocol.
 - Remove generic create-only provisioning, the external Cloudflare runner, and the ClawFleet compatibility provider so managed workspaces use only built-in Sandbox or the versioned runtime adapter.
 - Extract SSH gateway authentication, key linking, and session creation; remove the old Crabbox SSH environment and fingerprint-header aliases plus the `stop` CLI alias.
-- Remove unsupported provider stop/recovery compatibility; historical provider rows remain readable while live lifecycle mutations are limited to Sandbox, runtime-v1, and GitHub Actions.
+- Remove unsupported provider stop/recovery compatibility so live lifecycle mutations are limited to Sandbox, runtime-v1, and GitHub Actions.
+- Remove legacy app/product hosts, product path rewrites, Workers.dev exposure, the `ls` CLI alias, and obsolete provider cleanup warnings.
 - Remove legacy Sandbox credential-policy storage migration, repair claims, and read retries; reject old generations, rotate stale SQL references on registration, and purge unreadable stored credentials during fenced cleanup.
 - Extract terminal multiplex composition, upstream routing, lifecycle transitions, sharing authorization, multiplayer input, and clipboard uploads into one service; harden pasted filenames against dot-prefixed path-like input.
 - Extract runtime-adapter desktop connection minting and durable access revalidation into one service; remove the live legacy `vncUrl` redirect fallback.

@@ -642,7 +642,7 @@ Root stop request:
 
 Root stop closes descendant admission before rolling back pending reservations
 and driving the remaining root tree terminal in bounded batches, including a
-legacy tree above the normal supervision limit. It returns only after the whole
+tree above the normal supervision limit. It returns only after the whole
 tree is quiescent; a failed request leaves admission closed and can be retried
 safely.
 

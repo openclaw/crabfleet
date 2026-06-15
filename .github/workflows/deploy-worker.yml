@@ -127,4 +127,3 @@ jobs:
           set -euo pipefail
           test "$(curl --fail --silent --show-error --retry 12 --retry-all-errors --retry-delay 5 --max-time 20 https://crabfleet.openclaw.ai/healthz)" = "ok"
           test "$(curl --fail --silent --show-error --location --retry 12 --retry-all-errors --retry-delay 5 --max-time 20 --output /dev/null --write-out '%{url_effective}' https://crabfleet.ai/)" = "https://docs.crabfleet.ai/"
-          test "$(curl --fail --silent --show-error --location --retry 12 --retry-all-errors --retry-delay 5 --max-time 20 --output /dev/null --write-out '%{url_effective}' https://www.crabfleet.ai/)" = "https://docs.crabfleet.ai/"

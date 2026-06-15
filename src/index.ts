@@ -12,7 +12,7 @@ import {
   SPEC_V2_HTML,
   SPEC_V2_MARKDOWN,
 } from "./generated";
-import { appCanonicalOrigin, canonicalAppRedirect, productHostResponse } from "./canonical-host";
+import { appCanonicalOrigin } from "./canonical-host";
 import {
   runtimeAdapterBrowserVncUrl,
   runtimeAdapterName,
@@ -323,20 +323,11 @@ export default {
       request = ingress.request;
       const { trustedProxy } = ingress;
 
-      const productResponse = await productHostResponse(request);
-      if (productResponse) return productResponse;
-
       if (url.pathname === "/healthz") {
-        const canonicalRedirect = canonicalAppRedirect(url);
-        if (canonicalRedirect) return canonicalRedirect;
         return text("ok\n", "text/plain; charset=utf-8");
       }
 
       enforceWorkerIngressAuth(ingress);
-      if (trustedProxy.kind !== "authenticated") {
-        const canonicalRedirect = canonicalAppRedirect(url);
-        if (canonicalRedirect) return canonicalRedirect;
-      }
 
       if (url.pathname === "/crabbox-logo.png") {
         return new Response(base64Bytes(LOGO_PNG_BASE64), {

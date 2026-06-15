@@ -1,15 +1,7 @@
 const token = process.env.CLOUDFLARE_DNS_API_TOKEN || process.env.CLOUDFLARE_API_TOKEN;
 const productOnly = process.argv.includes("--product-only");
-const appHost = "crabfleet.openclaw.ai";
 const cloudflareAccountId = "91b59577e757131d68d55a471fe32aca";
 const productWorkerScript = "crabfleet-canonical-router";
-// OpenClaw app hosts are Worker Custom Domains in wrangler.jsonc; this script
-// only removes stale classic routes for them and keeps other aliases tidy.
-const openClawCustomDomainHosts = new Set([
-  appHost,
-  "clawfleet.openclaw.ai",
-  "crabyard.openclaw.ai",
-]);
 
 if (!token) {
   throw new Error("CLOUDFLARE_DNS_API_TOKEN or CLOUDFLARE_API_TOKEN is required");
@@ -112,17 +104,6 @@ async function ensureCrabfleetDocsRecord() {
   }
 }
 
-async function removeOpenClawClassicRoutes() {
-  const openclaw = await zone("openclaw.ai");
-  const routes = await request(`/zones/${openclaw.id}/workers/routes`);
-  for (const route of routes.filter((entry) =>
-    openClawCustomDomainHosts.has(entry.pattern.replace(/\/\*$/, "")),
-  )) {
-    await request(`/zones/${openclaw.id}/workers/routes/${route.id}`, { method: "DELETE" });
-    console.log(`deleted stale ${route.pattern} classic route ${route.id}`);
-  }
-}
-
 async function ensureCrabdSshRecord() {
   const crabd = await zone("crabd.sh");
   const records = await request(
@@ -171,10 +152,7 @@ async function ensureCrabdSshRecord() {
   }
 }
 
-if (!productOnly) {
-  await removeOpenClawClassicRoutes();
-}
-await ensureProductHosts("crabfleet.ai", ["crabfleet.ai", "www.crabfleet.ai"]);
+await ensureProductHosts("crabfleet.ai", ["crabfleet.ai"]);
 await ensureCrabfleetDocsRecord();
 if (!productOnly) {
   await ensureCrabdSshRecord();

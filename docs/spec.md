@@ -11,7 +11,7 @@ Status: living specification of the deployed product.
 
 Canonical OpenClaw app/API: <https://crabfleet.openclaw.ai>
 
-Public product/docs hosts: <https://crabfleet.ai> and <https://www.crabfleet.ai>
+Public product/docs host: <https://crabfleet.ai>
 
 SSH onboarding and CLI gateway: `crabd.sh`
 
@@ -234,7 +234,7 @@ For versioned adapters, Crabfleet:
 4. re-reads lifecycle, capability, control, and adapter identity;
 5. redirects with `cache-control: no-store`.
 
-The signed provider URL is not stored in D1 or returned through Fleet. Legacy backends may retain validated persisted VNC URLs.
+The signed provider URL is not stored in D1 or returned through Fleet.
 
 ## Sharing And Supervision
 
@@ -345,7 +345,7 @@ The Worker serves a server-rendered TypeScript app shell with D1-backed REST sta
 The `crabfleet` CLI supports:
 
 - SSH linking and session creation;
-- session listing/status/attach/stop/delete;
+- session listing/status/attach/delete;
 - logs and transcripts;
 - supervision tree, message, and summary operations;
 - diagnostics;
@@ -374,7 +374,7 @@ The repository contains:
 OpenClaw production uses:
 
 - canonical app/API/OAuth host `crabfleet.openclaw.ai`;
-- public docs/product redirects on `crabfleet.ai` and aliases;
+- public docs/product redirects on `crabfleet.ai`;
 - built-in Sandbox for container sessions;
 - the versioned Crabbox adapter with namespace `openclaw`;
 - D1, R2, and `SessionControlDO`;

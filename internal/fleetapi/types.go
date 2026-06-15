@@ -121,12 +121,6 @@ func (s Session) LifecycleStopNote() string {
 	if s.Runtime == "github_actions" && s.Status == "stopped" {
 		return "GitHub Actions workflow run was not canceled and may continue on GitHub"
 	}
-	if s.Adapter != "runtime-v1" && s.Runtime != "github_actions" {
-		switch s.Status {
-		case "stopping", "stopped", "expired":
-			return "provider deletion was not confirmed; legacy runtimes may require separate cleanup"
-		}
-	}
 	return ""
 }
 
