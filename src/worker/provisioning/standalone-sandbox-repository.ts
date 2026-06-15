@@ -1,18 +1,27 @@
 import { sql } from "kysely";
 
+import { mapWithConcurrency } from "../concurrency.ts";
 import { database, executeBatch, type StandaloneSandboxProvisionRow } from "../database.ts";
 import type { RuntimeEnv } from "../env.ts";
 import {
   activeSandboxCredentialPolicyCondition,
   activeSandboxCredentialPolicyGeneration,
+  sandboxCredentialPolicyCleanupAuthorizedCondition,
+  sandboxCredentialPolicyGeneration,
+  sandboxCredentialPolicyRefQueries,
 } from "../sandbox-credential-policy-repository.ts";
 import {
   newSandboxLease,
   sandboxLeaseId,
   type StandaloneSandboxProvisionFence,
 } from "../sandbox-lease.ts";
-import type { StandaloneSandboxProvisionClaim } from "./standalone-sandbox.ts";
+import {
+  isManagedInteractiveSessionId,
+  type StandaloneSandboxProvisionClaim,
+} from "./standalone-sandbox.ts";
 import type { InteractiveProvisionRequest, InteractiveProvisionResult } from "./types.ts";
+
+const credentialPolicyCleanupLimit = 8;
 
 export async function readStandaloneSandboxProvision(
   env: RuntimeEnv,
@@ -114,6 +123,123 @@ export async function stageStandaloneSandboxClaimCleanup(
     .where("lease_id", "=", sandboxLeaseId(claim.lease))
     .where("expires_at", "=", claim.expiresAt)
     .execute();
+}
+
+export async function stageStandaloneSandboxProvisionCleanup(
+  env: RuntimeEnv,
+  owner: StandaloneSandboxProvisionRow,
+  message: string,
+  now: number,
+): Promise<boolean> {
+  if (owner.state === "cleanup_pending") return true;
+  const db = database(env);
+  const transitionRevision = Math.max(now, owner.updated_at + 1);
+  const generation = await sandboxCredentialPolicyGeneration(env, owner.id, owner.sandbox_id);
+  let ownerTransition = db
+    .updateTable("standalone_sandbox_provisions")
+    .set({
+      state: "cleanup_pending",
+      ownership_claim: null,
+      ownership_claim_expires_at: null,
+      attach_url: null,
+      vnc_url: null,
+      message,
+      updated_at: transitionRevision,
+    })
+    .where("id", "=", owner.id)
+    .where("request_hash", "=", owner.request_hash)
+    .where("sandbox_id", "=", owner.sandbox_id)
+    .where("state", "=", owner.state)
+    .where("updated_at", "=", owner.updated_at);
+  ownerTransition = owner.ownership_claim
+    ? ownerTransition.where("ownership_claim", "=", owner.ownership_claim)
+    : ownerTransition.where("ownership_claim", "is", null);
+  ownerTransition =
+    owner.ownership_claim_expires_at === null
+      ? ownerTransition.where("ownership_claim_expires_at", "is", null)
+      : ownerTransition.where("ownership_claim_expires_at", "=", owner.ownership_claim_expires_at);
+  ownerTransition = owner.lease_id
+    ? ownerTransition.where("lease_id", "=", owner.lease_id)
+    : ownerTransition.where("lease_id", "is", null);
+  ownerTransition =
+    owner.expires_at === null
+      ? ownerTransition.where("expires_at", "is", null)
+      : ownerTransition.where("expires_at", "=", owner.expires_at);
+  const cleanupAuthorized = sandboxCredentialPolicyCleanupAuthorizedCondition(
+    owner.id,
+    owner.sandbox_id,
+    transitionRevision,
+  );
+  await executeBatch(env, [
+    ownerTransition,
+    ...sandboxCredentialPolicyRefQueries(
+      env,
+      owner.id,
+      owner.sandbox_id,
+      "cleanup_pending",
+      generation,
+      transitionRevision,
+      cleanupAuthorized,
+    ),
+    db
+      .updateTable("interactive_session_credential_policies")
+      .set({ state: "cleanup_pending", updated_at: transitionRevision })
+      .where("session_id", "=", owner.id)
+      .where("sandbox_id", "=", owner.sandbox_id)
+      .where(cleanupAuthorized),
+  ]);
+  const staged = await db
+    .selectFrom("standalone_sandbox_provisions")
+    .select(["state", "sandbox_id", "updated_at"])
+    .where("id", "=", owner.id)
+    .executeTakeFirst();
+  return Boolean(
+    staged?.state === "cleanup_pending" &&
+    staged.sandbox_id === owner.sandbox_id &&
+    staged.updated_at === transitionRevision,
+  );
+}
+
+export async function expireStandaloneSandboxProvisions(
+  env: RuntimeEnv,
+  now: number,
+  provisionId?: string,
+): Promise<void> {
+  const idFilter = provisionId ? sql`AND id = ${provisionId}` : sql``;
+  const result = await sql<StandaloneSandboxProvisionRow>`
+    SELECT *
+    FROM standalone_sandbox_provisions
+    WHERE (
+      (state = 'active' AND (expires_at IS NULL OR expires_at <= ${now}))
+      OR (
+        state = 'provisioning'
+        AND (
+          expires_at IS NULL
+          OR expires_at <= ${now}
+          OR ownership_claim_expires_at IS NULL
+          OR ownership_claim_expires_at <= ${now}
+        )
+      )
+      OR (
+        state = 'active'
+        AND lower(id) GLOB 'is-[0-9]*'
+        AND substr(lower(id), 4) NOT GLOB '*[^0-9]*'
+      )
+    )
+    ${idFilter}
+    ORDER BY COALESCE(expires_at, 0) ASC, updated_at ASC, id ASC
+    LIMIT ${credentialPolicyCleanupLimit}
+  `.execute(database(env));
+  await mapWithConcurrency(result.rows, 3, async (owner) => {
+    await stageStandaloneSandboxProvisionCleanup(
+      env,
+      owner,
+      isManagedInteractiveSessionId(owner.id)
+        ? "standalone provision used the reserved managed session namespace"
+        : "standalone Sandbox provision expired",
+      now,
+    );
+  });
 }
 
 export async function activateStandaloneSandboxProvision(

@@ -10,28 +10,188 @@ import {
 } from "./database.ts";
 import type { RuntimeEnv } from "./env.ts";
 import { serviceUnavailable } from "./http.ts";
+import { expireStandaloneSandboxProvisions } from "./provisioning/standalone-sandbox-repository.ts";
 import { safeProviderError } from "./provisioning/result.ts";
 import {
+  beginLegacySandboxCredentialPolicyRepair,
+  finishSandboxCredentialPolicyRegistration,
   queueSandboxCredentialPolicyCleanup,
+  renewSandboxCredentialPolicyRegistration,
   sandboxCredentialPolicyCleanupAuthorizedCondition,
+  sandboxLookupIds,
 } from "./sandbox-credential-policy-repository.ts";
+import { scanCredentialPolicyCleanupPage } from "./sandbox-credential-policy-scanner.ts";
 import {
-  scanCredentialPolicyCleanupPage,
-  type SandboxCredentialPolicyExists,
-} from "./sandbox-credential-policy-scanner.ts";
-import { isCurrentSandboxLease, sandboxLeaseInfo } from "./sandbox-lease.ts";
+  isCurrentSandboxLease,
+  sandboxLeaseInfo,
+  type SandboxCurrentLeaseFence,
+} from "./sandbox-lease.ts";
 import { isSandboxSessionAlreadyGone } from "./sandbox-session-errors.ts";
 import { sandboxControlStub } from "./session-control-do.ts";
+import {
+  credentialPolicyLegacyGenerationPrefix,
+  credentialPolicyLegacyRepairClaimPrefix,
+  type SandboxCredentialPolicyLegacyMigration,
+} from "./session-control-policy.ts";
 import { finalizeTerminalInteractiveSession } from "./session-terminal-finalization.ts";
 
 const credentialPolicyCleanupLimit = 8;
 const credentialPolicyCleanupClaimMs = 30_000;
 
-export type SandboxCredentialPolicyCleanupDependencies = {
-  expireStandaloneProvisions(env: RuntimeEnv, now: number, provisionId?: string): Promise<void>;
-  policyExists: SandboxCredentialPolicyExists;
-  repairLegacyPolicyBatch(env: RuntimeEnv, now: number, sessionId?: string): Promise<void>;
-};
+export async function repairLegacySandboxCredentialPolicy(
+  env: RuntimeEnv,
+  sessionId: string,
+  sandboxId: string,
+): Promise<void> {
+  const stub = sandboxControlStub(env);
+  if (!stub || !env.SANDBOX) {
+    throw new Error("legacy sandbox credential policy repair is unavailable");
+  }
+  const session = await database(env)
+    .selectFrom("interactive_sessions")
+    .selectAll()
+    .where("id", "=", sessionId)
+    .executeTakeFirst();
+  if (!session?.lease_id) {
+    throw new Error("legacy sandbox credential policy owner is unavailable");
+  }
+  const lease = sandboxLeaseInfo({
+    id: session.id,
+    adapter: session.adapter,
+    leaseId: session.lease_id,
+  });
+  if (lease.sandboxId !== sandboxId) {
+    throw new Error("legacy sandbox credential policy lease does not match");
+  }
+  const ownership: SandboxCurrentLeaseFence = { leaseId: session.lease_id, sandboxId };
+  const registration = await beginLegacySandboxCredentialPolicyRepair(
+    env,
+    sessionId,
+    sandboxId,
+    ownership,
+  );
+  try {
+    const registrationExpiresAt = await renewSandboxCredentialPolicyRegistration(
+      env,
+      sessionId,
+      sandboxId,
+      registration,
+      ownership,
+    );
+    if (!registrationExpiresAt) {
+      throw new Error("legacy sandbox credential policy repair claim was revoked");
+    }
+    const response = await stub.fetch(
+      "https://crabfleet.internal/api/session-control/migrate-legacy",
+      {
+        method: "POST",
+        body: JSON.stringify({
+          generation: registration.generation,
+          registrationClaim: registration.claim,
+          registrationExpiresAt,
+          sandboxIds: registration.lookupIds,
+          sessionId,
+        } satisfies SandboxCredentialPolicyLegacyMigration),
+        headers: { "content-type": "application/json" },
+      },
+    );
+    if (!response.ok) {
+      throw new Error("legacy sandbox credential policy repair failed");
+    }
+    if (
+      !(await finishSandboxCredentialPolicyRegistration(
+        env,
+        sessionId,
+        sandboxId,
+        registration,
+        ownership,
+      ))
+    ) {
+      throw new Error("legacy sandbox credential policy repair lost ownership");
+    }
+  } catch (error) {
+    await database(env)
+      .updateTable("interactive_session_credential_policies")
+      .set({
+        last_error: clean(error instanceof Error ? error.message : String(error), 500),
+        updated_at: Date.now(),
+      })
+      .where("session_id", "=", sessionId)
+      .where("sandbox_id", "=", sandboxId)
+      .where("registration_generation", "=", registration.generation)
+      .where("registration_claim", "=", registration.claim)
+      .execute();
+    throw error;
+  }
+}
+
+export async function repairLegacySandboxCredentialPolicyBatch(
+  env: RuntimeEnv,
+  now: number,
+  sessionId?: string,
+): Promise<void> {
+  if (!env.SANDBOX || !env.SESSION_CONTROL) return;
+  let query = database(env)
+    .selectFrom("interactive_session_credential_policies")
+    .select(["session_id", "sandbox_id"])
+    .select(({ fn }) => fn.min<number>("updated_at").as("repair_updated_at"))
+    .where((expression) =>
+      expression.or([
+        expression.and([
+          expression("state", "=", "active"),
+          expression(
+            "registration_generation",
+            "like",
+            `${credentialPolicyLegacyGenerationPrefix}%`,
+          ),
+        ]),
+        expression.and([
+          expression("state", "=", "registering"),
+          expression("registration_claim", "like", `${credentialPolicyLegacyRepairClaimPrefix}%`),
+          expression("registration_claim_expires_at", "<=", now),
+        ]),
+      ]),
+    )
+    .groupBy(["session_id", "sandbox_id"])
+    .orderBy("repair_updated_at", "asc")
+    .orderBy("session_id", "asc")
+    .orderBy("sandbox_id", "asc")
+    .limit(credentialPolicyCleanupLimit);
+  if (sessionId) query = query.where("session_id", "=", sessionId);
+  const candidates = await query.execute();
+  await mapWithConcurrency(candidates, 3, async (candidate) => {
+    await repairLegacySandboxCredentialPolicy(
+      env,
+      candidate.session_id,
+      candidate.sandbox_id,
+    ).catch((error) => {
+      console.error("legacy sandbox credential policy repair failed", error);
+    });
+  });
+}
+
+export async function sandboxCredentialPolicyExists(
+  env: RuntimeEnv,
+  sandboxId: string,
+  generation: string,
+): Promise<boolean> {
+  const stub = sandboxControlStub(env);
+  if (!stub) return false;
+  const responses = await Promise.all(
+    sandboxLookupIds(env, sandboxId).map((lookupId) =>
+      stub.fetch(
+        `https://crabfleet.internal/api/session-control/egress/${encodeURIComponent(lookupId)}`,
+      ),
+    ),
+  );
+  if (responses.some((response) => !response.ok && response.status !== 404)) {
+    throw new Error("sandbox credential policy lookup failed");
+  }
+  return responses.every(
+    (response) =>
+      response.ok && response.headers.get("x-crabfleet-policy-generation") === generation,
+  );
+}
 
 async function unregisterSandboxCredentialPolicyLookup(
   env: RuntimeEnv,
@@ -176,16 +336,15 @@ async function maximumCredentialPolicyCleanupGroup(
 export async function reconcileSandboxCredentialPolicyCleanupBatch(
   env: RuntimeEnv,
   now: number,
-  dependencies: SandboxCredentialPolicyCleanupDependencies,
   sessionId?: string,
 ): Promise<void> {
-  await dependencies.repairLegacyPolicyBatch(env, now, sessionId).catch((error) => {
+  await repairLegacySandboxCredentialPolicyBatch(env, now, sessionId).catch((error) => {
     console.error("legacy sandbox credential policy repair batch failed", error);
   });
-  await dependencies.expireStandaloneProvisions(env, now, sessionId).catch((error) => {
+  await expireStandaloneSandboxProvisions(env, now, sessionId).catch((error) => {
     console.error("standalone Sandbox expiry failed", error);
   });
-  await scanCredentialPolicyCleanupPage(env, now, dependencies.policyExists, sessionId).catch(
+  await scanCredentialPolicyCleanupPage(env, now, sandboxCredentialPolicyExists, sessionId).catch(
     (error) => {
       console.error("credential policy cleanup scan failed", error);
     },

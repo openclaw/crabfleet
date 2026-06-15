@@ -745,6 +745,10 @@ test("stateless Sandbox provision hook acquires durable standalone ownership", a
     new URL("../src/worker/sandbox-credential-policy-cleanup-service.ts", import.meta.url),
     "utf8",
   );
+  const standaloneRepositorySource = await readFile(
+    new URL("../src/worker/provisioning/standalone-sandbox-repository.ts", import.meta.url),
+    "utf8",
+  );
   const policyRepositorySource = await readFile(
     new URL("../src/worker/sandbox-credential-policy-repository.ts", import.meta.url),
     "utf8",
@@ -772,16 +776,15 @@ test("stateless Sandbox provision hook acquires durable standalone ownership", a
   const ptyEnd = source.indexOf("function authorizeProvisionBearerToken", ptyStart);
   const ptySource = source.slice(ptyStart, ptyEnd);
   const sandboxStart = source.indexOf("async function provisionWithSandbox");
-  const sandboxEnd = source.indexOf(
-    "async function repairLegacySandboxCredentialPolicy",
-    sandboxStart,
-  );
+  const sandboxEnd = source.indexOf("async function registerSandboxCredentialPolicy", sandboxStart);
   const sandboxSource = source.slice(sandboxStart, sandboxEnd);
   const stopStart = source.indexOf("async function stopStandaloneSandboxProvision");
   const stopEnd = source.indexOf("function standaloneSandboxAttachUrl", stopStart);
   const stopSource = source.slice(stopStart, stopEnd);
-  const expiryStart = source.indexOf("async function expireStandaloneSandboxProvisions");
-  const expirySource = source.slice(expiryStart, stopStart);
+  const expiryStart = standaloneRepositorySource.indexOf(
+    "async function expireStandaloneSandboxProvisions",
+  );
+  const expirySource = standaloneRepositorySource.slice(expiryStart);
   const standaloneCleanupStart = cleanupServiceSource.indexOf(
     "async function completeStandaloneSandboxProvisionCleanup",
   );
@@ -903,7 +906,6 @@ test("Sandbox credential egress proves the durable generation and owner", async 
 });
 
 test("cron generation-wraps migrated legacy policies under exact live ownership", async () => {
-  const source = await readFile(new URL("../src/index.ts", import.meta.url), "utf8");
   const cleanupServiceSource = await readFile(
     new URL("../src/worker/sandbox-credential-policy-cleanup-service.ts", import.meta.url),
     "utf8",
@@ -927,15 +929,17 @@ test("cron generation-wraps migrated legacy policies under exact live ownership"
     "async function renewSandboxCredentialPolicyRegistration",
     beginStart,
   );
-  const legacyRepairStart = source.indexOf("async function repairLegacySandboxCredentialPolicy");
-  const legacyRepairEnd = source.indexOf(
-    "async function registerSandboxCredentialPolicy",
+  const legacyRepairStart = cleanupServiceSource.indexOf(
+    "async function repairLegacySandboxCredentialPolicy",
+  );
+  const legacyRepairEnd = cleanupServiceSource.indexOf(
+    "async function unregisterSandboxCredentialPolicyLookup",
     legacyRepairStart,
   );
-  const repairSource = `${policyRepositorySource.slice(beginStart, renewStart)}\n${source.slice(
-    legacyRepairStart,
-    legacyRepairEnd,
-  )}`;
+  const repairSource = `${policyRepositorySource.slice(
+    beginStart,
+    renewStart,
+  )}\n${cleanupServiceSource.slice(legacyRepairStart, legacyRepairEnd)}`;
   const controlSource = (
     await Promise.all([
       readFile(new URL("../src/worker/session-control-do.ts", import.meta.url), "utf8"),

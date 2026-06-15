@@ -1,4 +1,4 @@
-import { sql, type Kysely, type Selectable, type UpdateObject } from "kysely";
+import { sql, type Kysely, type UpdateObject } from "kysely";
 import {
   ContainerProxy,
   Sandbox as CloudflareSandboxBase,
@@ -70,7 +70,6 @@ import {
   type InteractiveSessionRow,
   type RepoWorkflowTable,
   type RunAttemptTable,
-  type StandaloneSandboxProvisionTable,
 } from "./worker/database";
 import { type Role, type RunStatus, type User, type WorkflowStatus } from "./worker/models";
 import {
@@ -290,6 +289,7 @@ import {
   claimStandaloneSandboxProvision,
   readStandaloneSandboxProvision,
   stageStandaloneSandboxClaimCleanup,
+  stageStandaloneSandboxProvisionCleanup,
 } from "./worker/provisioning/standalone-sandbox-repository";
 import type {
   InteractiveProvisionRequest,
@@ -299,7 +299,6 @@ import {
   activeSandboxCredentialPolicyCondition,
   activeSandboxCredentialPolicyGeneration,
   abandonSandboxCredentialPolicyRegistration,
-  beginLegacySandboxCredentialPolicyRepair,
   beginSandboxCredentialPolicyRegistration,
   existingSandboxCredentialPolicyGeneration,
   finishSandboxCredentialPolicyRegistration,
@@ -307,14 +306,16 @@ import {
   recordSandboxCredentialPolicyRefs,
   renewSandboxCredentialPolicyRegistration,
   sandboxCredentialPolicyCleanupAuthorizedCondition,
-  sandboxCredentialPolicyGeneration,
-  sandboxCredentialPolicyRefQueries,
-  sandboxLookupIds,
   standaloneSandboxPolicyExpiresAt,
   type SandboxCredentialPolicyOwnershipFence,
 } from "./worker/sandbox-credential-policy-repository";
 import { stageTerminalCredentialPolicyCleanupById } from "./worker/sandbox-credential-policy-cleanup";
-import { reconcileSandboxCredentialPolicyCleanupBatch } from "./worker/sandbox-credential-policy-cleanup-service";
+import {
+  reconcileSandboxCredentialPolicyCleanupBatch as reconcileCredentialPolicyCleanupBatch,
+  repairLegacySandboxCredentialPolicy,
+  repairLegacySandboxCredentialPolicyBatch,
+  sandboxCredentialPolicyExists,
+} from "./worker/sandbox-credential-policy-cleanup-service";
 import { credentialPolicyProvisioningStaleMs } from "./worker/sandbox-credential-policy-scanner";
 import {
   isSandboxSessionAlreadyExists,
@@ -363,9 +364,7 @@ import {
 } from "./worker/session-control-do";
 import {
   credentialPolicyLegacyGenerationPrefix,
-  credentialPolicyLegacyRepairClaimPrefix,
   type SandboxCredentialPolicy,
-  type SandboxCredentialPolicyLegacyMigration,
   type StoredSandboxCredentialPolicy,
 } from "./worker/session-control-policy";
 import {
@@ -567,7 +566,6 @@ const runtimeAdapterReconcileConcurrency = 3;
 const runtimeAdapterReconcileForegroundBudgetMs = 750;
 const openClawPreparationTimeoutMs = 60_000;
 const interactiveSessionPreparationStaleMs = 5 * 60_000;
-const credentialPolicyCleanupLimit = 8;
 const defaultSandboxEgressHosts = [
   "api.github.com",
   "api.openai.com",
@@ -2686,23 +2684,6 @@ async function mutateInteractiveSession(
   throw badRequest("unknown action");
 }
 
-function reconcileCredentialPolicyCleanupBatch(
-  env: RuntimeEnv,
-  now: number,
-  sessionId?: string,
-): Promise<void> {
-  return reconcileSandboxCredentialPolicyCleanupBatch(
-    env,
-    now,
-    {
-      expireStandaloneProvisions: expireStandaloneSandboxProvisions,
-      policyExists: sandboxCredentialPolicyExists,
-      repairLegacyPolicyBatch: repairLegacySandboxCredentialPolicyBatch,
-    },
-    sessionId,
-  );
-}
-
 function managedSandboxLeaseId(
   session: Pick<InteractiveSession, "adapter" | "leaseId">,
 ): string | null {
@@ -3743,123 +3724,6 @@ async function provisionInteractiveEndpoint(
   );
 }
 
-async function stageStandaloneSandboxProvisionCleanup(
-  env: RuntimeEnv,
-  owner: Selectable<StandaloneSandboxProvisionTable>,
-  message: string,
-  now: number,
-): Promise<boolean> {
-  if (owner.state === "cleanup_pending") return true;
-  const db = database(env);
-  const transitionRevision = Math.max(now, owner.updated_at + 1);
-  const generation = await sandboxCredentialPolicyGeneration(env, owner.id, owner.sandbox_id);
-  let ownerTransition = db
-    .updateTable("standalone_sandbox_provisions")
-    .set({
-      state: "cleanup_pending",
-      ownership_claim: null,
-      ownership_claim_expires_at: null,
-      attach_url: null,
-      vnc_url: null,
-      message,
-      updated_at: transitionRevision,
-    })
-    .where("id", "=", owner.id)
-    .where("request_hash", "=", owner.request_hash)
-    .where("sandbox_id", "=", owner.sandbox_id)
-    .where("state", "=", owner.state)
-    .where("updated_at", "=", owner.updated_at);
-  ownerTransition = owner.ownership_claim
-    ? ownerTransition.where("ownership_claim", "=", owner.ownership_claim)
-    : ownerTransition.where("ownership_claim", "is", null);
-  ownerTransition =
-    owner.ownership_claim_expires_at === null
-      ? ownerTransition.where("ownership_claim_expires_at", "is", null)
-      : ownerTransition.where("ownership_claim_expires_at", "=", owner.ownership_claim_expires_at);
-  ownerTransition = owner.lease_id
-    ? ownerTransition.where("lease_id", "=", owner.lease_id)
-    : ownerTransition.where("lease_id", "is", null);
-  ownerTransition =
-    owner.expires_at === null
-      ? ownerTransition.where("expires_at", "is", null)
-      : ownerTransition.where("expires_at", "=", owner.expires_at);
-  const cleanupAuthorized = sandboxCredentialPolicyCleanupAuthorizedCondition(
-    owner.id,
-    owner.sandbox_id,
-    transitionRevision,
-  );
-  await executeBatch(env, [
-    ownerTransition,
-    ...sandboxCredentialPolicyRefQueries(
-      env,
-      owner.id,
-      owner.sandbox_id,
-      "cleanup_pending",
-      generation,
-      transitionRevision,
-      cleanupAuthorized,
-    ),
-    db
-      .updateTable("interactive_session_credential_policies")
-      .set({ state: "cleanup_pending", updated_at: transitionRevision })
-      .where("session_id", "=", owner.id)
-      .where("sandbox_id", "=", owner.sandbox_id)
-      .where(cleanupAuthorized),
-  ]);
-  const staged = await db
-    .selectFrom("standalone_sandbox_provisions")
-    .select(["state", "sandbox_id", "updated_at"])
-    .where("id", "=", owner.id)
-    .executeTakeFirst();
-  return Boolean(
-    staged?.state === "cleanup_pending" &&
-    staged.sandbox_id === owner.sandbox_id &&
-    staged.updated_at === transitionRevision,
-  );
-}
-
-async function expireStandaloneSandboxProvisions(
-  env: RuntimeEnv,
-  now: number,
-  provisionId?: string,
-): Promise<void> {
-  const idFilter = provisionId ? sql`AND id = ${provisionId}` : sql``;
-  const result = await sql<Selectable<StandaloneSandboxProvisionTable>>`
-    SELECT *
-    FROM standalone_sandbox_provisions
-    WHERE (
-      (state = 'active' AND (expires_at IS NULL OR expires_at <= ${now}))
-      OR (
-        state = 'provisioning'
-        AND (
-          expires_at IS NULL
-          OR expires_at <= ${now}
-          OR ownership_claim_expires_at IS NULL
-          OR ownership_claim_expires_at <= ${now}
-        )
-      )
-      OR (
-        state = 'active'
-        AND lower(id) GLOB 'is-[0-9]*'
-        AND substr(lower(id), 4) NOT GLOB '*[^0-9]*'
-      )
-    )
-    ${idFilter}
-    ORDER BY COALESCE(expires_at, 0) ASC, updated_at ASC, id ASC
-    LIMIT ${credentialPolicyCleanupLimit}
-  `.execute(database(env));
-  await mapWithConcurrency(result.rows, 3, async (owner) => {
-    await stageStandaloneSandboxProvisionCleanup(
-      env,
-      owner,
-      isManagedInteractiveSessionId(owner.id)
-        ? "standalone provision used the reserved managed session namespace"
-        : "standalone Sandbox provision expired",
-      now,
-    );
-  });
-}
-
 async function stopStandaloneSandboxProvision(
   request: Request,
   env: RuntimeEnv,
@@ -4137,138 +4001,6 @@ async function provisionWithSandbox(
   };
 }
 
-async function repairLegacySandboxCredentialPolicy(
-  env: RuntimeEnv,
-  sessionId: string,
-  sandboxId: string,
-): Promise<void> {
-  const stub = sandboxControlStub(env);
-  if (!stub || !env.SANDBOX) {
-    throw new Error("legacy sandbox credential policy repair is unavailable");
-  }
-  const session = await database(env)
-    .selectFrom("interactive_sessions")
-    .selectAll()
-    .where("id", "=", sessionId)
-    .executeTakeFirst();
-  if (!session?.lease_id) {
-    throw new Error("legacy sandbox credential policy owner is unavailable");
-  }
-  const lease = sandboxLeaseInfo({
-    id: session.id,
-    adapter: session.adapter,
-    leaseId: session.lease_id,
-  });
-  if (lease.sandboxId !== sandboxId) {
-    throw new Error("legacy sandbox credential policy lease does not match");
-  }
-  const ownership: SandboxCurrentLeaseFence = { leaseId: session.lease_id, sandboxId };
-  const registration = await beginLegacySandboxCredentialPolicyRepair(
-    env,
-    sessionId,
-    sandboxId,
-    ownership,
-  );
-  try {
-    const registrationExpiresAt = await renewSandboxCredentialPolicyRegistration(
-      env,
-      sessionId,
-      sandboxId,
-      registration,
-      ownership,
-    );
-    if (!registrationExpiresAt) {
-      throw new Error("legacy sandbox credential policy repair claim was revoked");
-    }
-    const response = await stub.fetch(
-      "https://crabfleet.internal/api/session-control/migrate-legacy",
-      {
-        method: "POST",
-        body: JSON.stringify({
-          generation: registration.generation,
-          registrationClaim: registration.claim,
-          registrationExpiresAt,
-          sandboxIds: registration.lookupIds,
-          sessionId,
-        } satisfies SandboxCredentialPolicyLegacyMigration),
-        headers: { "content-type": "application/json" },
-      },
-    );
-    if (!response.ok) {
-      throw new Error("legacy sandbox credential policy repair failed");
-    }
-    if (
-      !(await finishSandboxCredentialPolicyRegistration(
-        env,
-        sessionId,
-        sandboxId,
-        registration,
-        ownership,
-      ))
-    ) {
-      throw new Error("legacy sandbox credential policy repair lost ownership");
-    }
-  } catch (error) {
-    await database(env)
-      .updateTable("interactive_session_credential_policies")
-      .set({
-        last_error: clean(error instanceof Error ? error.message : String(error), 500),
-        updated_at: Date.now(),
-      })
-      .where("session_id", "=", sessionId)
-      .where("sandbox_id", "=", sandboxId)
-      .where("registration_generation", "=", registration.generation)
-      .where("registration_claim", "=", registration.claim)
-      .execute();
-    throw error;
-  }
-}
-
-async function repairLegacySandboxCredentialPolicyBatch(
-  env: RuntimeEnv,
-  now: number,
-  sessionId?: string,
-): Promise<void> {
-  if (!env.SANDBOX || !env.SESSION_CONTROL) return;
-  let query = database(env)
-    .selectFrom("interactive_session_credential_policies")
-    .select(["session_id", "sandbox_id"])
-    .select(({ fn }) => fn.min<number>("updated_at").as("repair_updated_at"))
-    .where((expression) =>
-      expression.or([
-        expression.and([
-          expression("state", "=", "active"),
-          expression(
-            "registration_generation",
-            "like",
-            `${credentialPolicyLegacyGenerationPrefix}%`,
-          ),
-        ]),
-        expression.and([
-          expression("state", "=", "registering"),
-          expression("registration_claim", "like", `${credentialPolicyLegacyRepairClaimPrefix}%`),
-          expression("registration_claim_expires_at", "<=", now),
-        ]),
-      ]),
-    )
-    .groupBy(["session_id", "sandbox_id"])
-    .orderBy("repair_updated_at", "asc")
-    .orderBy("session_id", "asc")
-    .orderBy("sandbox_id", "asc")
-    .limit(credentialPolicyCleanupLimit);
-  if (sessionId) query = query.where("session_id", "=", sessionId);
-  const candidates = await query.execute();
-  await mapWithConcurrency(candidates, 3, async (candidate) => {
-    await repairLegacySandboxCredentialPolicy(
-      env,
-      candidate.session_id,
-      candidate.sandbox_id,
-    ).catch((error) => {
-      console.error("legacy sandbox credential policy repair failed", error);
-    });
-  });
-}
-
 async function registerSandboxCredentialPolicy(
   env: RuntimeEnv,
   session: SandboxRuntimeSession,
@@ -4409,29 +4141,6 @@ async function ensureSandboxCredentialPolicy(
     return;
   }
   await registerSandboxCredentialPolicy(env, session, sandboxId, ownership);
-}
-
-async function sandboxCredentialPolicyExists(
-  env: RuntimeEnv,
-  sandboxId: string,
-  generation: string,
-): Promise<boolean> {
-  const stub = sandboxControlStub(env);
-  if (!stub) return false;
-  const responses = await Promise.all(
-    sandboxLookupIds(env, sandboxId).map((lookupId) =>
-      stub.fetch(
-        `https://crabfleet.internal/api/session-control/egress/${encodeURIComponent(lookupId)}`,
-      ),
-    ),
-  );
-  if (responses.some((response) => !response.ok && response.status !== 404)) {
-    throw new Error("sandbox credential policy lookup failed");
-  }
-  return responses.every(
-    (response) =>
-      response.ok && response.headers.get("x-crabfleet-policy-generation") === generation,
-  );
 }
 
 async function fetchGithubRepoNodeId(repo: string, token: string): Promise<string> {
