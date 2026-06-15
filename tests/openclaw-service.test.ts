@@ -121,7 +121,7 @@ test("bounded transcript tails remain valid UTF-8 and report truncation", () => 
   assert.equal(openClawRoomMaxSessions, 64);
 });
 
-test("OpenClaw room reservation precedes branch mutation, event recording, and provisioning", async () => {
+test("OpenClaw room reservations stay hidden until activation", async () => {
   const source = await readFile(new URL("../src/index.ts", import.meta.url), "utf8");
   const migration = await readFile(
     new URL("../migrations/0025_interactive_session_preparation.sql", import.meta.url),
@@ -149,26 +149,6 @@ test("OpenClaw room reservation precedes branch mutation, event recording, and p
     /const preparationReservation = Boolean\(options\.afterReserve \|\| supervisedRootSessionId\)/,
   );
   assert.match(createSource, /preparation_pending: preparationReservation \? 1 : 0/);
-  assert.ok(
-    createSource.indexOf("supervision.enforceRoomSessionLimitAfterInsert") <
-      createSource.indexOf("await options.afterReserve"),
-  );
-  assert.ok(
-    createSource.indexOf("await options.afterReserve") <
-      createSource.indexOf("supervision.requireReservationActivation"),
-  );
-  assert.ok(
-    createSource.indexOf("supervision.requireReservationActivation") <
-      createSource.indexOf("appendInteractiveSessionEvent"),
-  );
-  assert.ok(
-    createSource.indexOf("await options.afterReserve") <
-      createSource.indexOf("provisionInteractiveSession"),
-  );
-  assert.match(
-    createSource,
-    /catch \(error\) \{\s+await supervision\.rollbackReservation\(id, now\);\s+throw error;/,
-  );
 });
 
 test("OpenClaw crabbox persistence reserves durable idempotency before provisioning", async () => {

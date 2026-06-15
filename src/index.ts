@@ -254,6 +254,10 @@ import {
   InteractiveSessionLineageService,
   type InteractiveSessionLineageStore,
 } from "./worker/session-lineage";
+import {
+  InteractiveSessionCreationService,
+  type InteractiveSessionCreationStore,
+} from "./worker/session-creation";
 
 const defaultInteractiveCommand = "codex --yolo";
 
@@ -3701,6 +3705,7 @@ async function createInteractiveSessionFromInput(
     options.rootSessionId ?? (clean(body.rootSessionId, 120) || null),
   );
   const supervision = openClawSupervision(env);
+  const creation = interactiveSessionCreationService(env, user, supervision);
   const supervisedRootSessionId = await supervision.supervisedRootForCreate(createdBy, lineage);
   const preparationReservation = Boolean(options.afterReserve || supervisedRootSessionId);
   const now = Date.now();
@@ -3836,51 +3841,49 @@ async function createInteractiveSessionFromInput(
         await insertSession.execute();
       }
       reservationInserted = true;
-      if (supervisedRootSessionId) {
-        await supervision.enforceRoomSessionLimitAfterInsert(supervisedRootSessionId, id, now);
-      }
-      try {
-        await options.afterReserve?.();
-      } catch (error) {
-        await supervision.rollbackReservation(id, now);
-        throw error;
-      }
-      if (preparationReservation) {
-        await supervision.requireReservationActivation(id, now, adapterWorkspaceId);
-      }
-      await appendInteractiveSessionEvent(env, id, user, "interactive workspace requested", now);
-      const provisioned = await provisionInteractiveSession(
-        env,
+      const provisioned = await creation.provision(
         {
           id,
-          ...(adapterWorkspaceId ? { adapterWorkspaceId } : {}),
-          ...(adapterControlPlane ? { adapterControlPlane } : {}),
-          ...(adapterSettings
-            ? {
-                adapterTtlSeconds: adapterSettings.ttlSeconds,
-                adapterIdleTimeoutSeconds: adapterSettings.idleTimeoutSeconds,
-                adapterRequestedCapabilities: adapterSettings.capabilities,
-                adapterCreatePayloadJson,
-              }
-            : {}),
-          parentSessionId: lineage.parentSessionId,
-          rootSessionId,
-          repo,
-          branch,
-          runtime,
-          profile,
-          command,
-          prompt,
-          purpose,
-          summary,
-          owner,
-          createdBy,
-          ...(githubToken ? { githubToken } : {}),
+          insertedAt: now,
+          supervisedRootSessionId,
+          requiresActivation: preparationReservation,
+          adapterWorkspaceId,
         },
-        agentToken,
-        initialSandboxLease && initialSandboxOwnership
-          ? { lease: initialSandboxLease, ownership: initialSandboxOwnership }
-          : undefined,
+        options.afterReserve,
+        () =>
+          provisionInteractiveSession(
+            env,
+            {
+              id,
+              ...(adapterWorkspaceId ? { adapterWorkspaceId } : {}),
+              ...(adapterControlPlane ? { adapterControlPlane } : {}),
+              ...(adapterSettings
+                ? {
+                    adapterTtlSeconds: adapterSettings.ttlSeconds,
+                    adapterIdleTimeoutSeconds: adapterSettings.idleTimeoutSeconds,
+                    adapterRequestedCapabilities: adapterSettings.capabilities,
+                    adapterCreatePayloadJson,
+                  }
+                : {}),
+              parentSessionId: lineage.parentSessionId,
+              rootSessionId,
+              repo,
+              branch,
+              runtime,
+              profile,
+              command,
+              prompt,
+              purpose,
+              summary,
+              owner,
+              createdBy,
+              ...(githubToken ? { githubToken } : {}),
+            },
+            agentToken,
+            initialSandboxLease && initialSandboxOwnership
+              ? { lease: initialSandboxLease, ownership: initialSandboxOwnership }
+              : undefined,
+          ),
       );
       if (provisioned) {
         const initialTerminalStatus: "stopped" | "expired" | "failed" | null =
@@ -4303,6 +4306,30 @@ function interactiveSessionLineageService(env: RuntimeEnv): InteractiveSessionLi
     canManage: canManageInteractiveSession,
   };
   return new InteractiveSessionLineageService(store);
+}
+
+function interactiveSessionCreationService(
+  env: RuntimeEnv,
+  user: User,
+  supervision: OpenClawSupervisionService,
+): InteractiveSessionCreationService {
+  const store: InteractiveSessionCreationStore = {
+    enforceSupervision: (rootSessionId, insertedSessionId, insertedAt) =>
+      supervision.enforceRoomSessionLimitAfterInsert(rootSessionId, insertedSessionId, insertedAt),
+    rollbackReservation: (insertedSessionId, insertedAt) =>
+      supervision.rollbackReservation(insertedSessionId, insertedAt),
+    activateReservation: (insertedSessionId, insertedAt, adapterWorkspaceId) =>
+      supervision.requireReservationActivation(insertedSessionId, insertedAt, adapterWorkspaceId),
+    recordRequest: (insertedSessionId, insertedAt) =>
+      appendInteractiveSessionEvent(
+        env,
+        insertedSessionId,
+        user,
+        "interactive workspace requested",
+        insertedAt,
+      ),
+  };
+  return new InteractiveSessionCreationService(store);
 }
 
 function interactiveSessionPurpose(
