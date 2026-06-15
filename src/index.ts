@@ -111,8 +111,6 @@ import { cachedBooleanGrant } from "./terminal-authorization";
 import { obsoleteSessionArchiveObjectKeys, sessionArchiveAttemptKeys } from "./session-archive";
 import { readBoundedResponseText } from "./bounded-response";
 import {
-  openClawBranchPreparationCanDefer,
-  openClawGitBranchAllowed,
   openClawGitHubRepoParts,
   openClawRoomMaxSessions,
   openClawServiceAuthorized,
@@ -220,11 +218,7 @@ import {
   type RuntimeCapabilities,
 } from "./worker/session-model";
 import { normalizeRepo } from "./worker/repositories";
-import {
-  openClawCrabboxRequestHash,
-  openClawRequestId,
-  readOpenClawRequestSession,
-} from "./worker/openclaw-request";
+import { readOpenClawRequestSession } from "./worker/openclaw-request";
 import {
   activateInteractiveSessionReservation,
   closeOpenClawRootAdmission,
@@ -250,6 +244,12 @@ import {
   openClawVisibleRoomSessions,
 } from "./worker/openclaw-queries";
 import { OpenClawMutationService, type OpenClawMutationStore } from "./worker/openclaw-mutations";
+import {
+  OpenClawCreateService,
+  openClawServiceBranch,
+  type OpenClawCreateStore,
+  type OpenClawCreateInput,
+} from "./worker/openclaw-create";
 
 const defaultInteractiveCommand = "codex --yolo";
 
@@ -2393,84 +2393,10 @@ async function openClawCreateCrabbox(
   env: RuntimeEnv,
 ): Promise<{ session: InteractiveSession; browserUrl: string }> {
   requireOpenClawRoomService(request, env);
-  const body = await readJson<{
-    repo?: string;
-    branch?: string;
-    runtime?: string;
-    profile?: string;
-    command?: string;
-    prompt?: string;
-    owner?: string;
-    parentSessionId?: string;
-    rootSessionId?: string;
-    purpose?: string;
-    summary?: string;
-    githubToken?: string;
-    baseBranch?: string;
-    requestId?: string;
-  }>(request);
-  const owner = openClawOwner(body.owner);
-  body.branch = openClawServiceBranch(body.branch, "branch", "main");
-  const baseBranch = openClawServiceBranch(body.baseBranch, "baseBranch");
-  if (baseBranch) body.baseBranch = baseBranch;
-  else delete body.baseBranch;
+  const body = await readJson<OpenClawCreateInput>(request);
   const serviceUser = openClawServiceUser();
-  const requestId = openClawRequestId(body.requestId);
-  const requestHash = requestId
-    ? await openClawCrabboxRequestHash(body, owner, deploymentConfig(env).defaultRuntime)
-    : null;
-  if (requestId && requestHash) {
-    const existing = await readOpenClawRequestSession(env, requestId, requestHash);
-    if (existing) {
-      return openClawDecoratedCrabboxResponse(
-        env,
-        decorateInteractiveSession(existing, serviceUser, env),
-      );
-    }
-  }
-  const result = await createInteractiveSessionFromInput(
-    env,
-    serviceUser,
-    body,
-    clean(body.githubToken, 4000) || undefined,
-    {
-      owner,
-      createdBy: "service:openclaw",
-      openClawRequestId: requestId,
-      openClawRequestHash: requestHash,
-      afterReserve: async () => {
-        const signal = AbortSignal.timeout(openClawPreparationTimeoutMs);
-        try {
-          await ensureOpenClawServiceBranch(env, body.repo, body.branch, body.baseBranch, signal);
-        } catch (error) {
-          if (signal.aborted) {
-            throw serviceUnavailable("OpenClaw branch preparation timed out");
-          }
-          if (
-            !(error instanceof GitHubApiError) ||
-            !openClawBranchPreparationCanDefer(error.status)
-          ) {
-            throw error;
-          }
-          console.warn(
-            JSON.stringify({
-              event: "openclaw_branch_preparation_deferred",
-              repo: normalizeRepo(body.repo),
-              branch: clean(body.branch, 120) || "main",
-              status: error.status,
-            }),
-          );
-        }
-      },
-    },
-  );
-  await audit(
-    env,
-    serviceUser,
-    `openclaw crabbox created ${result.session.id} owner=${owner}`,
-    Date.now(),
-  );
-  return openClawDecoratedCrabboxResponse(env, result.session);
+  const session = await openClawCreateService(env, serviceUser).create(body);
+  return openClawDecoratedCrabboxResponse(env, session);
 }
 
 async function openClawReadSessionRoot(
@@ -2700,6 +2626,27 @@ function openClawMutationService(
     warn: (event) => console.warn(JSON.stringify(event)),
   };
   return new OpenClawMutationService(store);
+}
+
+function openClawCreateService(env: RuntimeEnv, serviceUser: User): OpenClawCreateService {
+  const store: OpenClawCreateStore = {
+    defaultRuntime: deploymentConfig(env).defaultRuntime,
+    now: () => Date.now(),
+    preparationSignal: () => AbortSignal.timeout(openClawPreparationTimeoutMs),
+    readRequestSession: async (requestId, requestHash) => {
+      const session = await readOpenClawRequestSession(env, requestId, requestHash);
+      return session ? decorateInteractiveSession(session, serviceUser, env) : null;
+    },
+    prepareBranch: (repo, branch, baseBranch, signal) =>
+      ensureOpenClawServiceBranch(env, repo, branch, baseBranch, signal),
+    createSession: (body, githubToken, options) =>
+      createInteractiveSessionFromInput(env, serviceUser, body, githubToken, options).then(
+        (result) => result.session,
+      ),
+    audit: (message, now) => audit(env, serviceUser, message, now),
+    warn: (event) => console.warn(JSON.stringify(event)),
+  };
+  return new OpenClawCreateService(store);
 }
 
 function openClawCrabboxResponse(
@@ -2944,14 +2891,6 @@ function requireOpenClawServiceToken(
   }
 }
 
-function openClawServiceBranch(value: unknown, name: string, fallback = ""): string {
-  if (value === undefined || value === null || value === "") return fallback;
-  if (typeof value !== "string" || !openClawGitBranchAllowed(value)) {
-    throw badRequest(`${name} must be a valid Git branch of at most 120 characters`);
-  }
-  return value;
-}
-
 async function ensureOpenClawServiceBranch(
   env: RuntimeEnv,
   repoInput: unknown,
@@ -3017,15 +2956,6 @@ function optionalHttpUrl(value: unknown, name: string): string | null {
   } catch {
     throw badRequest(`${name} must be an http(s) URL`);
   }
-}
-
-function openClawOwner(value: unknown): string {
-  const owner = clean(value, 240);
-  if (!owner) throw badRequest("owner is required");
-  if (/^[A-Za-z0-9_.-]+$/.test(owner)) return owner;
-  if (/^@[A-Za-z0-9_.-]+$/.test(owner)) return owner.slice(1);
-  if (/^github:[A-Za-z0-9_.-]+$/.test(owner)) return owner.replace(/^github:/, "");
-  return owner;
 }
 
 async function requireSshGatewayUser(request: Request, env: RuntimeEnv): Promise<User> {

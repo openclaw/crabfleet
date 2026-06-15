@@ -121,31 +121,6 @@ test("bounded transcript tails remain valid UTF-8 and report truncation", () => 
   assert.equal(openClawRoomMaxSessions, 64);
 });
 
-test("OpenClaw create preserves the already-decorated interactive session", async () => {
-  const source = await readFile(new URL("../src/index.ts", import.meta.url), "utf8");
-  const createStart = source.indexOf("async function openClawCreateCrabbox");
-  const createEnd = source.indexOf("async function openClawReadSessionRoot", createStart);
-  const createSource = source.slice(createStart, createEnd);
-  const responseStart = source.indexOf("function openClawDecoratedCrabboxResponse");
-  const responseEnd = source.indexOf("async function openClawRegisterActionSession", responseStart);
-  const responseSource = source.slice(responseStart, responseEnd);
-
-  assert.match(createSource, /return openClawDecoratedCrabboxResponse\(env, result\.session\)/);
-  assert.doesNotMatch(createSource, /openClawCrabboxResponse\(env, serviceUser, result\.session\)/);
-  assert.doesNotMatch(responseSource, /decorateInteractiveSession/);
-  assert.match(createSource, /AbortSignal\.timeout\(openClawPreparationTimeoutMs\)/);
-  assert.match(createSource, /ensureOpenClawServiceBranch\([\s\S]*signal\)/);
-  assert.match(createSource, /if \(signal\.aborted\)/);
-  assert.match(createSource, /openClawServiceBranch\(body\.branch, "branch", "main"\)/);
-
-  const branchStart = source.indexOf("async function ensureOpenClawServiceBranch");
-  const branchEnd = source.indexOf("function actionWorkIdentifier", branchStart);
-  const branchSource = source.slice(branchStart, branchEnd);
-  assert.match(branchSource, /openClawServiceBranch\(branchInput, "branch", "main"\)/);
-  assert.match(branchSource, /openClawServiceBranch\(baseBranchInput, "baseBranch"\)/);
-  assert.doesNotMatch(branchSource, /clean\(branch/);
-});
-
 test("interactive lineage rejects caller-claimed roots without a parent", async () => {
   const source = await readFile(new URL("../src/index.ts", import.meta.url), "utf8");
   const start = source.indexOf("async function resolveInteractiveSessionLineage");
@@ -208,27 +183,19 @@ test("OpenClaw room reservation precedes branch mutation, event recording, and p
   );
 });
 
-test("OpenClaw crabbox requests reserve durable idempotency before provisioning", async () => {
+test("OpenClaw crabbox persistence reserves durable idempotency before provisioning", async () => {
   const source = await readFile(new URL("../src/index.ts", import.meta.url), "utf8");
   const migration = await readFile(
     new URL("../migrations/0026_openclaw_lifecycle_guarantees.sql", import.meta.url),
     "utf8",
   );
-  const endpointStart = source.indexOf("async function openClawCreateCrabbox");
-  const endpointEnd = source.indexOf("async function openClawReadSessionRoot", endpointStart);
-  const endpointSource = source.slice(endpointStart, endpointEnd);
   const createStart = source.indexOf("async function createInteractiveSessionFromInput");
   const createEnd = source.indexOf("function initialRuntimeAdapterWorkspaceId", createStart);
   const createSource = source.slice(createStart, createEnd);
   assert.match(migration, /ADD COLUMN openclaw_request_id TEXT/);
   assert.match(migration, /UNIQUE INDEX IF NOT EXISTS idx_interactive_sessions_openclaw_request/);
   assert.match(migration, /CREATE TABLE IF NOT EXISTS openclaw_request_replays/);
-  assert.match(endpointSource, /readOpenClawRequestSession/);
   assert.equal(openClawRequestId("request-1"), "request-1");
-  assert.ok(
-    endpointSource.indexOf("readOpenClawRequestSession") <
-      endpointSource.indexOf("createInteractiveSessionFromInput"),
-  );
   assert.match(createSource, /openclaw_request_id: options\.openClawRequestId \?\? null/);
   assert.match(createSource, /openclaw_request_hash: options\.openClawRequestHash \?\? null/);
   assert.match(createSource, /\.insertInto\("openclaw_request_replays"\)/);
