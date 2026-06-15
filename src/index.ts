@@ -2373,32 +2373,6 @@ async function api(
     );
   }
 
-  const sshInteractivePtyMatch = url.pathname.match(
-    /^\/api\/ssh\/interactive-sessions\/([^/]+)\/pty$/,
-  );
-  if (request.method === "GET" && sshInteractivePtyMatch) {
-    const user = await requireSshGatewayUser(request, env);
-    return interactiveSessionPty(
-      request,
-      env,
-      user,
-      decodeURIComponent(sshInteractivePtyMatch[1] ?? ""),
-    );
-  }
-
-  const agentInteractivePtyMatch = url.pathname.match(
-    /^\/api\/agent\/interactive-sessions\/([^/]+)\/pty$/,
-  );
-  if (request.method === "GET" && agentInteractivePtyMatch) {
-    const { user } = await requireAgentSession(request, env);
-    return interactiveSessionPty(
-      request,
-      env,
-      user,
-      decodeURIComponent(agentInteractivePtyMatch[1] ?? ""),
-    );
-  }
-
   const sharedSessionMatch = url.pathname.match(/^\/api\/shared-sessions\/([^/]+)$/);
   if (request.method === "GET" && sharedSessionMatch) {
     return json(
@@ -2411,7 +2385,7 @@ async function api(
   }
 
   if (request.method === "GET" && url.pathname === "/api/terminal/ws") {
-    return interactiveTerminalHub(request, env, await optionalUser(request, env, requestAuth));
+    return interactiveTerminalHub(request, env, await terminalHubUser(request, env, requestAuth));
   }
 
   const user = await requireUser(request, env, requestAuth);
@@ -2568,17 +2542,6 @@ async function api(
     );
   }
 
-  const interactivePtyMatch = url.pathname.match(/^\/api\/interactive-sessions\/([^/]+)\/pty$/);
-  if (request.method === "GET" && interactivePtyMatch) {
-    requireRole(user, "viewer");
-    return interactiveSessionPty(
-      request,
-      env,
-      user,
-      decodeURIComponent(interactivePtyMatch[1] ?? ""),
-    );
-  }
-
   const interactiveClipboardMatch = url.pathname.match(
     /^\/api\/interactive-sessions\/([^/]+)\/clipboard$/,
   );
@@ -2655,6 +2618,17 @@ async function api(
 
 function usesIndependentServiceAuth(request: Request): boolean {
   const pathname = new URL(request.url).pathname;
+  if (pathname === "/api/terminal/ws") {
+    const headers = request.headers;
+    const hasAuthorization = Boolean(headers.get("authorization"));
+    const hasSshIdentity = Boolean(
+      headers.get("x-crabfleet-ssh-fingerprint") || headers.get("x-crabbox-ssh-fingerprint"),
+    );
+    const hasAgentIdentity = Boolean(
+      headers.get("x-crabfleet-session-id") || headers.get("x-crabbox-session-id"),
+    );
+    return hasAuthorization && (hasSshIdentity || hasAgentIdentity);
+  }
   return ["/api/ssh/", "/api/agent/", "/api/openclaw/", "/api/provision/"].some((prefix) =>
     pathname.startsWith(prefix),
   );
@@ -3052,6 +3026,20 @@ async function optionalUser(
     }
     throw error;
   }
+}
+
+async function terminalHubUser(
+  request: Request,
+  env: RuntimeEnv,
+  requestAuth: TrustedProxyAuthResult,
+): Promise<User | null> {
+  if (isSshGatewayRequest(request, env)) {
+    return requireSshGatewayUser(request, env);
+  }
+  if (agentSessionId(request)) {
+    return (await requireAgentSession(request, env)).user;
+  }
+  return optionalUser(request, env, requestAuth);
 }
 
 async function requireTrustedProxyUser(
@@ -8803,190 +8791,6 @@ function parseTerminalControlMessage(data: string): Record<string, unknown> | nu
   }
 }
 
-async function interactiveSessionPty(
-  request: Request,
-  env: RuntimeEnv,
-  user: User,
-  id: string,
-): Promise<Response> {
-  if (request.headers.get("upgrade")?.toLowerCase() !== "websocket") {
-    throw badRequest("websocket upgrade required");
-  }
-
-  const session = await readFreshInteractiveSession(env, id);
-  if (!session) throw notFound("interactive session not found");
-  if (["stopping", "expired", "failed", "stopped"].includes(session.status)) {
-    throw badRequest(`session is ${session.status}`);
-  }
-  if (!session.capabilities.terminal) {
-    throw badRequest("session does not advertise terminal access");
-  }
-  if (
-    !canControlInteractiveSession(user, session, Date.now(), canGrantDelegatedControl(env, session))
-  ) {
-    throw forbidden("terminal control has not been granted");
-  }
-  if (session.runtime === githubActionsRuntime) {
-    const upstreamConnection = await openInteractiveTerminalUpstream(
-      request,
-      env,
-      user,
-      session,
-      terminalSize(request, "cols", 120),
-      terminalSize(request, "rows", 34),
-    );
-    const pair = new WebSocketPair();
-    const client = pair[0];
-    const server = pair[1];
-    server.accept();
-    bridgeWebSockets(
-      server,
-      upstreamConnection.socket,
-      terminalInputGrant(env, user, session),
-      terminalSubscriptionReconciler(env, id),
-    );
-    await upstreamConnection.markConnected();
-    return new Response(null, { status: 101, webSocket: client });
-  }
-  const routeKind = interactivePtyRouteKind(env, session);
-  if (routeKind === "sandbox" && env.SANDBOX) {
-    return interactiveSandboxTerminal(
-      request,
-      env,
-      user,
-      session,
-      terminalInputGrant(env, user, session),
-      terminalSubscriptionReconciler(env, id),
-    );
-  }
-
-  const target = interactiveTerminalTarget(env, session, routeKind);
-  if (!target) throw serviceUnavailable("PTY bridge is not configured for this session");
-  const upstreamOutputAcknowledgements = terminalOutputAcknowledgements(target.url);
-  const downstreamOutputAcknowledgements = terminalOutputAcknowledgements(request.url);
-  const targetUrl = sizedTerminalTargetUrl(
-    target.url,
-    routeKind,
-    terminalSize(request, "cols", 120),
-    terminalSize(request, "rows", 34),
-  );
-  if (!targetUrl) throw serviceUnavailable("PTY bridge URL is invalid");
-
-  const pair = new WebSocketPair();
-  const client = pair[0];
-  const server = pair[1];
-  let upstreamResponse: Response;
-  try {
-    upstreamResponse = await interactiveTerminalFetch(
-      env,
-      session,
-      targetUrl,
-      interactiveTerminalHeaders(session, target.authorization),
-    );
-  } catch (error) {
-    server.accept();
-    server.close(
-      1011,
-      clean(
-        redactedAdapterMessage(
-          `PTY bridge failed: ${String(error)}`,
-          "failed",
-          [session.adapterWorkspaceId, session.providerResourceId],
-          [target.url, session.attachUrl],
-        ),
-        120,
-      ),
-    );
-    return new Response(null, { status: 101, webSocket: client });
-  }
-  const upstream = upstreamResponse.webSocket;
-  if (!upstream || upstreamResponse.status !== 101) {
-    server.accept();
-    server.close(1011, `PTY bridge HTTP ${upstreamResponse.status}`);
-    return new Response(null, { status: 101, webSocket: client });
-  }
-
-  server.accept();
-  upstream.accept();
-  bridgeWebSockets(
-    server,
-    upstream,
-    terminalInputGrant(env, user, session),
-    terminalSubscriptionReconciler(env, id),
-    "terminal control revoked",
-    upstreamOutputAcknowledgements && downstreamOutputAcknowledgements,
-    upstreamOutputAcknowledgements && !downstreamOutputAcknowledgements,
-  );
-
-  const now = Date.now();
-  await database(env)
-    .updateTable("interactive_sessions")
-    .set({
-      status:
-        session.status === "ready" || session.status === "detached" ? "attached" : session.status,
-      last_seen_at: now,
-      updated_at: sql<number>`MAX(updated_at + 1, ${now})`,
-      last_event: "PTY terminal connected",
-    })
-    .where("id", "=", id)
-    .where("status", "in", ["ready", "attached", "detached"])
-    .execute();
-  await appendInteractiveSessionEvent(env, id, user, "PTY terminal connected", now);
-
-  return new Response(null, { status: 101, webSocket: client });
-}
-
-async function interactiveSandboxTerminal(
-  request: Request,
-  env: RuntimeEnv,
-  user: User,
-  session: InteractiveSession,
-  canSendLeft?: () => Promise<boolean>,
-  reconcileSubscription?: () => void,
-): Promise<Response> {
-  if (!env.SANDBOX) throw serviceUnavailable("Sandbox binding is not configured");
-  const runtimeSession = await sandboxSessionWithGitHubToken(request, env, user, session);
-  const sandboxSession = await ensureCurrentSandboxLease(request, env, user, runtimeSession);
-  const lease = sandboxLeaseInfo(sandboxSession);
-  const sandbox = getSandbox(env.SANDBOX, lease.sandboxId);
-  const upstreamResponse = await openSandboxTerminalResponse(
-    request,
-    env,
-    sandbox,
-    sandboxSession,
-    {
-      cols: terminalSize(request, "cols", 120),
-      rows: terminalSize(request, "rows", 34),
-    },
-  );
-  const upstream = upstreamResponse.webSocket;
-  if (!upstream || upstreamResponse.status !== 101) {
-    await markInteractiveTerminalUnavailable(
-      env,
-      user,
-      sandboxSession.id,
-      Date.now(),
-      `terminal unavailable: Cloudflare Sandbox terminal HTTP ${upstreamResponse.status}`,
-    );
-    return upstreamResponse;
-  }
-
-  const pair = new WebSocketPair();
-  const client = pair[0];
-  const server = pair[1];
-  server.accept();
-  upstream.accept();
-  await markInteractiveTerminalConnected(
-    env,
-    user,
-    sandboxSession.id,
-    Date.now(),
-    "Cloudflare Sandbox terminal connected",
-  );
-  bridgeWebSockets(server, upstream, canSendLeft, reconcileSubscription);
-  return new Response(null, { status: 101, webSocket: client });
-}
-
 async function readInteractiveSessionDiagnostics(
   env: RuntimeEnv,
   user: User,
@@ -10806,7 +10610,7 @@ async function provisionWithSandbox(
     attachUrl:
       "provisionId" in ownershipFence
         ? standaloneSandboxAttachUrl(env, session.id)
-        : `/api/interactive-sessions/${encodeURIComponent(session.id)}/pty`,
+        : "/api/terminal/ws",
     vncUrl: null,
     message: `Cloudflare Sandbox ready for ${session.repo}`,
   };
@@ -15973,15 +15777,7 @@ function decorateInteractiveSession(
     session.capabilities.terminal &&
     ["ready", "attached", "detached"].includes(session.status) &&
     routeAvailable;
-  const proxyManagedTerminal =
-    session.runtime === githubActionsRuntime || session.adapter === runtimeAdapterName;
-  const attachUrl = proxyManagedTerminal
-    ? ptyAvailable
-      ? `/api/interactive-sessions/${encodeURIComponent(session.id)}/pty`
-      : null
-    : canControl && session.capabilities.terminal
-      ? session.attachUrl
-      : null;
+  const attachUrl = ptyAvailable ? "/api/terminal/ws" : null;
   const codexSshReady =
     session.adapter === runtimeAdapterName &&
     session.capabilities.terminal &&

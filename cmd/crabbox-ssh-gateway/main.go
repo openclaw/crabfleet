@@ -18,7 +18,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/coder/websocket"
+	"github.com/openclaw/crabfleet/internal/terminalws"
 	"golang.org/x/crypto/ssh"
 )
 
@@ -62,7 +62,7 @@ type interactiveSession struct {
 	Purpose         string               `json:"purpose"`
 	Summary         string               `json:"summary"`
 	Capabilities    *sessionCapabilities `json:"capabilities"`
-	PtyAvailable    *bool                `json:"ptyAvailable"`
+	PtyAvailable    bool                 `json:"ptyAvailable"`
 	LeaseID         string               `json:"leaseId"`
 	AttachURL       string               `json:"attachUrl"`
 	VNCURL          string               `json:"vncUrl"`
@@ -536,25 +536,7 @@ func attachable(session interactiveSession) bool {
 }
 
 func ptyAttachable(session interactiveSession) bool {
-	if session.PtyAvailable != nil {
-		return *session.PtyAvailable
-	}
-	if strings.HasPrefix(session.LeaseID, "sandbox:") || strings.HasPrefix(session.LeaseID, "cloudflare:") {
-		return true
-	}
-	return strings.HasPrefix(session.AttachURL, "/api/interactive-sessions/") || validWebSocketAttachURL(session.AttachURL)
-}
-
-func validWebSocketAttachURL(raw string) bool {
-	target, err := url.Parse(raw)
-	if err != nil || target.Host == "" || target.User != nil {
-		return false
-	}
-	if target.Scheme == "wss" {
-		return true
-	}
-	host := target.Hostname()
-	return target.Scheme == "ws" && (host == "localhost" || host == "127.0.0.1" || host == "::1")
+	return session.PtyAvailable
 }
 
 func printHelp(out io.Writer, user user) {
@@ -950,79 +932,51 @@ func (c *apiClient) updateSummary(ctx context.Context, fingerprint string, id st
 }
 
 func (c *apiClient) message(ctx context.Context, fingerprint string, id string, message string, enter bool, pty sessionPTY) error {
-	u, err := url.Parse(c.baseURL)
+	endpoint, err := terminalws.Endpoint(c.baseURL)
 	if err != nil {
 		return err
 	}
-	switch u.Scheme {
-	case "https":
-		u.Scheme = "wss"
-	default:
-		u.Scheme = "ws"
-	}
-	u.Path = "/api/ssh/interactive-sessions/" + url.PathEscape(id) + "/pty"
-	q := u.Query()
-	q.Set("fingerprint", fingerprint)
-	q.Set("cols", fmt.Sprint(pty.cols))
-	q.Set("rows", fmt.Sprint(pty.rows))
-	u.RawQuery = q.Encode()
 
 	headers := http.Header{}
 	headers.Set("Authorization", "Bearer "+c.token)
 	headers.Set("X-Crabfleet-SSH-Fingerprint", fingerprint)
-	ws, _, err := websocket.Dial(ctx, u.String(), &websocket.DialOptions{HTTPHeader: headers})
+	client, err := terminalws.Dial(ctx, endpoint, id, terminalws.Options{
+		Header: headers,
+		Cols:   pty.cols,
+		Rows:   pty.rows,
+	})
 	if err != nil {
 		return err
 	}
-	defer ws.Close(websocket.StatusNormalClosure, "")
+	defer client.Close()
 	payload := message
 	if enter {
 		payload += "\n"
 	}
-	return ws.Write(ctx, websocket.MessageBinary, []byte(payload))
+	return client.SendInput(ctx, []byte(payload))
 }
 
 func (c *apiClient) attach(ctx context.Context, fingerprint string, id string, terminal io.ReadWriter, pty sessionPTY) uint32 {
-	u, err := url.Parse(c.baseURL)
+	endpoint, err := terminalws.Endpoint(c.baseURL)
 	if err != nil {
 		fmt.Fprintf(terminal, "error: %v\n", err)
 		return 1
 	}
-	switch u.Scheme {
-	case "https":
-		u.Scheme = "wss"
-	default:
-		u.Scheme = "ws"
-	}
-	u.Path = "/api/ssh/interactive-sessions/" + url.PathEscape(id) + "/pty"
-	q := u.Query()
-	q.Set("fingerprint", fingerprint)
-	q.Set("cols", fmt.Sprint(pty.cols))
-	q.Set("rows", fmt.Sprint(pty.rows))
-	u.RawQuery = q.Encode()
 
 	headers := http.Header{}
 	headers.Set("Authorization", "Bearer "+c.token)
 	headers.Set("X-Crabfleet-SSH-Fingerprint", fingerprint)
-	ws, _, err := websocket.Dial(ctx, u.String(), &websocket.DialOptions{HTTPHeader: headers})
+	client, err := terminalws.Dial(ctx, endpoint, id, terminalws.Options{
+		Header: headers,
+		Cols:   pty.cols,
+		Rows:   pty.rows,
+	})
 	if err != nil {
 		fmt.Fprintf(terminal, "attach failed: %v\n", err)
 		return 1
 	}
-	defer ws.Close(websocket.StatusNormalClosure, "")
-	netConn := websocket.NetConn(ctx, ws, websocket.MessageBinary)
-	defer netConn.Close()
-
-	errCh := make(chan error, 2)
-	go func() {
-		_, err := io.Copy(netConn, terminal)
-		errCh <- err
-	}()
-	go func() {
-		_, err := io.Copy(terminal, netConn)
-		errCh <- err
-	}()
-	err = <-errCh
+	defer client.Close()
+	err = client.Attach(ctx, terminal)
 	if err != nil && !errors.Is(err, net.ErrClosed) && !strings.Contains(err.Error(), "closed") {
 		fmt.Fprintf(terminal, "\nattach closed: %v\n", err)
 		return 1

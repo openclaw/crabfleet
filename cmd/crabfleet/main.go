@@ -17,7 +17,7 @@ import (
 	"time"
 
 	"github.com/alecthomas/kong"
-	"github.com/coder/websocket"
+	"github.com/openclaw/crabfleet/internal/terminalws"
 )
 
 const defaultAPIURL = "https://crabfleet.openclaw.ai"
@@ -165,7 +165,7 @@ type interactiveSession struct {
 	Purpose         string               `json:"purpose"`
 	Summary         string               `json:"summary"`
 	Capabilities    *sessionCapabilities `json:"capabilities"`
-	PtyAvailable    *bool                `json:"ptyAvailable"`
+	PtyAvailable    bool                 `json:"ptyAvailable"`
 	LeaseID         string               `json:"leaseId"`
 	AttachURL       string               `json:"attachUrl"`
 	VNCURL          string               `json:"vncUrl"`
@@ -798,39 +798,31 @@ func (c *apiClient) transcript(ctx context.Context, id string) (string, error) {
 }
 
 func (c *apiClient) message(ctx context.Context, id string, message string, enter bool) error {
-	path := "/api/ssh/interactive-sessions/" + url.PathEscape(id) + "/pty"
-	apiPath, authMode, err := c.authenticatedPath(path)
+	_, authMode, err := c.authenticatedPath("/api/terminal/ws")
 	if err != nil {
 		return err
 	}
-	u, err := url.Parse(c.baseURL)
+	endpoint, err := terminalws.Endpoint(c.baseURL)
 	if err != nil {
 		return err
 	}
-	switch u.Scheme {
-	case "https":
-		u.Scheme = "wss"
-	default:
-		u.Scheme = "ws"
-	}
-	u.Path = apiPath
-	q := u.Query()
-	q.Set("cols", "120")
-	q.Set("rows", "34")
-	u.RawQuery = q.Encode()
 
 	headers := http.Header{}
 	c.setAuthHeaders(headers, authMode)
-	ws, _, err := websocket.Dial(ctx, u.String(), &websocket.DialOptions{HTTPHeader: headers})
+	client, err := terminalws.Dial(ctx, endpoint, id, terminalws.Options{
+		Header: headers,
+		Cols:   120,
+		Rows:   34,
+	})
 	if err != nil {
 		return err
 	}
-	defer ws.Close(websocket.StatusNormalClosure, "")
+	defer client.Close()
 	payload := message
 	if enter {
 		payload += "\n"
 	}
-	return ws.Write(ctx, websocket.MessageBinary, []byte(payload))
+	return client.SendInput(ctx, []byte(payload))
 }
 
 func (c *apiClient) updateSummary(ctx context.Context, id string, summary string, purpose string) (interactiveSession, error) {
@@ -1193,25 +1185,7 @@ func terminalCapable(session interactiveSession) bool {
 }
 
 func ptyAttachable(session interactiveSession) bool {
-	if session.PtyAvailable != nil {
-		return *session.PtyAvailable
-	}
-	if strings.HasPrefix(session.LeaseID, "sandbox:") || strings.HasPrefix(session.LeaseID, "cloudflare:") {
-		return true
-	}
-	return strings.HasPrefix(session.AttachURL, "/api/interactive-sessions/") || validWebSocketAttachURL(session.AttachURL)
-}
-
-func validWebSocketAttachURL(raw string) bool {
-	target, err := url.Parse(raw)
-	if err != nil || target.Host == "" || target.User != nil {
-		return false
-	}
-	if target.Scheme == "wss" {
-		return true
-	}
-	host := target.Hostname()
-	return target.Scheme == "ws" && (host == "localhost" || host == "127.0.0.1" || host == "::1")
+	return session.PtyAvailable
 }
 
 func isTerminal(file *os.File) bool {

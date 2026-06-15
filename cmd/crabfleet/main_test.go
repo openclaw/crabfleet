@@ -206,38 +206,28 @@ func TestLegacyProviderCleanupWarningRequiresConfirmedLegacyStop(t *testing.T) {
 	}
 }
 
-func TestAttachableRequiresReadySessionWithAttachURL(t *testing.T) {
-	if !attachable(interactiveSession{Status: "ready", AttachURL: "/api/interactive-sessions/IS-1/pty"}) {
-		t.Fatal("ready session with sandbox attach URL should be attachable")
+func TestAttachableRequiresAuthoritativePTYAvailability(t *testing.T) {
+	if !attachable(interactiveSession{Status: "ready", PtyAvailable: true}) {
+		t.Fatal("ready session with an available PTY should be attachable")
 	}
 	if attachable(interactiveSession{Status: "pending_adapter", LeaseID: "sandbox:test"}) {
 		t.Fatal("pending session should not be attachable")
 	}
-	if attachable(interactiveSession{Status: "ready", AttachURL: "https://example.com/console"}) {
-		t.Fatal("http console URL should not be SSH attachable")
-	}
-	if attachable(interactiveSession{Status: "ready", AttachURL: "ws://example.com/terminal"}) {
-		t.Fatal("insecure remote websocket should not be attachable")
-	}
-	if !attachable(interactiveSession{Status: "ready", AttachURL: "ws://127.0.0.1:9000/terminal"}) {
-		t.Fatal("loopback websocket should be attachable")
-	}
-	if !attachable(interactiveSession{Status: "ready", LeaseID: "sandbox:test"}) {
-		t.Fatal("sandbox lease should be attachable")
+	if attachable(interactiveSession{Status: "ready", AttachURL: "/api/terminal/ws"}) {
+		t.Fatal("attach URL must not override missing PTY availability")
 	}
 	if attachable(interactiveSession{
 		Status:       "ready",
 		LeaseID:      "sandbox:test",
-		AttachURL:    "/api/interactive-sessions/IS-1/pty",
+		PtyAvailable: true,
 		Capabilities: &sessionCapabilities{Terminal: false},
 	}) {
 		t.Fatal("session with withdrawn terminal capability should not be attachable")
 	}
-	available := false
 	if attachable(interactiveSession{
 		Status:       "ready",
 		LeaseID:      "sandbox:test",
-		PtyAvailable: &available,
+		PtyAvailable: false,
 	}) {
 		t.Fatal("server PTY availability should be authoritative")
 	}

@@ -52,7 +52,7 @@ The web app at [crabfleet.openclaw.ai/app](https://crabfleet.openclaw.ai/app/) e
 - Deployment-configured Crabbox runtime profiles with generic labels, server-side allowlisting, and capability previews.
 - Ghostty WASM fullscreen session grid with live multiplex PTY attach, D1 replay, sharing, delegated control, multiplayer attribution, and clipboard upload for Sandbox sessions.
 - Provider-backed workspace inspection, reconciliation, transient desktop connection minting, and confirmed deletion.
-- Session supervision trees, summaries, transcripts, direct PTY messaging, checkpoints, and restore.
+- Session supervision trees, summaries, transcripts, framed PTY messaging, checkpoints, and restore.
 - Durable GitHub Actions sessions with outbound runner PTYs, work-state heartbeats, and browser steering.
 - R2 event, transcript, and summary archives with retryable finalization and cleanup.
 - Card diff metadata and compact patch view.

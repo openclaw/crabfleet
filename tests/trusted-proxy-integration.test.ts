@@ -77,6 +77,8 @@ test("service-token routes bypass only the mandatory proxy assertion", async () 
   for (const prefix of ["/api/ssh/", "/api/agent/", "/api/openclaw/", "/api/provision/"]) {
     assert.match(serviceSource, new RegExp(prefix.replaceAll("/", "\\/")));
   }
+  assert.match(serviceSource, /pathname === "\/api\/terminal\/ws"/);
+  assert.match(serviceSource, /hasAuthorization && \(hasSshIdentity \|\| hasAgentIdentity\)/);
   assert.match(source, /requestAuth\.kind === "missing"\) throw unauthorized\(\)/);
   assert.match(source, /trustedProxy\.kind === "rejected"/);
   assert.match(

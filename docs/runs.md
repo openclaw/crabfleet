@@ -123,7 +123,7 @@ Cloudflare runner configuration:
 
 Runner PTY contract:
 
-- Crabfleet accepts the browser WebSocket on `/api/terminal/ws` and multiplexes one or more subscribed sessions.
+- Crabfleet accepts browser, CLI, agent, and SSH gateway WebSockets on `/api/terminal/ws` and multiplexes one or more subscribed sessions.
 - Crabfleet connects upstream to the configured bridge with `Upgrade: websocket`.
 - Browser-to-Crabfleet messages use binary terminal frames for subscribe, input, resize, and stop.
 - Runner-to-browser output is wrapped in terminal output frames with session IDs.

@@ -145,11 +145,11 @@ Important invariants:
 - Provider terminal URLs stay server-side; browsers receive Worker-owned PTY routes.
 - Desktop URLs are transient, reauthorized after minting, never persisted, and redirected without rewriting signed bytes.
 
-Cron runs every minute. Direct state, PTY, and desktop access also schedule bounded targeted reconciliation.
+Cron runs every minute. Foreground state, terminal subscription, and desktop access also schedule bounded targeted reconciliation.
 
 ## Terminal And Desktop
 
-The browser opens one multiplex `/api/terminal/ws` connection and subscribes to visible sessions. The Worker:
+Browser, CLI, agent, and SSH gateway clients use the multiplex `/api/terminal/ws` protocol and subscribe to visible sessions. The Worker:
 
 - rechecks D1 authorization without waiting on provider I/O;
 - forwards input only for the current controller;
