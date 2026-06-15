@@ -124,7 +124,7 @@ import {
   type AdapterWorkspaceResult,
 } from "./runtime-adapter";
 import { allocateInteractiveSessionIdSql, formatInteractiveSessionId } from "./session-id";
-import { configuredHttpOrigin, developmentIdentityEnabled } from "./url-security";
+import { developmentIdentityEnabled } from "./url-security";
 import { D1Connection } from "./d1-execution";
 import { preferredEnabledRepo } from "./repo-selection";
 import { sandboxGitAuthorEmail } from "./git-identity";
@@ -162,98 +162,25 @@ import {
   type CredentialPolicyLegacyMigration,
 } from "./credential-policy-fence";
 import {
-  parseRuntimeProfiles,
   resolveRuntimeProfileCodexSsh,
   runtimeProfileByID,
   runtimeProfileCapabilities,
   type ResolvedRuntimeProfileCodexSsh,
-  type RuntimeProfileDescriptor,
 } from "./runtime-profiles";
+import {
+  browserAppOrigin,
+  clientDeploymentConfig,
+  defaultPreferredRepo,
+  deploymentConfig,
+  publicDeploymentConfig,
+  selectedRuntimeProfile,
+} from "./worker/deployment";
+import type { RuntimeEnv } from "./worker/env";
 
 type Role = "viewer" | "maintainer" | "owner";
 type InteractiveRuntime = "crabbox" | "container" | "github_actions";
 
 const defaultInteractiveCommand = "codex --yolo";
-
-type DeploymentConfig = {
-  label: string;
-  canonicalUrl: string;
-  productUrl: string;
-  sshHost: string;
-  preferredRepo: string;
-  defaultRuntime: "crabbox" | "container";
-  defaultProfile: string;
-  runtimeProfiles: RuntimeProfileDescriptor[];
-};
-
-type PublicDeploymentConfig = Pick<
-  DeploymentConfig,
-  "label" | "canonicalUrl" | "productUrl" | "sshHost"
->;
-
-type RuntimeEnv = Env & {
-  DB: D1Database;
-  BACKUP_BUCKET?: R2Bucket;
-  SESSION_LOGS?: R2Bucket;
-  SANDBOX?: DurableObjectNamespace<CloudflareSandbox>;
-  SESSION_CONTROL?: DurableObjectNamespace<SessionControlDO>;
-  CRABBOX_BOOTSTRAP_TOKEN?: string;
-  GITHUB_CLIENT_ID?: string;
-  GITHUB_CLIENT_SECRET?: string;
-  GITHUB_REDIRECT_URI?: string;
-  GITHUB_TOKEN?: string;
-  GITHUB_ORG?: string;
-  CRABBOX_INTERACTIVE_PROVISION_URL?: string;
-  CRABBOX_INTERACTIVE_PROVISION_TOKEN?: string;
-  CRABBOX_STANDALONE_SANDBOX_TTL_SECONDS?: string;
-  CRABBOX_RUNTIME_PROVISION_URL?: string;
-  CRABBOX_RUNTIME_PROVISION_TOKEN?: string;
-  CRABBOX_RUNTIME_ADAPTER_URL?: string;
-  CRABBOX_RUNTIME_ADAPTER_URL_TEMPLATE?: string;
-  CRABBOX_RUNTIME_ADAPTER_TOKEN?: string;
-  CRABBOX_RUNTIME_ADAPTER_NAMESPACE?: string;
-  CRABBOX_RUNTIME_ADAPTER_TTL_SECONDS?: string;
-  CRABBOX_RUNTIME_ADAPTER_IDLE_SECONDS?: string;
-  CRABBOX_COORDINATOR?: Fetcher;
-  CRABBOX_COORDINATOR_ORIGIN?: string;
-  CRABBOX_CLOUDFLARE_RUNNER_URL?: string;
-  CRABBOX_CLOUDFLARE_RUNNER_TOKEN?: string;
-  CRABBOX_CLOUDFLARE_RUNNER_INSTANCE_TYPE?: string;
-  CRABBOX_CLOUDFLARE_RUNNER_WORKDIR?: string;
-  CRABBOX_CLOUDFLARE_RUNNER_TTL_SECONDS?: string;
-  CRABBOX_CLOUDFLARE_RUNNER_IDLE_SECONDS?: string;
-  CRABBOX_PTY_BRIDGE_URL?: string;
-  CRABBOX_PTY_BRIDGE_TOKEN?: string;
-  CRABBOX_CLAWFLEET_URL?: string;
-  CRABBOX_CLAWFLEET_TOKEN?: string;
-  CRABBOX_CLAWFLEET_PUBLIC_URL?: string;
-  CRABBOX_SSH_GATEWAY_TOKEN?: string;
-  CRABFLEET_SSH_GATEWAY_TOKEN?: string;
-  CRABBOX_OPENCLAW_TOKEN?: string;
-  CRABBOX_MULTICODEX_TOKEN?: string;
-  CRABBOX_TOKEN_ENCRYPTION_KEY?: string;
-  BACKUP_BUCKET_NAME?: string;
-  CLOUDFLARE_ACCOUNT_ID?: string;
-  CRABFLEET_LOCAL_SANDBOX_BACKUPS?: string;
-  CRABFLEET_LABEL?: string;
-  CRABFLEET_CANONICAL_URL?: string;
-  CRABFLEET_PRODUCT_URL?: string;
-  CRABFLEET_SSH_HOST?: string;
-  CRABFLEET_PREFERRED_REPO?: string;
-  CRABFLEET_DEFAULT_RUNTIME?: string;
-  CRABFLEET_DEFAULT_PROFILE?: string;
-  CRABFLEET_RUNTIME_PROFILES_JSON?: string;
-  CRABFLEET_DEV_LOGIN_ENABLED?: string;
-  CRABFLEET_TRUSTED_PROXY_ORIGIN?: string;
-  CRABFLEET_TRUSTED_PROXY_PUBLIC_ORIGIN?: string;
-  CRABFLEET_TRUSTED_USER_HEADER?: string;
-  CRABFLEET_TRUSTED_PROXY_SECRET?: string;
-  OPENAI_API_KEY?: string;
-  OPENAI_BASE_URL?: string;
-  OPENAI_ORG_ID?: string;
-  R2_ACCESS_KEY_ID?: string;
-  R2_SECRET_ACCESS_KEY?: string;
-};
 
 const sandboxPlaceholderOpenAIKey = "crabfleet-worker-injected";
 const sandboxPlaceholderGitHubToken = "crabfleet-worker-injected";
@@ -1044,7 +971,6 @@ const githubSessionSeconds = 60 * 15;
 const sshLinkSeconds = 5 * 60;
 const terminalClipboardMaxBytes = 10 * 1024 * 1024;
 const lanes = ["Todo", "Running", "Human Review", "Done"];
-const preferredRepo = "openclaw/crabfleet";
 const sandboxLeasePrefix = "sandbox:";
 const sandboxLeaseProfile = "autostart-v4";
 const activeRunStatuses: readonly RunStatus[] = ["queued", "leasing", "running"];
@@ -1102,62 +1028,6 @@ function runtimeAdapterCreateSettings(
     idleTimeoutSeconds: clampedSeconds(env.CRABBOX_RUNTIME_ADAPTER_IDLE_SECONDS, 1_800),
     capabilities,
   };
-}
-
-function deploymentConfig(env: RuntimeEnv): DeploymentConfig {
-  const defaultProfile = clean(env.CRABFLEET_DEFAULT_PROFILE, 120) || "default";
-  const runtimeProfiles = parseRuntimeProfiles(env.CRABFLEET_RUNTIME_PROFILES_JSON);
-  if (runtimeProfiles.length > 0 && !runtimeProfileByID(runtimeProfiles, defaultProfile)) {
-    throw new TypeError("CRABFLEET_DEFAULT_PROFILE must name a configured runtime profile");
-  }
-  return {
-    label: clean(env.CRABFLEET_LABEL, 80) || "Crabfleet",
-    canonicalUrl: configuredHttpOrigin(env.CRABFLEET_CANONICAL_URL, appCanonicalOrigin),
-    productUrl: configuredHttpOrigin(env.CRABFLEET_PRODUCT_URL, "https://crabfleet.ai"),
-    sshHost: clean(env.CRABFLEET_SSH_HOST, 240) || "crabd.sh",
-    preferredRepo: normalizeRepo(env.CRABFLEET_PREFERRED_REPO) || preferredRepo,
-    defaultRuntime: oneOf(
-      env.CRABFLEET_DEFAULT_RUNTIME,
-      ["crabbox", "container"] as const,
-      "container",
-    ),
-    defaultProfile,
-    runtimeProfiles,
-  };
-}
-
-function selectedRuntimeProfile(
-  deployment: DeploymentConfig,
-  value: unknown,
-): { profile: string; descriptor: RuntimeProfileDescriptor | undefined } {
-  const profile = clean(value, 120) || deployment.defaultProfile;
-  const descriptor = runtimeProfileByID(deployment.runtimeProfiles, profile);
-  if (deployment.runtimeProfiles.length > 0 && !descriptor) {
-    throw badRequest("profile is not configured");
-  }
-  return { profile, descriptor };
-}
-
-function publicDeploymentConfig(env: RuntimeEnv): PublicDeploymentConfig {
-  const { label, canonicalUrl, productUrl, sshHost } = deploymentConfig(env);
-  return {
-    label,
-    canonicalUrl: trustedProxyPublicOrigin(env) ?? canonicalUrl,
-    productUrl,
-    sshHost,
-  };
-}
-
-function clientDeploymentConfig(env: RuntimeEnv): DeploymentConfig {
-  const config = deploymentConfig(env);
-  return {
-    ...config,
-    runtimeProfiles: config.runtimeProfiles.map(({ codexSsh: _serverOnly, ...profile }) => profile),
-  };
-}
-
-function browserAppOrigin(env: RuntimeEnv): string {
-  return trustedProxyPublicOrigin(env) ?? deploymentConfig(env).canonicalUrl;
 }
 
 class D1Dialect implements Dialect {
@@ -16525,11 +16395,11 @@ function numberSetting(value: string | undefined, fallback: number): number {
   return Number.isFinite(parsed) ? parsed : fallback;
 }
 
-function sortRepos(repos: string[], preferred = preferredRepo): string[] {
+function sortRepos(repos: string[], preferred = defaultPreferredRepo): string[] {
   return [...repos].sort((left, right) => sortRepoNames(left, right, preferred));
 }
 
-function sortRepoNames(left: string, right: string, preferred = preferredRepo): number {
+function sortRepoNames(left: string, right: string, preferred = defaultPreferredRepo): number {
   if (left === preferred) return -1;
   if (right === preferred) return 1;
   return left.localeCompare(right);

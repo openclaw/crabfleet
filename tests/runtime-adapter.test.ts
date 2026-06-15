@@ -36,6 +36,11 @@ import {
   shouldReplayRuntimeAdapterCreate,
   validatedRuntimeAdapterCreatePayloadJson,
 } from "../src/runtime-adapter.ts";
+import {
+  deploymentConfig,
+  publicDeploymentConfig,
+  selectedRuntimeProfile,
+} from "../src/worker/deployment.ts";
 
 test("adapter create payload matches the strict controller contract", () => {
   const payload = runtimeAdapterCreatePayload({
@@ -111,9 +116,6 @@ test("configured profiles fence every adapter runtime and preserve requested cap
   const createStart = source.indexOf("async function createInteractiveSessionFromInput");
   const createEnd = source.indexOf("function initialRuntimeAdapterWorkspaceId", createStart);
   const createSource = source.slice(createStart, createEnd);
-  const profileStart = source.indexOf("function selectedRuntimeProfile");
-  const profileEnd = source.indexOf("function publicDeploymentConfig", profileStart);
-  const profileSource = source.slice(profileStart, profileEnd);
   const resultStart = source.indexOf("function runtimeAdapterProvisionResult");
   const resultEnd = source.indexOf(
     "async function reconcileStoppingRuntimeAdapterWorkspace",
@@ -122,7 +124,12 @@ test("configured profiles fence every adapter runtime and preserve requested cap
   const resultSource = source.slice(resultStart, resultEnd);
 
   assert.match(createSource, /selectedRuntimeProfile\(deployment, body\.profile\)/);
-  assert.match(profileSource, /deployment\.runtimeProfiles\.length > 0 && !descriptor/);
+  const deployment = deploymentConfig({
+    CRABFLEET_DEFAULT_PROFILE: "linux",
+    CRABFLEET_RUNTIME_PROFILES_JSON: JSON.stringify([{ id: "linux", label: "Linux" }]),
+  });
+  assert.equal(selectedRuntimeProfile(deployment, "linux").descriptor?.id, "linux");
+  assert.throws(() => selectedRuntimeProfile(deployment, "unknown"), /profile is not configured/);
   assert.match(resultSource, /session\.adapterRequestedCapabilities \?\?/);
   assert.match(resultSource, /profile: session\.profile/);
   assert.doesNotMatch(resultSource, /profile: result\.profile/);
@@ -735,15 +742,25 @@ test("recurring terminal authorization never awaits provider reconciliation", as
   assert.doesNotMatch(bridgeSource, /await reconcileSubscription/);
 });
 
-test("public auth deployment metadata excludes runtime routing", async () => {
-  const source = await readFile(new URL("../src/index.ts", import.meta.url), "utf8");
-  const publicStart = source.indexOf("function publicDeploymentConfig");
-  const publicEnd = source.indexOf("class D1Dialect", publicStart);
-  const publicSource = source.slice(publicStart, publicEnd);
-
-  assert.match(source, /deployment: publicDeploymentConfig\(env\)/);
-  assert.match(publicSource, /label, canonicalUrl, productUrl, sshHost/);
-  assert.doesNotMatch(publicSource, /preferredRepo|defaultRuntime|defaultProfile|RUNTIME_ADAPTER/);
+test("public auth deployment metadata excludes runtime routing", () => {
+  assert.deepEqual(
+    publicDeploymentConfig({
+      CRABFLEET_LABEL: "Tenant Fleet",
+      CRABFLEET_CANONICAL_URL: "https://fleet.example",
+      CRABFLEET_PREFERRED_REPO: "private/repo",
+      CRABFLEET_DEFAULT_RUNTIME: "crabbox",
+      CRABFLEET_DEFAULT_PROFILE: "desktop",
+      CRABFLEET_RUNTIME_PROFILES_JSON: JSON.stringify([
+        { id: "desktop", label: "Desktop", target: "provider-a" },
+      ]),
+    }),
+    {
+      label: "Tenant Fleet",
+      canonicalUrl: "https://fleet.example",
+      productUrl: "https://crabfleet.ai",
+      sshHost: "crabd.sh",
+    },
+  );
 });
 
 test("worker deployment installs the shared runtime adapter credential", async () => {

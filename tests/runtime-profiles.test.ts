@@ -2,6 +2,11 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import { test } from "node:test";
 import {
+  clientDeploymentConfig,
+  deploymentConfig,
+  selectedRuntimeProfile,
+} from "../src/worker/deployment.ts";
+import {
   parseRuntimeProfiles,
   resolveRuntimeProfileCodexSsh,
   runtimeProfileByID,
@@ -174,19 +179,32 @@ test("runtime profiles resolve bounded manager-only Codex SSH handoff data", asy
     decoration,
     /configuredRuntimeAdapterControlPlane\(env, session\.profile\) ===\s+session\[interactiveSessionAdapterControlPlane\]/,
   );
-  const clientConfigStart = source.indexOf("function clientDeploymentConfig");
-  const clientConfigEnd = source.indexOf("function browserAppOrigin", clientConfigStart);
-  assert.match(source.slice(clientConfigStart, clientConfigEnd), /codexSsh: _serverOnly/);
+  const client = clientDeploymentConfig({
+    CRABFLEET_DEFAULT_PROFILE: "linux",
+    CRABFLEET_RUNTIME_PROFILES_JSON: JSON.stringify([
+      {
+        id: "linux",
+        label: "Linux",
+        codexSsh: {
+          aliasTemplate: "codex-{providerResourceId}",
+          setupCommand: ["fleet-connect", "{providerResourceId}"],
+        },
+      },
+    ]),
+  });
+  assert.equal(client.runtimeProfiles[0]?.codexSsh, undefined);
 });
 
 test("profile allowlisting and capability withdrawals stay enforced at provisioning", async () => {
   const source = await readFile(new URL("../src/index.ts", import.meta.url), "utf8");
   const selectionStart = source.indexOf("const profile = clean(body.profile");
   assert.equal(selectionStart, -1);
-  const helperStart = source.indexOf("function selectedRuntimeProfile");
-  const helperEnd = source.indexOf("function publicDeploymentConfig", helperStart);
-  const helper = source.slice(helperStart, helperEnd);
-  assert.match(helper, /deployment\.runtimeProfiles\.length > 0 && !descriptor/);
+  const deployment = deploymentConfig({
+    CRABFLEET_DEFAULT_PROFILE: "linux",
+    CRABFLEET_RUNTIME_PROFILES_JSON: JSON.stringify([{ id: "linux", label: "Linux" }]),
+  });
+  assert.equal(selectedRuntimeProfile(deployment, "linux").descriptor?.id, "linux");
+  assert.throws(() => selectedRuntimeProfile(deployment, "unknown"), /profile is not configured/);
   assert.ok(source.indexOf("selectedRuntimeProfile(deploymentConfig(env), session.profile)") > 0);
 
   const resultStart = source.indexOf("function runtimeAdapterProvisionResult");

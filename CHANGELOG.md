@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Extract Worker environment and deployment/profile policy into testable foundation modules, replacing source inspection with behavioral coverage for public and client configuration.
 - Centralize secure URL, origin, and literal-loopback validation across OAuth, trusted proxy, runtime adapter, and Fleet routing.
 - De-duplicate the Go CLI and SSH gateway around shared control-plane models, authentication, lifecycle semantics, API calls, terminal operations, and terminal-safe session rendering.
 - Unify managed terminal clients on the multiplex `/api/terminal/ws` protocol, remove direct PTY routes, and share one framed Go transport across the CLI and SSH gateway.
