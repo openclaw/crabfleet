@@ -4,9 +4,13 @@ import test from "node:test";
 import type { RuntimeEnv } from "../src/worker/env.ts";
 import {
   buildInteractiveSessionReservationValues,
+  countInteractiveSessionEvents,
   insertInteractiveSessionReservation,
   markInteractiveSessionPendingAdapter,
   persistInteractiveSessionProvisionResult,
+  readInteractiveSessionEventRows,
+  readInteractiveSessionLogArchives,
+  readInteractiveSessionLogs,
   readVisibleInteractiveSessionRow,
   readVisibleInteractiveSessionRows,
 } from "../src/worker/session-repository.ts";
@@ -137,6 +141,121 @@ test("visible session reads exclude preparation reservations and stay bounded", 
     ["IS-2"],
   );
   assert.equal(calls, 2);
+});
+
+test("session log reads keep the newest bounded window in chronological order", async () => {
+  let queries = 0;
+  const logs = await readInteractiveSessionLogs(
+    runtimeEnv((sql, parameters, kind) => {
+      assert.equal(kind, "all");
+      queries += 1;
+      assert.match(sql, /row_number\(\) over/i);
+      assert.match(sql, /rank <= 80/i);
+      assert.match(sql, /order by session_id asc, created_at asc, id asc/i);
+      assert.deepEqual(parameters, ["IS-2", "IS-3"]);
+      return {
+        results: [
+          { session_id: "IS-2", message: "requested", created_at: 0 },
+          { session_id: "IS-2", message: "ready", created_at: 1000 },
+          { session_id: "IS-3", message: "requested", created_at: 2000 },
+        ],
+      };
+    }),
+    ["IS-2", "IS-2", "", "IS-3"],
+  );
+
+  assert.equal(queries, 1);
+  assert.equal(logs.get("IS-2")?.length, 2);
+  assert.match(logs.get("IS-2")?.[0] ?? "", /requested$/);
+  assert.match(logs.get("IS-2")?.[1] ?? "", /ready$/);
+  assert.match(logs.get("IS-3")?.[0] ?? "", /requested$/);
+  assert.deepEqual(
+    await readInteractiveSessionLogs(
+      runtimeEnv(() => ({})),
+      [],
+    ),
+    new Map(),
+  );
+});
+
+test("session archive reads map persistence rows by session", async () => {
+  const archives = await readInteractiveSessionLogArchives(
+    runtimeEnv((sql, parameters, kind) => {
+      assert.equal(kind, "all");
+      assert.match(sql, /from "interactive_session_log_archives"/i);
+      assert.deepEqual(parameters, ["IS-2"]);
+      return {
+        results: [
+          {
+            session_id: "IS-2",
+            event_count: 3,
+            events_key: "events.json",
+            transcript_key: "transcript.md",
+            summary_key: "summary.json",
+            archived_at: 100,
+            updated_at: 110,
+            session_updated_at: 105,
+          },
+        ],
+      };
+    }),
+    ["IS-2", "IS-2"],
+  );
+
+  assert.deepEqual(archives.get("IS-2"), {
+    sessionId: "IS-2",
+    eventCount: 3,
+    eventsKey: "events.json",
+    transcriptKey: "transcript.md",
+    summaryKey: "summary.json",
+    archivedAt: 100,
+    updatedAt: 110,
+  });
+});
+
+test("session event reads clamp newest windows and restore chronological order", async () => {
+  const rows = [
+    { id: 3, session_id: "IS-2", actor: "agent", message: "third", created_at: 30 },
+    { id: 2, session_id: "IS-2", actor: "agent", message: "second", created_at: 20 },
+  ];
+  const events = await readInteractiveSessionEventRows(
+    runtimeEnv((sql, parameters, kind) => {
+      assert.equal(kind, "all");
+      assert.match(sql, /order by "created_at" desc, "id" desc/i);
+      assert.match(sql, /limit/i);
+      assert.deepEqual(parameters, ["IS-2", 10000]);
+      return { results: rows };
+    }),
+    "IS-2",
+    { limit: 50_000, newest: true },
+  );
+
+  assert.deepEqual(
+    events.map((event) => event.id),
+    [2, 3],
+  );
+});
+
+test("session event counts normalize missing and persisted values", async () => {
+  assert.equal(
+    await countInteractiveSessionEvents(
+      runtimeEnv((sql, parameters, kind) => {
+        assert.equal(kind, "all");
+        assert.match(sql, /count\(\*\)/i);
+        assert.deepEqual(parameters, ["IS-2"]);
+        return { results: [{ count: 7 }] };
+      }),
+      "IS-2",
+    ),
+    7,
+  );
+  assert.equal(
+    await countInteractiveSessionEvents(
+      runtimeEnv(() => ({ results: [] })),
+      "IS-3",
+    ),
+    0,
+  );
 });
 
 test("session reservation inserts preparation and request identity in one batch", async () => {

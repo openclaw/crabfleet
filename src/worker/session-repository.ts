@@ -12,7 +12,12 @@ import type {
   InteractiveProvisionPersistenceInput,
   InteractiveProvisionResult,
 } from "./session-provisioning.ts";
-import type { RuntimeCapabilities } from "./session-model.ts";
+import {
+  interactiveSessionLogArchive,
+  type InteractiveSessionEventRow,
+  type InteractiveSessionLogArchive,
+  type RuntimeCapabilities,
+} from "./session-model.ts";
 
 export type InteractiveSessionReplayReservation = {
   requestId: string;
@@ -150,6 +155,78 @@ export async function readVisibleInteractiveSessionRow(
       .where("preparation_pending", "=", 0)
       .executeTakeFirst()) ?? null
   );
+}
+
+export async function readInteractiveSessionLogs(
+  env: RuntimeEnv,
+  ids: string[],
+): Promise<Map<string, string[]>> {
+  const uniqueIds = [...new Set(ids)].filter(Boolean);
+  if (!uniqueIds.length) return new Map();
+  const eventRows = (
+    await sql<{ session_id: string; message: string; created_at: number }>`
+      SELECT session_id, message, created_at
+      FROM (
+        SELECT session_id, message, created_at, id,
+          row_number() OVER (PARTITION BY session_id ORDER BY created_at DESC, id DESC) AS rank
+        FROM interactive_session_events
+        WHERE session_id IN (${sql.join(uniqueIds)})
+      )
+      WHERE rank <= 80
+      ORDER BY session_id ASC, created_at ASC, id ASC
+    `.execute(database(env))
+  ).rows;
+  const logs = new Map<string, string[]>();
+  for (const row of eventRows) {
+    const line = `${new Date(row.created_at).toLocaleTimeString("en-GB")} ${row.message}`;
+    logs.set(row.session_id, [...(logs.get(row.session_id) ?? []), line]);
+  }
+  return logs;
+}
+
+export async function readInteractiveSessionLogArchives(
+  env: RuntimeEnv,
+  ids: string[],
+): Promise<Map<string, InteractiveSessionLogArchive>> {
+  const uniqueIds = [...new Set(ids)].filter(Boolean);
+  if (!uniqueIds.length) return new Map();
+  const rows = await database(env)
+    .selectFrom("interactive_session_log_archives")
+    .selectAll()
+    .where("session_id", "in", uniqueIds)
+    .execute();
+  return new Map(rows.map((row) => [row.session_id, interactiveSessionLogArchive(row)]));
+}
+
+export async function readInteractiveSessionEventRows(
+  env: RuntimeEnv,
+  id: string,
+  options: { limit?: number; newest?: boolean } = {},
+): Promise<InteractiveSessionEventRow[]> {
+  const limit = options.limit ? Math.max(1, Math.min(10000, Math.floor(options.limit))) : 0;
+  const base = database(env)
+    .selectFrom("interactive_session_events")
+    .selectAll()
+    .where("session_id", "=", id);
+  if (limit && options.newest) {
+    const rows = await base
+      .orderBy("created_at", "desc")
+      .orderBy("id", "desc")
+      .limit(limit)
+      .execute();
+    return rows.reverse();
+  }
+  const ordered = base.orderBy("created_at", "asc").orderBy("id", "asc");
+  return (limit ? ordered.limit(limit) : ordered).execute();
+}
+
+export async function countInteractiveSessionEvents(env: RuntimeEnv, id: string): Promise<number> {
+  const row = await database(env)
+    .selectFrom("interactive_session_events")
+    .select(({ fn }) => fn.countAll<number>().as("count"))
+    .where("session_id", "=", id)
+    .executeTakeFirst();
+  return Number(row?.count ?? 0);
 }
 
 export async function insertInteractiveSessionReservation(
