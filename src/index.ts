@@ -69,6 +69,13 @@ import {
   githubOAuthRedirectUri,
 } from "./oauth";
 import {
+  cardScheduleSummary,
+  nextRecurringRunAt,
+  normalizeCardSchedule,
+  parseStoredCardSchedule,
+  type CardSchedule,
+} from "./recurring-cards";
+import {
   APP_HTML,
   GHOSTTY_BROWSER_EXTERNAL_JS,
   GHOSTTY_WEB_JS,
@@ -400,6 +407,9 @@ type Card = {
   logs: string[];
   changes: CardChanges;
   run: RunAttempt | null;
+  schedule: CardSchedule | null;
+  nextRunAt: number | null;
+  lastScheduledRunAt: number | null;
 };
 
 type DiffFileStatus = "added" | "deleted" | "modified" | "renamed";
@@ -787,6 +797,9 @@ type CardTable = {
   changed_files: string;
   diff_patch: string;
   active_run_id: string | null;
+  schedule_json: string;
+  next_run_at: number | null;
+  last_scheduled_run_at: number | null;
 };
 
 type RunAttemptTable = {
@@ -2029,8 +2042,14 @@ export default {
     env: RuntimeEnv,
     context: ExecutionContext,
   ): Promise<void> {
+    const now = Date.now();
     context.waitUntil(
-      reconcileInteractiveSessionLifecycleBatch(env, Date.now()).catch((error) => {
+      runSchedulerTick(env, now).catch((error) => {
+        console.error("scheduled recurring card tick failed", error);
+      }),
+    );
+    context.waitUntil(
+      reconcileInteractiveSessionLifecycleBatch(env, now).catch((error) => {
         console.error("scheduled interactive session reconciliation failed", error);
       }),
     );
@@ -2569,6 +2588,11 @@ async function api(
     const card = await readCard(env, cardId);
     if (!card) throw notFound("card not found");
     return json({ runs: await readRunsForCard(env, cardId) });
+  }
+
+  if (request.method === "POST" && url.pathname === "/api/admin/scheduler/tick") {
+    requireRole(user, "owner");
+    return json(await runSchedulerTick(env, Date.now()));
   }
 
   if (request.method === "PUT" && url.pathname === "/api/admin/policy") {
@@ -13591,6 +13615,7 @@ async function createCard(request: Request, env: RuntimeEnv, user: User): Promis
     source?: string;
     runtime?: string;
     policy?: string;
+    schedule?: unknown;
   }>(request);
   const prompt = clean(body.prompt, 4000);
   const title = clean(body.title, 140) || titleFromPrompt(prompt);
@@ -13604,6 +13629,7 @@ async function createCard(request: Request, env: RuntimeEnv, user: User): Promis
   const source = oneOf(body.source, ["Prompt", "Issue", "PR"], "Prompt");
   const runtime = oneOf(body.runtime, runtimeOptions, "auto");
   const policy = resolveCardPolicy(body.policy, workflowConfig);
+  const schedule = parseCreateCardSchedule(body.schedule);
   const owner = user.login ?? user.email ?? user.subject;
   const db = database(env);
   for (let attempt = 0; attempt < 3; attempt += 1) {
@@ -13628,6 +13654,9 @@ async function createCard(request: Request, env: RuntimeEnv, user: User): Promis
           changed_files: "[]",
           diff_patch: "",
           active_run_id: null,
+          schedule_json: schedule ? JSON.stringify(schedule) : "",
+          next_run_at: schedule ? nextRecurringRunAt(schedule, now, null) : null,
+          last_scheduled_run_at: null,
         })
         .execute();
       await db
@@ -13643,6 +13672,100 @@ async function createCard(request: Request, env: RuntimeEnv, user: User): Promis
     }
   }
   throw new Error("failed to allocate card id");
+}
+
+function parseCreateCardSchedule(input: unknown): CardSchedule | null {
+  try {
+    return normalizeCardSchedule(input);
+  } catch (error) {
+    throw badRequest(error instanceof Error ? error.message : "invalid schedule");
+  }
+}
+
+function safeStoredCardSchedule(value: unknown): CardSchedule | null {
+  try {
+    return parseStoredCardSchedule(value);
+  } catch {
+    return null;
+  }
+}
+
+type SchedulerTickResult = {
+  status: "ok";
+  now: number;
+  scanned: number;
+  queued: number;
+  skipped: number;
+  invalid: number;
+};
+
+async function runSchedulerTick(env: RuntimeEnv, now: number): Promise<SchedulerTickResult> {
+  await reconcileStalledRuns(env, now);
+  const system = systemUser();
+  const rows = (
+    await sql<{ id: string; schedule_json: string; next_run_at: number | null }>`
+      SELECT id, schedule_json, next_run_at
+      FROM cards
+      WHERE schedule_json != ''
+        AND next_run_at IS NOT NULL
+        AND next_run_at <= ${now}
+      ORDER BY next_run_at ASC
+      LIMIT 25
+    `.execute(database(env))
+  ).rows;
+  let queued = 0;
+  let skipped = 0;
+  let invalid = 0;
+  for (const row of rows) {
+    const schedule = safeStoredCardSchedule(row.schedule_json);
+    if (!schedule) {
+      invalid += 1;
+      await appendEvent(
+        env,
+        row.id,
+        system,
+        "recurring schedule invalid; human review required",
+        now,
+      );
+      continue;
+    }
+    const card = await readCard(env, row.id);
+    if (!card) {
+      skipped += 1;
+      continue;
+    }
+    if (card.run && activeRunStatuses.includes(card.run.status)) {
+      skipped += 1;
+      await appendEvent(
+        env,
+        card.id,
+        system,
+        "recurring schedule skipped; run already active",
+        now,
+      );
+      continue;
+    }
+    const claimed = await claimRunning(env, system, card, now);
+    if (!claimed) {
+      skipped += 1;
+      continue;
+    }
+    const nextRunAt = nextRecurringRunAt(schedule, now, now);
+    await database(env)
+      .updateTable("cards")
+      .set({ next_run_at: nextRunAt, last_scheduled_run_at: now })
+      .where("id", "=", card.id)
+      .execute();
+    await appendEvent(
+      env,
+      card.id,
+      system,
+      `recurring schedule queued (${cardScheduleSummary(schedule)}); next ${new Date(nextRunAt).toISOString()}`,
+      now + 4,
+    );
+    queued += 1;
+  }
+  return { status: "ok", now, scanned: rows.length, queued, skipped, invalid };
 }
 
 async function claimRunning(
@@ -14201,6 +14324,9 @@ async function readCards(env: RuntimeEnv): Promise<Card[]> {
       "created_at",
       "changed_files",
       "active_run_id",
+      "schedule_json",
+      "next_run_at",
+      "last_scheduled_run_at",
     ])
     .orderBy("updated_at", "desc")
     .orderBy("created_at", "desc")
@@ -14240,6 +14366,9 @@ async function readCards(env: RuntimeEnv): Promise<Card[]> {
     logs: logs.get(card.id) ?? [],
     changes: cardChanges(card.changed_files, ""),
     run: card.active_run_id ? (runs.get(card.active_run_id) ?? null) : null,
+    schedule: safeStoredCardSchedule(card.schedule_json),
+    nextRunAt: card.next_run_at,
+    lastScheduledRunAt: card.last_scheduled_run_at,
   }));
 }
 
@@ -14262,6 +14391,9 @@ async function readCard(env: RuntimeEnv, id: string): Promise<Card | null> {
       "changed_files",
       "diff_patch",
       "active_run_id",
+      "schedule_json",
+      "next_run_at",
+      "last_scheduled_run_at",
     ])
     .where("id", "=", id)
     .executeTakeFirst();
@@ -14297,6 +14429,9 @@ async function readCard(env: RuntimeEnv, id: string): Promise<Card | null> {
     ),
     changes: cardChanges(card.changed_files, card.diff_patch),
     run: card.active_run_id ? (runs.get(card.active_run_id) ?? null) : null,
+    schedule: safeStoredCardSchedule(card.schedule_json),
+    nextRunAt: card.next_run_at,
+    lastScheduledRunAt: card.last_scheduled_run_at,
   };
 }
 

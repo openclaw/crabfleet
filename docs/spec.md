@@ -414,3 +414,15 @@ Every push to `main` runs checks, tests, builds, migrations, deploys, and endpoi
 - [GitHub Actions Sessions](/github-actions-sessions/)
 - [Native macOS Client](/macos-native-client/)
 - [Fleet v2 Implementation Record](/spec-v2/)
+
+## Recurring cards
+
+Recurring work is modeled as a card schedule, not as an infinite process loop.
+
+MVP schedule shape:
+
+    { "kind": "interval", "everyMs": 86400000 }
+
+When `nextRunAt` is due, the scheduler queues a normal run attempt for the card and computes the next due timestamp. Active runs are not duplicated; a due card with an active run is skipped until the next tick.
+
+This allows daily operational sweeps, maintenance checks, and recurring repair jobs to remain visible in the normal card/run history.
