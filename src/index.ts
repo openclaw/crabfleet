@@ -3525,7 +3525,9 @@ async function openClawMutateSessionRoot(
         return;
       }
       await runOpenClawRootOperationBeforeDeadline(deadline, () =>
-        mutateInteractiveSession(request, env, serviceUser, session.id, "stop").then(() => undefined),
+        mutateInteractiveSession(request, env, serviceUser, session.id, "stop").then(
+          () => undefined,
+        ),
       );
     });
     if (Date.now() >= deadline) break;
@@ -3677,7 +3679,9 @@ async function openClawMessageCrabbox(
   id: string,
 ): Promise<{ delivered: true; session: InteractiveSession; browserUrl: string }> {
   requireOpenClawRoomService(request, env);
-  const body = await readJson<{ rootSessionId?: string; message?: string; enter?: boolean }>(request);
+  const body = await readJson<{ rootSessionId?: string; message?: string; enter?: boolean }>(
+    request,
+  );
   const session = await openClawRootScopedCrabbox(request, env, id, body.rootSessionId);
   if (["stopping", "stopped", "expired", "failed"].includes(session.status)) {
     throw badRequest(`session is ${session.status}`);
@@ -3689,7 +3693,13 @@ async function openClawMessageCrabbox(
   if (!message) throw badRequest("message is required");
   const serviceUser = openClawServiceUser();
   const now = Date.now();
-  await appendInteractiveSessionEvent(env, id, serviceUser, "OpenClaw service nudge requested", now);
+  await appendInteractiveSessionEvent(
+    env,
+    id,
+    serviceUser,
+    "OpenClaw service nudge requested",
+    now,
+  );
   await audit(env, serviceUser, `openclaw crabbox message requested ${id}`, now);
   const terminalRequest = new Request(request.url, { headers: { upgrade: "websocket" } });
   const upstream = await openInteractiveTerminalUpstream(
@@ -3755,11 +3765,7 @@ async function openClawRootScopedCrabbox(
   const root = await readInteractiveSession(env, rootSessionId);
   const chain =
     session && root ? await openClawReadSessionChain(env, session, root, rootSessionId) : [];
-  if (
-    !session ||
-    !root ||
-    !openClawRoomSessionChainAllowed(chain, session.id, rootSessionId)
-  ) {
+  if (!session || !root || !openClawRoomSessionChainAllowed(chain, session.id, rootSessionId)) {
     throw notFound("interactive session not found");
   }
   const refreshed = await readFreshInteractiveSession(env, id);
@@ -5124,73 +5130,71 @@ async function createInteractiveSessionFromInput(
       ? JSON.stringify(adapterCreatePayload)
       : null;
     try {
-      const insertSession = db
-        .insertInto("interactive_sessions")
-        .values({
-          id,
-          parent_session_id: lineage.parentSessionId,
-          root_session_id: rootSessionId,
-          repo,
-          branch,
-          runtime,
-          adapter: adapterWorkspaceId && !preparationReservation ? runtimeAdapterName : null,
-          profile,
-          adapter_workspace_id: adapterWorkspaceId,
-          adapter_control_plane: adapterControlPlane,
-          provider_resource_id: null,
-          capabilities_json: JSON.stringify(requestedCapabilities),
-          expires_at: null,
-          last_reconciled_at: adapterWorkspaceId && !preparationReservation ? now : null,
-          reconcile_error:
-            adapterWorkspaceId && !preparationReservation ? "runtime adapter create pending" : null,
-          terminal_status: null,
-          adapter_ttl_seconds: adapterSettings?.ttlSeconds ?? null,
-          adapter_idle_timeout_seconds: adapterSettings?.idleTimeoutSeconds ?? null,
-          adapter_requested_capabilities_json: adapterSettings
-            ? JSON.stringify(adapterSettings.capabilities)
-            : null,
-          adapter_create_payload_json: adapterCreatePayloadJson,
-          adapter_create_pending: adapterWorkspaceId && !preparationReservation ? 1 : 0,
-          preparation_pending: preparationReservation ? 1 : 0,
-          openclaw_request_id: options.openClawRequestId ?? null,
-          openclaw_request_hash: options.openClawRequestHash ?? null,
-          openclaw_admission_closed: 0,
-          command,
-          prompt,
-          purpose,
-          summary,
-          owner,
-          created_by: createdBy,
-          status: "provisioning",
-          lease_id: initialSandboxOwnership?.leaseId ?? null,
-          attach_url: null,
-          vnc_url: null,
-          last_event: "interactive workspace requested",
-          created_at: now,
-          updated_at: now,
-          last_seen_at: now,
-          stopped_at: null,
-          share_mode: "private",
-          share_token_hash: null,
-          share_token_preview: null,
-          control_requested_by: null,
-          control_requested_at: null,
-          controller: null,
-          control_granted_at: null,
-          control_expires_at: null,
-          multiplayer_mode: 0,
-          agent_token_hash: initialAgentTokenHash,
-          work_key: null,
-          work_kind: null,
-          work_state: "",
-          work_phase: "",
-          source_url: null,
-          github_run_url: null,
-          codex_thread_id: null,
-          codex_turn_id: null,
-          last_heartbeat_at: null,
-          completion_reason: null,
-        });
+      const insertSession = db.insertInto("interactive_sessions").values({
+        id,
+        parent_session_id: lineage.parentSessionId,
+        root_session_id: rootSessionId,
+        repo,
+        branch,
+        runtime,
+        adapter: adapterWorkspaceId && !preparationReservation ? runtimeAdapterName : null,
+        profile,
+        adapter_workspace_id: adapterWorkspaceId,
+        adapter_control_plane: adapterControlPlane,
+        provider_resource_id: null,
+        capabilities_json: JSON.stringify(requestedCapabilities),
+        expires_at: null,
+        last_reconciled_at: adapterWorkspaceId && !preparationReservation ? now : null,
+        reconcile_error:
+          adapterWorkspaceId && !preparationReservation ? "runtime adapter create pending" : null,
+        terminal_status: null,
+        adapter_ttl_seconds: adapterSettings?.ttlSeconds ?? null,
+        adapter_idle_timeout_seconds: adapterSettings?.idleTimeoutSeconds ?? null,
+        adapter_requested_capabilities_json: adapterSettings
+          ? JSON.stringify(adapterSettings.capabilities)
+          : null,
+        adapter_create_payload_json: adapterCreatePayloadJson,
+        adapter_create_pending: adapterWorkspaceId && !preparationReservation ? 1 : 0,
+        preparation_pending: preparationReservation ? 1 : 0,
+        openclaw_request_id: options.openClawRequestId ?? null,
+        openclaw_request_hash: options.openClawRequestHash ?? null,
+        openclaw_admission_closed: 0,
+        command,
+        prompt,
+        purpose,
+        summary,
+        owner,
+        created_by: createdBy,
+        status: "provisioning",
+        lease_id: initialSandboxOwnership?.leaseId ?? null,
+        attach_url: null,
+        vnc_url: null,
+        last_event: "interactive workspace requested",
+        created_at: now,
+        updated_at: now,
+        last_seen_at: now,
+        stopped_at: null,
+        share_mode: "private",
+        share_token_hash: null,
+        share_token_preview: null,
+        control_requested_by: null,
+        control_requested_at: null,
+        controller: null,
+        control_granted_at: null,
+        control_expires_at: null,
+        multiplayer_mode: 0,
+        agent_token_hash: initialAgentTokenHash,
+        work_key: null,
+        work_kind: null,
+        work_state: "",
+        work_phase: "",
+        source_url: null,
+        github_run_url: null,
+        codex_thread_id: null,
+        codex_turn_id: null,
+        last_heartbeat_at: null,
+        completion_reason: null,
+      });
       if (options.openClawRequestId && options.openClawRequestHash) {
         await executeBatch(env, [
           db.insertInto("openclaw_request_replays").values({
@@ -5207,12 +5211,7 @@ async function createInteractiveSessionFromInput(
       }
       reservationInserted = true;
       if (supervisedRootSessionId) {
-        await enforceOpenClawRoomSessionLimitAfterInsert(
-          env,
-          supervisedRootSessionId,
-          id,
-          now,
-        );
+        await enforceOpenClawRoomSessionLimitAfterInsert(env, supervisedRootSessionId, id, now);
       }
       try {
         await options.afterReserve?.();

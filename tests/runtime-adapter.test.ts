@@ -767,10 +767,7 @@ test("strict session rows and cleanup preserve terminal finalization anchors", a
   assert.match(cleanupSource, /deleteFrom\("interactive_session_log_archives"\)/);
   assert.match(cleanupSource, /deleteFrom\("interactive_sessions"\)/);
   assert.match(cleanupSource, /FROM interactive_session_credential_policies/);
-  assert.equal(
-    cleanupSource.match(/WITH RECURSIVE active_ancestor\(id\)/g)?.length,
-    2,
-  );
+  assert.equal(cleanupSource.match(/WITH RECURSIVE active_ancestor\(id\)/g)?.length, 2);
   assert.match(cleanupSource, /SELECT parent_session_id[\s\S]*FROM interactive_sessions/);
   assert.match(cleanupSource, /JOIN active_ancestor ON session\.id = active_ancestor\.id/);
   assert.match(cleanupSource, /WHERE id = interactive_sessions\.id/);
