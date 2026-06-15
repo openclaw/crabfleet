@@ -5,11 +5,15 @@ import { test } from "node:test";
 test("app actions use styled HTML dialogs instead of browser prompts", async () => {
   const source = await readFile(new URL("../src/app/main.jsx", import.meta.url), "utf8");
   const appData = await readFile(new URL("../src/app/app-data.js", import.meta.url), "utf8");
+  const appShell = await readFile(new URL("../src/app/app-shell.jsx", import.meta.url), "utf8");
   const dialogs = await readFile(new URL("../src/app/dialogs.jsx", import.meta.url), "utf8");
+  const login = await readFile(new URL("../src/app/login.jsx", import.meta.url), "utf8");
 
   assert.doesNotMatch(source, /\bwindow\.(?:alert|confirm|prompt)\s*\(/);
   assert.doesNotMatch(appData, /\bwindow\.(?:alert|confirm|prompt)\s*\(/);
+  assert.doesNotMatch(appShell, /\bwindow\.(?:alert|confirm|prompt)\s*\(/);
   assert.doesNotMatch(dialogs, /\bwindow\.(?:alert|confirm|prompt)\s*\(/);
+  assert.doesNotMatch(login, /\bwindow\.(?:alert|confirm|prompt)\s*\(/);
   assert.match(dialogs, /<dialog/);
   assert.match(dialogs, /showModal\(\)/);
   assert.match(dialogs, /function Drawer[\s\S]*?<dialog[\s\S]*?aria-labelledby=\{titleId\}/);

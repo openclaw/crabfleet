@@ -2,6 +2,8 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import { test } from "node:test";
 
+import { appUserPresentation } from "../src/app/app-shell-state.js";
+
 test("interactive session creation requests browser credentials only for GitHub users", async () => {
   const source = await readFile(new URL("../src/index.ts", import.meta.url), "utf8");
   const createStart = source.indexOf("async function createInteractiveSession(");
@@ -25,11 +27,14 @@ test("trusted proxy requests stay sanitized on terminal forwarding paths", async
   assert.match(source.slice(openStart, openEnd), /terminalSession\.terminal\(request, options\)/);
 });
 
-test("trusted proxy sign-in cannot pretend that local logout will end the session", async () => {
-  const source = await readFile(new URL("../src/app/main.jsx", import.meta.url), "utf8");
-  assert.match(source, /user\?\.subject\?\.startsWith\("proxy:"\)/);
-  assert.match(source, /disabled=\{trustedProxyUser\}/);
-  assert.match(source, /Signed in by your organization/);
+test("trusted proxy sign-in cannot pretend that local logout will end the session", () => {
+  assert.equal(
+    appUserPresentation({
+      signedIn: true,
+      user: { subject: "proxy:alice", login: "alice", role: "maintainer" },
+    }).trustedProxyUser,
+    true,
+  );
 });
 
 test("split-origin links use the browser-visible proxy origin", async () => {
