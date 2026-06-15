@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-- Derive a route-scoped Crabbox workspace credential from the existing OpenClaw service secret and deploy the identical token atomically across both coordinators.
+- Connect Crabfleet to Crabbox through a Cloudflare service binding and deploy an identical route-scoped credential atomically across both coordinators.
 - Make OpenClaw room trees recoverable with idempotent Crabbox creation and root-level admission freeze plus recursive stop.
 - Add root-fenced OpenClaw service supervision for Crabbox room trees, including current state, bounded transcript evidence, targeted terminal nudges, audited stop requests, and canonical browser URLs.
 - Allow MultiCodex to use a dedicated service capability without rotating the existing OpenClaw automation token.

@@ -104,6 +104,7 @@ import {
   runtimeAdapterCreatePayload,
   runtimeAdapterCollectionUrl,
   runtimeAdapterControlPlaneForProfile,
+  runtimeAdapterControlPlaneIdentity,
   runtimeAdapterBrowserVncUrl,
   runtimeAdapterDesktopUrl,
   runtimeAdapterName,
@@ -213,6 +214,7 @@ type RuntimeEnv = Env & {
   CRABBOX_RUNTIME_ADAPTER_NAMESPACE?: string;
   CRABBOX_RUNTIME_ADAPTER_TTL_SECONDS?: string;
   CRABBOX_RUNTIME_ADAPTER_IDLE_SECONDS?: string;
+  CRABBOX_COORDINATOR?: Fetcher;
   CRABBOX_CLOUDFLARE_RUNNER_URL?: string;
   CRABBOX_CLOUDFLARE_RUNNER_TOKEN?: string;
   CRABBOX_CLOUDFLARE_RUNNER_INSTANCE_TYPE?: string;
@@ -13500,7 +13502,12 @@ async function runtimeAdapterFetch(
   headers.set("authorization", `Bearer ${token}`);
   headers.set("accept", "application/json");
   if (init.body) headers.set("content-type", "application/json");
-  const response = await fetch(target, {
+  const adapter = runtimeAdapterControlPlaneIdentity(env.CRABBOX_RUNTIME_ADAPTER_URL);
+  const fetcher =
+    env.CRABBOX_COORDINATOR && adapter && new URL(adapter).origin === target.origin
+      ? env.CRABBOX_COORDINATOR
+      : globalThis;
+  const response = await fetcher.fetch(target, {
     ...init,
     headers,
     redirect: "manual",

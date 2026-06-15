@@ -759,6 +759,20 @@ test("worker deployment installs the shared runtime adapter credential", async (
   assert.doesNotMatch(tokenSource, /CRABBOX_OPENCLAW_TOKEN|createHmac|crypto\.subtle/);
 });
 
+test("production runtime adapter calls use the Crabbox service binding", async () => {
+  const source = await readFile(new URL("../src/index.ts", import.meta.url), "utf8");
+  const config = await readFile(new URL("../wrangler.jsonc", import.meta.url), "utf8");
+  const fetchStart = source.indexOf("async function runtimeAdapterFetch");
+  const fetchEnd = source.indexOf("async function readRuntimeAdapterResponseBody", fetchStart);
+  const fetchSource = source.slice(fetchStart, fetchEnd);
+
+  assert.match(config, /"binding": "CRABBOX_COORDINATOR"/);
+  assert.match(config, /"service": "crabbox-coordinator"/);
+  assert.match(fetchSource, /env\.CRABBOX_COORDINATOR/);
+  assert.match(fetchSource, /new URL\(adapter\)\.origin === target\.origin/);
+  assert.match(fetchSource, /fetcher\.fetch\(target/);
+});
+
 test("strict session rows and cleanup preserve terminal finalization anchors", async () => {
   const source = await readFile(new URL("../src/index.ts", import.meta.url), "utf8");
   const cleanupStart = source.indexOf("async function cleanupInteractiveSessions");

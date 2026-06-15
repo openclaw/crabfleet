@@ -46,6 +46,12 @@
       "bucket_name": "crabfleet-session-logs",
     },
   ],
+  "services": [
+    {
+      "binding": "CRABBOX_COORDINATOR",
+      "service": "crabbox-coordinator",
+    },
+  ],
   "containers": [
     {
       "class_name": "Sandbox",
