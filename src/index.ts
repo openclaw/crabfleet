@@ -149,7 +149,6 @@ import {
   type StandaloneSandboxProvisionTable,
 } from "./worker/database";
 import {
-  deadInteractiveSessionStatuses,
   type InteractiveSessionStatus,
   type Role,
   type RunStatus,
@@ -159,7 +158,6 @@ import {
 import {
   badRequest,
   bearer,
-  bearerToken,
   conflict,
   cookie,
   forbidden,
@@ -192,6 +190,11 @@ import {
   upsertUser,
 } from "./worker/auth";
 import { base64FromBytes, openSecret, sealSecret, sha256 } from "./worker/crypto";
+import {
+  AgentSessionAuthenticator,
+  agentSessionId,
+  type AgentSessionAuthenticationStore,
+} from "./worker/session-agent-auth";
 import { githubCallback, githubLogin, sshLinkCookie } from "./worker/github-auth";
 import { GitHubApiError, githubFetch, githubHeaders, refreshGitHubUser } from "./worker/github";
 import {
@@ -1589,7 +1592,7 @@ async function api(
     /^\/api\/agent\/interactive-sessions\/([^/]+)$/,
   );
   if (request.method === "GET" && agentInteractiveReadMatch) {
-    const { user } = await requireAgentSession(request, env);
+    const { user } = await agentSessionAuthentication(env).require(request);
     const session = await readFreshInteractiveSession(
       env,
       decodeURIComponent(agentInteractiveReadMatch[1] ?? ""),
@@ -1665,7 +1668,7 @@ async function api(
     /^\/api\/agent\/interactive-sessions\/([^/]+)\/logs$/,
   );
   if (request.method === "GET" && agentInteractiveLogsMatch) {
-    const { user } = await requireAgentSession(request, env);
+    const { user } = await agentSessionAuthentication(env).require(request);
     return json(
       await readInteractiveSessionLogBundle(
         env,
@@ -1692,7 +1695,7 @@ async function api(
     /^\/api\/agent\/interactive-sessions\/([^/]+)\/transcript$/,
   );
   if (request.method === "GET" && agentInteractiveTranscriptMatch) {
-    const { user } = await requireAgentSession(request, env);
+    const { user } = await agentSessionAuthentication(env).require(request);
     return interactiveSessionTranscriptResponse(
       env,
       user,
@@ -1720,7 +1723,7 @@ async function api(
     /^\/api\/agent\/interactive-sessions\/([^/]+)\/summary$/,
   );
   if (request.method === "POST" && agentInteractiveSummaryMatch) {
-    const { user } = await requireAgentSession(request, env);
+    const { user } = await agentSessionAuthentication(env).require(request);
     return json(
       await updateInteractiveSessionSummary(
         request,
@@ -2256,7 +2259,7 @@ async function terminalHubUser(
     return requireSshGatewayUser(request, env);
   }
   if (agentSessionId(request)) {
-    return (await requireAgentSession(request, env)).user;
+    return (await agentSessionAuthentication(env).require(request)).user;
   }
   return optionalUser(request, env, requestAuth);
 }
@@ -2342,7 +2345,7 @@ async function sshState(request: Request, env: RuntimeEnv): Promise<Record<strin
 }
 
 async function agentState(request: Request, env: RuntimeEnv): Promise<Record<string, unknown>> {
-  const { session, user } = await requireAgentSession(request, env);
+  const { session, user } = await agentSessionAuthentication(env).require(request);
   const state = await readState(request, env, user);
   return { ...state, agent: { sessionId: session.id, rootSessionId: session.rootSessionId } };
 }
@@ -2392,7 +2395,7 @@ async function agentCreateInteractiveSession(
   request: Request,
   env: RuntimeEnv,
 ): Promise<{ session: InteractiveSession }> {
-  const { session: parent, user } = await requireAgentSession(request, env);
+  const { session: parent, user } = await agentSessionAuthentication(env).require(request);
   const body = await readJson<{
     repo?: string;
     branch?: string;
@@ -3000,46 +3003,25 @@ async function requireSshGatewayUser(request: Request, env: RuntimeEnv): Promise
   return user;
 }
 
-async function requireAgentSession(
-  request: Request,
-  env: RuntimeEnv,
-  expectedId?: string,
-  options: { allowQueryToken?: boolean } = {},
-): Promise<{ session: InteractiveSession; user: User }> {
-  const presentedId = agentSessionId(request);
-  const id = clean(expectedId, 120) || presentedId;
-  if (expectedId && presentedId && presentedId !== expectedId) throw unauthorized();
-  const url = new URL(request.url);
-  const token =
-    bearerToken(request) ||
-    clean(request.headers.get("x-crabfleet-agent-token"), 200) ||
-    (options.allowQueryToken ? clean(url.searchParams.get("agentToken"), 200) : "");
-  if (!id || !token) throw unauthorized();
-  const row = await database(env)
-    .selectFrom("interactive_sessions")
-    .selectAll()
-    .where("id", "=", id)
-    .where("preparation_pending", "=", 0)
-    .executeTakeFirst();
-  if (!row?.agent_token_hash || row.agent_token_hash !== (await sha256(token))) {
-    throw unauthorized();
-  }
-  const session = interactiveSession(row, []);
-  if (session.status === "stopping" || deadInteractiveSessionStatuses.includes(session.status)) {
-    throw forbidden("agent session is not active");
-  }
-  return {
-    session,
-    user: {
-      subject: `agent:${session.id}`,
-      login: session.owner,
-      email: null,
-      name: `Codex ${session.id}`,
-      role: "viewer",
-      allowed: true,
-      teams: [],
+function agentSessionAuthentication(env: RuntimeEnv): AgentSessionAuthenticator {
+  const store: AgentSessionAuthenticationStore = {
+    readCredential: async (id) => {
+      const row = await database(env)
+        .selectFrom("interactive_sessions")
+        .selectAll()
+        .where("id", "=", id)
+        .where("preparation_pending", "=", 0)
+        .executeTakeFirst();
+      return row
+        ? {
+            session: interactiveSession(row, []),
+            tokenHash: row.agent_token_hash,
+          }
+        : null;
     },
+    hashToken: sha256,
   };
+  return new AgentSessionAuthenticator(store);
 }
 
 function requireSshGateway(request: Request, env: RuntimeEnv): void {
@@ -3143,15 +3125,6 @@ function sshFingerprint(request: Request): string {
     clean(request.headers.get("x-crabfleet-ssh-fingerprint"), 120) ||
     clean(request.headers.get("x-crabbox-ssh-fingerprint"), 120) ||
     clean(url.searchParams.get("fingerprint"), 120)
-  );
-}
-
-function agentSessionId(request: Request): string {
-  const url = new URL(request.url);
-  return (
-    clean(request.headers.get("x-crabfleet-session-id"), 120) ||
-    clean(request.headers.get("x-crabbox-session-id"), 120) ||
-    clean(url.searchParams.get("sessionId"), 120)
   );
 }
 
@@ -11960,7 +11933,7 @@ async function updateGitHubActionsWorkState(
   env: RuntimeEnv,
   id: string,
 ): Promise<{ session: InteractiveSession }> {
-  const { session, user } = await requireAgentSession(request, env, id);
+  const { session, user } = await agentSessionAuthentication(env).require(request, id);
   if (session.runtime !== githubActionsRuntime || !session.workKey) {
     throw badRequest("session is not a GitHub Actions work session");
   }
@@ -12048,7 +12021,7 @@ async function githubActionsRunnerPty(
   if (request.headers.get("upgrade")?.toLowerCase() !== "websocket") {
     throw badRequest("websocket upgrade required");
   }
-  const { session, user } = await requireAgentSession(request, env, id, {
+  const { session, user } = await agentSessionAuthentication(env).require(request, id, {
     allowQueryToken: true,
   });
   if (session.runtime !== githubActionsRuntime || !session.workKey) {

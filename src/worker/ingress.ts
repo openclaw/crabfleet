@@ -42,9 +42,7 @@ export function usesIndependentServiceAuth(request: Request): boolean {
     const hasSshIdentity = Boolean(
       headers.get("x-crabfleet-ssh-fingerprint") || headers.get("x-crabbox-ssh-fingerprint"),
     );
-    const hasAgentIdentity = Boolean(
-      headers.get("x-crabfleet-session-id") || headers.get("x-crabbox-session-id"),
-    );
+    const hasAgentIdentity = Boolean(headers.get("x-crabfleet-session-id"));
     return hasAuthorization && (hasSshIdentity || hasAgentIdentity);
   }
   return ["/api/ssh/", "/api/agent/", "/api/openclaw/", "/api/provision/"].some((prefix) =>

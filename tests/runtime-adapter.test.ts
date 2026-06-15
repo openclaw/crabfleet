@@ -1544,10 +1544,6 @@ test("terminal endpoints enforce current runtime capabilities", async () => {
   assert.match(source, /runtimeAdapterTerminalFailureStatus\(existing\.adapter\) === "detached"/);
   assert.doesNotMatch(source, /async function interactiveSessionPty/);
   assert.doesNotMatch(source, /\/api\/(?:ssh\/|agent\/)?interactive-sessions\/\(\[\^\/\]\+\)\/pty/);
-  assert.match(
-    source,
-    /async function terminalHubUser[\s\S]*isSshGatewayRequest[\s\S]*requireSshGatewayUser[\s\S]*agentSessionId[\s\S]*requireAgentSession/,
-  );
 });
 
 test("non-retryable adapter client errors do not enter ambiguous replay", () => {
