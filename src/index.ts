@@ -102,6 +102,7 @@ import {
   redactedAdapterMessage,
   redactedAdapterResponseMessage,
   runtimeAdapterCreatePayload,
+  runtimeAdapterCredential,
   runtimeAdapterCollectionUrl,
   runtimeAdapterControlPlaneForProfile,
   runtimeAdapterBrowserVncUrl,
@@ -13523,7 +13524,10 @@ async function readRuntimeAdapterResponseBody(response: Response): Promise<unkno
 }
 
 function runtimeAdapterToken(env: RuntimeEnv): string {
-  return clean(env.CRABBOX_RUNTIME_ADAPTER_TOKEN, 4000);
+  return runtimeAdapterCredential(
+    clean(env.CRABBOX_OPENCLAW_TOKEN, 4000),
+    clean(env.CRABBOX_RUNTIME_ADAPTER_TOKEN, 4000),
+  );
 }
 
 function runtimeAdapterProviderConfigured(env: RuntimeEnv): boolean {

@@ -21,6 +21,7 @@ import {
   runtimeAdapterControlPlaneForProfile,
   runtimeAdapterControlPlaneIdentity,
   runtimeAdapterCreatePayload,
+  runtimeAdapterCredential,
   runtimeAdapterBrowserVncUrl,
   runtimeAdapterDesktopUrl,
   runtimeAdapterReplayRequest,
@@ -36,6 +37,14 @@ import {
   shouldReplayRuntimeAdapterCreate,
   validatedRuntimeAdapterCreatePayloadJson,
 } from "../src/runtime-adapter.ts";
+
+test("runtime adapter credential derives from the OpenClaw service token", () => {
+  assert.equal(
+    runtimeAdapterCredential("root-token", "stale-configured-token"),
+    "FXfsL5ao-wZuz_ggZwg1cEAMypAAOMkFgXi-E7OooVw",
+  );
+  assert.equal(runtimeAdapterCredential("", "configured-token"), "configured-token");
+});
 
 test("adapter create payload matches the strict controller contract", () => {
   const payload = runtimeAdapterCreatePayload({
