@@ -41,8 +41,8 @@ function dependencies(calls: string[]): ControlPlaneRouteDependencies {
       calls.push(`fleet:${user.login}`);
       return { handler: "fleet" };
     },
-    async searchGitHubRefs() {
-      calls.push("github-refs");
+    async searchGitHubRefs(number) {
+      calls.push(`github-refs:${number}`);
       return { handler: "github-refs" };
     },
     async createCard(_request, user) {
@@ -108,7 +108,7 @@ test("control-plane read and card routes enforce their role boundaries", async (
   const cases: Array<[Request, User, number, string[]]> = [
     [request("GET", "/api/state"), viewer, 200, ["state:viewer"]],
     [request("GET", "/api/fleet"), viewer, 200, ["fleet:viewer"]],
-    [request("GET", "/api/github/refs"), maintainer, 200, ["github-refs"]],
+    [request("GET", "/api/github/refs?number=42"), maintainer, 200, ["github-refs:42"]],
     [request("POST", "/api/cards", {}), maintainer, 201, ["card:create:maintainer"]],
     [request("GET", "/api/cards/card%2F1/runs"), viewer, 200, ["card:runs:card/1"]],
   ];

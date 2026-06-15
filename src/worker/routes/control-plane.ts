@@ -11,7 +11,7 @@ import type { User } from "../models.ts";
 export type ControlPlaneRouteDependencies = {
   readState(request: Request, user: User): Promise<unknown>;
   readFleet(user: User): Promise<unknown>;
-  searchGitHubRefs(request: Request): Promise<unknown>;
+  searchGitHubRefs(number: unknown): Promise<unknown>;
   createCard(request: Request, user: User): Promise<unknown>;
   readCardRuns(cardId: string): Promise<unknown[] | null>;
   mutateCard(user: User, cardId: string, action: string): Promise<unknown>;
@@ -38,7 +38,7 @@ export async function handleControlPlaneRoute(
   }
   if (request.method === "GET" && url.pathname === "/api/github/refs") {
     requireRole(user, "maintainer");
-    return json(await dependencies.searchGitHubRefs(request));
+    return json(await dependencies.searchGitHubRefs(url.searchParams.get("number")));
   }
   if (request.method === "POST" && url.pathname === "/api/cards") {
     requireRole(user, "maintainer");

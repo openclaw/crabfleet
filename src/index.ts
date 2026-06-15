@@ -96,8 +96,9 @@ import { CardLifecycleService, type CardCreateInput } from "./worker/card-lifecy
 import { CardRepository } from "./worker/card-repository";
 import { AdminRepository } from "./worker/admin-repository";
 import { AdminService } from "./worker/admin-service";
+import { GitHubReferenceService } from "./worker/github-reference-service";
 import { createWorkflowService, type WorkflowService } from "./worker/workflow-service";
-import { githubRepoParts, normalizeRepo, sortRepoNames, sortRepos } from "./worker/repositories";
+import { githubRepoParts, normalizeRepo, sortRepos } from "./worker/repositories";
 import { handlePublicAuthRoute, handleSessionAuthRoute } from "./worker/routes/auth";
 import {
   handleBrowserSessionRoute,
@@ -302,40 +303,6 @@ export class Sandbox extends CloudflareSandboxBase<RuntimeEnv> {
 
 export { ContainerProxy };
 export { SessionControlDO } from "./worker/session-control-do";
-
-type GitHubIssuePayload = {
-  number: number;
-  title: string;
-  state: string;
-  html_url: string;
-  body: string | null;
-  user: { login: string } | null;
-  updated_at: string;
-  pull_request?: unknown;
-};
-
-type GitHubGraphqlRefPayload = {
-  __typename: "Issue" | "PullRequest";
-  number: number;
-  title: string;
-  state: string;
-  url: string;
-  body: string | null;
-  author: { login: string } | null;
-  updatedAt: string;
-};
-
-type GitHubReference = {
-  repo: string;
-  number: number;
-  title: string;
-  source: "Issue" | "PR";
-  state: string;
-  url: string;
-  author: string | null;
-  updatedAt: string;
-  body: string;
-};
 
 const runtimeAdapterReconcileIntervalMs = 15_000;
 const runtimeAdapterReconcileLimit = 3;
@@ -556,7 +523,7 @@ function controlPlaneRouteDependencies(
   return {
     readState: (request, user) => readState(request, env, user, context),
     readFleet: (user) => readFleetState(env, user, undefined, context),
-    searchGitHubRefs: (request) => searchGitHubRefs(request, env),
+    searchGitHubRefs: (number) => githubReferenceService(env).search(number),
     createCard: async (request, user) =>
       cardLifecycleService(env).create(await readJson<CardCreateInput>(request), user),
     readCardRuns: (cardId) => cardLifecycleService(env).runs(cardId),
@@ -727,6 +694,16 @@ function adminService(env: RuntimeEnv): AdminService {
     now: Date.now,
     refreshWorkflow: (repo, now) => workflowService(env).refresh(repo, now),
     audit: (user, message, now) => audit(env, user, message, now),
+  });
+}
+
+function githubReferenceService(env: RuntimeEnv): GitHubReferenceService {
+  return new GitHubReferenceService({
+    readEnabledRepos: () => new AdminRepository(env).readEnabledRepos(),
+    preferredRepo: deploymentConfig(env).preferredRepo,
+    authenticated: Boolean(env.GITHUB_TOKEN),
+    headers: githubHeaders(env),
+    fetcher: fetch,
   });
 }
 
@@ -2016,138 +1993,6 @@ function interactiveProvisioningEndpoints(env: RuntimeEnv): InteractiveProvision
     provisionStandalone: (session) => standaloneSandboxProvisioningService(env).provision(session),
     supportsStandalone: (runtime) => interactive.supportsStandalone(runtime),
   });
-}
-
-async function searchGitHubRefs(
-  request: Request,
-  env: RuntimeEnv,
-): Promise<{ matches: GitHubReference[] }> {
-  const url = new URL(request.url);
-  const number = Number(url.searchParams.get("number"));
-  if (!Number.isInteger(number) || number < 1) throw badRequest("issue or PR number is required");
-
-  const preferredRepo = deploymentConfig(env).preferredRepo;
-  const repos = sortRepos(await new AdminRepository(env).readEnabledRepos(), preferredRepo).slice(
-    0,
-    160,
-  );
-  const matches = env.GITHUB_TOKEN
-    ? await fetchGitHubReferences(env, repos, number)
-    : await fetchPublicGitHubReferences(env, repos, number);
-  return { matches };
-}
-
-async function fetchGitHubReferences(
-  env: RuntimeEnv,
-  repos: string[],
-  number: number,
-): Promise<GitHubReference[]> {
-  const targets = repos.flatMap((repo) => {
-    const [owner, name] = repo.split("/");
-    return owner && name ? [{ repo, owner, name }] : [];
-  });
-  if (!targets.length) return [];
-  const selections = targets
-    .map((target, index) => {
-      const { owner, name } = target;
-      return `r${index}: repository(owner: ${JSON.stringify(owner)}, name: ${JSON.stringify(name)}) {
-        issueOrPullRequest(number: $number) {
-          __typename
-          ... on Issue { number title state url body author { login } updatedAt }
-          ... on PullRequest { number title state url body author { login } updatedAt }
-        }
-      }`;
-    })
-    .join("\n");
-  const response = await fetch("https://api.github.com/graphql", {
-    method: "POST",
-    headers: {
-      ...githubHeaders(env),
-      "content-type": "application/json",
-    },
-    body: JSON.stringify({
-      query: `query CrabfleetRefs($number: Int!) { ${selections} }`,
-      variables: { number },
-    }),
-  });
-  if (response.status === 403 || response.status === 429) {
-    throw serviceUnavailable("GitHub lookup rate limited; retry later");
-  }
-  if (!response.ok) throw serviceUnavailable("GitHub lookup failed; retry later");
-
-  const payload = await response.json<{
-    data?: Record<string, { issueOrPullRequest?: GitHubGraphqlRefPayload | null } | null>;
-    errors?: { type?: string; message?: string }[];
-  }>();
-  if (
-    payload.errors?.some((error) =>
-      /rate|limit/i.test(`${error.type ?? ""} ${error.message ?? ""}`),
-    )
-  ) {
-    throw serviceUnavailable("GitHub lookup rate limited; retry later");
-  }
-  return targets
-    .flatMap((target, index) => {
-      const item = payload.data?.[`r${index}`]?.issueOrPullRequest;
-      return item ? [githubReferenceFromGraphql(target.repo, item)] : [];
-    })
-    .sort((left, right) =>
-      sortRepoNames(left.repo, right.repo, deploymentConfig(env).preferredRepo),
-    );
-}
-
-async function fetchPublicGitHubReferences(
-  env: RuntimeEnv,
-  repos: string[],
-  number: number,
-): Promise<GitHubReference[]> {
-  const preferred = deploymentConfig(env).preferredRepo;
-  const repo = repos.includes(preferred) ? preferred : repos[0];
-  if (!repo) return [];
-  const match = await fetchGitHubReference(env, repo, number);
-  return match ? [match] : [];
-}
-
-async function fetchGitHubReference(
-  env: RuntimeEnv,
-  repo: string,
-  number: number,
-): Promise<GitHubReference | null> {
-  const response = await fetch(`https://api.github.com/repos/${repo}/issues/${number}`, {
-    headers: githubHeaders(env),
-  });
-  if (response.status === 404 || response.status === 410) return null;
-  if (response.status === 403 || response.status === 429) {
-    throw serviceUnavailable("GitHub search rate limited; retry later");
-  }
-  if (!response.ok) return null;
-
-  const item = await response.json<GitHubIssuePayload>();
-  return {
-    repo,
-    number: item.number,
-    title: item.title,
-    source: item.pull_request ? "PR" : "Issue",
-    state: item.state,
-    url: item.html_url,
-    author: item.user?.login ?? null,
-    updatedAt: item.updated_at,
-    body: item.body ?? "",
-  };
-}
-
-function githubReferenceFromGraphql(repo: string, item: GitHubGraphqlRefPayload): GitHubReference {
-  return {
-    repo,
-    number: item.number,
-    title: item.title,
-    source: item.__typename === "PullRequest" ? "PR" : "Issue",
-    state: item.state.toLowerCase(),
-    url: item.url,
-    author: item.author?.login ?? null,
-    updatedAt: item.updatedAt,
-    body: item.body ?? "",
-  };
 }
 
 async function readInteractiveSessions(env: RuntimeEnv, user: User): Promise<InteractiveSession[]> {

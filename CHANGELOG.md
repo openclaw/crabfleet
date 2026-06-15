@@ -14,6 +14,7 @@
 - Extract card creation, run claims, heartbeat/stall transitions, actions, projections, and SQL persistence into a directly tested lifecycle service and repository.
 - Extract CRABBOX.md parsing, fetch/cache policy, failure fallback, summaries, and SQL persistence into a directly tested workflow service and repository.
 - Extract control-plane policy, allowlist, repository administration, validation, audit ordering, and SQL persistence into a directly tested admin service and repository.
+- Extract GitHub issue/PR reference validation, repository selection, GraphQL batching, public fallback, mapping, and rate-limit handling into a directly tested service.
 - Centralize failed provisioning results and provider-error redaction across managed Sandbox, standalone Sandbox, and runtime-adapter lifecycle paths.
 - Extract OpenClaw nudge and stop validation, audit ordering, terminal delivery, and best-effort delivery records into a directly tested mutation service.
 - Extract OpenClaw crabbox normalization, replay handling, branch preparation, timeout policy, and creation audit into a directly tested service.
