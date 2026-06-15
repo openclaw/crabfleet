@@ -17,6 +17,7 @@
 - Extract GitHub issue/PR reference validation, repository selection, GraphQL batching, public fallback, mapping, and rate-limit handling into a directly tested service.
 - Extract superseded runtime-adapter stop recovery and confirmed-release CAS persistence into a directly tested release service and repository.
 - Move interactive-session normalization, reservation retries, provisioning, recovery, audit, and durable result assembly into the creation service.
+- Move GitHub Actions registration, work-state, and runner-connection persistence into one repository with shared service composition.
 - Centralize failed provisioning results and provider-error redaction across managed Sandbox, standalone Sandbox, and runtime-adapter lifecycle paths.
 - Extract OpenClaw nudge and stop validation, audit ordering, terminal delivery, and best-effort delivery records into a directly tested mutation service.
 - Extract OpenClaw crabbox normalization, replay handling, branch preparation, timeout policy, and creation audit into a directly tested service.

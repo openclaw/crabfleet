@@ -73,6 +73,7 @@ import {
   GitHubActionsRunnerConnectionService,
   type GitHubActionsRunnerConnectionStore,
 } from "./worker/github-actions-runner-connection";
+import { GitHubActionsRepository } from "./worker/github-actions-repository";
 import {
   GitHubActionsWorkStateService,
   type GitHubActionsWorkStateInput,
@@ -917,32 +918,18 @@ function openClawActionSessionRegistrationService(
   env: RuntimeEnv,
   serviceUser: User,
 ): GitHubActionsSessionRegistrationService {
-  const db = database(env);
   const admin = new AdminRepository(env);
+  const repository = new GitHubActionsRepository(env);
   const store: GitHubActionsSessionRegistrationStore = {
     now: () => Date.now(),
     newAgentToken,
     hashToken: sha256,
     requireRepo: (repo) => admin.requireRepo(repo),
-    readByWorkKey: async (workKey) =>
-      (await db
-        .selectFrom("interactive_sessions")
-        .selectAll()
-        .where("work_key", "=", workKey)
-        .executeTakeFirst()) ?? null,
+    readByWorkKey: (workKey) => repository.readByWorkKey(workKey),
     nextSessionId: () => nextInteractiveSessionId(env),
-    insertSession: async (values) => {
-      await db.insertInto("interactive_sessions").values(values).execute();
-    },
-    readById: async (id) =>
-      (await db
-        .selectFrom("interactive_sessions")
-        .selectAll()
-        .where("id", "=", id)
-        .executeTakeFirst()) ?? null,
-    updateSession: async (id, values) => {
-      await db.updateTable("interactive_sessions").set(values).where("id", "=", id).execute();
-    },
+    insertSession: (values) => repository.insertSession(values),
+    readById: (id) => repository.readById(id),
+    updateSession: (id, values) => repository.updateSession(id, values),
     isConstraintError,
     disconnectRunner: (id) => disconnectGitHubActionsRunner(env, id),
     appendEvent: (id, message, now) =>
@@ -951,6 +938,34 @@ function openClawActionSessionRegistrationService(
     readSession: (id) => readInteractiveSession(env, id),
   };
   return new GitHubActionsSessionRegistrationService(store);
+}
+
+function githubActionsWorkStateService(env: RuntimeEnv, user: User): GitHubActionsWorkStateService {
+  const repository = new GitHubActionsRepository(env);
+  const store: GitHubActionsWorkStateStore = {
+    now: () => Date.now(),
+    readRow: (sessionId) => repository.readById(sessionId),
+    persist: (sessionId, values) => repository.updateSession(sessionId, values),
+    appendEvent: (sessionId, message, now) =>
+      appendInteractiveSessionEvent(env, sessionId, user, message, now),
+    disconnectRunner: (sessionId) => disconnectGitHubActionsRunner(env, sessionId),
+    readSession: (sessionId) => readInteractiveSession(env, sessionId),
+  };
+  return new GitHubActionsWorkStateService(store);
+}
+
+function githubActionsRunnerConnectionService(
+  env: RuntimeEnv,
+  user: User,
+): GitHubActionsRunnerConnectionService {
+  const repository = new GitHubActionsRepository(env);
+  const store: GitHubActionsRunnerConnectionStore = {
+    now: () => Date.now(),
+    persist: (sessionId, values) => repository.updateSession(sessionId, values),
+    appendEvent: (sessionId, message, now) =>
+      appendInteractiveSessionEvent(env, sessionId, user, message, now),
+  };
+  return new GitHubActionsRunnerConnectionService(store);
 }
 
 function openClawServiceUser(): User {
@@ -1819,27 +1834,7 @@ async function updateGitHubActionsWorkState(
 ): Promise<{ session: InteractiveSession }> {
   const { session, user } = await agentSessionAuthentication(env).require(request, id);
   const body = await readJson<GitHubActionsWorkStateInput>(request);
-  const store: GitHubActionsWorkStateStore = {
-    now: () => Date.now(),
-    readRow: async (sessionId) =>
-      (await database(env)
-        .selectFrom("interactive_sessions")
-        .selectAll()
-        .where("id", "=", sessionId)
-        .executeTakeFirst()) ?? null,
-    persist: async (sessionId, values) => {
-      await database(env)
-        .updateTable("interactive_sessions")
-        .set(values)
-        .where("id", "=", sessionId)
-        .execute();
-    },
-    appendEvent: (sessionId, message, now) =>
-      appendInteractiveSessionEvent(env, sessionId, user, message, now),
-    disconnectRunner: (sessionId) => disconnectGitHubActionsRunner(env, sessionId),
-    readSession: (sessionId) => readInteractiveSession(env, sessionId),
-  };
-  const current = await new GitHubActionsWorkStateService(store).update(session, body);
+  const current = await githubActionsWorkStateService(env, user).update(session, body);
   return {
     session: decorateInteractiveSession(current, user, env),
   };
@@ -1858,19 +1853,7 @@ async function githubActionsRunnerPty(
   });
   const stub = githubActionsRelayStub(env, id);
   if (!stub) throw serviceUnavailable("SESSION_CONTROL Durable Object is not configured");
-  const store: GitHubActionsRunnerConnectionStore = {
-    now: () => Date.now(),
-    persist: async (sessionId, values) => {
-      await database(env)
-        .updateTable("interactive_sessions")
-        .set(values)
-        .where("id", "=", sessionId)
-        .execute();
-    },
-    appendEvent: (sessionId, message, now) =>
-      appendInteractiveSessionEvent(env, sessionId, user, message, now),
-  };
-  await new GitHubActionsRunnerConnectionService(store).connect(session);
+  await githubActionsRunnerConnectionService(env, user).connect(session);
   return stub.fetch("https://crabfleet.internal/api/session-control/github-actions/runner", {
     headers: { upgrade: "websocket" },
   });
