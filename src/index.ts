@@ -128,7 +128,6 @@ import {
   type CredentialPolicyGenerationTombstone,
   type CredentialPolicyLegacyMigration,
 } from "./credential-policy-fence";
-import { resolveRuntimeProfileCodexSsh, runtimeProfileByID } from "./runtime-profiles";
 import {
   browserAppOrigin,
   clientDeploymentConfig,
@@ -291,6 +290,7 @@ import {
   canControlInteractiveSession,
   canManageInteractiveSession,
 } from "./worker/session-access";
+import { presentInteractiveSession } from "./worker/session-presentation";
 import {
   archiveInteractiveSessionLogs,
   cleanupSessionLogArchiveObjects,
@@ -310,7 +310,7 @@ import {
   type RuntimeAdapterStopStore,
   type RuntimeAdapterWorkspaceStopResult,
 } from "./worker/session-runtime-adapter-stop";
-import { activeDelegatedController, sharedInteractiveSession } from "./worker/session-sharing";
+import { sharedInteractiveSession } from "./worker/session-sharing";
 import type { InteractiveProvisionResult } from "./worker/session-provisioning";
 import {
   interactiveCommand,
@@ -13030,73 +13030,21 @@ function decorateInteractiveSession(
   user: User,
   env: RuntimeEnv,
 ): InteractiveSession {
-  const now = Date.now();
-  const delegatedControl = canGrantDelegatedControl(env, session);
-  const canManage = canManageInteractiveSession(user, session);
-  const canChangeMultiplayer = canChangeInteractiveSessionMultiplayer(user, session);
-  const canControl = canControlInteractiveSession(user, session, now, delegatedControl);
-  const activeController = activeDelegatedController(session, now);
-  const desktopActive = !["stopping", "stopped", "expired", "failed"].includes(session.status);
-  const versionedDesktopReady = ["ready", "attached", "detached"].includes(session.status);
-  const versionedDesktopAvailable =
-    versionedDesktopReady &&
-    session.adapter === runtimeAdapterName &&
-    (session.capabilities.vnc || session.capabilities.desktop);
-  const legacyDesktopUrl = desktopActive ? safeDesktopUrl(session.vncUrl) : null;
   const routeKind = interactivePtyRouteKind(env, session);
   const routeAvailable =
     session.runtime === githubActionsRuntime ||
     (routeKind === "sandbox"
       ? Boolean(env.SANDBOX)
       : Boolean(interactiveTerminalTarget(env, session, routeKind)));
-  const ptyAvailable =
-    canControl &&
-    session.capabilities.terminal &&
-    ["ready", "attached", "detached"].includes(session.status) &&
-    routeAvailable;
-  const attachUrl = ptyAvailable ? "/api/terminal/ws" : null;
-  const codexSshReady =
-    session.adapter === runtimeAdapterName &&
-    session.capabilities.terminal &&
-    ["ready", "attached", "detached"].includes(session.status) &&
-    Boolean(session[interactiveSessionAdapterControlPlane]) &&
-    configuredRuntimeAdapterControlPlane(env, session.profile) ===
-      session[interactiveSessionAdapterControlPlane];
-  const runtimeProfile = runtimeProfileByID(deploymentConfig(env).runtimeProfiles, session.profile);
-  const codexSsh =
-    canManage && codexSshReady
-      ? resolveRuntimeProfileCodexSsh(runtimeProfile, {
-          providerResourceId: session.providerResourceId,
-          workspaceId: session.adapterWorkspaceId,
-          sessionId: session.id,
-          profile: session.profile,
-        })
-      : null;
-  return {
-    ...session,
-    adapter: canControl ? session.adapter : null,
-    profile: canControl ? session.profile : "",
-    adapterWorkspaceId: canControl ? session.adapterWorkspaceId : null,
-    providerResourceId: canControl ? session.providerResourceId : null,
-    lastReconciledAt: canControl ? session.lastReconciledAt : null,
-    reconcileError: canControl ? session.reconcileError : null,
-    leaseId: canControl ? legacyInteractiveSessionLeaseId(session) : null,
-    attachUrl,
-    ptyAvailable,
-    codexSsh,
-    vncUrl: canControl
-      ? versionedDesktopAvailable
-        ? runtimeAdapterBrowserVncUrl(browserAppOrigin(env), session.id)
-        : legacyDesktopUrl
-      : null,
-    controller: activeController,
-    controlGrantedAt: activeController ? session.controlGrantedAt : null,
-    controlExpiresAt: activeController ? session.controlExpiresAt : null,
-    canManage,
-    canChangeMultiplayer,
-    canControl,
-    canRequestControl: delegatedControl && !canControl,
-  };
+  return presentInteractiveSession(session, user, {
+    now: Date.now(),
+    delegatedControlAvailable: canGrantDelegatedControl(env, session),
+    terminalRouteAvailable: routeAvailable,
+    runtimeProfiles: deploymentConfig(env).runtimeProfiles,
+    configuredRuntimeAdapterControlPlane: (profile) =>
+      configuredRuntimeAdapterControlPlane(env, profile),
+    browserVncUrl: (sessionId) => runtimeAdapterBrowserVncUrl(browserAppOrigin(env), sessionId),
+  });
 }
 
 async function canControlInteractiveSessionById(

@@ -85,7 +85,7 @@ test("runtime profile catalog fails closed on malformed or ambiguous input", () 
   assert.deepEqual(parseRuntimeProfiles(""), []);
 });
 
-test("runtime profiles resolve bounded manager-only Codex SSH handoff data", async () => {
+test("runtime profiles resolve bounded Codex SSH handoff data", () => {
   const [profile] = parseRuntimeProfiles(
     JSON.stringify([
       {
@@ -169,16 +169,6 @@ test("runtime profiles resolve bounded manager-only Codex SSH handoff data", asy
     },
   );
 
-  const source = await readFile(new URL("../src/index.ts", import.meta.url), "utf8");
-  const start = source.indexOf("function decorateInteractiveSession");
-  const end = source.indexOf("async function canControlInteractiveSessionById", start);
-  const decoration = source.slice(start, end);
-  assert.match(decoration, /canManage && codexSshReady/);
-  assert.match(decoration, /codexSsh,/);
-  assert.match(
-    decoration,
-    /configuredRuntimeAdapterControlPlane\(env, session\.profile\) ===\s+session\[interactiveSessionAdapterControlPlane\]/,
-  );
   const client = clientDeploymentConfig({
     CRABFLEET_DEFAULT_PROFILE: "linux",
     CRABFLEET_RUNTIME_PROFILES_JSON: JSON.stringify([

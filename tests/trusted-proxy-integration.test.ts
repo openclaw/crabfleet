@@ -37,7 +37,10 @@ test("split-origin links use the browser-visible proxy origin", async () => {
   assert.match(source, /trustedProxyPublicOrigin\(env\) \?\? new URL\(request\.url\)\.origin/);
   assert.match(source, /shareUrl\(request, env, id, result\.shareToken\)/);
   assert.match(source, /externalRequestOrigin\(request, env\)/);
-  assert.match(source, /runtimeAdapterBrowserVncUrl\(browserAppOrigin\(env\), session\.id\)/);
+  assert.match(
+    source,
+    /browserVncUrl: \(sessionId\) => runtimeAdapterBrowserVncUrl\(browserAppOrigin\(env\), sessionId\)/,
+  );
   assert.match(
     source,
     /browserUrl: `\$\{browserAppOrigin\(env\)\}\/app\/sessions\/\$\{encodeURIComponent\(existing\.id\)\}`/,
