@@ -21,6 +21,7 @@
 - Move OpenClaw stop eligibility, agent credential reads, session ID allocation, and audit persistence out of the Worker entry point into their owning repositories.
 - Extract OpenClaw GitHub branch validation, lookup, creation, and concurrent-create recovery into a directly tested service.
 - Move interactive-session summary and purpose authorization, validation, fenced persistence, archive refresh, and reread into the metadata service.
+- Extract GitHub Actions stop persistence, runner disconnect, archive refresh, and terminal finalization ordering into a directly tested service.
 - Centralize failed provisioning results and provider-error redaction across managed Sandbox, standalone Sandbox, and runtime-adapter lifecycle paths.
 - Extract OpenClaw nudge and stop validation, audit ordering, terminal delivery, and best-effort delivery records into a directly tested mutation service.
 - Extract OpenClaw crabbox normalization, replay handling, branch preparation, timeout policy, and creation audit into a directly tested service.

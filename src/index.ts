@@ -71,6 +71,10 @@ import {
   GitHubActionsRunnerConnectionService,
   type GitHubActionsRunnerConnectionStore,
 } from "./worker/github-actions-runner-connection";
+import {
+  GitHubActionsSessionStopService,
+  type GitHubActionsSessionStopStore,
+} from "./worker/github-actions-session-stop";
 import { GitHubActionsRepository } from "./worker/github-actions-repository";
 import {
   GitHubActionsWorkStateService,
@@ -1377,24 +1381,16 @@ function interactiveSessionMetadataService(
   return new InteractiveSessionMetadataService(store);
 }
 
-async function stopGitHubActionsSession(
-  env: RuntimeEnv,
-  session: InteractiveSession,
-  eventActor: string,
-  now: number,
-): Promise<boolean> {
-  const stopped = await persistGitHubActionsSessionStop(
-    env,
-    session,
-    eventActor,
-    githubActionsRuntime,
-    now,
-  );
-  if (!stopped) return false;
-  await disconnectGitHubActionsRunner(env, session.id).catch(() => undefined);
-  await archiveInteractiveSessionLogs(env, session.id, now).catch(() => undefined);
-  await finalizeTerminalInteractiveSession(env, session.id, "stopped", now).catch(() => undefined);
-  return true;
+function githubActionsSessionStopService(env: RuntimeEnv): GitHubActionsSessionStopService {
+  const store: GitHubActionsSessionStopStore = {
+    persist: (session, actorName, now) =>
+      persistGitHubActionsSessionStop(env, session, actorName, githubActionsRuntime, now),
+    disconnect: (sessionId) => disconnectGitHubActionsRunner(env, sessionId),
+    archive: (sessionId, now) => archiveInteractiveSessionLogs(env, sessionId, now),
+    finalize: (sessionId, now) =>
+      finalizeTerminalInteractiveSession(env, sessionId, "stopped", now),
+  };
+  return new GitHubActionsSessionStopService(store);
 }
 
 function interactiveSessionRuntimeAdapterStopService(env: RuntimeEnv): RuntimeAdapterStopService {
@@ -1459,7 +1455,7 @@ function interactiveSessionStopService(env: RuntimeEnv, user: User): Interactive
     finalizeTerminal: (sessionId, status, now) =>
       finalizeTerminalInteractiveSession(env, sessionId, status, now),
     stopGitHubActions: (session, actorName, now) =>
-      stopGitHubActionsSession(env, session, actorName, now),
+      githubActionsSessionStopService(env).stop(session, actorName, now),
     stopRuntimeAdapter: (session, actorName, now) =>
       interactiveSessionRuntimeAdapterStopService(env).stop({
         session,

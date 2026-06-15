@@ -976,21 +976,6 @@ test("Sandbox credential registration always proves exact durable ownership", as
   );
 });
 
-test("GitHub Actions stop wrapper finalizes persisted transitions", async () => {
-  const source = await readFile(new URL("../src/index.ts", import.meta.url), "utf8");
-  const githubActionsStart = source.indexOf("async function stopGitHubActionsSession");
-  const githubActionsEnd = source.indexOf(
-    "function interactiveSessionRuntimeAdapterStopService",
-    githubActionsStart,
-  );
-  const githubActionsSource = source.slice(githubActionsStart, githubActionsEnd);
-
-  assert.match(githubActionsSource, /persistGitHubActionsSessionStop/);
-  assert.match(githubActionsSource, /disconnectGitHubActionsRunner/);
-  assert.match(githubActionsSource, /archiveInteractiveSessionLogs/);
-  assert.match(githubActionsSource, /finalizeTerminalInteractiveSession/);
-});
-
 test("managed terminal expiry enters the shared retryable terminal finalizer", async () => {
   const source = await readFile(
     new URL("../src/worker/interactive-terminal-service.ts", import.meta.url),
