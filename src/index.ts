@@ -64,7 +64,7 @@ import {
   type AgentSessionAuthenticationStore,
 } from "./worker/session-agent-auth";
 import { githubCallback, githubLogin } from "./worker/github-auth";
-import { GitHubApiError, githubFetch, githubHeaders } from "./worker/github";
+import { githubHeaders } from "./worker/github";
 import {
   GitHubActionsSessionRegistrationService,
   type GitHubActionsSessionRegistrationStore,
@@ -92,7 +92,7 @@ import { AdminRepository } from "./worker/admin-repository";
 import { AdminService } from "./worker/admin-service";
 import { GitHubReferenceService } from "./worker/github-reference-service";
 import { createWorkflowService, type WorkflowService } from "./worker/workflow-service";
-import { githubRepoParts, normalizeRepo, sortRepos } from "./worker/repositories";
+import { normalizeRepo, sortRepos } from "./worker/repositories";
 import { handlePublicAuthRoute, handleSessionAuthRoute } from "./worker/routes/auth";
 import {
   handleBrowserSessionRoute,
@@ -141,11 +141,8 @@ import {
 } from "./worker/openclaw-supervision";
 import { OpenClawRootStopService, type OpenClawRootStopStore } from "./worker/openclaw-root-stop";
 import { OpenClawMutationService, type OpenClawMutationStore } from "./worker/openclaw-mutations";
-import {
-  OpenClawCreateService,
-  openClawServiceBranch,
-  type OpenClawCreateStore,
-} from "./worker/openclaw-create";
+import { OpenClawCreateService, type OpenClawCreateStore } from "./worker/openclaw-create";
+import { OpenClawBranchService } from "./worker/openclaw-branch";
 import { OpenClawController, type OpenClawControllerStore } from "./worker/openclaw-controller";
 import {
   InteractiveSessionLineageService,
@@ -855,6 +852,11 @@ function openClawMutationService(
 }
 
 function openClawCreateService(env: RuntimeEnv, serviceUser: User): OpenClawCreateService {
+  const admin = new AdminRepository(env);
+  const branches = new OpenClawBranchService({
+    token: env.GITHUB_TOKEN,
+    requireRepo: (repo) => admin.requireRepo(repo),
+  });
   const store: OpenClawCreateStore = {
     defaultRuntime: deploymentConfig(env).defaultRuntime,
     now: () => Date.now(),
@@ -864,7 +866,7 @@ function openClawCreateService(env: RuntimeEnv, serviceUser: User): OpenClawCrea
       return session ? decorateInteractiveSession(session, serviceUser, env) : null;
     },
     prepareBranch: (repo, branch, baseBranch, signal) =>
-      ensureOpenClawServiceBranch(env, repo, branch, baseBranch, signal),
+      branches.ensure(repo, branch, baseBranch, signal),
     createSession: (body, githubToken, options) =>
       createInteractiveSessionFromInput(env, serviceUser, body, githubToken, options).then(
         (result) => result.session,
@@ -970,50 +972,6 @@ function openClawServiceUser(): User {
     allowed: true,
     teams: [],
   };
-}
-
-async function ensureOpenClawServiceBranch(
-  env: RuntimeEnv,
-  repoInput: unknown,
-  branchInput: unknown,
-  baseBranchInput: unknown,
-  signal?: AbortSignal,
-): Promise<void> {
-  const repo = normalizeRepo(repoInput);
-  if (!repo) throw badRequest("repo is required");
-  const target = githubRepoParts(repo);
-  if (!target) throw badRequest("repo must be a GitHub owner/name");
-  await new AdminRepository(env).requireRepo(repo);
-  const branch = openClawServiceBranch(branchInput, "branch", "main");
-  const baseBranch = openClawServiceBranch(baseBranchInput, "baseBranch");
-  if (!baseBranch) return;
-  if (branch === baseBranch) return;
-  if (!env.GITHUB_TOKEN) return;
-  const { owner, name } = target;
-  const refPath = `/repos/${owner}/${name}/git/ref/heads/${encodeURIComponent(branch)}`;
-  try {
-    await githubFetch<{ object: { sha: string } }>(refPath, env.GITHUB_TOKEN, signal);
-    return;
-  } catch (error) {
-    if (!(error instanceof GitHubApiError) || error.status !== 404) throw error;
-  }
-  const base = await githubFetch<{ object: { sha: string } }>(
-    `/repos/${owner}/${name}/git/ref/heads/${encodeURIComponent(baseBranch)}`,
-    env.GITHUB_TOKEN,
-    signal,
-  );
-  const response = await fetch(`https://api.github.com/repos/${owner}/${name}/git/refs`, {
-    method: "POST",
-    body: JSON.stringify({ ref: `refs/heads/${branch}`, sha: base.object.sha }),
-    headers: { ...githubHeaders(), authorization: `Bearer ${env.GITHUB_TOKEN}` },
-    ...(signal ? { signal } : {}),
-  });
-  if (response.ok) return;
-  if (response.status === 422) {
-    await githubFetch<{ object: { sha: string } }>(refPath, env.GITHUB_TOKEN, signal);
-    return;
-  }
-  throw new GitHubApiError(response.status);
 }
 
 function agentSessionAuthentication(env: RuntimeEnv): AgentSessionAuthenticator {
