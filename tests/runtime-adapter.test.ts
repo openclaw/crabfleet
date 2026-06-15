@@ -482,7 +482,7 @@ test("runtime adapter lifecycle cannot escape durable session ownership", async 
     stopSource.indexOf("clearRuntimeAdapterCreatePending") <
       stopSource.indexOf("runtimeAdapterWorkspaceLifecycle(env).stopForSession"),
   );
-  assert.match(source, /AND NOT EXISTS \(/);
+  assert.match(finalizationSource, /AND NOT EXISTS \(/);
   assert.match(
     finalizationSource,
     /archiveInteractiveSessionLogs\(env, id, now, \{ force: true \}\)/,
@@ -741,6 +741,10 @@ test("runtime adapter control-plane registration is canonical and durable", asyn
 
 test("stateless Sandbox provision hook acquires durable standalone ownership", async () => {
   const source = await readFile(new URL("../src/index.ts", import.meta.url), "utf8");
+  const cleanupServiceSource = await readFile(
+    new URL("../src/worker/sandbox-credential-policy-cleanup-service.ts", import.meta.url),
+    "utf8",
+  );
   const policyRepositorySource = await readFile(
     new URL("../src/worker/sandbox-credential-policy-repository.ts", import.meta.url),
     "utf8",
@@ -778,14 +782,17 @@ test("stateless Sandbox provision hook acquires durable standalone ownership", a
   const stopSource = source.slice(stopStart, stopEnd);
   const expiryStart = source.indexOf("async function expireStandaloneSandboxProvisions");
   const expirySource = source.slice(expiryStart, stopStart);
-  const standaloneCleanupStart = source.indexOf(
+  const standaloneCleanupStart = cleanupServiceSource.indexOf(
     "async function completeStandaloneSandboxProvisionCleanup",
   );
-  const standaloneCleanupEnd = source.indexOf(
+  const standaloneCleanupEnd = cleanupServiceSource.indexOf(
     "async function completeCredentialPolicyCleanupSession",
     standaloneCleanupStart,
   );
-  const standaloneCleanupSource = source.slice(standaloneCleanupStart, standaloneCleanupEnd);
+  const standaloneCleanupSource = cleanupServiceSource.slice(
+    standaloneCleanupStart,
+    standaloneCleanupEnd,
+  );
   const strictAuthStart = source.indexOf("function authorizeProvisionBearerToken");
   const strictAuthEnd = source.indexOf("function sandboxProvisionPreflightError", strictAuthStart);
   const strictAuthSource = source.slice(strictAuthStart, strictAuthEnd);
@@ -897,13 +904,22 @@ test("Sandbox credential egress proves the durable generation and owner", async 
 
 test("cron generation-wraps migrated legacy policies under exact live ownership", async () => {
   const source = await readFile(new URL("../src/index.ts", import.meta.url), "utf8");
+  const cleanupServiceSource = await readFile(
+    new URL("../src/worker/sandbox-credential-policy-cleanup-service.ts", import.meta.url),
+    "utf8",
+  );
   const policyRepositorySource = await readFile(
     new URL("../src/worker/sandbox-credential-policy-repository.ts", import.meta.url),
     "utf8",
   );
-  const batchStart = source.indexOf("async function reconcileCredentialPolicyCleanupBatch");
-  const batchEnd = source.indexOf("async function reconcileCredentialPolicyCleanup(", batchStart);
-  const batchSource = source.slice(batchStart, batchEnd);
+  const batchStart = cleanupServiceSource.indexOf(
+    "async function reconcileSandboxCredentialPolicyCleanupBatch",
+  );
+  const batchEnd = cleanupServiceSource.indexOf(
+    "async function reconcileCredentialPolicyCleanup(",
+    batchStart,
+  );
+  const batchSource = cleanupServiceSource.slice(batchStart, batchEnd);
   const beginStart = policyRepositorySource.indexOf(
     "async function beginLegacySandboxCredentialPolicyRepair",
   );
@@ -928,7 +944,7 @@ test("cron generation-wraps migrated legacy policies under exact live ownership"
   ).join("\n");
 
   assert.ok(
-    batchSource.indexOf("repairLegacySandboxCredentialPolicyBatch") <
+    batchSource.indexOf("repairLegacyPolicyBatch") <
       batchSource.indexOf("scanCredentialPolicyCleanupPage"),
   );
   assert.match(repairSource, /credentialPolicyLegacyGenerationPrefix/);
@@ -1064,7 +1080,10 @@ test("managed terminal expiry enters the shared retryable terminal finalizer", a
 });
 
 test("sandbox credential cleanup failures remain explicit", async () => {
-  const source = await readFile(new URL("../src/index.ts", import.meta.url), "utf8");
+  const source = await readFile(
+    new URL("../src/worker/sandbox-credential-policy-cleanup-service.ts", import.meta.url),
+    "utf8",
+  );
   const unregisterStart = source.indexOf("async function unregisterSandboxCredentialPolicyLookup");
   const unregisterEnd = source.indexOf(
     "async function normalizeCredentialPolicyCleanupGroups",
@@ -1080,6 +1099,10 @@ test("sandbox credential cleanup failures remain explicit", async () => {
 
 test("sandbox credential cleanup is durably staged and retried", async () => {
   const source = await readFile(new URL("../src/index.ts", import.meta.url), "utf8");
+  const cleanupServiceSource = await readFile(
+    new URL("../src/worker/sandbox-credential-policy-cleanup-service.ts", import.meta.url),
+    "utf8",
+  );
   const scannerSource = await readFile(
     new URL("../src/worker/sandbox-credential-policy-scanner.ts", import.meta.url),
     "utf8",
@@ -1094,21 +1117,26 @@ test("sandbox credential cleanup is durably staged and retried", async () => {
   );
   const scanStart = scannerSource.indexOf("type CredentialPolicyScanRow");
   const scanSource = scannerSource.slice(scanStart);
-  const batchStart = source.indexOf("async function reconcileCredentialPolicyCleanupBatch");
-  const normalizationStart = source.indexOf(
+  const batchStart = cleanupServiceSource.indexOf(
+    "async function reconcileSandboxCredentialPolicyCleanupBatch",
+  );
+  const normalizationStart = cleanupServiceSource.indexOf(
     "async function normalizeCredentialPolicyCleanupGroups",
   );
-  const normalizationSource = source.slice(normalizationStart, batchStart);
-  const batchEnd = source.indexOf("async function reconcileCredentialPolicyCleanup(", batchStart);
-  const batchSource = source.slice(batchStart, batchEnd);
+  const normalizationSource = cleanupServiceSource.slice(normalizationStart, batchStart);
+  const batchEnd = cleanupServiceSource.indexOf(
+    "async function reconcileCredentialPolicyCleanup(",
+    batchStart,
+  );
+  const batchSource = cleanupServiceSource.slice(batchStart, batchEnd);
   const cleanupStart = batchEnd;
-  const cleanupEnd = source.indexOf(
+  const cleanupEnd = cleanupServiceSource.indexOf(
     "async function completeCredentialPolicyCleanupSession",
     cleanupStart,
   );
-  const cleanupSource = source.slice(cleanupStart, cleanupEnd);
-  const completionEnd = source.indexOf("function legacyInteractiveSessionLeaseId", cleanupEnd);
-  const completionSource = source.slice(cleanupEnd, completionEnd);
+  const cleanupSource = cleanupServiceSource.slice(cleanupStart, cleanupEnd);
+  const completionEnd = cleanupServiceSource.indexOf("function clean", cleanupEnd);
+  const completionSource = cleanupServiceSource.slice(cleanupEnd, completionEnd);
   const provisionStart = source.indexOf("async function provisionWithSandbox");
   const provisionEnd = source.indexOf(
     "async function registerSandboxCredentialPolicy",
