@@ -47,12 +47,7 @@ import {
   type GitHubActionsWorkState,
 } from "./github-actions-runtime";
 import { githubRequestCanUseRepoCredential, matchesAnyHost } from "./sandbox-security";
-import {
-  githubOAuthCallbackRequestMatches,
-  githubOAuthCanonicalLoginUrl,
-  githubOAuthCanonicalSshLinkUrl,
-  githubOAuthRedirectUri,
-} from "./oauth";
+import { githubOAuthCanonicalSshLinkUrl, githubOAuthRedirectUri } from "./oauth";
 import {
   APP_HTML,
   GHOSTTY_BROWSER_EXTERNAL_JS,
@@ -182,7 +177,6 @@ import {
   bearerToken,
   conflict,
   cookie,
-  cookies,
   forbidden,
   json,
   notFound,
@@ -204,7 +198,6 @@ import {
   createSession,
   devIdentityEnabled,
   devIdentityId,
-  githubSessionSeconds,
   logout,
   optionalUser,
   parseRole,
@@ -214,6 +207,8 @@ import {
   upsertUser,
 } from "./worker/auth";
 import { base64FromBytes, openSecret, sealSecret, sha256 } from "./worker/crypto";
+import { githubCallback, githubLogin, sshLinkCookie } from "./worker/github-auth";
+import { GitHubApiError, githubFetch, githubHeaders, refreshGitHubUser } from "./worker/github";
 
 const defaultInteractiveCommand = "codex --yolo";
 
@@ -252,13 +247,6 @@ export class Sandbox extends CloudflareSandboxBase<RuntimeEnv> {
 (Sandbox as unknown as SandboxClassWithOutbound).outbound = sandboxOutbound;
 
 export { ContainerProxy };
-
-type GitHubProfile = {
-  id: number;
-  login: string;
-  email: string | null;
-  name: string | null;
-};
 
 type GitHubIssuePayload = {
   number: number;
@@ -661,8 +649,6 @@ type CardChanges = {
 
 const encoder = new TextEncoder();
 const terminalInputStates = new Map<string, TerminalInputState>();
-const oauthStateCookie = "crabbox_oauth_state";
-const sshLinkCookie = "crabbox_ssh_link";
 const sshLinkSeconds = 5 * 60;
 const terminalClipboardMaxBytes = 10 * 1024 * 1024;
 const lanes = ["Todo", "Running", "Human Review", "Done"];
@@ -2158,115 +2144,6 @@ async function devIdentityLogin(request: Request, env: RuntimeEnv): Promise<Resp
   return json(
     { user, auth: authMethods(env, request) },
     { headers: { "set-cookie": cookieHeader } },
-  );
-}
-
-async function githubLogin(request: Request, env: RuntimeEnv): Promise<Response> {
-  if (!env.GITHUB_CLIENT_ID || !env.GITHUB_CLIENT_SECRET) {
-    return text("GitHub OAuth is not configured.\n", "text/plain; charset=utf-8", {}, 503);
-  }
-
-  const url = new URL(request.url);
-  const redirectUri = githubOAuthRedirectUri(url, env.GITHUB_REDIRECT_URI);
-  const canonicalLoginUrl = githubOAuthCanonicalLoginUrl(url, env.GITHUB_REDIRECT_URI);
-  if (canonicalLoginUrl) {
-    return redirect(canonicalLoginUrl, { "cache-control": "no-store" });
-  }
-  const state = crypto.randomUUID();
-  const target = new URL("https://github.com/login/oauth/authorize");
-  target.searchParams.set("client_id", env.GITHUB_CLIENT_ID);
-  target.searchParams.set("redirect_uri", redirectUri);
-  target.searchParams.set("scope", "read:user read:org repo");
-  target.searchParams.set("state", state);
-
-  return redirect(target.toString(), {
-    "set-cookie": cookie(request, oauthStateCookie, state, 600),
-  });
-}
-
-async function githubCallback(request: Request, env: RuntimeEnv): Promise<Response> {
-  if (!env.GITHUB_CLIENT_ID || !env.GITHUB_CLIENT_SECRET) {
-    return text("GitHub OAuth is not configured.\n", "text/plain; charset=utf-8", {}, 503);
-  }
-
-  const url = new URL(request.url);
-  const redirectUri = githubOAuthRedirectUri(url, env.GITHUB_REDIRECT_URI);
-  if (!githubOAuthCallbackRequestMatches(url, env.GITHUB_REDIRECT_URI)) {
-    return text(
-      "OAuth callback host does not match configured redirect URI.\n",
-      "text/plain; charset=utf-8",
-      {},
-      400,
-    );
-  }
-  const code = url.searchParams.get("code");
-  const state = url.searchParams.get("state");
-  if (!code || !state || state !== cookies(request).get(oauthStateCookie)) {
-    return text("Invalid OAuth state.\n", "text/plain; charset=utf-8", {}, 400);
-  }
-
-  const tokenResponse = await fetch("https://github.com/login/oauth/access_token", {
-    method: "POST",
-    headers: {
-      accept: "application/json",
-      "content-type": "application/json",
-      "user-agent": "crabbox-ai",
-    },
-    body: JSON.stringify({
-      client_id: env.GITHUB_CLIENT_ID,
-      client_secret: env.GITHUB_CLIENT_SECRET,
-      code,
-      redirect_uri: redirectUri,
-      state,
-    }),
-  });
-  const tokenBody = await tokenResponse.json<{ access_token?: string; error?: string }>();
-  if (!tokenBody.access_token) {
-    return text(
-      tokenBody.error ?? "OAuth token exchange failed.\n",
-      "text/plain; charset=utf-8",
-      {},
-      401,
-    );
-  }
-
-  const freshUser = await refreshGitHubUser(env, tokenBody.access_token).catch(() => {
-    throw serviceUnavailable("GitHub membership refresh failed; retry later");
-  });
-  if (!freshUser) {
-    return text(
-      "GitHub user is not an active OpenClaw org member.\n",
-      "text/plain; charset=utf-8",
-      {},
-      403,
-    );
-  }
-  const authorized = await authorize(env, freshUser);
-  if (!authorized.allowed) {
-    return text(
-      "GitHub user is not in the Crabfleet allowlist.\n",
-      "text/plain; charset=utf-8",
-      {},
-      403,
-    );
-  }
-
-  const now = Date.now();
-  await upsertUser(env, authorized, now);
-  const session = await createSession(
-    env,
-    request,
-    authorized.subject,
-    now,
-    githubSessionSeconds,
-    tokenBody.access_token,
-  );
-  const pendingSshCode = cookies(request).get(sshLinkCookie);
-  return redirect(
-    pendingSshCode ? `/ssh/link/${encodeURIComponent(pendingSshCode)}` : "/app?login=github",
-    {
-      "set-cookie": session,
-    },
   );
 }
 
@@ -14604,78 +14481,6 @@ function eventInsert(
   return db
     .insertInto("events")
     .values({ card_id: cardId, actor: actorName, message, created_at: now });
-}
-
-async function githubFetch<T>(path: string, token: string, signal?: AbortSignal): Promise<T> {
-  const response = await fetch(`https://api.github.com${path}`, {
-    headers: {
-      ...githubHeaders(),
-      authorization: `Bearer ${token}`,
-    },
-    ...(signal ? { signal } : {}),
-  });
-  if (!response.ok) throw new GitHubApiError(response.status);
-  return response.json<T>();
-}
-
-function githubHeaders(env?: RuntimeEnv): HeadersInit {
-  return {
-    accept: "application/vnd.github+json",
-    ...(env?.GITHUB_TOKEN ? { authorization: `Bearer ${env.GITHUB_TOKEN}` } : {}),
-    "user-agent": "crabbox-ai",
-    "x-github-api-version": "2022-11-28",
-  };
-}
-
-async function githubFetchPages<T>(path: string, token: string): Promise<T[]> {
-  const rows: T[] = [];
-  for (let page = 1; page <= 10; page += 1) {
-    const separator = path.includes("?") ? "&" : "?";
-    const batch = await githubFetch<T[]>(`${path}${separator}per_page=100&page=${page}`, token);
-    rows.push(...batch);
-    if (batch.length < 100) break;
-  }
-  return rows;
-}
-
-async function refreshGitHubUser(env: RuntimeEnv, token: string): Promise<User | null> {
-  const org = env.GITHUB_ORG ?? "openclaw";
-  const [githubUser, emails, membership, teamRows] = await Promise.all([
-    githubFetch<GitHubProfile>("/user", token),
-    githubFetch<Array<{ email: string; primary: boolean; verified: boolean }>>(
-      "/user/emails",
-      token,
-    ).catch(() => []),
-    githubFetch<{ state: string }>(`/user/memberships/orgs/${org}`, token).catch((error) => {
-      if (error instanceof GitHubApiError && error.status === 404) return null;
-      throw error;
-    }),
-    githubFetchPages<{ slug: string; organization?: { login?: string } }>("/user/teams", token),
-  ]);
-  if (membership?.state !== "active") return null;
-  const email =
-    githubUser.email ??
-    emails.find((item) => item.primary && item.verified)?.email ??
-    emails.find((item) => item.verified)?.email ??
-    null;
-  const teams = teamRows
-    .filter((team) => (team.organization?.login ?? "").toLowerCase() === org.toLowerCase())
-    .map((team) => `@${org}/${team.slug}`);
-  return {
-    subject: `github:${githubUser.id}`,
-    login: githubUser.login,
-    email,
-    name: githubUser.name,
-    role: "viewer",
-    allowed: false,
-    teams,
-  };
-}
-
-class GitHubApiError extends Error {
-  constructor(readonly status: number) {
-    super(`GitHub API failed: ${status}`);
-  }
 }
 
 function parseJson<T>(value: string, fallback: T): T {

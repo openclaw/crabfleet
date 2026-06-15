@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-- Give Worker users, allowlist roles, cookie sessions, trusted-proxy identities, session-owned GitHub credentials, and secret encryption dedicated auth modules with behavioral coverage.
+- Give Worker users, allowlist roles, cookie sessions, trusted-proxy identities, GitHub OAuth/API membership, session-owned credentials, and secret encryption dedicated auth modules with behavioral coverage.
 - Isolate Worker ingress authentication, trusted-proxy credential stripping, and independent service-route policy behind direct behavioral tests.
 - Centralize Worker HTTP responses, security headers, status errors, JSON parsing, bearer authentication, and cookie handling behind a directly tested module.
 - Give shared Worker models and the complete Kysely/D1 schema, dialect, factory, and batch execution dedicated foundation modules.
