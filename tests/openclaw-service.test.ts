@@ -4,7 +4,11 @@ import test from "node:test";
 
 import {
   boundedUtf8Tail,
+	createOpenClawEmbedTicket,
   openClawBranchPreparationCanDefer,
+	openClawEmbedTicketDefaultSeconds,
+	openClawEmbedTicketMaxSeconds,
+	openClawEmbedTicketTtlSeconds,
   openClawGitBranchAllowed,
   openClawGitHubRepoParts,
   openClawRoomMaxSessions,
@@ -14,6 +18,7 @@ import {
   openClawServiceAuthorized,
   openClawTranscriptMaxBytes,
   sessionBelongsToRoot,
+	verifyOpenClawEmbedTicket,
 } from "../src/openclaw-service.ts";
 
 test("OpenClaw service authorization accepts dedicated scoped consumers", () => {
@@ -21,6 +26,30 @@ test("OpenClaw service authorization accepts dedicated scoped consumers", () => 
   assert.equal(openClawServiceAuthorized("Bearer multicodex", ["openclaw", "multicodex"]), true);
   assert.equal(openClawServiceAuthorized("Bearer public", ["openclaw", "multicodex"]), false);
   assert.equal(openClawServiceAuthorized(null, [undefined, null]), false);
+});
+
+test("OpenClaw embed tickets are signed, session scoped, and expiring", async () => {
+	const now = 1_800_000_000_000;
+	const token = await createOpenClawEmbedTicket("dedicated-secret", "IS-10", now + 60_000);
+	assert.equal(await verifyOpenClawEmbedTicket("dedicated-secret", token, "IS-10", now), true);
+	assert.equal(await verifyOpenClawEmbedTicket("other-secret", token, "IS-10", now), false);
+	assert.equal(await verifyOpenClawEmbedTicket("dedicated-secret", token, "IS-11", now), false);
+	assert.equal(
+		await verifyOpenClawEmbedTicket("dedicated-secret", token, "IS-10", now + 60_000),
+		false,
+	);
+	assert.equal(
+		await verifyOpenClawEmbedTicket("dedicated-secret", `${token}x`, "IS-10", now),
+		false,
+	);
+	assert.equal(await verifyOpenClawEmbedTicket("dedicated-secret", "invalid", "IS-10", now), false);
+});
+
+test("OpenClaw embed ticket lifetimes stay short and bounded", () => {
+	assert.equal(openClawEmbedTicketTtlSeconds(), openClawEmbedTicketDefaultSeconds);
+	assert.equal(openClawEmbedTicketTtlSeconds(1), 60);
+	assert.equal(openClawEmbedTicketTtlSeconds(3_600.9), 3_600);
+	assert.equal(openClawEmbedTicketTtlSeconds(99_999), openClawEmbedTicketMaxSeconds);
 });
 
 test("OpenClaw branch preparation defers masked control-plane permission failures", () => {
@@ -219,6 +248,22 @@ test("OpenClaw target authorization precedes targeted reconciliation", async () 
   assert.match(scopedSource, /const session = await readInteractiveSession/);
   assert.match(scopedSource, /const root = await readInteractiveSession/);
   assert.doesNotMatch(chainSource, /readFreshInteractiveSession/);
+});
+
+test("OpenClaw embed ticket minting stays root fenced and terminal scoped", async () => {
+	const source = await readFile(new URL("../src/index.ts", import.meta.url), "utf8");
+	const start = source.indexOf("async function openClawCreateCrabboxEmbedTicket");
+	const end = source.indexOf("async function openClawRootScopedCrabbox", start);
+	const mintSource = source.slice(start, end);
+	const inputStart = source.indexOf("function terminalInputGrant");
+	const inputEnd = source.indexOf("function terminalSubscriptionReconciler", inputStart);
+	const inputSource = source.slice(inputStart, inputEnd);
+
+	assert.match(mintSource, /requireOpenClawRoomService/);
+	assert.match(mintSource, /openClawRootScopedCrabbox\(request, env, id, body\.rootSessionId\)/);
+	assert.match(mintSource, /createOpenClawEmbedTicket/);
+	assert.match(mintSource, /session does not advertise terminal access/);
+	assert.match(inputSource, /canControlEmbeddedTerminalRequest/);
 });
 
 test("interactive lineage rejects caller-claimed roots without a parent", async () => {
