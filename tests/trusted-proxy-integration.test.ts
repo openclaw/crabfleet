@@ -15,6 +15,10 @@ test("interactive session creation requests browser credentials only for GitHub 
 
 test("trusted proxy requests stay sanitized on terminal forwarding paths", async () => {
   const source = await readFile(new URL("../src/index.ts", import.meta.url), "utf8");
+  const sandboxRuntimeSource = await readFile(
+    new URL("../src/worker/sandbox-runtime.ts", import.meta.url),
+    "utf8",
+  );
   const standaloneStart = source.indexOf("async function standaloneSandboxPty(");
   const standaloneEnd = source.indexOf("function standaloneSandboxTerminalGrant", standaloneStart);
   assert.match(
@@ -22,9 +26,14 @@ test("trusted proxy requests stay sanitized on terminal forwarding paths", async
     /sanitizeTrustedProxyRequest\(request, env\)/,
   );
 
-  const openStart = source.indexOf("async function openSandboxTerminalResponse(");
-  const openEnd = source.indexOf("async function ensureSandboxTerminalPrepared", openStart);
-  assert.match(source.slice(openStart, openEnd), /terminalSession\.terminal\(request, options\)/);
+  const openStart = sandboxRuntimeSource.indexOf(
+    "export async function openSandboxTerminalResponse(",
+  );
+  const openEnd = sandboxRuntimeSource.indexOf("export function sandboxSessionEnv", openStart);
+  assert.match(
+    sandboxRuntimeSource.slice(openStart, openEnd),
+    /terminalSession\.terminal\(request, options\)/,
+  );
 });
 
 test("trusted proxy sign-in cannot pretend that local logout will end the session", () => {

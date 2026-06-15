@@ -1200,7 +1200,7 @@ test("sandbox credential cleanup is durably staged and retried", async () => {
     ])
   ).join("\n");
   const refreshStart = source.indexOf("async function ensureCurrentSandboxLease");
-  const refreshEnd = source.indexOf("async function prepareSandboxWorkspace", refreshStart);
+  const refreshEnd = source.indexOf("async function createCard", refreshStart);
   const refreshSource = source.slice(refreshStart, refreshEnd);
   assert.match(scanSource, /credentialPolicyScanLimit/);
   assert.match(scanSource, /scan_max_rowid/);

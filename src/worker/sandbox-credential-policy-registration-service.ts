@@ -1,7 +1,6 @@
 import { fetchGithubRepoNodeId } from "./github.ts";
 import { sealSecret } from "./crypto.ts";
 import type { RuntimeEnv } from "./env.ts";
-import type { InteractiveProvisionRequest } from "./provisioning/types.ts";
 import {
   abandonSandboxCredentialPolicyRegistration,
   beginSandboxCredentialPolicyRegistration,
@@ -21,6 +20,7 @@ import {
   sandboxLeasePrefix,
   type SandboxCurrentLeaseFence,
 } from "./sandbox-lease.ts";
+import type { SandboxRuntimeSession } from "./sandbox-runtime.ts";
 import { sandboxControlStub } from "./session-control-do.ts";
 import {
   credentialPolicyLegacyGenerationPrefix,
@@ -28,10 +28,6 @@ import {
   type StoredSandboxCredentialPolicy,
 } from "./session-control-policy.ts";
 import type { InteractiveSession } from "./session-model.ts";
-
-export type SandboxRuntimeSession = (InteractiveProvisionRequest | InteractiveSession) & {
-  githubToken?: string;
-};
 
 export async function registerSandboxCredentialPolicy(
   env: RuntimeEnv,
