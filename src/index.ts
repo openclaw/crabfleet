@@ -275,9 +275,9 @@ import {
   readInteractiveSessionEventRows,
   readInteractiveSessionLogArchives,
   readInteractiveSessionLogs,
+  readInteractiveSessionRecord as readInteractiveSession,
+  readInteractiveSessionRecords,
   readSharedInteractiveSessionRow,
-  readVisibleInteractiveSessionRow,
-  readVisibleInteractiveSessionRows,
 } from "./worker/session-repository";
 import { activeDelegatedController, sharedInteractiveSession } from "./worker/session-sharing";
 import type { InteractiveProvisionResult } from "./worker/session-provisioning";
@@ -12719,34 +12719,9 @@ async function readRunsForCard(env: RuntimeEnv, cardId: string): Promise<RunAtte
 }
 
 async function readInteractiveSessions(env: RuntimeEnv, user: User): Promise<InteractiveSession[]> {
-  const rows = await readVisibleInteractiveSessionRows(env);
-  if (!rows.length) return [];
-  const logs = await readInteractiveSessionLogs(
-    env,
-    rows.map((row) => row.id),
+  return (await readInteractiveSessionRecords(env)).map((session) =>
+    decorateInteractiveSession(session, user, env),
   );
-  const archives = await readInteractiveSessionLogArchives(
-    env,
-    rows.map((row) => row.id),
-  );
-  return rows.map((row) =>
-    decorateInteractiveSession(
-      interactiveSession(row, logs.get(row.id) ?? [], archives.get(row.id) ?? null),
-      user,
-      env,
-    ),
-  );
-}
-
-async function readInteractiveSession(
-  env: RuntimeEnv,
-  id: string,
-): Promise<InteractiveSession | null> {
-  const row = await readVisibleInteractiveSessionRow(env, id);
-  if (!row) return null;
-  const logs = await readInteractiveSessionLogs(env, [id]);
-  const archives = await readInteractiveSessionLogArchives(env, [id]);
-  return interactiveSession(row, logs.get(id) ?? [], archives.get(id) ?? null);
 }
 
 async function readFreshInteractiveSession(

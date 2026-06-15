@@ -13,7 +13,9 @@ import type {
   InteractiveProvisionResult,
 } from "./session-provisioning.ts";
 import {
+  interactiveSession,
   interactiveSessionLogArchive,
+  type InteractiveSession,
   type InteractiveSessionEventRow,
   type InteractiveSessionLogArchive,
   type RuntimeCapabilities,
@@ -170,6 +172,35 @@ export async function readSharedInteractiveSessionRow(
       .where("share_mode", "=", "link_read")
       .executeTakeFirst()) ?? null
   );
+}
+
+export async function readInteractiveSessionRecords(
+  env: RuntimeEnv,
+  limit = 80,
+): Promise<InteractiveSession[]> {
+  const rows = await readVisibleInteractiveSessionRows(env, limit);
+  if (!rows.length) return [];
+  const ids = rows.map((row) => row.id);
+  const [logs, archives] = await Promise.all([
+    readInteractiveSessionLogs(env, ids),
+    readInteractiveSessionLogArchives(env, ids),
+  ]);
+  return rows.map((row) =>
+    interactiveSession(row, logs.get(row.id) ?? [], archives.get(row.id) ?? null),
+  );
+}
+
+export async function readInteractiveSessionRecord(
+  env: RuntimeEnv,
+  id: string,
+): Promise<InteractiveSession | null> {
+  const row = await readVisibleInteractiveSessionRow(env, id);
+  if (!row) return null;
+  const [logs, archives] = await Promise.all([
+    readInteractiveSessionLogs(env, [id]),
+    readInteractiveSessionLogArchives(env, [id]),
+  ]);
+  return interactiveSession(row, logs.get(id) ?? [], archives.get(id) ?? null);
 }
 
 export async function readInteractiveSessionLogs(

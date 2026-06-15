@@ -11,6 +11,8 @@ import {
   readInteractiveSessionEventRows,
   readInteractiveSessionLogArchives,
   readInteractiveSessionLogs,
+  readInteractiveSessionRecord,
+  readInteractiveSessionRecords,
   readSharedInteractiveSessionRow,
   readVisibleInteractiveSessionRow,
   readVisibleInteractiveSessionRows,
@@ -161,6 +163,48 @@ test("shared session reads require visible link-read rows", async () => {
   });
 
   assert.equal((await readSharedInteractiveSessionRow(env, "IS-2"))?.share_token_hash, "hash");
+});
+
+test("session aggregates combine rows, recent logs, and archive metadata", async () => {
+  const row = sessionRow({ id: "IS-2", preparation_pending: 0 });
+  const archive = {
+    session_id: "IS-2",
+    event_count: 1,
+    events_key: "events.json",
+    transcript_key: "transcript.md",
+    summary_key: "summary.json",
+    archived_at: 100,
+    updated_at: 110,
+    session_updated_at: 105,
+  };
+  const env = runtimeEnv((sql, parameters, kind) => {
+    assert.equal(kind, "all");
+    if (/from "interactive_sessions"/i.test(sql)) {
+      return { results: [row] };
+    }
+    if (/from interactive_session_events/i.test(sql)) {
+      assert.deepEqual(parameters, ["IS-2"]);
+      return {
+        results: [{ session_id: "IS-2", message: "ready", created_at: 1000 }],
+      };
+    }
+    if (/from "interactive_session_log_archives"/i.test(sql)) {
+      assert.deepEqual(parameters, ["IS-2"]);
+      return { results: [archive] };
+    }
+    throw new Error(`unexpected query: ${sql}`);
+  });
+
+  const record = await readInteractiveSessionRecord(env, "IS-2");
+  assert.equal(record?.id, "IS-2");
+  assert.match(record?.logs[0] ?? "", /ready$/);
+  assert.equal(record?.logArchive?.transcriptKey, "transcript.md");
+
+  const records = await readInteractiveSessionRecords(env, 1);
+  assert.equal(records.length, 1);
+  assert.equal(records[0]?.id, "IS-2");
+  assert.match(records[0]?.logs[0] ?? "", /ready$/);
+  assert.equal(records[0]?.logArchive?.eventCount, 1);
 });
 
 test("session log reads keep the newest bounded window in chronological order", async () => {
