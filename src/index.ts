@@ -280,6 +280,11 @@ import {
   readInteractiveSessionRecords,
   readSharedInteractiveSessionRow,
 } from "./worker/session-repository";
+import {
+  InteractiveSessionMetadataService,
+  isInteractiveSessionMetadataAction,
+  type InteractiveSessionMetadataStore,
+} from "./worker/session-metadata";
 import { activeDelegatedController, sharedInteractiveSession } from "./worker/session-sharing";
 import type { InteractiveProvisionResult } from "./worker/session-provisioning";
 import {
@@ -4336,6 +4341,20 @@ async function mutateInteractiveSessionMetadataAtomically(
   await archiveInteractiveSessionLogs(env, session.id, now).catch(() => undefined);
 }
 
+function interactiveSessionMetadataService(
+  env: RuntimeEnv,
+  user: User,
+): InteractiveSessionMetadataService {
+  const store: InteractiveSessionMetadataStore = {
+    persist: (session, actorName, message, values, now) =>
+      persistInteractiveSessionMetadataMutation(env, session, actorName, message, values, now),
+    archive: (sessionId, now) => archiveInteractiveSessionLogs(env, sessionId, now),
+    audit: (message, now) => audit(env, user, message, now),
+    readSession: (sessionId) => readInteractiveSession(env, sessionId),
+  };
+  return new InteractiveSessionMetadataService(store);
+}
+
 type LegacyInteractiveSessionStopOwner = {
   id: string;
   status: InteractiveSessionStatus;
@@ -4531,207 +4550,23 @@ async function mutateInteractiveSession(
     };
   }
 
-  if (action === "share_link") {
-    if (!canManage) throw forbidden("only the session owner or maintainer can share");
-    const token = shareToken();
-    const tokenHash = await sha256(token);
-    const preview = token.slice(0, 8);
-    await mutateInteractiveSessionMetadataAtomically(
-      env,
+  if (isInteractiveSessionMetadataAction(action)) {
+    const delegatedControlAvailable = canGrantDelegatedControl(env, session);
+    const result = await interactiveSessionMetadataService(env, user).mutate({
       session,
-      user,
-      "read-only share link enabled",
-      {
-        share_mode: "link_read",
-        share_token_hash: tokenHash,
-        share_token_preview: preview,
+      action,
+      actor: userActor,
+      policy: {
+        canManage,
+        canChangeMultiplayer: canChangeInteractiveSessionMultiplayer(user, session),
+        canControl: canControlInteractiveSession(user, session, now, delegatedControlAvailable),
+        delegatedControlAvailable,
       },
       now,
-    );
-    await audit(env, user, `interactive session share enabled ${id}`, now);
+    });
     return {
-      session: decorateInteractiveSession(
-        (await readInteractiveSession(env, id)) as InteractiveSession,
-        user,
-        env,
-      ),
-      shareUrl: shareUrl(request, env, id, token),
-    };
-  }
-
-  if (action === "disable_share") {
-    if (!canManage) throw forbidden("only the session owner or maintainer can disable sharing");
-    await mutateInteractiveSessionMetadataAtomically(
-      env,
-      session,
-      user,
-      "session sharing disabled",
-      {
-        share_mode: "private",
-        share_token_hash: null,
-        share_token_preview: null,
-        control_requested_by: null,
-        control_requested_at: null,
-        controller: null,
-        control_granted_at: null,
-        control_expires_at: null,
-      },
-      now,
-    );
-    await audit(env, user, `interactive session share disabled ${id}`, now);
-    return {
-      session: decorateInteractiveSession(
-        (await readInteractiveSession(env, id)) as InteractiveSession,
-        user,
-        env,
-      ),
-    };
-  }
-
-  if (action === "enable_multiplayer" || action === "disable_multiplayer") {
-    if (!canChangeInteractiveSessionMultiplayer(user, session)) {
-      throw forbidden("only the session creator can change multiplayer");
-    }
-    const enabled = action === "enable_multiplayer";
-    const message = enabled ? "multiplayer mode enabled" : "multiplayer mode disabled";
-    await mutateInteractiveSessionMetadataAtomically(
-      env,
-      session,
-      user,
-      message,
-      { multiplayer_mode: enabled ? 1 : 0 },
-      now,
-    );
-    await audit(
-      env,
-      user,
-      `interactive session multiplayer ${enabled ? "enabled" : "disabled"} ${id}`,
-      now,
-    );
-    return {
-      session: decorateInteractiveSession(
-        (await readInteractiveSession(env, id)) as InteractiveSession,
-        user,
-        env,
-      ),
-    };
-  }
-
-  if (action === "request_control") {
-    if (!canGrantDelegatedControl(env, session)) {
-      throw badRequest("delegated terminal control requires a revocable PTY bridge");
-    }
-    if (canControlInteractiveSession(user, session, now, canGrantDelegatedControl(env, session))) {
-      return { session: decorateInteractiveSession(session, user, env) };
-    }
-    if (["stopping", "expired", "failed", "stopped"].includes(session.status)) {
-      throw badRequest(`session is ${session.status}`);
-    }
-    const message = `${userActor} requested terminal control`;
-    await mutateInteractiveSessionMetadataAtomically(
-      env,
-      session,
-      user,
-      message,
-      {
-        control_requested_by: userActor,
-        control_requested_at: now,
-      },
-      now,
-    );
-    return {
-      session: decorateInteractiveSession(
-        (await readInteractiveSession(env, id)) as InteractiveSession,
-        user,
-        env,
-      ),
-    };
-  }
-
-  if (action === "approve_control") {
-    if (!canManage) throw forbidden("only the session owner or maintainer can approve control");
-    if (!session.controlRequestedBy) throw badRequest("no pending control request");
-    if (!canGrantDelegatedControl(env, session)) {
-      throw badRequest("delegated terminal control requires a revocable PTY bridge");
-    }
-    const expires = now + 30 * 60 * 1000;
-    const message = `control granted to ${session.controlRequestedBy}`;
-    await mutateInteractiveSessionMetadataAtomically(
-      env,
-      session,
-      user,
-      message,
-      {
-        controller: session.controlRequestedBy,
-        control_granted_at: now,
-        control_expires_at: expires,
-        control_requested_by: null,
-        control_requested_at: null,
-      },
-      now,
-    );
-    await audit(
-      env,
-      user,
-      `interactive session control granted ${id} to ${session.controlRequestedBy}`,
-      now,
-    );
-    return {
-      session: decorateInteractiveSession(
-        (await readInteractiveSession(env, id)) as InteractiveSession,
-        user,
-        env,
-      ),
-    };
-  }
-
-  if (action === "deny_control") {
-    if (!canManage) throw forbidden("only the session owner or maintainer can deny control");
-    const requester = session.controlRequestedBy;
-    const message = requester
-      ? `control request denied for ${requester}`
-      : "control request denied";
-    await mutateInteractiveSessionMetadataAtomically(
-      env,
-      session,
-      user,
-      message,
-      {
-        control_requested_by: null,
-        control_requested_at: null,
-      },
-      now,
-    );
-    return {
-      session: decorateInteractiveSession(
-        (await readInteractiveSession(env, id)) as InteractiveSession,
-        user,
-        env,
-      ),
-    };
-  }
-
-  if (action === "revoke_control") {
-    if (!canManage) throw forbidden("only the session owner or maintainer can revoke control");
-    await mutateInteractiveSessionMetadataAtomically(
-      env,
-      session,
-      user,
-      "terminal control revoked",
-      {
-        controller: null,
-        control_granted_at: null,
-        control_expires_at: null,
-      },
-      now,
-    );
-    await audit(env, user, `interactive session control revoked ${id}`, now);
-    return {
-      session: decorateInteractiveSession(
-        (await readInteractiveSession(env, id)) as InteractiveSession,
-        user,
-        env,
-      ),
+      session: decorateInteractiveSession(result.session, user, env),
+      ...(result.shareToken ? { shareUrl: shareUrl(request, env, id, result.shareToken) } : {}),
     };
   }
 
@@ -13774,12 +13609,6 @@ async function canControlInteractiveSessionById(
 function canGrantDelegatedControl(env: RuntimeEnv, session: InteractiveSession): boolean {
   if (!env.SANDBOX && isSandboxInteractiveSession(session)) return false;
   return true;
-}
-
-function shareToken(): string {
-  const first = crypto.randomUUID().replaceAll("-", "");
-  const second = crypto.randomUUID().replaceAll("-", "");
-  return `${first}${second}`;
 }
 
 function shareUrl(request: Request, env: RuntimeEnv, id: string, token: string): string {

@@ -35,7 +35,7 @@ test("trusted proxy sign-in cannot pretend that local logout will end the sessio
 test("split-origin links use the browser-visible proxy origin", async () => {
   const source = await readFile(new URL("../src/index.ts", import.meta.url), "utf8");
   assert.match(source, /trustedProxyPublicOrigin\(env\) \?\? new URL\(request\.url\)\.origin/);
-  assert.match(source, /shareUrl\(request, env, id, token\)/);
+  assert.match(source, /shareUrl\(request, env, id, result\.shareToken\)/);
   assert.match(source, /externalRequestOrigin\(request, env\)/);
   assert.match(source, /runtimeAdapterBrowserVncUrl\(browserAppOrigin\(env\), session\.id\)/);
   assert.match(

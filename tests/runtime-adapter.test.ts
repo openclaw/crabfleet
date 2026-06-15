@@ -829,14 +829,11 @@ test("strict session rows and cleanup preserve terminal finalization anchors", a
   assert.match(source, /events_key IS NOT NULL/);
 });
 
-test("summary and sharing events invalidate terminal cleanup snapshots", async () => {
+test("summary events invalidate terminal cleanup snapshots", async () => {
   const source = await readFile(new URL("../src/index.ts", import.meta.url), "utf8");
   const cleanupStart = source.indexOf("async function deleteFinalizedInteractiveSession");
   const cleanupEnd = source.indexOf("async function mutateInteractiveSession", cleanupStart);
   const cleanupSource = source.slice(cleanupStart, cleanupEnd);
-  const shareStart = source.indexOf('if (action === "share_link")');
-  const shareEnd = source.indexOf('if (action === "enable_multiplayer")', shareStart);
-  const shareSource = source.slice(shareStart, shareEnd);
   const summaryStart = source.indexOf("async function updateInteractiveSessionSummary");
   const summaryEnd = source.indexOf("async function updateGitHubActionsWorkState", summaryStart);
   const summarySource = source.slice(summaryStart, summaryEnd);
@@ -849,7 +846,6 @@ test("summary and sharing events invalidate terminal cleanup snapshots", async (
   assert.match(cleanupSource, /event_count = \$\{archive\?\.event_count/);
   assert.match(cleanupSource, /archived_at = \$\{archive\?\.archived_at/);
   assert.match(cleanupSource, /count\(\*\)/);
-  assert.match(shareSource, /mutateInteractiveSessionMetadataAtomically/);
   assert.match(summarySource, /mutateInteractiveSessionMetadataAtomically/);
   assert.match(metadataSource, /persistInteractiveSessionMetadataMutation/);
   assert.match(metadataSource, /archiveInteractiveSessionLogs/);
