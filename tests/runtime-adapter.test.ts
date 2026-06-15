@@ -920,7 +920,6 @@ test("runtime adapter operations stay bound to the registered control plane", as
   const stopSource = source.slice(stopStart, stopEnd);
 
   assert.match(migration, /ADD COLUMN adapter_control_plane TEXT/);
-  assert.match(source, /adapter_control_plane: adapterControlPlane/);
   assert.equal(
     configuredRuntimeAdapterControlPlane(
       {
@@ -1334,7 +1333,6 @@ test("Sandbox credential registration always proves exact durable ownership", as
   assert.match(ownerSource, /AND \$\{sandboxId\} = \$\{ownershipFence\.sandboxId\}/);
   assert.match(createSource, /const initialSandboxLease/);
   assert.match(createSource, /const initialAgentTokenHash = await sha256\(agentToken\)/);
-  assert.match(createSource, /lease_id: initialSandboxOwnership\?\.leaseId/);
   assert.match(createSource, /ownership: initialSandboxOwnership/);
   assert.match(ensureSource, /sandboxCurrentLeaseFence|SandboxCurrentLeaseFence/);
   assert.match(ensureSource, /credentialPolicyLegacyGenerationPrefix/);

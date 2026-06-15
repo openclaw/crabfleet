@@ -3,6 +3,7 @@ import test from "node:test";
 
 import type { RuntimeEnv } from "../src/worker/env.ts";
 import {
+  buildInteractiveSessionReservationValues,
   insertInteractiveSessionReservation,
   markInteractiveSessionPendingAdapter,
   persistInteractiveSessionProvisionResult,
@@ -53,6 +54,64 @@ function runtimeEnv(
     } as unknown as D1Database,
   } as RuntimeEnv;
 }
+
+function reservationInput() {
+  return {
+    id: "IS-2",
+    parentSessionId: "IS-1",
+    rootSessionId: "IS-1",
+    repo: "openclaw/crabfleet",
+    branch: "main",
+    runtime: "crabbox" as const,
+    adapterName: "runtime-adapter",
+    profile: "default",
+    adapterWorkspaceId: "workspace-2",
+    adapterControlPlane: "https://adapter.example.test/",
+    requestedCapabilities: containerCapabilities,
+    adapterSettings: {
+      ttlSeconds: 14_400,
+      idleTimeoutSeconds: 1_800,
+      capabilities: containerCapabilities,
+    },
+    adapterCreatePayloadJson: '{"id":"workspace-2"}',
+    preparationReservation: true,
+    openClawRequestId: "request-1",
+    openClawRequestHash: "hash-1",
+    command: "codex --yolo",
+    prompt: "fix the issue",
+    purpose: "fix the issue",
+    summary: "starting",
+    owner: "maintainer",
+    createdBy: "service:openclaw",
+    initialLeaseId: "sandbox:lease",
+    initialAgentTokenHash: "agent-hash",
+    now: 100,
+  };
+}
+
+test("session reservation rows centralize preparation, replay, and lease ownership", () => {
+  const prepared = buildInteractiveSessionReservationValues(reservationInput());
+  assert.equal(prepared.adapter, null);
+  assert.equal(prepared.adapter_create_pending, 0);
+  assert.equal(prepared.preparation_pending, 1);
+  assert.equal(prepared.last_reconciled_at, null);
+  assert.equal(prepared.reconcile_error, null);
+  assert.equal(prepared.adapter_control_plane, "https://adapter.example.test/");
+  assert.equal(prepared.openclaw_request_id, "request-1");
+  assert.equal(prepared.openclaw_request_hash, "hash-1");
+  assert.equal(prepared.lease_id, "sandbox:lease");
+  assert.equal(prepared.agent_token_hash, "agent-hash");
+
+  const immediate = buildInteractiveSessionReservationValues({
+    ...reservationInput(),
+    preparationReservation: false,
+  });
+  assert.equal(immediate.adapter, "runtime-adapter");
+  assert.equal(immediate.adapter_create_pending, 1);
+  assert.equal(immediate.preparation_pending, 0);
+  assert.equal(immediate.last_reconciled_at, 100);
+  assert.equal(immediate.reconcile_error, "runtime adapter create pending");
+});
 
 test("visible session reads exclude preparation reservations and stay bounded", async () => {
   const row = sessionRow({ id: "IS-2", preparation_pending: 0 });

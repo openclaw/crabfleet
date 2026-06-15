@@ -12,6 +12,7 @@ import type {
   InteractiveProvisionPersistenceInput,
   InteractiveProvisionResult,
 } from "./session-provisioning.ts";
+import type { RuntimeCapabilities } from "./session-model.ts";
 
 export type InteractiveSessionReplayReservation = {
   requestId: string;
@@ -21,6 +22,108 @@ export type InteractiveSessionReplayReservation = {
 };
 
 export type InteractiveSessionReservationValues = Insertable<InteractiveSessionTable>;
+
+export type InteractiveSessionReservationBuildInput = {
+  id: string;
+  parentSessionId: string | null;
+  rootSessionId: string;
+  repo: string;
+  branch: string;
+  runtime: "crabbox" | "container";
+  adapterName: string;
+  profile: string;
+  adapterWorkspaceId: string | null;
+  adapterControlPlane: string | null;
+  requestedCapabilities: RuntimeCapabilities;
+  adapterSettings: {
+    ttlSeconds: number;
+    idleTimeoutSeconds: number;
+    capabilities: RuntimeCapabilities;
+  } | null;
+  adapterCreatePayloadJson: string | null;
+  preparationReservation: boolean;
+  openClawRequestId: string | null;
+  openClawRequestHash: string | null;
+  command: string;
+  prompt: string;
+  purpose: string;
+  summary: string;
+  owner: string;
+  createdBy: string;
+  initialLeaseId: string | null;
+  initialAgentTokenHash: string;
+  now: number;
+};
+
+export function buildInteractiveSessionReservationValues(
+  input: InteractiveSessionReservationBuildInput,
+): InteractiveSessionReservationValues {
+  const immediateAdapter = Boolean(input.adapterWorkspaceId && !input.preparationReservation);
+  return {
+    id: input.id,
+    parent_session_id: input.parentSessionId,
+    root_session_id: input.rootSessionId,
+    repo: input.repo,
+    branch: input.branch,
+    runtime: input.runtime,
+    adapter: immediateAdapter ? input.adapterName : null,
+    profile: input.profile,
+    adapter_workspace_id: input.adapterWorkspaceId,
+    adapter_control_plane: input.adapterControlPlane,
+    provider_resource_id: null,
+    capabilities_json: JSON.stringify(input.requestedCapabilities),
+    expires_at: null,
+    last_reconciled_at: immediateAdapter ? input.now : null,
+    reconcile_error: immediateAdapter ? "runtime adapter create pending" : null,
+    terminal_status: null,
+    adapter_ttl_seconds: input.adapterSettings?.ttlSeconds ?? null,
+    adapter_idle_timeout_seconds: input.adapterSettings?.idleTimeoutSeconds ?? null,
+    adapter_requested_capabilities_json: input.adapterSettings
+      ? JSON.stringify(input.adapterSettings.capabilities)
+      : null,
+    adapter_create_payload_json: input.adapterCreatePayloadJson,
+    adapter_create_pending: immediateAdapter ? 1 : 0,
+    preparation_pending: input.preparationReservation ? 1 : 0,
+    openclaw_request_id: input.openClawRequestId,
+    openclaw_request_hash: input.openClawRequestHash,
+    openclaw_admission_closed: 0,
+    command: input.command,
+    prompt: input.prompt,
+    purpose: input.purpose,
+    summary: input.summary,
+    owner: input.owner,
+    created_by: input.createdBy,
+    status: "provisioning",
+    lease_id: input.initialLeaseId,
+    attach_url: null,
+    vnc_url: null,
+    last_event: "interactive workspace requested",
+    created_at: input.now,
+    updated_at: input.now,
+    last_seen_at: input.now,
+    stopped_at: null,
+    share_mode: "private",
+    share_token_hash: null,
+    share_token_preview: null,
+    control_requested_by: null,
+    control_requested_at: null,
+    controller: null,
+    control_granted_at: null,
+    control_expires_at: null,
+    multiplayer_mode: 0,
+    agent_token_hash: input.initialAgentTokenHash,
+    work_key: null,
+    work_kind: null,
+    work_state: "",
+    work_phase: "",
+    source_url: null,
+    github_run_url: null,
+    codex_thread_id: null,
+    codex_turn_id: null,
+    last_heartbeat_at: null,
+    completion_reason: null,
+  };
+}
 
 export async function readVisibleInteractiveSessionRows(
   env: RuntimeEnv,

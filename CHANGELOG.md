@@ -10,6 +10,7 @@
 - Move interactive-session reservation retry and idempotent replay recovery into the creation service.
 - Extract runtime-adapter configuration, control-plane, token, and create-preflight policy into a directly tested module.
 - Extract provisioning-result compare-and-set persistence, pending-adapter fallback, event recording, and terminal finalization ordering.
+- Centralize interactive-session reservation row defaults, adapter preparation state, replay identity, and sandbox lease ownership.
 - Centralize OpenClaw room visibility, log-free summaries, and bounded transcript sentinel/truncation policy behind direct query tests.
 - Isolate OpenClaw recursive root-stop admission, reservation cleanup, lifecycle retries, reconciliation, and stable-completion polling behind a directly tested service.
 - Extract OpenClaw root-scoped authorization, lineage supervision, reservation outcomes, rollback, and activation orchestration into a directly tested service boundary.
