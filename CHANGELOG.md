@@ -37,6 +37,7 @@
 - Extract GitHub Actions work-state projection, heartbeat persistence, event suppression, terminal mapping, runner disconnect, and reread.
 - Extract GitHub Actions runner-connect validation, lifecycle projection, heartbeat persistence, and durable connection evidence.
 - Extract interactive terminal route selection, bridge expansion, signed attach preservation, adapter authorization, runner targets, query projection, and headers.
+- Extract terminal WebSocket relay queues, output acknowledgements, message normalization, authorization polling, and peer close handling.
 - Centralize OpenClaw room visibility, log-free summaries, and bounded transcript sentinel/truncation policy behind direct query tests.
 - Isolate OpenClaw recursive root-stop admission, reservation cleanup, lifecycle retries, reconciliation, and stable-completion polling behind a directly tested service.
 - Extract OpenClaw root-scoped authorization, lineage supervision, reservation outcomes, rollback, and activation orchestration into a directly tested service boundary.

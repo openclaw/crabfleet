@@ -657,10 +657,6 @@ test("recurring terminal authorization never awaits provider reconciliation", as
   const shareStart = source.indexOf("async function isSharedSessionToken");
   const shareEnd = source.indexOf("function sendTerminalFrame", shareStart);
   const shareSource = source.slice(shareStart, shareEnd);
-  const bridgeStart = source.indexOf("function bridgeWebSockets");
-  const bridgeEnd = source.indexOf("async function webSocketMessageData", bridgeStart);
-  const bridgeSource = source.slice(bridgeStart, bridgeEnd);
-
   assert.match(grantSource, /cachedBooleanGrant/);
   assert.match(grantSource, /terminalSubscriptionReconciler/);
   assert.match(grantSource, /void reconcileExternalInteractiveSessionById/);
@@ -668,8 +664,6 @@ test("recurring terminal authorization never awaits provider reconciliation", as
   assert.doesNotMatch(controlSource, /reconcileCredentialPolicyCleanupBatch|runtimeAdapterFetch/);
   assert.doesNotMatch(shareSource, /reconcileExternalInteractiveSessionById/);
   assert.doesNotMatch(shareSource, /reconcileCredentialPolicyCleanupBatch|runtimeAdapterFetch/);
-  assert.match(bridgeSource, /reconcileSubscription\?\.\(\)/);
-  assert.doesNotMatch(bridgeSource, /await reconcileSubscription/);
 });
 
 test("public auth deployment metadata excludes runtime routing", () => {
@@ -1951,11 +1945,7 @@ test("runtime adapter terminal flow control stays explicit and end-to-end", asyn
   assert.match(source, /frame\.type === TerminalMessageType\.Ack/);
   assert.match(source, /subscription\.outputAcknowledgements/);
   assert.match(source, /bytes <= subscription\.outputAcknowledgementBytes/);
-  assert.match(source, /acknowledgedBytes <= rightOutputAcknowledgementBytes/);
   assert.match(source, /TerminalSubscribeFlags\.OutputAcknowledgements/);
-  assert.match(source, /searchParams\.get\("flow"\) === "ack-v1"/);
-  assert.match(source, /JSON\.stringify\(\{ type: "ack", bytes \}\)/);
-  assert.match(source, /terminalOutputAcknowledgement\(forwarded\)/);
   assert.match(source, /else if \(upstreamConnection\.outputAcknowledgements\)/);
 });
 
