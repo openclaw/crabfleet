@@ -948,19 +948,25 @@ test("cron generation-wraps migrated legacy policies under exact live ownership"
 });
 
 test("active credential-policy generations recover after a post-DO crash", async () => {
-  const source = await readFile(new URL("../src/index.ts", import.meta.url), "utf8");
+  const scannerSource = await readFile(
+    new URL("../src/worker/sandbox-credential-policy-scanner.ts", import.meta.url),
+    "utf8",
+  );
   const policyRepositorySource = await readFile(
     new URL("../src/worker/sandbox-credential-policy-repository.ts", import.meta.url),
     "utf8",
   );
-  const scanStart = source.indexOf("async function scanCredentialPolicyCleanupPage");
-  const scanEnd = source.indexOf("async function readCredentialPolicyScanPage", scanStart);
-  const scanSource = source.slice(scanStart, scanEnd);
-  const repairStart = source.indexOf(
+  const scanStart = scannerSource.indexOf("async function scanCredentialPolicyCleanupPage");
+  const scanEnd = scannerSource.indexOf("async function readCredentialPolicyScanPage", scanStart);
+  const scanSource = scannerSource.slice(scanStart, scanEnd);
+  const repairStart = scannerSource.indexOf(
     "async function repairActiveSandboxCredentialPolicyRegistration",
   );
-  const repairEnd = source.indexOf("function credentialPolicyScanRequiresCleanup", repairStart);
-  const repairSource = source.slice(repairStart, repairEnd);
+  const repairEnd = scannerSource.indexOf(
+    "function credentialPolicyScanRequiresCleanup",
+    repairStart,
+  );
+  const repairSource = scannerSource.slice(repairStart, repairEnd);
   const promoteStart = policyRepositorySource.indexOf(
     "async function promoteSandboxCredentialPolicyRegistration",
   );
@@ -975,7 +981,7 @@ test("active credential-policy generations recover after a post-DO crash", async
   assert.match(repairSource, /row\.policy_state !== "registering"/);
   assert.match(repairSource, /row\.registration_claim_expires_at/);
   assert.match(repairSource, /credentialPolicyScanOwnershipFence/);
-  assert.match(repairSource, /sandboxCredentialPolicyExists/);
+  assert.match(repairSource, /policyExists/);
   assert.match(repairSource, /recordSandboxCredentialPolicyRefs\([\s\S]*"active"/);
   assert.match(repairSource, /repair lost durable ownership/);
   assert.match(promoteSource, /state: "active"/);
@@ -1060,7 +1066,10 @@ test("managed terminal expiry enters the shared retryable terminal finalizer", a
 test("sandbox credential cleanup failures remain explicit", async () => {
   const source = await readFile(new URL("../src/index.ts", import.meta.url), "utf8");
   const unregisterStart = source.indexOf("async function unregisterSandboxCredentialPolicyLookup");
-  const unregisterEnd = source.indexOf("type CredentialPolicyScanRow", unregisterStart);
+  const unregisterEnd = source.indexOf(
+    "async function normalizeCredentialPolicyCleanupGroups",
+    unregisterStart,
+  );
   const unregisterSource = source.slice(unregisterStart, unregisterEnd);
 
   assert.match(unregisterSource, /if \(!stub\) throw serviceUnavailable/);
@@ -1071,6 +1080,10 @@ test("sandbox credential cleanup failures remain explicit", async () => {
 
 test("sandbox credential cleanup is durably staged and retried", async () => {
   const source = await readFile(new URL("../src/index.ts", import.meta.url), "utf8");
+  const scannerSource = await readFile(
+    new URL("../src/worker/sandbox-credential-policy-scanner.ts", import.meta.url),
+    "utf8",
+  );
   const policyRepositorySource = await readFile(
     new URL("../src/worker/sandbox-credential-policy-repository.ts", import.meta.url),
     "utf8",
@@ -1079,12 +1092,13 @@ test("sandbox credential cleanup is durably staged and retried", async () => {
     new URL("../migrations/0022_credential_policy_cleanup.sql", import.meta.url),
     "utf8",
   );
-  const scanStart = source.indexOf("type CredentialPolicyScanRow");
-  const batchStart = source.indexOf(
-    "async function reconcileCredentialPolicyCleanupBatch",
-    scanStart,
+  const scanStart = scannerSource.indexOf("type CredentialPolicyScanRow");
+  const scanSource = scannerSource.slice(scanStart);
+  const batchStart = source.indexOf("async function reconcileCredentialPolicyCleanupBatch");
+  const normalizationStart = source.indexOf(
+    "async function normalizeCredentialPolicyCleanupGroups",
   );
-  const scanSource = source.slice(scanStart, batchStart);
+  const normalizationSource = source.slice(normalizationStart, batchStart);
   const batchEnd = source.indexOf("async function reconcileCredentialPolicyCleanup(", batchStart);
   const batchSource = source.slice(batchStart, batchEnd);
   const cleanupStart = batchEnd;
@@ -1121,12 +1135,8 @@ test("sandbox credential cleanup is durably staged and retried", async () => {
     finishEnd,
   );
   const abandonSource = policyRepositorySource.slice(finishEnd, abandonEnd);
-  const scanDecisionStart = source.indexOf("function credentialPolicyScanRequiresCleanup");
-  const scanDecisionEnd = source.indexOf(
-    "async function normalizeCredentialPolicyCleanupGroups",
-    scanDecisionStart,
-  );
-  const scanDecisionSource = source.slice(scanDecisionStart, scanDecisionEnd);
+  const scanDecisionStart = scannerSource.indexOf("function credentialPolicyScanRequiresCleanup");
+  const scanDecisionSource = scannerSource.slice(scanDecisionStart);
   const controlSource = (
     await Promise.all([
       readFile(new URL("../src/worker/session-control-do.ts", import.meta.url), "utf8"),
@@ -1165,10 +1175,9 @@ test("sandbox credential cleanup is durably staged and retried", async () => {
   assert.match(scanSource, /agent_token_hash = NULL/);
   assert.match(scanSource, /credentialPolicySandboxIsExpected/);
   assert.match(scanSource, /sandbox_refresh_claim = NULL/);
-  assert.match(scanSource, /normalizeCredentialPolicyCleanupGroups/);
-  assert.match(scanSource, /group_max_session_id/);
   assert.match(batchSource, /scanCredentialPolicyCleanupPage/);
   assert.match(batchSource, /normalizeCredentialPolicyCleanupGroups/);
+  assert.match(normalizationSource, /group_max_session_id/);
   assert.match(batchSource, /COALESCE\(last_attempt_at, created_at\)/);
   assert.match(batchSource, /\.limit\(credentialPolicyCleanupLimit\)/);
   assert.match(batchSource, /completeStandaloneSandboxProvisionCleanupSafely/);
