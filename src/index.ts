@@ -1,11 +1,5 @@
 import { sql, type Kysely, type UpdateObject } from "kysely";
-import {
-  ContainerProxy,
-  Sandbox as CloudflareSandboxBase,
-  getSandbox,
-  type BackupOptions,
-  type Sandbox as CloudflareSandbox,
-} from "@cloudflare/sandbox";
+import { ContainerProxy, Sandbox as CloudflareSandboxBase } from "@cloudflare/sandbox";
 import { buildFleetState, type FleetState } from "./fleet-state";
 import { buildGitHubActionsRunnerPtyUrl, githubActionsRuntime } from "./github-actions-runtime";
 import {
@@ -256,11 +250,6 @@ import { stageTerminalCredentialPolicyCleanupById } from "./worker/sandbox-crede
 import { reconcileSandboxCredentialPolicyCleanupBatch as reconcileCredentialPolicyCleanupBatch } from "./worker/sandbox-credential-policy-cleanup-service";
 import { credentialPolicyProvisioningStaleMs } from "./worker/sandbox-credential-policy-scanner";
 import {
-  createSandboxSession,
-  sandboxSetupSessionId,
-  sandboxWorkdir,
-} from "./worker/sandbox-runtime";
-import {
   resolveInteractiveSessionCreateRequest,
   type InteractiveSessionCreateRequest,
 } from "./worker/session-create-request";
@@ -286,16 +275,12 @@ import {
   interactivePtyRouteKind,
   interactiveTerminalTarget,
 } from "./worker/session-terminal-route";
-import {
-  githubActionsRelayStub,
-  readSandboxFleetPolicies,
-  sandboxControlStub,
-  type SandboxCheckpoint,
-} from "./worker/session-control-do";
+import { githubActionsRelayStub, readSandboxFleetPolicies } from "./worker/session-control-do";
 import { defaultSandboxEgressHosts, sandboxPlaceholderOpenAIKey } from "./worker/sandbox-outbound";
 import { sandboxOutbound } from "./worker/sandbox-outbound-service";
 import { createInteractiveDesktopService } from "./worker/interactive-desktop-service";
 import { InteractiveTerminalService } from "./worker/interactive-terminal-service";
+import { createSandboxSessionResourceService } from "./worker/sandbox-session-resources";
 
 type SandboxClassWithOutbound = {
   outbound?: typeof sandboxOutbound;
@@ -719,11 +704,14 @@ function browserSessionRouteDependencies(env: RuntimeEnv): BrowserSessionRouteDe
       updateInteractiveSessionSummary(request, env, user, sessionId),
     mutateSession: (request, user, sessionId, action) =>
       mutateInteractiveSession(request, env, user, sessionId, action),
-    listCheckpoints: (user, sessionId) => listInteractiveSessionCheckpoints(env, user, sessionId),
-    createCheckpoint: (user, sessionId) => checkpointInteractiveSession(env, user, sessionId),
+    listCheckpoints: (user, sessionId) =>
+      sandboxSessionResourceService(env).listCheckpoints(user, sessionId),
+    createCheckpoint: (user, sessionId) =>
+      sandboxSessionResourceService(env).createCheckpoint(user, sessionId),
     restoreCheckpoint: (user, sessionId, checkpointId) =>
-      restoreInteractiveSessionCheckpoint(env, user, sessionId, checkpointId),
-    readDiagnostics: (user, sessionId) => readInteractiveSessionDiagnostics(env, user, sessionId),
+      sandboxSessionResourceService(env).restoreCheckpoint(user, sessionId, checkpointId),
+    readDiagnostics: (user, sessionId) =>
+      sandboxSessionResourceService(env).readDiagnostics(user, sessionId),
     openVnc: (user, sessionId) => interactiveDesktopService(env).open(user, sessionId),
     uploadClipboard: (request, user, sessionId) =>
       interactiveTerminalService(env).uploadClipboard(request, user, sessionId),
@@ -751,10 +739,12 @@ function serviceSessionRouteDependencies(env: RuntimeEnv): ServiceSessionRouteDe
     presentSession: (session, user) => decorateInteractiveSession(session, user, env),
     mutateSession: (request, user, sessionId, action) =>
       mutateInteractiveSession(request, env, user, sessionId, action),
-    listCheckpoints: (user, sessionId) => listInteractiveSessionCheckpoints(env, user, sessionId),
-    createCheckpoint: (user, sessionId) => checkpointInteractiveSession(env, user, sessionId),
+    listCheckpoints: (user, sessionId) =>
+      sandboxSessionResourceService(env).listCheckpoints(user, sessionId),
+    createCheckpoint: (user, sessionId) =>
+      sandboxSessionResourceService(env).createCheckpoint(user, sessionId),
     restoreCheckpoint: (user, sessionId, checkpointId) =>
-      restoreInteractiveSessionCheckpoint(env, user, sessionId, checkpointId),
+      sandboxSessionResourceService(env).restoreCheckpoint(user, sessionId, checkpointId),
     readLogs: (user, sessionId) => readInteractiveSessionLogBundle(env, user, sessionId),
     readTranscript: (user, sessionId) => interactiveSessionTranscriptResponse(env, user, sessionId),
     updateSummary: (request, user, sessionId) =>
@@ -790,6 +780,13 @@ function interactiveTerminalService(env: RuntimeEnv): InteractiveTerminalService
 function interactiveDesktopService(env: RuntimeEnv) {
   return createInteractiveDesktopService(env, {
     readFreshSession: (sessionId) => readFreshInteractiveSession(env, sessionId),
+    delegatedControlAvailable: (session) => canGrantDelegatedControl(env, session),
+  });
+}
+
+function sandboxSessionResourceService(env: RuntimeEnv) {
+  return createSandboxSessionResourceService(env, {
+    presentSession: (session, user) => decorateInteractiveSession(session, user, env),
     delegatedControlAvailable: (session) => canGrantDelegatedControl(env, session),
   });
 }
@@ -1995,292 +1992,6 @@ async function disconnectGitHubActionsRunner(env: RuntimeEnv, id: string): Promi
     { method: "POST" },
   );
   if (!response.ok) throw serviceUnavailable("GitHub Actions relay is unavailable");
-}
-
-async function readInteractiveSessionDiagnostics(
-  env: RuntimeEnv,
-  user: User,
-  id: string,
-): Promise<{ session: InteractiveSession; diagnostics: unknown }> {
-  const session = await readInteractiveSession(env, id);
-  if (!session) throw notFound("interactive session not found");
-  const decoratedSession = decorateInteractiveSession(session, user, env);
-  if (
-    !canControlInteractiveSession(user, session, Date.now(), canGrantDelegatedControl(env, session))
-  ) {
-    throw forbidden("terminal control has not been granted");
-  }
-  if (!env.SANDBOX || !isSandboxInteractiveSession(session)) {
-    return {
-      session: decoratedSession,
-      diagnostics: {
-        available: false,
-        reason: "diagnostics are only available for Cloudflare Sandbox sessions",
-      },
-    };
-  }
-
-  const lease = sandboxLeaseInfo(session);
-  const sandbox = getSandbox(env.SANDBOX, lease.sandboxId);
-  const workdir = sandboxWorkdir(session.id);
-  const setup = await createSandboxSession(
-    sandbox,
-    sandboxSetupSessionId(session.id),
-    "/workspace",
-    {
-      CRABBOX_SESSION_ID: session.id,
-      CRABBOX_WORKDIR: workdir,
-    },
-  );
-  const result = await setup.exec(
-    `
-node - <<'NODE'
-const fs = require("fs");
-const cp = require("child_process");
-const tools = [
-  "bash", "git", "gh", "node", "npm", "pnpm", "codex", "rg", "fd", "jq",
-  "python3", "pip3", "make", "gcc", "time", "ssh", "rsync", "curl",
-  "unzip", "zip", "sqlite3", "shellcheck", "crabbox"
-];
-const workdir = process.env.CRABBOX_WORKDIR || "";
-const repo = process.env.CRABBOX_REPO || "";
-const home = process.env.HOME || "/root";
-function run(command, args) {
-  try {
-    return cp.execFileSync(command, args, {
-      encoding: "utf8",
-      stdio: ["ignore", "pipe", "ignore"],
-      timeout: 5000
-    }).trim();
-  } catch {
-    return "";
-  }
-}
-function shell(command) {
-  return run("/bin/bash", ["-lc", command]);
-}
-function which(tool) {
-  return shell("command -v " + JSON.stringify(tool));
-}
-function oneLine(text) {
-  return String(text || "").split(/\\r?\\n/).find(Boolean) || "";
-}
-const toolResults = tools.map((name) => {
-  const path = which(name);
-  return {
-    name,
-    present: Boolean(path),
-    path: path || null,
-    version: path ? oneLine(run(path, ["--version"])) || null : null
-  };
-});
-const missing = toolResults.filter((tool) => !tool.present).map((tool) => tool.name);
-const checkout = {
-  path: workdir,
-  exists: Boolean(workdir && fs.existsSync(workdir)),
-  git: Boolean(workdir && fs.existsSync(workdir + "/.git")),
-  branch: workdir ? run("git", ["-C", workdir, "rev-parse", "--abbrev-ref", "HEAD"]) || null : null,
-  head: workdir ? run("git", ["-C", workdir, "rev-parse", "--short", "HEAD"]) || null : null,
-  remote: workdir ? run("git", ["-C", workdir, "config", "--get", "remote.origin.url"]).replace(/\\/\\/[^/@]+@/g, "//<redacted>@") || null : null
-};
-const codexHome = process.env.CODEX_HOME || home + "/.codex";
-const repoPermissionsRaw = repo ? run("gh", ["api", "repos/" + repo, "--jq", ".permissions"]) : "";
-let repoPermissions = null;
-try {
-  repoPermissions = repoPermissionsRaw ? JSON.parse(repoPermissionsRaw) : null;
-} catch {}
-const diagnostics = {
-  available: true,
-  imageVersion: process.env.CRABBOX_IMAGE_VERSION || null,
-  cwd: process.cwd(),
-  checkout,
-  github: {
-    credentialProxy: process.env.CRABFLEET_SANDBOX === "1",
-    credentialFilePresent: fs.existsSync(home + "/.config/crabbox/github-credential"),
-    ghAuthenticated: Boolean(run("gh", ["api", "user", "--jq", ".login"])),
-    repo,
-    permissions: repoPermissions
-  },
-  codex: {
-    home: codexHome,
-    configPresent: fs.existsSync(codexHome + "/config.toml"),
-    authPresent: fs.existsSync(codexHome + "/auth.json")
-  },
-  tools: toolResults,
-  missing
-};
-console.log(JSON.stringify(diagnostics));
-NODE
-`,
-    { timeout: 20_000, env: { CRABBOX_WORKDIR: workdir, CRABBOX_REPO: session.repo } },
-  );
-  if (!result.success) {
-    return {
-      session: decoratedSession,
-      diagnostics: {
-        available: false,
-        reason: clean(result.stderr || result.stdout || "diagnostics failed", 700),
-      },
-    };
-  }
-  const output = result.stdout.trim();
-  try {
-    return { session: decoratedSession, diagnostics: JSON.parse(output) };
-  } catch {
-    return {
-      session: decoratedSession,
-      diagnostics: {
-        available: false,
-        reason: "diagnostics returned invalid JSON",
-        output: clean(output, 700),
-      },
-    };
-  }
-}
-
-async function listInteractiveSessionCheckpoints(
-  env: RuntimeEnv,
-  user: User,
-  id: string,
-): Promise<{ checkpoints: Array<Omit<SandboxCheckpoint, "backup">>; session: InteractiveSession }> {
-  const session = await managedSandboxSession(env, user, id);
-  const stub = sandboxControlStub(env);
-  if (!stub) throw serviceUnavailable("SESSION_CONTROL Durable Object is not configured");
-  const response = await stub.fetch(
-    `https://crabfleet.internal/api/session-control/checkpoints/${encodeURIComponent(id)}`,
-  );
-  if (!response.ok) throw serviceUnavailable("checkpoint registry is unavailable");
-  const body = (await response.json()) as { checkpoints?: SandboxCheckpoint[] };
-  return {
-    checkpoints: (body.checkpoints ?? []).map(({ backup: _backup, ...checkpoint }) => checkpoint),
-    session: decorateInteractiveSession(session, user, env),
-  };
-}
-
-async function checkpointInteractiveSession(
-  env: RuntimeEnv,
-  user: User,
-  id: string,
-): Promise<{ checkpoint: Omit<SandboxCheckpoint, "backup">; session: InteractiveSession }> {
-  const session = await managedSandboxSession(env, user, id);
-  const lease = sandboxLeaseInfo(session);
-  const sandbox = getManagedSandbox(env, session);
-  const workdir = sandboxWorkdir(id);
-  const name = `checkpoint-${Date.now()}`;
-  const backup = await sandbox.createBackup(sandboxBackupOptions(env, workdir, name));
-  const checkpoint: SandboxCheckpoint = {
-    backup,
-    createdAt: Date.now(),
-    id: backup.id,
-    name,
-    sessionId: id,
-    workdir,
-  };
-  const stub = sandboxControlStub(env);
-  if (!stub) throw serviceUnavailable("SESSION_CONTROL Durable Object is not configured");
-  const response = await stub.fetch("https://crabfleet.internal/api/session-control/checkpoints", {
-    method: "POST",
-    body: JSON.stringify(checkpoint),
-    headers: { "content-type": "application/json" },
-  });
-  if (!response.ok) throw serviceUnavailable("checkpoint registry is unavailable");
-  await appendInteractiveSessionEvent(
-    env,
-    id,
-    user,
-    `checkpoint created ${checkpoint.id} in ${lease.sandboxId}`,
-    Date.now(),
-  );
-  return {
-    checkpoint: (({ backup: _backup, ...item }) => item)(checkpoint),
-    session: decorateInteractiveSession(session, user, env),
-  };
-}
-
-async function restoreInteractiveSessionCheckpoint(
-  env: RuntimeEnv,
-  user: User,
-  id: string,
-  checkpointId: string,
-): Promise<{ checkpoint: Omit<SandboxCheckpoint, "backup">; session: InteractiveSession }> {
-  const session = await managedSandboxSession(env, user, id);
-  const stub = sandboxControlStub(env);
-  if (!stub) throw serviceUnavailable("SESSION_CONTROL Durable Object is not configured");
-  const response = await stub.fetch(
-    `https://crabfleet.internal/api/session-control/checkpoints/${encodeURIComponent(
-      id,
-    )}/${encodeURIComponent(checkpointId)}`,
-  );
-  if (!response.ok) throw notFound("checkpoint not found");
-  const body = (await response.json()) as { checkpoint?: SandboxCheckpoint };
-  if (!body.checkpoint) throw notFound("checkpoint not found");
-  const sandbox = getManagedSandbox(env, session);
-  await sandbox.restoreBackup(body.checkpoint.backup);
-  await appendInteractiveSessionEvent(
-    env,
-    id,
-    user,
-    `checkpoint restored ${body.checkpoint.id}`,
-    Date.now(),
-  );
-  return {
-    checkpoint: (({ backup: _backup, ...item }) => item)(body.checkpoint),
-    session: decorateInteractiveSession(session, user, env),
-  };
-}
-
-function sandboxBackupOptions(env: RuntimeEnv, workdir: string, name: string): BackupOptions {
-  const localBucket = env.CRABFLEET_LOCAL_SANDBOX_BACKUPS !== "0";
-  if (localBucket && !env.BACKUP_BUCKET) {
-    throw serviceUnavailable("checkpoint backups require the BACKUP_BUCKET R2 binding");
-  }
-  if (!localBucket && !sandboxHasPresignedBackupConfig(env)) {
-    throw serviceUnavailable(
-      "checkpoint backups require BACKUP_BUCKET plus CLOUDFLARE_ACCOUNT_ID, BACKUP_BUCKET_NAME, R2_ACCESS_KEY_ID, and R2_SECRET_ACCESS_KEY",
-    );
-  }
-  return {
-    dir: workdir,
-    excludes: ["node_modules", ".pnpm-store", ".cache", "dist", "build"],
-    gitignore: true,
-    ...(localBucket ? { localBucket: true } : {}),
-    name,
-  };
-}
-
-function sandboxHasPresignedBackupConfig(env: RuntimeEnv): boolean {
-  return Boolean(
-    env.BACKUP_BUCKET &&
-    env.CLOUDFLARE_ACCOUNT_ID &&
-    env.BACKUP_BUCKET_NAME &&
-    env.R2_ACCESS_KEY_ID &&
-    env.R2_SECRET_ACCESS_KEY,
-  );
-}
-
-async function managedSandboxSession(
-  env: RuntimeEnv,
-  user: User,
-  id: string,
-): Promise<InteractiveSession> {
-  const session = await readInteractiveSession(env, id);
-  if (!session) throw notFound("interactive session not found");
-  if (!canManageInteractiveSession(user, session)) {
-    throw forbidden("only the session owner or maintainer can manage checkpoints");
-  }
-  if (!env.SANDBOX || !isSandboxInteractiveSession(session)) {
-    throw badRequest("checkpoints require a Cloudflare Sandbox session");
-  }
-  if (["stopping", "expired", "failed", "stopped"].includes(session.status)) {
-    throw badRequest(`session is ${session.status}`);
-  }
-  return session;
-}
-
-function getManagedSandbox(env: RuntimeEnv, session: InteractiveSession): CloudflareSandbox {
-  if (!env.SANDBOX) throw serviceUnavailable("Sandbox binding is not configured");
-  const lease = sandboxLeaseInfo(session);
-  return getSandbox(env.SANDBOX, lease.sandboxId);
 }
 
 function interactiveProvisioningService(env: RuntimeEnv): InteractiveProvisioningService {
