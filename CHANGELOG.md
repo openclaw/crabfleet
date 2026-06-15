@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Extract OpenClaw root-scoped authorization, lineage supervision, reservation outcomes, rollback, and activation orchestration into a directly tested service boundary.
 - Move OpenClaw room reads, reservation fencing, activation, rollback, cleanup polling, admission state, completion counts, and lineage reads into a directly tested repository boundary.
 - Centralize repository normalization and OpenClaw request identity, semantic hashing, and durable replay lookup behind direct behavior tests.
 - Centralize interactive-session types, capability defaults, hidden adapter identity, and database row/event/archive mapping in a directly tested model module.

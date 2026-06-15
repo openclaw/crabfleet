@@ -240,6 +240,10 @@ import {
   readOpenClawRootRows,
   removeInteractiveSessionReservation,
 } from "./worker/openclaw-repository";
+import {
+  OpenClawSupervisionService,
+  type OpenClawSupervisionStore,
+} from "./worker/openclaw-supervision";
 
 const defaultInteractiveCommand = "codex --yolo";
 
@@ -2516,6 +2520,7 @@ async function openClawMutateSessionRoot(
     throw notFound("session root not found");
   }
   const serviceUser = openClawServiceUser();
+  const supervision = openClawSupervision(env);
   await audit(env, serviceUser, `openclaw session root stop requested ${root}`, Date.now());
   await closeOpenClawRootAdmission(env, root);
   const deadline = Date.now() + 60_000;
@@ -2529,7 +2534,7 @@ async function openClawMutateSessionRoot(
     const pending = rows.filter((row) => row.preparation_pending !== 0).slice(0, 4);
     await mapWithConcurrency(pending, 4, async (row) => {
       await runOpenClawRootOperationBeforeDeadline(deadline, () =>
-        rollbackInteractiveSessionReservation(env, row.id, row.created_at),
+        supervision.rollbackReservation(row.id, row.created_at),
       );
     });
     if (Date.now() >= deadline) break;
@@ -2732,112 +2737,7 @@ async function openClawRootScopedCrabbox(
     120,
   );
   if (!rootSessionId) throw badRequest("root session id is required");
-  const session = await readInteractiveSession(env, id);
-  const root = await readInteractiveSession(env, rootSessionId);
-  const chain =
-    session && root ? await openClawReadSessionChain(env, session, root, rootSessionId) : [];
-  if (!session || !root || !openClawRoomSessionChainAllowed(chain, session.id, rootSessionId)) {
-    throw notFound("interactive session not found");
-  }
-  const refreshed = await readFreshInteractiveSession(env, id);
-  if (!refreshed) throw notFound("interactive session not found");
-  return refreshed;
-}
-
-async function openClawReadSessionChain(
-  env: RuntimeEnv,
-  session: InteractiveSession,
-  root: InteractiveSession,
-  rootSessionId: string,
-): Promise<InteractiveSession[]> {
-  const chain = new Map<string, InteractiveSession>([[root.id, root]]);
-  let current = session;
-  for (let depth = 0; depth < openClawRoomMaxSessions && !chain.has(current.id); depth += 1) {
-    chain.set(current.id, current);
-    if (current.id === rootSessionId || !current.parentSessionId) break;
-    if (chain.has(current.parentSessionId)) break;
-    const parent = await readInteractiveSession(env, current.parentSessionId);
-    if (!parent) break;
-    current = parent;
-  }
-  return [...chain.values()];
-}
-
-async function openClawSupervisedRootForCreate(
-  env: RuntimeEnv,
-  createdBy: string,
-  lineage: { parentSessionId: string | null; rootSessionId: string | null },
-): Promise<string | null> {
-  if (!lineage.parentSessionId || !lineage.rootSessionId) return null;
-  const [parent, root] = await Promise.all([
-    readInteractiveSession(env, lineage.parentSessionId),
-    readInteractiveSession(env, lineage.rootSessionId),
-  ]);
-  if (!parent || !root) throw badRequest("session lineage not found");
-  if (createdBy === "service:openclaw" || createdBy === `session:${lineage.parentSessionId}`) {
-    const chain = await openClawReadSessionChain(env, parent, root, lineage.rootSessionId);
-    if (openClawRoomSessionChainAllowed(chain, parent.id, lineage.rootSessionId)) {
-      if (!(await openClawRootAdmissionOpen(env, lineage.rootSessionId))) {
-        throw conflict("OpenClaw room root is stopping");
-      }
-      return lineage.rootSessionId;
-    }
-  }
-  if (createdBy === "service:openclaw" || openClawRoomRootAllowed(root)) {
-    throw badRequest("invalid OpenClaw room lineage");
-  }
-  return null;
-}
-
-async function enforceOpenClawRoomSessionLimitAfterInsert(
-  env: RuntimeEnv,
-  rootSessionId: string,
-  insertedSessionId: string,
-  insertedAt: number,
-): Promise<void> {
-  if (!(await openClawRoomReservationLineageAllowed(env, insertedSessionId, rootSessionId))) {
-    await rollbackInteractiveSessionReservation(env, insertedSessionId, insertedAt);
-    throw badRequest("invalid OpenClaw room lineage");
-  }
-  const position = await openClawRoomReservationPosition(
-    env,
-    rootSessionId,
-    insertedSessionId,
-    insertedAt,
-  );
-  if (position > 0 && position <= openClawRoomMaxSessions) return;
-  if (!position) {
-    await rollbackInteractiveSessionReservation(env, insertedSessionId, insertedAt);
-    if (!(await openClawRootAdmissionOpen(env, rootSessionId))) {
-      throw conflict("OpenClaw room root is stopping");
-    }
-    throw serviceUnavailable("session root reservation disappeared");
-  }
-  await rollbackInteractiveSessionReservation(env, insertedSessionId, insertedAt);
-  throw tooManyRequests("session root reached the supervision limit");
-}
-
-async function openClawRoomReservationLineageAllowed(
-  env: RuntimeEnv,
-  insertedSessionId: string,
-  rootSessionId: string,
-): Promise<boolean> {
-  const [session, root] = await Promise.all([
-    readOpenClawLineageSession(env, insertedSessionId, 1),
-    readOpenClawLineageSession(env, rootSessionId, 0),
-  ]);
-  if (!session || !root) return false;
-  const chain = new Map<string, InteractiveSession>([[root.id, root]]);
-  let current = session;
-  for (let depth = 0; depth < openClawRoomMaxSessions && !chain.has(current.id); depth += 1) {
-    chain.set(current.id, current);
-    if (current.id === rootSessionId || !current.parentSessionId) break;
-    if (chain.has(current.parentSessionId)) break;
-    const parent = await readOpenClawLineageSession(env, current.parentSessionId, 0);
-    if (!parent) break;
-    current = parent;
-  }
-  return openClawRoomSessionChainAllowed([...chain.values()], session.id, rootSessionId);
+  return openClawSupervision(env).requireRootScopedSession(id, rootSessionId);
 }
 
 async function cleanupAbandonedInteractiveSessionPreparations(
@@ -2849,43 +2749,35 @@ async function cleanupAbandonedInteractiveSessionPreparations(
     now - interactiveSessionPreparationStaleMs,
     runtimeAdapterReconcileLimit,
   );
+  const supervision = openClawSupervision(env);
   await mapWithConcurrency(rows, runtimeAdapterReconcileConcurrency, async (row) => {
-    await rollbackInteractiveSessionReservation(env, row.sessionId, row.createdAt).catch(
-      (error) => {
-        console.error(`interactive session preparation cleanup failed for ${row.sessionId}`, error);
-      },
-    );
+    await supervision.rollbackReservation(row.sessionId, row.createdAt).catch((error) => {
+      console.error(`interactive session preparation cleanup failed for ${row.sessionId}`, error);
+    });
   });
 }
 
-async function rollbackInteractiveSessionReservation(
-  env: RuntimeEnv,
-  insertedSessionId: string,
-  insertedAt: number,
-): Promise<void> {
-  if (await removeInteractiveSessionReservation(env, insertedSessionId, insertedAt)) return;
-  throw serviceUnavailable("interactive session reservation rollback failed");
-}
-
-async function requireInteractiveSessionReservationActivation(
-  env: RuntimeEnv,
-  insertedSessionId: string,
-  insertedAt: number,
-  adapterWorkspaceId: string | null,
-): Promise<void> {
-  if (
-    await activateInteractiveSessionReservation(
-      env,
-      insertedSessionId,
-      insertedAt,
-      adapterWorkspaceId,
-      runtimeAdapterName,
-    )
-  ) {
-    return;
-  }
-  await rollbackInteractiveSessionReservation(env, insertedSessionId, insertedAt);
-  throw serviceUnavailable("interactive session reservation activation failed");
+function openClawSupervision(env: RuntimeEnv): OpenClawSupervisionService {
+  const store: OpenClawSupervisionStore = {
+    readSession: (id) => readInteractiveSession(env, id),
+    refreshSession: (id) => readFreshInteractiveSession(env, id),
+    readLineageSession: (id, preparationPending) =>
+      readOpenClawLineageSession(env, id, preparationPending),
+    rootAdmissionOpen: (rootSessionId) => openClawRootAdmissionOpen(env, rootSessionId),
+    roomReservationPosition: (rootSessionId, insertedSessionId, insertedAt) =>
+      openClawRoomReservationPosition(env, rootSessionId, insertedSessionId, insertedAt),
+    removeReservation: (insertedSessionId, insertedAt) =>
+      removeInteractiveSessionReservation(env, insertedSessionId, insertedAt),
+    activateReservation: (insertedSessionId, insertedAt, adapterWorkspaceId) =>
+      activateInteractiveSessionReservation(
+        env,
+        insertedSessionId,
+        insertedAt,
+        adapterWorkspaceId,
+        runtimeAdapterName,
+      ),
+  };
+  return new OpenClawSupervisionService(store);
 }
 
 function openClawCrabboxResponse(
@@ -3953,7 +3845,8 @@ async function createInteractiveSessionFromInput(
     options.parentSessionId ?? (clean(body.parentSessionId, 120) || null),
     options.rootSessionId ?? (clean(body.rootSessionId, 120) || null),
   );
-  const supervisedRootSessionId = await openClawSupervisedRootForCreate(env, createdBy, lineage);
+  const supervision = openClawSupervision(env);
+  const supervisedRootSessionId = await supervision.supervisedRootForCreate(createdBy, lineage);
   const preparationReservation = Boolean(options.afterReserve || supervisedRootSessionId);
   const now = Date.now();
   const db = database(env);
@@ -4089,16 +3982,16 @@ async function createInteractiveSessionFromInput(
       }
       reservationInserted = true;
       if (supervisedRootSessionId) {
-        await enforceOpenClawRoomSessionLimitAfterInsert(env, supervisedRootSessionId, id, now);
+        await supervision.enforceRoomSessionLimitAfterInsert(supervisedRootSessionId, id, now);
       }
       try {
         await options.afterReserve?.();
       } catch (error) {
-        await rollbackInteractiveSessionReservation(env, id, now);
+        await supervision.rollbackReservation(id, now);
         throw error;
       }
       if (preparationReservation) {
-        await requireInteractiveSessionReservationActivation(env, id, now, adapterWorkspaceId);
+        await supervision.requireReservationActivation(id, now, adapterWorkspaceId);
       }
       await appendInteractiveSessionEvent(env, id, user, "interactive workspace requested", now);
       const provisioned = await provisionInteractiveSession(
