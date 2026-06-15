@@ -249,6 +249,7 @@ import {
   openClawTranscriptEventWindow,
   openClawVisibleRoomSessions,
 } from "./worker/openclaw-queries";
+import { OpenClawMutationService, type OpenClawMutationStore } from "./worker/openclaw-mutations";
 
 const defaultInteractiveCommand = "codex --yolo";
 
@@ -2568,52 +2569,8 @@ async function openClawMessageCrabbox(
     request,
   );
   const session = await openClawRootScopedCrabbox(request, env, id, body.rootSessionId);
-  if (["stopping", "stopped", "expired", "failed"].includes(session.status)) {
-    throw badRequest(`session is ${session.status}`);
-  }
-  if (!session.capabilities.terminal) {
-    throw badRequest("session does not advertise terminal access");
-  }
-  const message = clean(body.message, 4000);
-  if (!message) throw badRequest("message is required");
   const serviceUser = openClawServiceUser();
-  const now = Date.now();
-  await appendInteractiveSessionEvent(
-    env,
-    id,
-    serviceUser,
-    "OpenClaw service nudge requested",
-    now,
-  );
-  await audit(env, serviceUser, `openclaw crabbox message requested ${id}`, now);
-  const terminalRequest = new Request(request.url, { headers: { upgrade: "websocket" } });
-  const upstream = await openInteractiveTerminalUpstream(
-    terminalRequest,
-    env,
-    serviceUser,
-    session,
-    120,
-    34,
-  );
-  upstream.socket.send(encoder.encode(`${message}${body.enter === false ? "" : "\r"}`));
-  try {
-    upstream.socket.close(1000, "OpenClaw service nudge sent");
-  } catch {
-    console.warn(JSON.stringify({ event: "openclaw_message_socket_close_failed", sessionId: id }));
-  }
-  const deliveredAt = Date.now();
-  const deliveryRecords = await Promise.allSettled([
-    appendInteractiveSessionEvent(env, id, serviceUser, "OpenClaw service nudge sent", deliveredAt),
-    audit(env, serviceUser, `openclaw crabbox message sent ${id}`, deliveredAt),
-  ]);
-  if (deliveryRecords.some((record) => record.status === "rejected")) {
-    console.warn(
-      JSON.stringify({
-        event: "openclaw_message_delivery_record_failed",
-        sessionId: id,
-      }),
-    );
-  }
+  await openClawMutationService(request, env, serviceUser).sendMessage(session, body);
   return {
     delivered: true,
     ...openClawCrabboxSummaryResponse(env, serviceUser, session),
@@ -2630,9 +2587,8 @@ async function openClawMutateCrabbox(
   await openClawRootScopedCrabbox(request, env, id, body.rootSessionId);
   if (body.action !== "stop") throw badRequest("only stop is supported");
   const serviceUser = openClawServiceUser();
-  await audit(env, serviceUser, `openclaw crabbox stop requested ${id}`, Date.now());
-  const result = await mutateInteractiveSession(request, env, serviceUser, id, body.action);
-  return openClawCrabboxSummaryResponse(env, serviceUser, result.session);
+  const session = await openClawMutationService(request, env, serviceUser).stopSession(id);
+  return openClawCrabboxSummaryResponse(env, serviceUser, session);
 }
 
 async function openClawRootScopedCrabbox(
@@ -2713,6 +2669,37 @@ function openClawRootStopService(
       audit(env, serviceUser, `openclaw session root stopped ${rootSessionId}`, now),
   };
   return new OpenClawRootStopService(store, runtimeAdapterName);
+}
+
+function openClawMutationService(
+  request: Request,
+  env: RuntimeEnv,
+  serviceUser: User,
+): OpenClawMutationService {
+  const store: OpenClawMutationStore = {
+    now: () => Date.now(),
+    recordEvent: (sessionId, message, now) =>
+      appendInteractiveSessionEvent(env, sessionId, serviceUser, message, now),
+    audit: (message, now) => audit(env, serviceUser, message, now),
+    openTerminal: async (session) => {
+      const terminalRequest = new Request(request.url, { headers: { upgrade: "websocket" } });
+      const upstream = await openInteractiveTerminalUpstream(
+        terminalRequest,
+        env,
+        serviceUser,
+        session,
+        120,
+        34,
+      );
+      return upstream.socket;
+    },
+    stopSession: (sessionId) =>
+      mutateInteractiveSession(request, env, serviceUser, sessionId, "stop").then(
+        (result) => result.session,
+      ),
+    warn: (event) => console.warn(JSON.stringify(event)),
+  };
+  return new OpenClawMutationService(store);
 }
 
 function openClawCrabboxResponse(
