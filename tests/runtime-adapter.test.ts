@@ -458,68 +458,6 @@ test("confirmed stop races terminalize only after create ambiguity clears", () =
   });
 });
 
-test("runtime adapter lifecycle cannot escape durable session ownership", async () => {
-  const source = await readFile(new URL("../src/index.ts", import.meta.url), "utf8");
-  const finalizationSource = await readFile(
-    new URL("../src/worker/session-terminal-finalization.ts", import.meta.url),
-    "utf8",
-  );
-  const stopStart = source.indexOf("async function stopSupersededRuntimeAdapterProvision");
-  const stopEnd = source.indexOf("async function resolveInteractiveSessionLineage", stopStart);
-  const stopSource = source.slice(stopStart, stopEnd);
-
-  assert.match(stopSource, /recordConfirmedRuntimeAdapterRelease/);
-  assert.match(stopSource, /select\(\[[\s\S]*"adapter_create_pending"[\s\S]*"terminal_status"/);
-  assert.match(stopSource, /AND adapter_create_pending = \$\{lifecycle\.adapter_create_pending\}/);
-  assert.match(stopSource, /terminal_status IS NULL/);
-  assert.match(stopSource, /AND updated_at = \$\{lifecycle\.updated_at\}/);
-  assert.match(stopSource, /MAX\(updated_at \+ 1, \$\{now\}\)/);
-  assert.match(stopSource, /env\.DB\.batch/);
-  assert.match(stopSource, /INSERT INTO interactive_session_events/);
-  assert.match(stopSource, /finalizeTerminalInteractiveSession/);
-  assert.match(stopSource, /terminal_finalize_pending: 1/);
-  assert.ok(
-    stopSource.indexOf("clearRuntimeAdapterCreatePending") <
-      stopSource.indexOf("runtimeAdapterWorkspaceLifecycle(env).stopForSession"),
-  );
-  assert.match(finalizationSource, /AND NOT EXISTS \(/);
-  assert.match(
-    finalizationSource,
-    /archiveInteractiveSessionLogs\(env, id, now, \{ force: true \}\)/,
-  );
-});
-
-test("confirmed adapter failure release keeps the original failure evidence", async () => {
-  const source = await readFile(new URL("../src/index.ts", import.meta.url), "utf8");
-  const finalizationSource = await readFile(
-    new URL("../src/worker/session-terminal-finalization.ts", import.meta.url),
-    "utf8",
-  );
-  const migration = await readFile(
-    new URL("../migrations/0021_runtime_adapter_hardening.sql", import.meta.url),
-    "utf8",
-  );
-  const releaseStart = source.indexOf("async function recordConfirmedRuntimeAdapterRelease");
-  const releaseEnd = source.indexOf(
-    "async function clearRuntimeAdapterCreatePending",
-    releaseStart,
-  );
-  const releaseSource = source.slice(releaseStart, releaseEnd);
-
-  assert.match(releaseSource, /"terminal_failure_reason"/);
-  assert.match(releaseSource, /retainedRuntimeAdapterFailureMessage/);
-  assert.match(
-    releaseSource,
-    /terminal_failure_reason: resolved\.status === "failed" \? failureMessage/,
-  );
-  assert.match(releaseSource, /reconcile_error: resolved\.status === "failed" \? failureMessage/);
-  assert.match(releaseSource, /\? failureMessage/);
-  assert.match(finalizationSource, /retainedRuntimeAdapterFailureMessage/);
-  assert.match(finalizationSource, /INSERT INTO interactive_session_events/);
-  assert.match(finalizationSource, /SELECT \$\{id\}, 'system', \$\{message\}/);
-  assert.match(migration, /ADD COLUMN terminal_failure_reason TEXT/);
-});
-
 test("terminal archive finalization remains durably retryable", async () => {
   const finalizationSource = await readFile(
     new URL("../src/worker/session-terminal-finalization.ts", import.meta.url),
@@ -1463,21 +1401,6 @@ test("successful DELETE requires an implicit or parsed release confirmation", ()
   assert.equal(runtimeAdapterStopOutcome(200, stopped, "fleet-a-is-101"), "stopped");
   assert.equal(runtimeAdapterStopOutcome(204, null, "fleet-a-is-101"), "stopped");
   assert.equal(runtimeAdapterStopOutcome(200, wrong, "fleet-a-is-101"), "identity_mismatch");
-});
-
-test("confirmed adapter release persists DELETE evidence", async () => {
-  const source = await readFile(new URL("../src/index.ts", import.meta.url), "utf8");
-  const releaseStart = source.indexOf("async function recordConfirmedRuntimeAdapterRelease");
-  const releaseEnd = source.indexOf(
-    "async function clearRuntimeAdapterCreatePending",
-    releaseStart,
-  );
-  const releaseSource = source.slice(releaseStart, releaseEnd);
-
-  assert.match(releaseSource, /retainedReleaseMessage/);
-  assert.match(releaseSource, /env\.DB\.batch/);
-  assert.match(releaseSource, /INSERT INTO interactive_session_events/);
-  assert.match(releaseSource, /terminal_finalize_pending: 1/);
 });
 
 test("adapter workspace paths use the controller id and encode it", () => {

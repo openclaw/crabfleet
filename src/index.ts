@@ -18,8 +18,6 @@ import {
   runtimeAdapterBrowserVncUrl,
   runtimeAdapterName,
   runtimeAdapterReplayRequest,
-  retainedRuntimeAdapterFailureMessage,
-  resolveCreateAfterStopRace,
 } from "./runtime-adapter";
 import { allocateInteractiveSessionIdSql, formatInteractiveSessionId } from "./session-id";
 import { openClawRoomMaxSessions } from "./openclaw-service";
@@ -33,12 +31,7 @@ import {
 } from "./worker/deployment";
 import { mapWithConcurrency } from "./worker/concurrency";
 import type { RuntimeEnv } from "./worker/env";
-import {
-  database,
-  type CompilableQuery,
-  type Database,
-  type InteractiveSessionRow,
-} from "./worker/database";
+import { database, type Database, type InteractiveSessionRow } from "./worker/database";
 import type { User } from "./worker/models";
 import {
   badRequest,
@@ -225,11 +218,14 @@ import { RuntimeAdapterProvisioningService } from "./worker/provisioning/runtime
 import { InteractiveProvisioningEndpoints } from "./worker/provisioning/endpoints";
 import { safeProviderError } from "./worker/provisioning/result";
 import {
+  clearRuntimeAdapterCreatePending,
+  confirmRuntimeAdapterRelease,
   failRuntimeAdapterWorkspaceIdConflict,
   persistRuntimeAdapterStopEvidence,
   stageFailedRuntimeAdapterRelease,
   stageRuntimeAdapterProvision,
 } from "./worker/provisioning/runtime-adapter-repository";
+import { RuntimeAdapterReleaseService } from "./worker/provisioning/runtime-adapter-release-service";
 import { SandboxLifecycleService } from "./worker/provisioning/sandbox-lifecycle";
 import {
   standaloneSandboxProvisionTtlMs,
@@ -1117,7 +1113,12 @@ function interactiveSessionReconciliationService(
       ),
     readSession: (sessionId) => readInteractiveSession(env, sessionId),
     stopSuperseded: (sessionId, adapterWorkspaceId, createPending, now) =>
-      stopSupersededRuntimeAdapterProvision(env, sessionId, adapterWorkspaceId, createPending, now),
+      runtimeAdapterReleaseService(env).stopSuperseded({
+        sessionId,
+        adapterWorkspaceId,
+        createPending,
+        now,
+      }),
     archive: (sessionId, now) => archiveInteractiveSessionLogs(env, sessionId, now),
     finalize: (sessionId, status, now) =>
       finalizeTerminalInteractiveSession(env, sessionId, status, now),
@@ -1148,9 +1149,30 @@ function runtimeAdapterWorkspaceLifecycle(env: RuntimeEnv): RuntimeAdapterWorksp
       runtimeAdapterProvisioningService(env).releaseFailed(sessionId, result),
     failWorkspaceIdConflict: (input) => failRuntimeAdapterWorkspaceIdConflict(env, input),
     recordConfirmedRelease: async (sessionId, adapterWorkspaceId, now, message) => {
-      await recordConfirmedRuntimeAdapterRelease(env, sessionId, adapterWorkspaceId, now, message);
+      await confirmRuntimeAdapterRelease(env, sessionId, adapterWorkspaceId, now, message);
     },
     archive: (sessionId, now) => archiveInteractiveSessionLogs(env, sessionId, now),
+  });
+}
+
+function runtimeAdapterReleaseService(env: RuntimeEnv): RuntimeAdapterReleaseService {
+  return new RuntimeAdapterReleaseService({
+    clearCreatePending: (sessionId, adapterWorkspaceId) =>
+      clearRuntimeAdapterCreatePending(env, sessionId, adapterWorkspaceId),
+    stopWorkspace: (sessionId, adapterWorkspaceId) =>
+      runtimeAdapterWorkspaceLifecycle(env).stopForSession(sessionId, adapterWorkspaceId),
+    confirmRelease: (sessionId, adapterWorkspaceId, now, message) =>
+      confirmRuntimeAdapterRelease(env, sessionId, adapterWorkspaceId, now, message),
+    persistStopEvidence: (sessionId, adapterWorkspaceId, message, now, reconcileError) =>
+      persistRuntimeAdapterStopEvidence(
+        env,
+        sessionId,
+        adapterWorkspaceId,
+        message,
+        now,
+        reconcileError,
+      ),
+    providerError: (error, adapterWorkspaceId) => safeProviderError(error, [adapterWorkspaceId]),
   });
 }
 
@@ -1432,188 +1454,6 @@ async function createInteractiveSessionFromInput(
   throw new Error("failed to allocate interactive session id");
 }
 
-async function stopSupersededRuntimeAdapterProvision(
-  env: RuntimeEnv,
-  sessionId: string,
-  adapterWorkspaceId: string,
-  createPending: boolean,
-  now: number,
-): Promise<void> {
-  if (!createPending) {
-    await clearRuntimeAdapterCreatePending(env, sessionId, adapterWorkspaceId);
-  }
-  try {
-    const release = await runtimeAdapterWorkspaceLifecycle(env).stopForSession(
-      sessionId,
-      adapterWorkspaceId,
-    );
-    if (release.status === "stopped") {
-      await recordConfirmedRuntimeAdapterRelease(
-        env,
-        sessionId,
-        adapterWorkspaceId,
-        now,
-        release.message,
-      );
-      return;
-    }
-    await persistRuntimeAdapterStopEvidence(
-      env,
-      sessionId,
-      adapterWorkspaceId,
-      release.message,
-      now,
-      null,
-    );
-  } catch (error) {
-    const message = safeProviderError(error, [adapterWorkspaceId]);
-    const pendingMessage = `superseded runtime adapter stop pending: ${message}`;
-    await persistRuntimeAdapterStopEvidence(
-      env,
-      sessionId,
-      adapterWorkspaceId,
-      pendingMessage,
-      now,
-      message,
-    );
-  }
-}
-
-async function recordConfirmedRuntimeAdapterRelease(
-  env: RuntimeEnv,
-  sessionId: string,
-  adapterWorkspaceId: string,
-  now: number,
-  releaseMessage?: string,
-): Promise<"stopping" | "stopped" | "failed" | null> {
-  for (let attempt = 0; attempt < 3; attempt += 1) {
-    const lifecycle = await database(env)
-      .selectFrom("interactive_sessions")
-      .select([
-        "adapter_create_pending",
-        "terminal_status",
-        "terminal_failure_reason",
-        "reconcile_error",
-        "last_event",
-        "updated_at",
-      ])
-      .where("id", "=", sessionId)
-      .where("adapter", "=", runtimeAdapterName)
-      .where("adapter_workspace_id", "=", adapterWorkspaceId)
-      .where("status", "=", "stopping")
-      .executeTakeFirst();
-    if (!lifecycle) return null;
-
-    const resolved = resolveCreateAfterStopRace(
-      lifecycle.adapter_create_pending === 1,
-      lifecycle.terminal_status,
-    );
-    const failureMessage = retainedRuntimeAdapterFailureMessage(
-      lifecycle.terminal_failure_reason,
-      lifecycle.reconcile_error,
-      lifecycle.last_event,
-    );
-    const retainedReleaseMessage = clean(releaseMessage, 500) || null;
-    const values =
-      resolved.status === "stopping"
-        ? ({
-            adapter_create_pending: 1,
-            last_reconciled_at: now,
-            updated_at: sql<number>`MAX(updated_at + 1, ${now})`,
-            last_event:
-              retainedReleaseMessage ?? "runtime adapter stop waiting for create resolution",
-          } as const)
-        : ({
-            status: resolved.status,
-            lease_id: null,
-            attach_url: null,
-            vnc_url: null,
-            terminal_status: resolved.terminalStatus,
-            terminal_failure_reason: resolved.status === "failed" ? failureMessage : null,
-            adapter_create_pending: 0,
-            terminal_finalize_pending: 1,
-            last_reconciled_at: now,
-            reconcile_error: resolved.status === "failed" ? failureMessage : null,
-            stopped_at: now,
-            agent_token_hash: null,
-            controller: null,
-            control_requested_by: null,
-            control_requested_at: null,
-            control_granted_at: null,
-            control_expires_at: null,
-            updated_at: sql<number>`MAX(updated_at + 1, ${now})`,
-            last_event:
-              resolved.status === "failed"
-                ? failureMessage
-                : (retainedReleaseMessage ?? "interactive workspace stopped"),
-          } as const);
-    const terminalStatusOwner = lifecycle.terminal_status
-      ? sql<boolean>`terminal_status = ${lifecycle.terminal_status}`
-      : sql<boolean>`terminal_status IS NULL`;
-    const expectedOwner = sql<boolean>`
-      id = ${sessionId}
-      AND adapter = ${runtimeAdapterName}
-      AND adapter_workspace_id = ${adapterWorkspaceId}
-      AND status = 'stopping'
-      AND adapter_create_pending = ${lifecycle.adapter_create_pending}
-      AND updated_at = ${lifecycle.updated_at}
-      AND ${terminalStatusOwner}
-    `;
-    const db = database(env);
-    const update = db
-      .updateTable("interactive_sessions")
-      .set(values)
-      .where(expectedOwner)
-      .returning("updated_at");
-    const recordReleaseEvent =
-      retainedReleaseMessage &&
-      (resolved.status !== "stopping" || lifecycle.last_event !== retainedReleaseMessage);
-    const queries: CompilableQuery[] = [];
-    if (recordReleaseEvent) {
-      queries.push(sql`
-        INSERT INTO interactive_session_events (session_id, actor, message, created_at)
-        SELECT ${sessionId}, 'system', ${retainedReleaseMessage}, ${now}
-        FROM interactive_sessions
-        WHERE ${expectedOwner}
-      `);
-    }
-    queries.push(update);
-    const results = await env.DB.batch<{ updated_at: number }>(
-      queries.map((query) => {
-        const compiled = query.compile(db);
-        return env.DB.prepare(compiled.sql).bind(...compiled.parameters);
-      }),
-    );
-    if (results.at(-1)?.results.length) {
-      if (recordReleaseEvent) {
-        await archiveInteractiveSessionLogs(env, sessionId, now).catch(() => undefined);
-      }
-      if (resolved.status === "stopped" || resolved.status === "failed") {
-        await finalizeTerminalInteractiveSession(env, sessionId, resolved.status, now).catch(
-          () => undefined,
-        );
-      }
-      return resolved.status;
-    }
-  }
-  return null;
-}
-
-async function clearRuntimeAdapterCreatePending(
-  env: RuntimeEnv,
-  sessionId: string,
-  adapterWorkspaceId: string,
-): Promise<void> {
-  await database(env)
-    .updateTable("interactive_sessions")
-    .set({ adapter_create_pending: 0 })
-    .where("id", "=", sessionId)
-    .where("adapter", "=", runtimeAdapterName)
-    .where("adapter_workspace_id", "=", adapterWorkspaceId)
-    .where("status", "=", "stopping")
-    .execute();
-}
-
 function interactiveSessionLineageService(env: RuntimeEnv): InteractiveSessionLineageService {
   const store: InteractiveSessionLineageStore = {
     readSession: (id) => readInteractiveSession(env, id),
@@ -1656,7 +1496,12 @@ function interactiveSessionCreationService(
       finalizeTerminalInteractiveSession(env, sessionId, status, now),
     readSession: (sessionId) => readInteractiveSession(env, sessionId),
     stopSupersededAdapter: (sessionId, adapterWorkspaceId, createPending, now) =>
-      stopSupersededRuntimeAdapterProvision(env, sessionId, adapterWorkspaceId, createPending, now),
+      runtimeAdapterReleaseService(env).stopSuperseded({
+        sessionId,
+        adapterWorkspaceId,
+        createPending,
+        now,
+      }),
     cleanupSupersededSandbox: async (sessionId, leaseId) => {
       await queueSandboxCredentialPolicyCleanup(
         env,
@@ -1799,7 +1644,7 @@ function interactiveSessionRuntimeAdapterStopService(env: RuntimeEnv): RuntimeAd
     readCreatePending: (sessionId, adapterWorkspaceId) =>
       readRuntimeAdapterCreatePending(env, sessionId, runtimeAdapterName, adapterWorkspaceId),
     confirmRelease: (sessionId, adapterWorkspaceId, now, message) =>
-      recordConfirmedRuntimeAdapterRelease(env, sessionId, adapterWorkspaceId, now, message),
+      confirmRuntimeAdapterRelease(env, sessionId, adapterWorkspaceId, now, message),
     now: Date.now,
   };
   return new RuntimeAdapterStopService(store, runtimeAdapterName);
@@ -1943,7 +1788,7 @@ function runtimeAdapterProvisioningService(env: RuntimeEnv): RuntimeAdapterProvi
     stopWorkspaceForSession: (sessionId, adapterWorkspaceId) =>
       runtimeAdapterWorkspaceLifecycle(env).stopForSession(sessionId, adapterWorkspaceId),
     recordConfirmedRelease: async (sessionId, adapterWorkspaceId, now, message) => {
-      await recordConfirmedRuntimeAdapterRelease(env, sessionId, adapterWorkspaceId, now, message);
+      await confirmRuntimeAdapterRelease(env, sessionId, adapterWorkspaceId, now, message);
     },
     persistStopEvidence: (sessionId, adapterWorkspaceId, message, now) =>
       persistRuntimeAdapterStopEvidence(env, sessionId, adapterWorkspaceId, message, now),

@@ -1,7 +1,11 @@
 import { sql } from "kysely";
 
-import { runtimeAdapterName } from "../../runtime-adapter.ts";
-import { database, executeBatch } from "../database.ts";
+import {
+  retainedRuntimeAdapterFailureMessage,
+  resolveCreateAfterStopRace,
+  runtimeAdapterName,
+} from "../../runtime-adapter.ts";
+import { database, executeBatch, type CompilableQuery } from "../database.ts";
 import type { RuntimeEnv } from "../env.ts";
 import { archiveInteractiveSessionLogs } from "../session-log-archive.ts";
 import { finalizeTerminalInteractiveSession } from "../session-terminal-finalization.ts";
@@ -10,6 +14,11 @@ import type {
   RuntimeAdapterWorkspaceConflictInput,
 } from "./runtime-adapter.ts";
 import type { InteractiveProvisionResult } from "./types.ts";
+
+export type RuntimeAdapterReleaseEffects = {
+  archive(sessionId: string, now: number): Promise<void>;
+  finalize(sessionId: string, status: "stopped" | "expired" | "failed", now: number): Promise<void>;
+};
 
 export async function stageRuntimeAdapterProvision(
   env: RuntimeEnv,
@@ -218,6 +227,145 @@ export async function persistRuntimeAdapterStopEvidence(
     `,
   ]);
   await archiveInteractiveSessionLogs(env, sessionId, now).catch(() => undefined);
+}
+
+export async function confirmRuntimeAdapterRelease(
+  env: RuntimeEnv,
+  sessionId: string,
+  adapterWorkspaceId: string,
+  now: number,
+  releaseMessage?: string,
+  effects?: RuntimeAdapterReleaseEffects,
+): Promise<"stopping" | "stopped" | "failed" | null> {
+  const releaseEffects = effects ?? {
+    archive: (id: string, at: number) => archiveInteractiveSessionLogs(env, id, at),
+    finalize: (id: string, status: "stopped" | "expired" | "failed", at: number) =>
+      finalizeTerminalInteractiveSession(env, id, status, at),
+  };
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    const lifecycle = await database(env)
+      .selectFrom("interactive_sessions")
+      .select([
+        "adapter_create_pending",
+        "terminal_status",
+        "terminal_failure_reason",
+        "reconcile_error",
+        "last_event",
+        "updated_at",
+      ])
+      .where("id", "=", sessionId)
+      .where("adapter", "=", runtimeAdapterName)
+      .where("adapter_workspace_id", "=", adapterWorkspaceId)
+      .where("status", "=", "stopping")
+      .executeTakeFirst();
+    if (!lifecycle) return null;
+
+    const resolved = resolveCreateAfterStopRace(
+      lifecycle.adapter_create_pending === 1,
+      lifecycle.terminal_status,
+    );
+    const failureMessage = retainedRuntimeAdapterFailureMessage(
+      lifecycle.terminal_failure_reason,
+      lifecycle.reconcile_error,
+      lifecycle.last_event,
+    );
+    const retainedReleaseMessage = clean(releaseMessage, 500) || null;
+    const values =
+      resolved.status === "stopping"
+        ? ({
+            adapter_create_pending: 1,
+            last_reconciled_at: now,
+            updated_at: sql<number>`MAX(updated_at + 1, ${now})`,
+            last_event:
+              retainedReleaseMessage ?? "runtime adapter stop waiting for create resolution",
+          } as const)
+        : ({
+            status: resolved.status,
+            lease_id: null,
+            attach_url: null,
+            vnc_url: null,
+            terminal_status: resolved.terminalStatus,
+            terminal_failure_reason: resolved.status === "failed" ? failureMessage : null,
+            adapter_create_pending: 0,
+            terminal_finalize_pending: 1,
+            last_reconciled_at: now,
+            reconcile_error: resolved.status === "failed" ? failureMessage : null,
+            stopped_at: now,
+            agent_token_hash: null,
+            controller: null,
+            control_requested_by: null,
+            control_requested_at: null,
+            control_granted_at: null,
+            control_expires_at: null,
+            updated_at: sql<number>`MAX(updated_at + 1, ${now})`,
+            last_event:
+              resolved.status === "failed"
+                ? failureMessage
+                : (retainedReleaseMessage ?? "interactive workspace stopped"),
+          } as const);
+    const terminalStatusOwner = lifecycle.terminal_status
+      ? sql<boolean>`terminal_status = ${lifecycle.terminal_status}`
+      : sql<boolean>`terminal_status IS NULL`;
+    const expectedOwner = sql<boolean>`
+      id = ${sessionId}
+      AND adapter = ${runtimeAdapterName}
+      AND adapter_workspace_id = ${adapterWorkspaceId}
+      AND status = 'stopping'
+      AND adapter_create_pending = ${lifecycle.adapter_create_pending}
+      AND updated_at = ${lifecycle.updated_at}
+      AND ${terminalStatusOwner}
+    `;
+    const db = database(env);
+    const update = db
+      .updateTable("interactive_sessions")
+      .set(values)
+      .where(expectedOwner)
+      .returning("updated_at");
+    const recordReleaseEvent =
+      retainedReleaseMessage &&
+      (resolved.status !== "stopping" || lifecycle.last_event !== retainedReleaseMessage);
+    const queries: CompilableQuery[] = [];
+    if (recordReleaseEvent) {
+      queries.push(sql`
+        INSERT INTO interactive_session_events (session_id, actor, message, created_at)
+        SELECT ${sessionId}, 'system', ${retainedReleaseMessage}, ${now}
+        FROM interactive_sessions
+        WHERE ${expectedOwner}
+      `);
+    }
+    queries.push(update);
+    const results = await env.DB.batch<{ updated_at: number }>(
+      queries.map((query) => {
+        const compiled = query.compile(db);
+        return env.DB.prepare(compiled.sql).bind(...compiled.parameters);
+      }),
+    );
+    if (results.at(-1)?.results.length) {
+      if (recordReleaseEvent) {
+        await releaseEffects.archive(sessionId, now).catch(() => undefined);
+      }
+      if (resolved.status === "stopped" || resolved.status === "failed") {
+        await releaseEffects.finalize(sessionId, resolved.status, now).catch(() => undefined);
+      }
+      return resolved.status;
+    }
+  }
+  return null;
+}
+
+export async function clearRuntimeAdapterCreatePending(
+  env: RuntimeEnv,
+  sessionId: string,
+  adapterWorkspaceId: string,
+): Promise<void> {
+  await database(env)
+    .updateTable("interactive_sessions")
+    .set({ adapter_create_pending: 0 })
+    .where("id", "=", sessionId)
+    .where("adapter", "=", runtimeAdapterName)
+    .where("adapter_workspace_id", "=", adapterWorkspaceId)
+    .where("status", "=", "stopping")
+    .execute();
 }
 
 export async function stageFailedRuntimeAdapterRelease(
