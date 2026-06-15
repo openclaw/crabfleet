@@ -282,6 +282,7 @@ import {
   canManageInteractiveSession,
 } from "./worker/session-access";
 import { presentInteractiveSession } from "./worker/session-presentation";
+import { scheduleInteractiveSessionReconciliation } from "./worker/scheduled";
 import { archiveInteractiveSessionLogs, sessionLogTranscript } from "./worker/session-log-archive";
 import { appendInteractiveSessionEventRecord } from "./worker/session-events";
 import { createInteractiveSessionCleanupService } from "./worker/session-cleanup";
@@ -1468,11 +1469,13 @@ export default {
     env: RuntimeEnv,
     context: ExecutionContext,
   ): Promise<void> {
-    context.waitUntil(
-      reconcileInteractiveSessionLifecycleBatch(env, Date.now()).catch((error) => {
+    scheduleInteractiveSessionReconciliation(context, {
+      now: Date.now,
+      reconcile: (now) => interactiveSessionReconciliationScheduler(env).runBatch(now),
+      reportError: (error) => {
         console.error("scheduled interactive session reconciliation failed", error);
-      }),
-    );
+      },
+    });
   },
 } satisfies ExportedHandler<RuntimeEnv>;
 
@@ -2339,9 +2342,11 @@ async function reconcileExternalInteractiveSessions(
   now: number,
   context?: ExecutionContext,
 ): Promise<void> {
-  const reconciliation = reconcileInteractiveSessionLifecycleBatch(env, now).catch((error) => {
-    console.error("interactive session reconciliation failed", error);
-  });
+  const reconciliation = interactiveSessionReconciliationScheduler(env)
+    .runBatch(now)
+    .catch((error) => {
+      console.error("interactive session reconciliation failed", error);
+    });
   if (!context) {
     await reconciliation;
     return;
@@ -2351,13 +2356,6 @@ async function reconcileExternalInteractiveSessions(
     reconciliation,
     new Promise<void>((resolve) => setTimeout(resolve, runtimeAdapterReconcileForegroundBudgetMs)),
   ]);
-}
-
-async function reconcileInteractiveSessionLifecycleBatch(
-  env: RuntimeEnv,
-  now: number,
-): Promise<void> {
-  await interactiveSessionReconciliationScheduler(env).runBatch(now);
 }
 
 function interactiveSessionReconciliationScheduler(

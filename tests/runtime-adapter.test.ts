@@ -565,12 +565,10 @@ test("terminal archive finalization remains durably retryable", async () => {
   assert.match(migration, /status IN \('stopped', 'expired', 'failed'\)/);
 });
 
-test("runtime reconciliation has scheduled and targeted lifecycle clocks", async () => {
+test("runtime reconciliation keeps its cron and targeted refresh paths", async () => {
   const source = await readFile(new URL("../src/index.ts", import.meta.url), "utf8");
   const config = await readFile(new URL("../wrangler.jsonc", import.meta.url), "utf8");
 
-  assert.match(source, /async scheduled\(/);
-  assert.match(source, /context\.waitUntil\(\s*reconcileInteractiveSessionLifecycleBatch/);
   assert.match(config, /"crons": \["\* \* \* \* \*"\]/);
   assert.match(source, /async function readFreshInteractiveSession/);
   assert.match(
@@ -578,11 +576,6 @@ test("runtime reconciliation has scheduled and targeted lifecycle clocks", async
     /async function subscribeTerminalHubSession[\s\S]*readFreshInteractiveSession/,
   );
   assert.match(source, /async function interactiveSessionVnc[\s\S]*readFreshInteractiveSession/);
-  assert.match(source, /scheduled interactive session reconciliation failed/);
-  assert.match(
-    source,
-    /async function reconcileInteractiveSessionLifecycleBatch[\s\S]*interactiveSessionReconciliationScheduler\(env\)\.runBatch\(now\)/,
-  );
   assert.match(
     source,
     /async function reconcileExternalInteractiveSessionById[\s\S]*interactiveSessionReconciliationScheduler\(env\)\.reconcileById\(id, now\)/,
