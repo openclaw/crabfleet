@@ -565,13 +565,21 @@ test("terminal archive finalization remains durably retryable", async () => {
 
 test("runtime reconciliation keeps its cron and targeted refresh paths", async () => {
   const source = await readFile(new URL("../src/index.ts", import.meta.url), "utf8");
+  const terminalSource = await readFile(
+    new URL("../src/worker/interactive-terminal-service.ts", import.meta.url),
+    "utf8",
+  );
   const config = await readFile(new URL("../wrangler.jsonc", import.meta.url), "utf8");
 
   assert.match(config, /"crons": \["\* \* \* \* \*"\]/);
   assert.match(source, /async function readFreshInteractiveSession/);
   assert.match(
     source,
-    /function terminalHub[\s\S]*readSession: \(sessionId\) => readFreshInteractiveSession/,
+    /function interactiveTerminalService[\s\S]*readFreshSession: \(sessionId\) => readFreshInteractiveSession/,
+  );
+  assert.match(
+    terminalSource,
+    /readSession: \(sessionId\) => this\.dependencies\.readFreshSession/,
   );
   assert.match(source, /async function interactiveSessionVnc[\s\S]*readFreshInteractiveSession/);
   assert.match(
@@ -582,19 +590,26 @@ test("runtime reconciliation keeps its cron and targeted refresh paths", async (
 });
 
 test("recurring terminal authorization never awaits provider reconciliation", async () => {
-  const source = await readFile(new URL("../src/index.ts", import.meta.url), "utf8");
+  const source = await readFile(
+    new URL("../src/worker/interactive-terminal-service.ts", import.meta.url),
+    "utf8",
+  );
   const grantStart = source.indexOf("function terminalInputGrant");
   const grantEnd = source.indexOf("function terminalViewGrant", grantStart);
   const grantSource = source.slice(grantStart, grantEnd);
   const controlStart = source.indexOf("async function canControlInteractiveSessionById");
-  const controlEnd = source.indexOf("function canGrantDelegatedControl", controlStart);
+  const controlEnd = source.indexOf(
+    "async function multiplayerTerminalInputPayloads",
+    controlStart,
+  );
   const controlSource = source.slice(controlStart, controlEnd);
   const shareStart = source.indexOf("async function isSharedSessionToken");
-  const shareEnd = source.indexOf("async function readInteractiveSessionDiagnostics", shareStart);
+  const shareEnd = source.indexOf("async function canControlInteractiveSessionById", shareStart);
   const shareSource = source.slice(shareStart, shareEnd);
   assert.match(grantSource, /cachedBooleanGrant/);
   assert.match(grantSource, /terminalSubscriptionReconciler/);
-  assert.match(grantSource, /void reconcileExternalInteractiveSessionById/);
+  assert.match(grantSource, /void dependencies/);
+  assert.match(grantSource, /\.reconcileSession\(sessionId, now\)/);
   assert.doesNotMatch(controlSource, /reconcileExternalInteractiveSessionById/);
   assert.doesNotMatch(controlSource, /reconcileCredentialPolicyCleanupBatch|runtimeAdapterFetch/);
   assert.doesNotMatch(shareSource, /reconcileExternalInteractiveSessionById/);
@@ -1053,25 +1068,31 @@ test("GitHub Actions stop wrapper finalizes persisted transitions", async () => 
 });
 
 test("managed terminal expiry enters the shared retryable terminal finalizer", async () => {
-  const source = await readFile(new URL("../src/index.ts", import.meta.url), "utf8");
+  const source = await readFile(
+    new URL("../src/worker/interactive-terminal-service.ts", import.meta.url),
+    "utf8",
+  );
   const expiryStart = source.indexOf("async function markInteractiveTerminalUnavailable");
-  const expiryEnd = source.indexOf("async function uploadInteractiveSessionClipboard", expiryStart);
+  const expiryEnd = source.indexOf("function terminalInputGrant", expiryStart);
   const expirySource = source.slice(expiryStart, expiryEnd);
 
   assert.match(expirySource, /status: "expired"/);
   assert.match(expirySource, /MAX\(updated_at \+ 1, \$\{now\}\)/);
   assert.match(expirySource, /where\("updated_at", "=", existing\.updated_at\)/);
   assert.match(expirySource, /terminal_finalize_pending: 1/);
-  assert.match(expirySource, /finalizeTerminalInteractiveSession\(env, id, "expired", now\)/);
+  assert.match(
+    expirySource,
+    /finalizeTerminalInteractiveSession\(env, sessionId, "expired", now\)/,
+  );
   assert.match(expirySource, /stageTerminalCredentialPolicyCleanupById/);
   assert.match(
     expirySource,
     /stageTerminalCredentialPolicyCleanupById\([\s\S]*?"failed",\s*message,[\s\S]*?now,\s*message/,
   );
-  assert.match(expirySource, /reconcileCredentialPolicyCleanupBatch\(env, now, id\)/);
+  assert.match(expirySource, /reconcileSandboxCredentialPolicyCleanupBatch\(env, now, sessionId\)/);
   assert.ok(
     expirySource.indexOf("stageTerminalCredentialPolicyCleanup") <
-      expirySource.indexOf("reconcileCredentialPolicyCleanupBatch"),
+      expirySource.indexOf("reconcileSandboxCredentialPolicyCleanupBatch"),
   );
 });
 
@@ -1361,7 +1382,10 @@ test("sandbox credential cleanup is durably staged and retried", async () => {
 });
 
 test("terminal endpoints enforce current runtime capabilities", async () => {
-  const source = await readFile(new URL("../src/index.ts", import.meta.url), "utf8");
+  const source = await readFile(
+    new URL("../src/worker/interactive-terminal-service.ts", import.meta.url),
+    "utf8",
+  );
 
   assert.match(source, /if \(!session\.capabilities\.terminal\)/);
   assert.match(source, /terminalFailureStatusForAdapter\(existing\.adapter\) === "detached"/);
@@ -1562,7 +1586,7 @@ test("runtime adapter profile routes expand one allowlisted path segment", () =>
 test("desktop operations use the bounded runtime adapter parser", async () => {
   const source = await readFile(new URL("../src/index.ts", import.meta.url), "utf8");
   const start = source.indexOf("async function interactiveSessionVnc");
-  const end = source.indexOf("async function multiplayerTerminalInputPayloads", start);
+  const end = source.indexOf("function interactiveProvisioningService", start);
   const operation = source.slice(start, end);
   assert.match(operation, /readRuntimeAdapterResponseBody\(response\)/);
   assert.doesNotMatch(operation, /response\.(?:json|text)\(/);
@@ -1571,7 +1595,7 @@ test("desktop operations use the bounded runtime adapter parser", async () => {
 test("desktop mint revalidates current ownership before redirect", async () => {
   const source = await readFile(new URL("../src/index.ts", import.meta.url), "utf8");
   const vncStart = source.indexOf("async function interactiveSessionVnc");
-  const vncEnd = source.indexOf("async function multiplayerTerminalInputPayloads", vncStart);
+  const vncEnd = source.indexOf("function interactiveProvisioningService", vncStart);
   const vncSource = source.slice(vncStart, vncEnd);
 
   assert.ok(
@@ -1596,9 +1620,12 @@ test("desktop mint revalidates current ownership before redirect", async () => {
 });
 
 test("runtime adapter terminal upgrades use the shared transport", async () => {
-  const source = await readFile(new URL("../src/index.ts", import.meta.url), "utf8");
-  const openStart = source.indexOf("async function openInteractiveTerminalUpstream");
-  const openEnd = source.indexOf("async function markInteractiveTerminalConnected", openStart);
+  const source = await readFile(
+    new URL("../src/worker/interactive-terminal-service.ts", import.meta.url),
+    "utf8",
+  );
+  const openStart = source.indexOf("async openUpstream(");
+  const openEnd = source.indexOf("async uploadClipboard(", openStart);
   const openSource = source.slice(openStart, openEnd);
 
   assert.match(openSource, /interactiveTerminalFetch\(/);

@@ -6,12 +6,6 @@ import {
   type BackupOptions,
   type Sandbox as CloudflareSandbox,
 } from "@cloudflare/sandbox";
-import {
-  attributedTerminalInputPayloads,
-  newTerminalInputState,
-  terminalSubmittedLine,
-  type TerminalInputState,
-} from "./terminal-multiplayer";
 import { buildFleetState, type FleetState } from "./fleet-state";
 import { buildGitHubActionsRunnerPtyUrl, githubActionsRuntime } from "./github-actions-runtime";
 import {
@@ -35,10 +29,8 @@ import {
   retainedRuntimeAdapterFailureMessage,
   resolveCreateAfterStopRace,
   safeDesktopUrl,
-  terminalFailureStatusForAdapter,
 } from "./runtime-adapter";
 import { allocateInteractiveSessionIdSql, formatInteractiveSessionId } from "./session-id";
-import { cachedBooleanGrant } from "./terminal-authorization";
 import { openClawGitHubRepoParts, openClawRoomMaxSessions } from "./openclaw-service";
 import { trustedProxyPublicOrigin, type TrustedProxyAuthResult } from "./trusted-proxy-auth";
 import {
@@ -85,7 +77,7 @@ import {
   sessionGitHubToken,
   tokenLogin,
 } from "./worker/auth";
-import { base64FromBytes, sha256 } from "./worker/crypto";
+import { sha256 } from "./worker/crypto";
 import {
   AgentSessionAuthenticator,
   agentSessionId,
@@ -268,7 +260,6 @@ import { reconcileSandboxCredentialPolicyCleanupBatch as reconcileCredentialPoli
 import { credentialPolicyProvisioningStaleMs } from "./worker/sandbox-credential-policy-scanner";
 import {
   createSandboxSession,
-  openSandboxTerminalResponse,
   sandboxSetupSessionId,
   sandboxWorkdir,
 } from "./worker/sandbox-runtime";
@@ -287,7 +278,6 @@ import {
   runtimeAdapterConfigurationPresent,
 } from "./worker/runtime-adapter-preflight";
 import {
-  interactiveTerminalFetch,
   readRuntimeAdapterResponseBody,
   runtimeAdapterFetch,
 } from "./worker/runtime-adapter-transport";
@@ -297,14 +287,8 @@ import {
 } from "./worker/runtime-adapter-workspaces";
 import {
   interactivePtyRouteKind,
-  interactiveTerminalHeaders,
   interactiveTerminalTarget,
 } from "./worker/session-terminal-route";
-import {
-  TerminalHub,
-  type TerminalHubSubscription,
-  type TerminalUpstream,
-} from "./worker/terminal-hub";
 import {
   githubActionsRelayStub,
   readSandboxFleetPolicies,
@@ -313,7 +297,7 @@ import {
 } from "./worker/session-control-do";
 import { defaultSandboxEgressHosts, sandboxPlaceholderOpenAIKey } from "./worker/sandbox-outbound";
 import { sandboxOutbound } from "./worker/sandbox-outbound-service";
-import { terminalOutputAcknowledgements } from "./worker/terminal-websocket-bridge";
+import { InteractiveTerminalService } from "./worker/interactive-terminal-service";
 
 type SandboxClassWithOutbound = {
   outbound?: typeof sandboxOutbound;
@@ -464,8 +448,6 @@ type CardChanges = {
   };
 };
 
-const terminalInputStates = new Map<string, TerminalInputState>();
-const terminalClipboardMaxBytes = 10 * 1024 * 1024;
 const lanes = ["Todo", "Running", "Human Review", "Done"];
 const activeRunStatuses: readonly RunStatus[] = ["queued", "leasing", "running"];
 const runtimeOptions = ["auto", "container", "crabbox"] as const;
@@ -720,7 +702,10 @@ function sessionIngressRouteDependencies(
   return {
     readSharedSession: (sessionId, token) => readSharedInteractiveSession(env, sessionId, token),
     openTerminal: async (request) =>
-      interactiveTerminalHub(request, env, await terminalHubUser(request, env, requestAuth)),
+      interactiveTerminalService(env).open(
+        request,
+        await terminalHubUser(request, env, requestAuth),
+      ),
   };
 }
 
@@ -743,7 +728,7 @@ function browserSessionRouteDependencies(env: RuntimeEnv): BrowserSessionRouteDe
     readDiagnostics: (user, sessionId) => readInteractiveSessionDiagnostics(env, user, sessionId),
     openVnc: (user, sessionId) => interactiveSessionVnc(env, user, sessionId),
     uploadClipboard: (request, user, sessionId) =>
-      uploadInteractiveSessionClipboard(request, env, user, sessionId),
+      interactiveTerminalService(env).uploadClipboard(request, user, sessionId),
   };
 }
 
@@ -791,6 +776,17 @@ async function terminalHubUser(
     return (await agentSessionAuthentication(env).require(request)).user;
   }
   return optionalUser(request, env, requestAuth);
+}
+
+function interactiveTerminalService(env: RuntimeEnv): InteractiveTerminalService {
+  return new InteractiveTerminalService(env, {
+    readFreshSession: (sessionId) => readFreshInteractiveSession(env, sessionId),
+    reconcileSession: (sessionId, now) =>
+      reconcileExternalInteractiveSessionById(env, sessionId, now),
+    reconcileIntervalMs: runtimeAdapterReconcileIntervalMs,
+    resolveSandboxSession: (request, user, session) =>
+      sandboxSessionWithGitHubToken(request, env, user, session),
+  });
 }
 
 function sshGateway(env: RuntimeEnv): SshGateway {
@@ -932,9 +928,8 @@ function openClawMutationService(
     audit: (message, now) => audit(env, serviceUser, message, now),
     openTerminal: async (session) => {
       const terminalRequest = new Request(request.url, { headers: { upgrade: "websocket" } });
-      const upstream = await openInteractiveTerminalUpstream(
+      const upstream = await interactiveTerminalService(env).openUpstream(
         terminalRequest,
-        env,
         serviceUser,
         session,
         120,
@@ -2016,425 +2011,6 @@ async function disconnectGitHubActionsRunner(env: RuntimeEnv, id: string): Promi
   if (!response.ok) throw serviceUnavailable("GitHub Actions relay is unavailable");
 }
 
-async function interactiveTerminalHub(
-  request: Request,
-  env: RuntimeEnv,
-  user: User | null,
-): Promise<Response> {
-  return terminalHub(env).open(request, user);
-}
-
-function terminalHub(env: RuntimeEnv): TerminalHub {
-  return new TerminalHub({
-    createSocketPair: () => {
-      const pair = new WebSocketPair();
-      return { client: pair[0], server: pair[1] };
-    },
-    upgradeResponse: (client) => new Response(null, { status: 101, webSocket: client }),
-    canOpenAnonymous: (request) => canOpenAnonymousTerminalHub(request, env),
-    canViewShared: (request, sessionId) => canViewSharedTerminalRequest(request, env, sessionId),
-    readSession: (sessionId) => readFreshInteractiveSession(env, sessionId),
-    canViewSession: (request, user, session) => canViewTerminalSession(request, env, user, session),
-    inputGrant: (user, session) => terminalInputGrant(env, user, session),
-    viewGrant: (request, user, session) => terminalViewGrant(request, env, user, session),
-    reconcileSubscription: (sessionId) => terminalSubscriptionReconciler(env, sessionId),
-    openUpstream: (request, user, session, cols, rows) =>
-      openInteractiveTerminalUpstream(request, env, user, session, cols, rows),
-    inputPayloads: (subscription, user, payload) =>
-      multiplayerTerminalInputPayloads(env, subscription, user, payload),
-    markConnectionFailure: async (user, session, message) => {
-      const markTerminal =
-        session.runtime === githubActionsRuntime ||
-        (isSandboxInteractiveSession(session) && env.SANDBOX)
-          ? markInteractiveTerminalDetached
-          : markInteractiveTerminalUnavailable;
-      await markTerminal(env, user, session.id, Date.now(), message);
-    },
-    markDetached: (user, sessionId, message) =>
-      markInteractiveTerminalDetached(env, user, sessionId, Date.now(), message),
-  });
-}
-
-async function writeTerminalClipboardFile(
-  env: RuntimeEnv,
-  user: User,
-  session: InteractiveSession,
-  bytes: Uint8Array,
-  rawName: unknown,
-  rawMediaType: unknown,
-): Promise<{ path: string; name: string; mediaType: string; byteCount: number }> {
-  if (!isSandboxInteractiveSession(session) || !env.SANDBOX) {
-    throw serviceUnavailable("clipboard file paste requires a Cloudflare Sandbox session");
-  }
-  if (!bytes.byteLength || bytes.byteLength > terminalClipboardMaxBytes) {
-    throw badRequest(
-      `clipboard file exceeds ${Math.floor(terminalClipboardMaxBytes / 1024 / 1024)} MiB`,
-    );
-  }
-  const mediaType = clean(rawMediaType || "application/octet-stream", 120);
-  const name = safeClipboardFilename(rawName, mediaType);
-  const lease = sandboxLeaseInfo(session);
-  const sandbox = getSandbox(env.SANDBOX, lease.sandboxId);
-  const directory = `${sandboxWorkdir(session.id)}/.crabbox/clipboard`;
-  const path = `${directory}/${Date.now()}-${crypto.randomUUID().slice(0, 8)}-${name}`;
-  await sandbox.mkdir(directory, { recursive: true });
-  await sandbox.writeFile(path, base64FromBytes(bytes), { encoding: "base64" });
-  await appendInteractiveSessionEvent(
-    env,
-    session.id,
-    user,
-    `Clipboard file pasted: ${path}`,
-    Date.now(),
-  );
-  return { path, name, mediaType, byteCount: bytes.byteLength };
-}
-
-async function openInteractiveTerminalUpstream(
-  request: Request,
-  env: RuntimeEnv,
-  user: User | null,
-  session: InteractiveSession,
-  cols: number,
-  rows: number,
-): Promise<TerminalUpstream> {
-  if (!session.capabilities.terminal) {
-    throw serviceUnavailable("session does not advertise terminal access");
-  }
-  const now = Date.now();
-  if (session.runtime === githubActionsRuntime) {
-    const stub = githubActionsRelayStub(env, session.id);
-    if (!stub) throw serviceUnavailable("SESSION_CONTROL Durable Object is not configured");
-    const upstreamResponse = await stub.fetch(
-      "https://crabfleet.internal/api/session-control/github-actions/viewer",
-      { headers: { upgrade: "websocket" } },
-    );
-    const upstream = upstreamResponse.webSocket;
-    if (!upstream || upstreamResponse.status !== 101) {
-      throw serviceUnavailable(`GitHub Actions relay HTTP ${upstreamResponse.status}`);
-    }
-    upstream.accept();
-    return {
-      socket: upstream,
-      outputAcknowledgements: false,
-      markConnected: () =>
-        markInteractiveTerminalConnected(
-          env,
-          user,
-          session.id,
-          now,
-          "GitHub Actions terminal connected",
-        ),
-    };
-  }
-
-  const routeKind = interactivePtyRouteKind(env, session);
-  if (routeKind === "sandbox" && env.SANDBOX) {
-    const runtimeSession = await sandboxSessionWithGitHubToken(request, env, user, session);
-    const sandboxSession = await new SandboxLifecycleService(env).ensureCurrentLease(
-      request,
-      user,
-      runtimeSession,
-    );
-    const lease = sandboxLeaseInfo(sandboxSession);
-    const sandbox = getSandbox(env.SANDBOX, lease.sandboxId);
-    const upstreamResponse = await openSandboxTerminalResponse(
-      request,
-      env,
-      sandbox,
-      sandboxSession,
-      {
-        cols,
-        rows,
-      },
-    );
-    const upstream = upstreamResponse.webSocket;
-    if (!upstream || upstreamResponse.status !== 101) {
-      throw serviceUnavailable(`Cloudflare Sandbox terminal HTTP ${upstreamResponse.status}`);
-    }
-    upstream.accept();
-    return {
-      socket: upstream,
-      outputAcknowledgements: false,
-      markConnected: () =>
-        markInteractiveTerminalConnected(
-          env,
-          user,
-          sandboxSession.id,
-          now,
-          "Cloudflare Sandbox terminal connected",
-        ),
-    };
-  }
-
-  const target = interactiveTerminalTarget(env, session, routeKind);
-  if (!target) throw serviceUnavailable("terminal upstream is not configured for this session");
-  const upstreamResponse = await interactiveTerminalFetch(
-    env,
-    session,
-    target.url,
-    interactiveTerminalHeaders(session, target.authorization),
-  );
-  const upstream = upstreamResponse.webSocket;
-  if (!upstream || upstreamResponse.status !== 101) {
-    throw serviceUnavailable(`terminal upstream HTTP ${upstreamResponse.status}`);
-  }
-  upstream.accept();
-  return {
-    socket: upstream,
-    outputAcknowledgements: terminalOutputAcknowledgements(target.url),
-    markConnected: () =>
-      markInteractiveTerminalConnected(env, user, session.id, now, "PTY terminal connected"),
-  };
-}
-
-async function markInteractiveTerminalConnected(
-  env: RuntimeEnv,
-  user: User | null,
-  id: string,
-  now: number,
-  message: string,
-): Promise<void> {
-  const previous = await database(env)
-    .selectFrom("interactive_sessions")
-    .select(["status", "last_event", "last_seen_at"])
-    .where("id", "=", id)
-    .executeTakeFirst();
-  await database(env)
-    .updateTable("interactive_sessions")
-    .set({
-      status: "attached",
-      last_seen_at: now,
-      last_event: message,
-    })
-    .where("id", "=", id)
-    .where("status", "in", ["ready", "attached", "detached"])
-    .execute();
-  if (
-    previous &&
-    (previous.status !== "attached" ||
-      previous.last_event !== message ||
-      now - previous.last_seen_at > 5 * 60_000)
-  ) {
-    await appendInteractiveSessionLog(env, id, user, message, now);
-  }
-}
-
-async function markInteractiveTerminalDetached(
-  env: RuntimeEnv,
-  user: User | null,
-  id: string,
-  now: number,
-  message: string,
-): Promise<void> {
-  const existing = await database(env)
-    .selectFrom("interactive_sessions")
-    .select("status")
-    .where("id", "=", id)
-    .executeTakeFirst();
-  if (!existing || ["stopping", "expired", "failed", "stopped"].includes(existing.status)) return;
-  await database(env)
-    .updateTable("interactive_sessions")
-    .set({
-      status: "detached",
-      last_event: message,
-    })
-    .where("id", "=", id)
-    .where("status", "in", ["ready", "attached", "detached"])
-    .execute();
-  await appendInteractiveSessionLog(env, id, user, message, now);
-}
-
-async function markInteractiveTerminalUnavailable(
-  env: RuntimeEnv,
-  user: User | null,
-  id: string,
-  now: number,
-  message: string,
-): Promise<void> {
-  const existing = await database(env)
-    .selectFrom("interactive_sessions")
-    .selectAll()
-    .where("id", "=", id)
-    .executeTakeFirst();
-  if (!existing || ["expired", "failed", "stopped"].includes(existing.status)) return;
-  if (terminalFailureStatusForAdapter(existing.adapter) === "detached") {
-    if (existing.status === "stopping") return;
-    await markInteractiveTerminalDetached(env, user, id, now, message);
-    return;
-  }
-  const legacySession = {
-    adapter: existing.adapter,
-    leaseId: existing.lease_id,
-  };
-  if (isSandboxInteractiveSession(legacySession)) {
-    const staged = await stageTerminalCredentialPolicyCleanupById(
-      env,
-      id,
-      "failed",
-      message,
-      now,
-      message,
-    );
-    if (!staged) return;
-    await appendInteractiveSessionLog(env, id, user, message, now);
-    await reconcileCredentialPolicyCleanupBatch(env, now, id);
-    return;
-  }
-  if (existing.status === "stopping") return;
-  const update = await database(env)
-    .updateTable("interactive_sessions")
-    .set({
-      status: "expired",
-      agent_token_hash: null,
-      attach_url: null,
-      vnc_url: null,
-      controller: null,
-      control_requested_by: null,
-      control_requested_at: null,
-      control_granted_at: null,
-      control_expires_at: null,
-      updated_at: sql<number>`MAX(updated_at + 1, ${now})`,
-      stopped_at: now,
-      terminal_finalize_pending: 1,
-      last_event: message,
-    })
-    .where("id", "=", id)
-    .where("status", "=", existing.status)
-    .where("updated_at", "=", existing.updated_at)
-    .executeTakeFirst();
-  if ((update.numUpdatedRows ?? 0n) > 0n) {
-    await appendInteractiveSessionLog(env, id, user, message, now);
-    await finalizeTerminalInteractiveSession(env, id, "expired", now).catch(() => undefined);
-  }
-}
-
-async function uploadInteractiveSessionClipboard(
-  request: Request,
-  env: RuntimeEnv,
-  user: User,
-  id: string,
-): Promise<{ path: string; name: string; mediaType: string; byteCount: number }> {
-  if (!(await canControlInteractiveSessionById(env, user, id))) {
-    throw forbidden("terminal control has not been granted");
-  }
-  const session = await readInteractiveSession(env, id);
-  if (!session) throw notFound("interactive session not found");
-  if (["stopping", "expired", "failed", "stopped"].includes(session.status)) {
-    throw badRequest(`session is ${session.status}`);
-  }
-  const bytes = await readClipboardUploadBytes(request);
-  return writeTerminalClipboardFile(
-    env,
-    user,
-    session,
-    bytes,
-    decodeHeaderValue(request.headers.get("x-clipboard-name")),
-    request.headers.get("content-type") || "application/octet-stream",
-  );
-}
-
-async function readClipboardUploadBytes(request: Request): Promise<Uint8Array> {
-  const contentLength = Number(request.headers.get("content-length") || "0");
-  if (Number.isFinite(contentLength) && contentLength > terminalClipboardMaxBytes) {
-    throw badRequest(
-      `clipboard file exceeds ${Math.floor(terminalClipboardMaxBytes / 1024 / 1024)} MiB`,
-    );
-  }
-  const bytes = new Uint8Array(await request.arrayBuffer());
-  if (!bytes.byteLength) throw badRequest("clipboard file is empty");
-  if (bytes.byteLength > terminalClipboardMaxBytes) {
-    throw badRequest(
-      `clipboard file exceeds ${Math.floor(terminalClipboardMaxBytes / 1024 / 1024)} MiB`,
-    );
-  }
-  return bytes;
-}
-
-function terminalInputGrant(
-  env: RuntimeEnv,
-  user: User | null,
-  session: InteractiveSession,
-): () => Promise<boolean> {
-  if (!user || !session.capabilities.terminal) return async () => false;
-  return cachedBooleanGrant(() => canControlInteractiveSessionById(env, user, session.id));
-}
-
-function terminalSubscriptionReconciler(env: RuntimeEnv, id: string): () => void {
-  let nextAt = Date.now() + runtimeAdapterReconcileIntervalMs;
-  let inFlight = false;
-  return () => {
-    const now = Date.now();
-    if (inFlight || now < nextAt) return;
-    inFlight = true;
-    nextAt = now + runtimeAdapterReconcileIntervalMs;
-    void reconcileExternalInteractiveSessionById(env, id, now)
-      .catch((error) => {
-        console.error("terminal subscription reconciliation failed", error);
-      })
-      .finally(() => {
-        inFlight = false;
-      });
-  };
-}
-
-function terminalViewGrant(
-  request: Request,
-  env: RuntimeEnv,
-  user: User | null,
-  session: InteractiveSession,
-): () => Promise<boolean> {
-  return async () =>
-    Boolean(user && (await canControlInteractiveSessionById(env, user, session.id))) ||
-    (await canViewSharedTerminalRequest(request, env, session.id));
-}
-
-async function canViewSharedTerminalRequest(
-  request: Request,
-  env: RuntimeEnv,
-  id: string,
-): Promise<boolean> {
-  const url = new URL(request.url);
-  const shareSession = url.searchParams.get("shareSession") ?? "";
-  const token = url.searchParams.get("token") ?? "";
-  return (!shareSession || shareSession === id) && (await isSharedSessionToken(env, id, token));
-}
-
-async function canOpenAnonymousTerminalHub(request: Request, env: RuntimeEnv): Promise<boolean> {
-  const url = new URL(request.url);
-  const shareSession = url.searchParams.get("shareSession") ?? "";
-  const token = url.searchParams.get("token") ?? "";
-  return Boolean(shareSession && token && (await isSharedSessionToken(env, shareSession, token)));
-}
-
-async function canViewTerminalSession(
-  request: Request,
-  env: RuntimeEnv,
-  user: User | null,
-  session: InteractiveSession,
-): Promise<boolean> {
-  if (user) {
-    requireRole(user, "viewer");
-    if (await canControlInteractiveSessionById(env, user, session.id)) return true;
-  }
-  return canViewSharedTerminalRequest(request, env, session.id);
-}
-
-async function isSharedSessionToken(env: RuntimeEnv, id: string, token: string): Promise<boolean> {
-  if (!token) return false;
-  const row = await database(env)
-    .selectFrom("interactive_sessions")
-    .select(["share_token_hash", "share_mode", "status", "runtime", "capabilities_json"])
-    .where("id", "=", id)
-    .where("share_mode", "=", "link_read")
-    .executeTakeFirst();
-  return Boolean(
-    row?.share_token_hash &&
-    !["stopping", "expired", "failed", "stopped"].includes(row.status) &&
-    runtimeCapabilities(row.runtime, row.capabilities_json).terminal &&
-    (await sha256(token)) === row.share_token_hash,
-  );
-}
-
 async function readInteractiveSessionDiagnostics(
   env: RuntimeEnv,
   user: User,
@@ -2821,54 +2397,6 @@ async function currentRuntimeAdapterDesktopAccess(
     Date.now(),
     canGrantDelegatedControl(env, current),
   );
-}
-
-async function multiplayerTerminalInputPayloads(
-  env: RuntimeEnv,
-  subscription: TerminalHubSubscription,
-  user: User | null,
-  payload: Uint8Array,
-): Promise<Uint8Array[]> {
-  const submitted = terminalSubmittedLine(terminalInputState(subscription.session.id), payload);
-  if (!user || !submitted || !submitted.text.trim()) {
-    return [payload];
-  }
-  const enabled = await readInteractiveSessionMultiplayerMode(
-    env,
-    subscription.session.id,
-    subscription.session.multiplayerMode,
-  );
-  if (!enabled) {
-    return [payload];
-  }
-
-  return attributedTerminalInputPayloads(user, submitted);
-}
-
-function terminalInputState(sessionId: string): TerminalInputState {
-  let state = terminalInputStates.get(sessionId);
-  if (!state) {
-    state = newTerminalInputState();
-    terminalInputStates.set(sessionId, state);
-  }
-  return state;
-}
-
-async function readInteractiveSessionMultiplayerMode(
-  env: RuntimeEnv,
-  id: string,
-  fallback: boolean,
-): Promise<boolean> {
-  try {
-    const row = await database(env)
-      .selectFrom("interactive_sessions")
-      .select(["multiplayer_mode"])
-      .where("id", "=", id)
-      .executeTakeFirst();
-    return row ? row.multiplayer_mode === 1 : fallback;
-  } catch {
-    return fallback;
-  }
 }
 
 function interactiveProvisioningService(env: RuntimeEnv): InteractiveProvisioningService {
@@ -3901,21 +3429,6 @@ async function appendInteractiveSessionEvent(
   });
 }
 
-async function appendInteractiveSessionLog(
-  env: RuntimeEnv,
-  id: string,
-  user: User | null,
-  message: string,
-  now = Date.now(),
-): Promise<void> {
-  await appendInteractiveSessionEventRecord(env, {
-    sessionId: id,
-    actor: user ? actor(user) : "system",
-    message,
-    now,
-  });
-}
-
 async function readSettings(env: RuntimeEnv): Promise<Record<string, string>> {
   const rows = await database(env).selectFrom("settings").select(["key", "value"]).execute();
   return Object.fromEntries(rows.map((row) => [row.key, row.value]));
@@ -4230,28 +3743,6 @@ function decorateInteractiveSession(
   });
 }
 
-async function canControlInteractiveSessionById(
-  env: RuntimeEnv,
-  user: User,
-  id: string,
-): Promise<boolean> {
-  const row = await database(env)
-    .selectFrom("interactive_sessions")
-    .selectAll()
-    .where("id", "=", id)
-    .executeTakeFirst();
-  if (!row) return false;
-  const session = interactiveSession(row, []);
-  if (!session.capabilities.terminal) return false;
-  if (["stopping", "expired", "failed", "stopped"].includes(session.status)) return false;
-  return canControlInteractiveSession(
-    user,
-    session,
-    Date.now(),
-    canGrantDelegatedControl(env, session),
-  );
-}
-
 function canGrantDelegatedControl(env: RuntimeEnv, session: InteractiveSession): boolean {
   if (!env.SANDBOX && isSandboxInteractiveSession(session)) return false;
   return true;
@@ -4453,45 +3944,6 @@ function clean(value: unknown, max: number): string {
   return String(value ?? "")
     .trim()
     .slice(0, max);
-}
-
-function decodeHeaderValue(value: string | null): string {
-  if (!value) return "";
-  try {
-    return decodeURIComponent(value);
-  } catch {
-    return value;
-  }
-}
-
-function safeClipboardFilename(value: unknown, mediaType: string): string {
-  const raw =
-    String(value ?? "")
-      .split(/[\\/]/)
-      .pop() || "";
-  const base = clean(raw || `clipboard${clipboardExtension(mediaType)}`, 90)
-    .replace(/[^A-Za-z0-9._-]/g, "-")
-    .replace(/^-+/, "")
-    .replace(/-+/g, "-");
-  const fallback = `clipboard${clipboardExtension(mediaType)}`;
-  const name = base || fallback;
-  return name.includes(".") ? name : `${name}${clipboardExtension(mediaType)}`;
-}
-
-function clipboardExtension(mediaType: string): string {
-  const normalized = (mediaType.toLowerCase().split(";")[0] ?? "").trim();
-  return (
-    {
-      "image/png": ".png",
-      "image/jpeg": ".jpg",
-      "image/gif": ".gif",
-      "image/webp": ".webp",
-      "text/plain": ".txt",
-      "text/markdown": ".md",
-      "application/json": ".json",
-      "application/pdf": ".pdf",
-    }[normalized] || ".bin"
-  );
 }
 
 function titleFromPrompt(prompt: string): string {
