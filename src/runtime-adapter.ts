@@ -1,3 +1,5 @@
+import { exactSecureHttpUrl, exactSecureWebSocketUrl } from "./url-security.ts";
+
 export const runtimeAdapterVersion = "crabfleet/v1";
 export const runtimeAdapterName = "runtime-v1";
 export const runtimeAdapterDesktopMaxTtlMs = 15 * 60 * 1000;
@@ -660,47 +662,11 @@ export function currentAdapterDesktopConnection(
 }
 
 export function safeDesktopUrl(value: unknown): string | null {
-  const raw = exactUrlString(value);
-  if (!raw) return null;
-  try {
-    const url = new URL(raw);
-    if (url.username || url.password) return null;
-    if (url.protocol === "https:") return raw;
-    if (url.protocol !== "http:" || !isExactLiteralLoopbackUrl(raw, url)) return null;
-    return raw;
-  } catch {
-    return null;
-  }
+  return exactSecureHttpUrl(value);
 }
 
 export function safeWebSocketUrl(value: unknown): string | null {
-  const raw = exactUrlString(value);
-  if (!raw) return null;
-  try {
-    const url = new URL(raw);
-    if (url.username || url.password) return null;
-    if (url.protocol === "wss:") return raw;
-    if (url.protocol !== "ws:" || !isExactLiteralLoopbackUrl(raw, url)) return null;
-    return raw;
-  } catch {
-    return null;
-  }
-}
-
-function exactUrlString(value: unknown): string | null {
-  if (typeof value !== "string" || !value) return null;
-  for (let index = 0; index < value.length; index += 1) {
-    const code = value.charCodeAt(index);
-    if (code <= 0x20 || (code >= 0x7f && code <= 0x9f)) return null;
-  }
-  return value;
-}
-
-function isExactLiteralLoopbackUrl(raw: string, parsed: URL): boolean {
-  if (!isLiteralLoopbackHostname(parsed.hostname)) return false;
-  return /^[a-z][a-z0-9+.-]*:\/\/(?:localhost|127\.0\.0\.1|\[::1\])(?::[0-9]+)?(?:[/?#]|$)/iu.test(
-    raw,
-  );
+  return exactSecureWebSocketUrl(value);
 }
 
 function adapterStatus(value: unknown): AdapterSessionStatus | null {
@@ -934,13 +900,4 @@ function escapedConnectionRepresentations(connection: string): string[] {
     }
   }
   return [...representations].sort((left, right) => right.length - left.length);
-}
-
-function isLiteralLoopbackHostname(hostname: string): boolean {
-  return (
-    hostname === "localhost" ||
-    hostname === "127.0.0.1" ||
-    hostname === "::1" ||
-    hostname === "[::1]"
-  );
 }

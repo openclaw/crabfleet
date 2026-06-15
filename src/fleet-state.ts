@@ -1,3 +1,5 @@
+import { normalizedSecureHttpUrl, normalizedSecureWebSocketUrl } from "./url-security.ts";
+
 export type FleetStatus =
   | "provisioning"
   | "pending_adapter"
@@ -341,35 +343,9 @@ function configuredBridgeWebSocketUrl(value: string | null | undefined): string 
 }
 
 function safePtyWebSocketUrl(value: string | null | undefined): string | null {
-  return safePtyUrl(value, "wss:", "ws:");
+  return normalizedSecureWebSocketUrl(value);
 }
 
 function safePtyHttpUrl(value: string | null | undefined): string | null {
-  return safePtyUrl(value, "https:", "http:");
-}
-
-function safePtyUrl(
-  value: string | null | undefined,
-  secureProtocol: string,
-  loopbackProtocol: string,
-): string | null {
-  if (!value) return null;
-  try {
-    const url = new URL(value);
-    if (url.username || url.password) return null;
-    if (url.protocol === secureProtocol) return url.toString();
-    if (url.protocol !== loopbackProtocol || !isPtyLoopbackHostname(url.hostname)) return null;
-    return url.toString();
-  } catch {
-    return null;
-  }
-}
-
-function isPtyLoopbackHostname(hostname: string): boolean {
-  return (
-    hostname === "localhost" ||
-    hostname === "127.0.0.1" ||
-    hostname === "::1" ||
-    hostname === "[::1]"
-  );
+  return normalizedSecureHttpUrl(value);
 }
