@@ -1,14 +1,13 @@
 import { render } from "preact";
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "preact/hooks";
 import { api } from "./api.js";
+import { defaultDeployment, useAppData } from "./app-data.js";
 import { CopyCommand, Icon } from "./components.jsx";
 import { ActionDialog, Drawer, useActionDialog } from "./dialogs.jsx";
 import { FleetPage } from "./fleet.jsx";
 import {
   appViewUrl,
   initialAppView,
-  isGithubLoginCallback,
-  loginReturnKey,
   parseSessionLink,
   restoreSessionReturnUrl,
   sessionRouteUrl,
@@ -57,60 +56,12 @@ import {
 } from "./terminal.js";
 
 const logo = "__CRABBOX_LOGO__";
-const productName = "Crabfleet";
-const productDomain = "crabfleet.openclaw.ai";
-const sshHost = "crabd.sh";
-const defaultDeployment = {
-  label: productName,
-  canonicalUrl: `https://${productDomain}`,
-  productUrl: "https://crabfleet.ai",
-  sshHost,
-  preferredRepo,
-  defaultRuntime: "container",
-  defaultProfile: "default",
-  runtimeProfiles: [],
-};
-const skipAutoGithubLoginKey = "crabbox-skip-auto-github-login";
-const githubAutoLoginReadyKey = "crabbox-github-auto-login-ready";
-const emptyState = {
-  cards: [],
-  interactiveSessions: [],
-  fleet: null,
-  allow: [],
-  repos: [],
-  workflows: [],
-  cap: 20,
-  retention: "30",
-  merge: "guarded",
-  deployment: defaultDeployment,
-};
-function initialState(initialSessionLink) {
-  if (!initialSessionLink.id) return emptyState;
-  return {
-    ...emptyState,
-    interactiveSessions: [
-      linkedInteractiveSessionPlaceholder(initialSessionLink.id, {
-        sharedReadOnly: Boolean(initialSessionLink.token),
-      }),
-    ],
-  };
-}
 
 function App() {
-  const githubLoginCallback = useRef(isGithubLoginCallback());
   const initialSessionLink = useMemo(() => {
     restoreSessionReturnUrl();
     return parseSessionLink();
   }, []);
-  const [state, setState] = useState(() => initialState(initialSessionLink));
-  const [signedIn, setSignedIn] = useState(false);
-  const [authMethods, setAuthMethods] = useState({
-    github: false,
-    token: false,
-    devIdentity: false,
-    trustedProxy: false,
-  });
-  const [loginMessage, setLoginMessage] = useState("");
   const [filter, setFilter] = useState("all");
   const [search, setSearch] = useState("");
   const [appView, setAppViewState] = useState(initialAppView);
@@ -132,18 +83,44 @@ function App() {
   const { dialog, openActionDialog, closeActionDialog, confirmActionDialog } = useActionDialog();
   const [sessionLayout, setSessionLayout] = useState(loadSessionLayout);
   const [terminalStatus, setTerminalStatus] = useState({});
-  const stateRef = useRef(state);
-  const authMethodsRef = useRef(authMethods);
-  const signedInRef = useRef(signedIn);
-  const activeRunIdRef = useRef(activeRunId);
   const focusedSessionIdRef = useRef(focusedSessionId);
-  const drawersRef = useRef(drawers);
-  const sharedRef = useRef({ id: sharedSessionId, token: sharedToken });
-  const stateRetryTimer = useRef(null);
   const refPreviewTimer = useRef(null);
   const refPreviewSeq = useRef(0);
   const draggedSessionId = useRef(null);
-  const autoLoginStarted = useRef(false);
+  const {
+    state,
+    setState,
+    stateRef,
+    signedIn,
+    authMethods,
+    loginMessage,
+    setLoginMessage,
+    refreshState,
+    loadSharedSession,
+    beginLogin,
+    tokenLogin,
+    devIdentityLogin,
+    logout,
+  } = useAppData({
+    initialSessionLink,
+    activeRunId,
+    runDrawerOpen: Boolean(drawers.run),
+    sharedSessionId,
+    sharedToken,
+    onSignedOut: closeAllDrawers,
+    onSharedSessionLoaded: (session) => {
+      setFocusedSessionId(session.id);
+      openSessionGrid(session.id, { deepLink: true });
+    },
+    onSharedSessionRejected: () => {
+      closeAllDrawers();
+      setSharedSessionId(null);
+      setSharedToken(null);
+      setFocusedSessionId(null);
+      setInitialSessionOpened(true);
+      setSessionUrl(null);
+    },
+  });
 
   const allSessionItems = useMemo(() => sessionItems(state), [state]);
   const sessionItemById = useMemo(
@@ -151,35 +128,9 @@ function App() {
     [allSessionItems],
   );
 
-  stateRef.current = state;
-  authMethodsRef.current = authMethods;
-  signedInRef.current = signedIn;
-  activeRunIdRef.current = activeRunId;
   focusedSessionIdRef.current = focusedSessionId;
-  drawersRef.current = drawers;
-  sharedRef.current = { id: sharedSessionId, token: sharedToken };
-
   useEffect(() => {
-    void loadState();
-    const interval = setInterval(() => {
-      if (signedInRef.current) {
-        void loadState();
-        return;
-      }
-      const shared = sharedRef.current;
-      if (shared.id && shared.token && !document.body.classList.contains("locked")) {
-        loadSharedSession().catch((error) => {
-          if (error.status === 403 || error.status === 404) {
-            void showSharedLinkError(error);
-            return;
-          }
-          console.warn("Shared session refresh failed", error);
-        });
-      }
-    }, 15000);
     return () => {
-      clearInterval(interval);
-      if (stateRetryTimer.current) clearTimeout(stateRetryTimer.current);
       if (refPreviewTimer.current) clearTimeout(refPreviewTimer.current);
       disposeAllTerminals();
     };
@@ -195,10 +146,6 @@ function App() {
     window.addEventListener("popstate", onPopState);
     return () => window.removeEventListener("popstate", onPopState);
   }, []);
-
-  useEffect(() => {
-    if (!signedIn && !loginMessage) void maybeAutoGithubLogin(authMethods);
-  }, [signedIn, loginMessage, authMethods.github, sharedSessionId, sharedToken]);
 
   useEffect(() => {
     document.documentElement.dataset.theme = theme;
@@ -225,125 +172,12 @@ function App() {
     void openInitialSessionLink();
   }, [sharedSessionId, signedIn, state.interactiveSessions]);
 
-  async function loadState() {
-    try {
-      const nextState = await api("/api/state", { authOptional: true });
-      const linkedSessionId = sharedRef.current.id;
-      const linkedSession = linkedSessionId ? findInteractiveSession(linkedSessionId) : null;
-      if (
-        linkedSession &&
-        !(nextState.interactiveSessions || []).some((session) => session.id === linkedSessionId)
-      ) {
-        nextState.interactiveSessions = [linkedSession, ...(nextState.interactiveSessions || [])];
-      }
-      const activeRunId = activeRunIdRef.current;
-      const activeCard = nextState.cards.find((card) => card.id === activeRunId);
-      if (activeRunId && drawersRef.current.run && activeCard?.changes?.files?.length) {
-        const result = await api(`/api/cards/${encodeURIComponent(activeRunId)}/actions`, {
-          method: "POST",
-          body: { action: "attach" },
-        });
-        nextState.cards = nextState.cards.map((card) =>
-          card.id === result.card.id ? result.card : card,
-        );
-      }
-      if (stateRetryTimer.current) clearTimeout(stateRetryTimer.current);
-      stateRetryTimer.current = null;
-      setAuthMethods(nextState.auth || authMethodsRef.current);
-      setState(nextState);
-      setSignedIn(true);
-      setLoginMessage("");
-      finishGithubLoginCallback(true);
-    } catch (error) {
-      if (error.status === 401 || error.status === 403) {
-        const shared = sharedRef.current;
-        if (shared.id && shared.token) {
-          try {
-            await loadSharedSession();
-          } catch (sharedError) {
-            await showSharedLinkError(sharedError);
-          }
-          return;
-        }
-        const methods = await loadAuthMethods();
-        finishGithubLoginCallback(false);
-        if (error.status === 401 && (await maybeAutoGithubLogin(methods))) return;
-        closeAllDrawers();
-        setSignedIn(false);
-        setLoginMessage(error.message === "unauthorized" ? "" : error.message);
-        return;
-      }
-      setLoginMessage(error.message);
-      stateRetryTimer.current ||= setTimeout(() => {
-        stateRetryTimer.current = null;
-        void loadState();
-      }, 5000);
-    }
-  }
-
-  async function loadSharedSession() {
-    const result = await api(
-      `/api/shared-sessions/${encodeURIComponent(sharedSessionId)}?token=${encodeURIComponent(sharedToken)}`,
-      { authOptional: true },
-    );
-    await loadAuthMethods();
-    setState({
-      user: { subject: "shared", login: "shared link", role: "viewer" },
-      auth: authMethods,
-      org: "OpenClaw",
-      cap: 20,
-      retention: "30",
-      merge: "guarded",
-      allow: [],
-      repos: [result.session.repo],
-      workflows: [],
-      cards: [],
-      interactiveSessions: [result.session],
-      deployment: stateRef.current.deployment || defaultDeployment,
-    });
-    setSignedIn(false);
-    setFocusedSessionId(result.session.id);
-    openSessionGrid(result.session.id, { deepLink: true });
-  }
-
   async function loadLinkedInteractiveSession(id) {
     const result = await api(`/api/interactive-sessions/${encodeURIComponent(id)}`);
     upsertInteractiveSession(result.session);
     setInitialSessionOpened(true);
     setFocusedSessionId(result.session.id);
     openSessionGrid(result.session.id, { deepLink: true });
-  }
-
-  async function showSharedLinkError(error) {
-    await loadAuthMethods();
-    closeAllDrawers();
-    setSharedSessionId(null);
-    setSharedToken(null);
-    setFocusedSessionId(null);
-    setInitialSessionOpened(true);
-    setSessionUrl(null);
-    setSignedIn(false);
-    setLoginMessage(
-      error?.status === 404
-        ? "Shared session link is invalid or expired."
-        : error?.message || "Shared session could not be loaded.",
-    );
-  }
-
-  async function loadAuthMethods() {
-    try {
-      const result = await api("/api/auth", { authOptional: true });
-      const methods = result.auth || authMethodsRef.current;
-      if (result.deployment) {
-        setState((current) => ({ ...current, deployment: result.deployment }));
-      }
-      setAuthMethods(methods);
-      return methods;
-    } catch {
-      const methods = { github: false, token: true, devIdentity: false, trustedProxy: false };
-      setAuthMethods(methods);
-      return methods;
-    }
   }
 
   async function openInitialSessionLink() {
@@ -512,96 +346,6 @@ function App() {
 
   function setTheme(value) {
     setThemeState(value === "light" ? "light" : "dark");
-  }
-
-  async function beginLogin() {
-    try {
-      sessionStorage.removeItem(skipAutoGithubLoginKey);
-    } catch {}
-    preserveLoginReturnUrl();
-    let methods = authMethods;
-    if (!methods.github && !methods.token) methods = await loadAuthMethods();
-    if (methods.github) {
-      location.href = "/login/github";
-      return;
-    }
-    setLoginMessage("Sign in to request terminal control.");
-  }
-
-  async function tokenLogin(token) {
-    try {
-      await api("/api/login/token", { method: "POST", body: { token }, authOptional: true });
-      await loadState();
-    } catch (error) {
-      setLoginMessage(String(error.message || error));
-    }
-  }
-
-  async function devIdentityLogin(identity) {
-    try {
-      await api("/api/login/dev", {
-        method: "POST",
-        body: identity,
-        authOptional: true,
-      });
-      await loadState();
-    } catch (error) {
-      setLoginMessage(String(error.message || error));
-    }
-  }
-
-  async function logout() {
-    try {
-      sessionStorage.setItem(skipAutoGithubLoginKey, "1");
-      localStorage.removeItem(githubAutoLoginReadyKey);
-    } catch {}
-    autoLoginStarted.current = false;
-    await api("/api/logout", { method: "POST", authOptional: true });
-    await loadState();
-  }
-
-  async function maybeAutoGithubLogin(methods = authMethodsRef.current) {
-    if (signedInRef.current || autoLoginStarted.current || !methods?.github) return false;
-    if (methods.devIdentity) return false;
-    if (methods.token && wantsTokenLoginBypass()) return false;
-    const shared = sharedRef.current;
-    if (shared.id && shared.token) return false;
-    try {
-      if (sessionStorage.getItem(skipAutoGithubLoginKey) === "1") return false;
-      if (localStorage.getItem(githubAutoLoginReadyKey) !== "1") return false;
-    } catch {
-      return false;
-    }
-    autoLoginStarted.current = true;
-    preserveLoginReturnUrl();
-    location.href = "/login/github";
-    return true;
-  }
-
-  function preserveLoginReturnUrl() {
-    try {
-      if (sharedRef.current.id) sessionStorage.setItem(loginReturnKey, location.href);
-    } catch {}
-  }
-
-  function wantsTokenLoginBypass() {
-    const params = new URLSearchParams(location.search);
-    return params.get("auth") === "token";
-  }
-
-  function finishGithubLoginCallback(remember) {
-    if (!githubLoginCallback.current) return;
-    githubLoginCallback.current = false;
-    if (remember) {
-      try {
-        localStorage.setItem(githubAutoLoginReadyKey, "1");
-      } catch {}
-    }
-    if (!history.replaceState) return;
-    const url = new URL(location.href);
-    if (url.searchParams.get("login") !== "github") return;
-    url.searchParams.delete("login");
-    history.replaceState(null, "", `${url.pathname}${url.search}${url.hash}`);
   }
 
   async function cardAction(id, action) {
@@ -805,7 +549,7 @@ function App() {
     });
     setRefPreview({ number: "", loading: false, matches: [], error: "" });
     setSearch("");
-    await loadState();
+    await refreshState();
   }
 
   async function createCard(form) {
@@ -823,7 +567,7 @@ function App() {
     });
     form.reset();
     closeDrawer("card");
-    await loadState();
+    await refreshState();
   }
 
   async function createInteractiveSession(form) {
