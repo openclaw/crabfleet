@@ -5,3 +5,6 @@
 !go.sum
 !cmd/
 !cmd/**
+!internal/
+!internal/terminalws/
+!internal/terminalws/**

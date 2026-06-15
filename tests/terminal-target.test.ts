@@ -4,7 +4,7 @@ import test from "node:test";
 
 import { sizedTerminalTargetUrl } from "../src/terminal-target.ts";
 
-test("opaque direct terminal URLs pass through the multiplex hub unchanged", async () => {
+test("opaque provider terminal URLs pass through the multiplex hub unchanged", async () => {
   const signed =
     "wss://controller.example/v1/pty?signature=a%2Bb%2Fc%3D&cols=provider-owned&opaque=1";
   assert.equal(sizedTerminalTargetUrl(signed, "attach", 120, 34), signed);
@@ -20,19 +20,7 @@ test("opaque direct terminal URLs pass through the multiplex hub unchanged", asy
     /interactiveTerminalFetch\(\s*env,\s*session,\s*sizedTerminalTargetUrl\(target\.url, routeKind, cols, rows\)/,
   );
   assert.doesNotMatch(upstreamSource, /addQuery\(target\.url/);
-
-  const directStart = source.indexOf("async function interactiveSessionPty");
-  const directEnd = source.indexOf("function sendTerminalJson", directStart);
-  const directSource = source.slice(directStart, directEnd);
-  assert.match(directSource, /const targetUrl = sizedTerminalTargetUrl\(/);
-  assert.match(directSource, /const targetUrl = sizedTerminalTargetUrl\(\s*target\.url,/);
-  assert.match(directSource, /terminalSize\(request, "cols", 120\)/);
-  assert.match(directSource, /terminalSize\(request, "rows", 34\)/);
-  assert.match(
-    directSource,
-    /upstreamResponse = await interactiveTerminalFetch\(\s*env,\s*session,\s*targetUrl,/,
-  );
-  assert.doesNotMatch(directSource, /interactiveTerminalFetch\([^)]*target\.url/);
+  assert.doesNotMatch(source, /async function interactiveSessionPty/);
 });
 
 test("known bridge and runner targets receive terminal dimensions", () => {

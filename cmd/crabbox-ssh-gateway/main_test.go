@@ -121,26 +121,17 @@ func TestTerminalCapabilityWithdrawalSuppressesAttach(t *testing.T) {
 }
 
 func TestCreateAutoAttachRequiresReadyResolvablePTY(t *testing.T) {
-	available := true
-	if attachable(interactiveSession{Status: "provisioning", PtyAvailable: &available}) {
+	if attachable(interactiveSession{Status: "provisioning", PtyAvailable: true}) {
 		t.Fatal("provisioning create must succeed without auto-attach")
 	}
-	available = false
-	if attachable(interactiveSession{Status: "ready", PtyAvailable: &available}) {
+	if attachable(interactiveSession{Status: "ready", PtyAvailable: false}) {
 		t.Fatal("ready session without a PTY route must not auto-attach")
 	}
-	available = true
-	if !attachable(interactiveSession{Status: "ready", PtyAvailable: &available}) {
+	if !attachable(interactiveSession{Status: "ready", PtyAvailable: true}) {
 		t.Fatal("ready session with a PTY route should auto-attach")
 	}
-	if !attachable(interactiveSession{
-		Status:    "detached",
-		AttachURL: "/api/interactive-sessions/IS-1/pty",
-	}) {
-		t.Fatal("legacy API PTY routes should remain attachable")
-	}
-	if attachable(interactiveSession{Status: "ready", AttachURL: "ws://example.com/terminal"}) {
-		t.Fatal("insecure remote websocket should not auto-attach")
+	if attachable(interactiveSession{Status: "detached", AttachURL: "/api/terminal/ws"}) {
+		t.Fatal("attach URL must not override missing PTY availability")
 	}
 }
 

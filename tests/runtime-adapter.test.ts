@@ -684,7 +684,10 @@ test("runtime reconciliation has scheduled and targeted lifecycle clocks", async
       reconcileSource.indexOf("inspectRuntimeAdapterWorkspace"),
   );
   assert.match(source, /async function readFreshInteractiveSession/);
-  assert.match(source, /async function interactiveSessionPty[\s\S]*readFreshInteractiveSession/);
+  assert.match(
+    source,
+    /async function subscribeTerminalHubSession[\s\S]*readFreshInteractiveSession/,
+  );
   assert.match(source, /async function interactiveSessionVnc[\s\S]*readFreshInteractiveSession/);
   assert.match(source, /scheduled interactive session reconciliation failed/);
   assert.match(
@@ -1737,9 +1740,6 @@ test("terminal endpoints enforce current runtime capabilities", async () => {
     decorateStart,
   );
   const decorateSource = source.slice(decorateStart, decorateEnd);
-  const directPtyStart = source.indexOf("async function interactiveSessionPty");
-  const directPtyEnd = source.indexOf("async function interactiveSandboxTerminal", directPtyStart);
-  const directPtySource = source.slice(directPtyStart, directPtyEnd);
 
   assert.match(source, /type InteractiveSession = \{[\s\S]*ptyAvailable\?: boolean;/);
   assert.match(source, /if \(!session\.capabilities\.terminal\)/);
@@ -1749,20 +1749,17 @@ test("terminal endpoints enforce current runtime capabilities", async () => {
   assert.match(decorateSource, /const routeKind = interactivePtyRouteKind\(env, session\)/);
   assert.match(decorateSource, /interactiveTerminalTarget\(env, session, routeKind\)/);
   assert.match(decorateSource, /routeAvailable/);
-  assert.match(
-    decorateSource,
-    /const proxyManagedTerminal =[\s\S]*session\.runtime === githubActionsRuntime \|\|[\s\S]*session\.adapter === runtimeAdapterName/,
-  );
-  assert.match(
-    decorateSource,
-    /const attachUrl = proxyManagedTerminal[\s\S]*\? ptyAvailable[\s\S]*`\/api\/interactive-sessions\/\$\{encodeURIComponent\(session\.id\)\}\/pty`[\s\S]*: null/,
-  );
-  assert.match(directPtySource, /session\.runtime === githubActionsRuntime/);
-  assert.match(directPtySource, /openInteractiveTerminalUpstream\(/);
+  assert.match(decorateSource, /const attachUrl = ptyAvailable \? "\/api\/terminal\/ws" : null/);
   assert.match(decorateSource, /attachUrl,/);
   assert.doesNotMatch(
     decorateSource,
     /attachUrl: canControl && session\.capabilities\.terminal \? session\.attachUrl : null/,
+  );
+  assert.doesNotMatch(source, /async function interactiveSessionPty/);
+  assert.doesNotMatch(source, /\/api\/(?:ssh\/|agent\/)?interactive-sessions\/\(\[\^\/\]\+\)\/pty/);
+  assert.match(
+    source,
+    /async function terminalHubUser[\s\S]*isSshGatewayRequest[\s\S]*requireSshGatewayUser[\s\S]*agentSessionId[\s\S]*requireAgentSession/,
   );
 });
 
@@ -2160,15 +2157,11 @@ test("runtime adapter terminal upgrades use the coordinator service binding", as
   const openStart = source.indexOf("async function openInteractiveTerminalUpstream");
   const openEnd = source.indexOf("async function markInteractiveTerminalConnected", openStart);
   const openSource = source.slice(openStart, openEnd);
-  const legacyStart = source.indexOf("async function interactiveSessionPty");
-  const legacyEnd = source.indexOf("async function interactiveSandboxTerminal", legacyStart);
-  const legacySource = source.slice(legacyStart, legacyEnd);
   const fetchStart = source.indexOf("async function interactiveTerminalFetch");
   const fetchEnd = source.indexOf("async function runtimeAdapterFetch", fetchStart);
   const fetchSource = source.slice(fetchStart, fetchEnd);
 
   assert.match(openSource, /interactiveTerminalFetch\(/);
-  assert.match(legacySource, /interactiveTerminalFetch\(/);
   assert.match(fetchSource, /session\.adapter === runtimeAdapterName/);
   assert.match(fetchSource, /runtimeAdapterFetcher\(env, target\)/);
   assert.match(fetchSource, /fetchTarget\.protocol === "wss:"/);

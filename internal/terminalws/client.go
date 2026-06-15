@@ -1,0 +1,317 @@
+package terminalws
+
+import (
+	"context"
+	"encoding/binary"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"net/http"
+	"net/url"
+	"sync"
+
+	"github.com/coder/websocket"
+)
+
+const (
+	magic         = 0x5943
+	version       = 1
+	maxFrameBytes = 16 * 1024 * 1024
+
+	messageHello          = 1
+	messageWelcome        = 2
+	messageSubscribe      = 10
+	messageOutput         = 20
+	messageEvent          = 22
+	messageError          = 23
+	messageInput          = 30
+	messageControlRevoked = 53
+	messageAck            = 62
+
+	subscribeOutput                 = 1 << 0
+	subscribeEvents                 = 1 << 2
+	subscribeOutputAcknowledgements = 1 << 3
+)
+
+type Options struct {
+	Header http.Header
+	Cols   uint32
+	Rows   uint32
+}
+
+type Client struct {
+	conn      *websocket.Conn
+	sessionID string
+	writeMu   sync.Mutex
+}
+
+type frame struct {
+	messageType byte
+	sessionID   string
+	payload     []byte
+}
+
+type eventPayload struct {
+	Type     string `json:"type"`
+	Error    string `json:"error"`
+	Reason   string `json:"reason"`
+	CanInput bool   `json:"canInput"`
+}
+
+func Endpoint(baseURL string) (string, error) {
+	target, err := url.Parse(baseURL)
+	if err != nil {
+		return "", err
+	}
+	switch target.Scheme {
+	case "https":
+		target.Scheme = "wss"
+	case "http":
+		target.Scheme = "ws"
+	case "wss", "ws":
+	default:
+		return "", fmt.Errorf("unsupported terminal URL scheme %q", target.Scheme)
+	}
+	target.Path = "/api/terminal/ws"
+	target.RawPath = ""
+	target.RawQuery = ""
+	target.Fragment = ""
+	return target.String(), nil
+}
+
+func Dial(ctx context.Context, endpoint string, sessionID string, options Options) (*Client, error) {
+	if sessionID == "" {
+		return nil, errors.New("terminal session id is required")
+	}
+	conn, _, err := websocket.Dial(ctx, endpoint, &websocket.DialOptions{
+		HTTPHeader: options.Header,
+	})
+	if err != nil {
+		return nil, err
+	}
+	conn.SetReadLimit(maxFrameBytes)
+	client := &Client{conn: conn, sessionID: sessionID}
+	closeWithError := func(err error) (*Client, error) {
+		_ = conn.Close(websocket.StatusInternalError, "terminal setup failed")
+		return nil, err
+	}
+	if err := client.write(ctx, frame{messageType: messageHello}); err != nil {
+		return closeWithError(err)
+	}
+	if err := client.write(ctx, frame{
+		messageType: messageSubscribe,
+		sessionID:   sessionID,
+		payload:     subscribePayload(options.Cols, options.Rows),
+	}); err != nil {
+		return closeWithError(err)
+	}
+	for {
+		current, err := client.read(ctx)
+		if err != nil {
+			return closeWithError(err)
+		}
+		if current.sessionID != "" && current.sessionID != sessionID {
+			continue
+		}
+		switch current.messageType {
+		case messageWelcome:
+			continue
+		case messageError, messageControlRevoked:
+			return closeWithError(frameError(current, "terminal subscription failed"))
+		case messageEvent:
+			var event eventPayload
+			if err := json.Unmarshal(current.payload, &event); err != nil {
+				return closeWithError(fmt.Errorf("decode terminal event: %w", err))
+			}
+			if event.Type == "subscribed" {
+				if !event.CanInput {
+					return closeWithError(errors.New("terminal control has not been granted"))
+				}
+				return client, nil
+			}
+			if event.Type == "closed" {
+				return closeWithError(errors.New("terminal closed during subscription"))
+			}
+		}
+	}
+}
+
+func (c *Client) Close() error {
+	return c.conn.Close(websocket.StatusNormalClosure, "")
+}
+
+func (c *Client) SendInput(ctx context.Context, payload []byte) error {
+	if len(payload) == 0 {
+		return nil
+	}
+	return c.write(ctx, frame{
+		messageType: messageInput,
+		sessionID:   c.sessionID,
+		payload:     payload,
+	})
+}
+
+func (c *Client) Attach(ctx context.Context, terminal io.ReadWriter) error {
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	errCh := make(chan error, 2)
+	go func() {
+		buffer := make([]byte, 32*1024)
+		for {
+			count, err := terminal.Read(buffer)
+			if count > 0 {
+				if writeErr := c.SendInput(ctx, buffer[:count]); writeErr != nil {
+					errCh <- writeErr
+					return
+				}
+			}
+			if err != nil {
+				if errors.Is(err, io.EOF) {
+					errCh <- nil
+				} else {
+					errCh <- err
+				}
+				return
+			}
+		}
+	}()
+	go func() {
+		for {
+			current, err := c.read(ctx)
+			if err != nil {
+				errCh <- err
+				return
+			}
+			if current.sessionID != "" && current.sessionID != c.sessionID {
+				continue
+			}
+			switch current.messageType {
+			case messageOutput:
+				if _, err := terminal.Write(current.payload); err != nil {
+					errCh <- err
+					return
+				}
+				if err := c.write(ctx, frame{
+					messageType: messageAck,
+					sessionID:   c.sessionID,
+					payload:     ackPayload(uint32(len(current.payload))),
+				}); err != nil {
+					errCh <- err
+					return
+				}
+			case messageError, messageControlRevoked:
+				errCh <- frameError(current, "terminal connection failed")
+				return
+			case messageEvent:
+				var event eventPayload
+				if json.Unmarshal(current.payload, &event) == nil && event.Type == "closed" {
+					errCh <- nil
+					return
+				}
+			}
+		}
+	}()
+
+	err := <-errCh
+	cancel()
+	return normalizeCloseError(err)
+}
+
+func (c *Client) write(ctx context.Context, current frame) error {
+	c.writeMu.Lock()
+	defer c.writeMu.Unlock()
+	return c.conn.Write(ctx, websocket.MessageBinary, encodeFrame(current))
+}
+
+func (c *Client) read(ctx context.Context) (frame, error) {
+	messageType, payload, err := c.conn.Read(ctx)
+	if err != nil {
+		return frame{}, normalizeCloseError(err)
+	}
+	if messageType != websocket.MessageBinary {
+		return frame{}, errors.New("terminal server sent a non-binary frame")
+	}
+	return decodeFrame(payload)
+}
+
+func encodeFrame(current frame) []byte {
+	sessionID := []byte(current.sessionID)
+	payload := make([]byte, 12+len(sessionID)+len(current.payload))
+	binary.LittleEndian.PutUint16(payload[0:2], magic)
+	payload[2] = version
+	payload[3] = current.messageType
+	binary.LittleEndian.PutUint32(payload[4:8], uint32(len(sessionID)))
+	copy(payload[8:], sessionID)
+	offset := 8 + len(sessionID)
+	binary.LittleEndian.PutUint32(payload[offset:offset+4], uint32(len(current.payload)))
+	copy(payload[offset+4:], current.payload)
+	return payload
+}
+
+func decodeFrame(payload []byte) (frame, error) {
+	if len(payload) < 12 || binary.LittleEndian.Uint16(payload[0:2]) != magic {
+		return frame{}, errors.New("invalid terminal frame")
+	}
+	if payload[2] != version {
+		return frame{}, fmt.Errorf("unsupported terminal protocol version %d", payload[2])
+	}
+	sessionLength := uint64(binary.LittleEndian.Uint32(payload[4:8]))
+	if sessionLength > uint64(len(payload)-12) {
+		return frame{}, errors.New("invalid terminal session id length")
+	}
+	payloadLengthOffset := 8 + int(sessionLength)
+	bodyLength := uint64(binary.LittleEndian.Uint32(payload[payloadLengthOffset : payloadLengthOffset+4]))
+	bodyOffset := payloadLengthOffset + 4
+	if bodyLength != uint64(len(payload)-bodyOffset) {
+		return frame{}, errors.New("invalid terminal payload length")
+	}
+	return frame{
+		messageType: payload[3],
+		sessionID:   string(payload[8:payloadLengthOffset]),
+		payload:     payload[bodyOffset:],
+	}, nil
+}
+
+func subscribePayload(cols uint32, rows uint32) []byte {
+	payload := make([]byte, 20)
+	binary.LittleEndian.PutUint32(
+		payload[0:4],
+		subscribeOutput|subscribeEvents|subscribeOutputAcknowledgements,
+	)
+	binary.LittleEndian.PutUint32(payload[12:16], cols)
+	binary.LittleEndian.PutUint32(payload[16:20], rows)
+	return payload
+}
+
+func ackPayload(bytes uint32) []byte {
+	payload := make([]byte, 4)
+	binary.LittleEndian.PutUint32(payload, bytes)
+	return payload
+}
+
+func frameError(current frame, fallback string) error {
+	var event eventPayload
+	if json.Unmarshal(current.payload, &event) == nil {
+		if event.Error != "" {
+			return errors.New(event.Error)
+		}
+		if event.Reason != "" {
+			return errors.New(event.Reason)
+		}
+	}
+	return errors.New(fallback)
+}
+
+func normalizeCloseError(err error) error {
+	if err == nil {
+		return nil
+	}
+	var closeError websocket.CloseError
+	if errors.As(err, &closeError) &&
+		(closeError.Code == websocket.StatusNormalClosure || closeError.Code == websocket.StatusGoingAway) {
+		return nil
+	}
+	return err
+}

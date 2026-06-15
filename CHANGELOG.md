@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Unify managed terminal clients on the multiplex `/api/terminal/ws` protocol, remove direct PTY routes, and share one framed Go transport across the CLI and SSH gateway.
 - Connect Crabfleet lifecycle and terminal traffic to Crabbox through a Cloudflare service binding and deploy an identical route-scoped credential atomically across both coordinators.
 - Make OpenClaw room trees recoverable with idempotent Crabbox creation and root-level admission freeze plus recursive stop.
 - Add root-fenced OpenClaw service supervision for Crabbox room trees, including current state, bounded transcript evidence, targeted terminal nudges, audited stop requests, and canonical browser URLs.
@@ -18,7 +19,7 @@
 - Reject runtime-adapter redirects with Cloudflare-compatible manual redirect handling instead of using unsupported Worker fetch semantics.
 - Make create, run, and admin drawers real modal dialogs with keyboard focus containment and restoration.
 - Move the public product hosts to safely converged Worker Custom Domains and fail deploys unless app and product endpoints are reachable.
-- Bound Crabbox terminal output with negotiated acknowledgements and legacy-client compatibility.
+- Bound Crabbox terminal output with negotiated acknowledgements on the multiplex terminal hub.
 - Enable the OpenClaw deployment's versioned Crabbox runtime adapter with a stable tenant namespace.
 - Add comprehensive documentation for durable GitHub Actions sessions, including registration, runner and viewer relay, work-state heartbeats, Codex steering, resumption, completion, cancellation, authentication, archives, and troubleshooting.
 - Name versioned provider-backed workspace lifecycle actions Delete across Fleet, the Go CLI, and SSH while retaining explicit Stop wording for legacy sessions and `stop` as a CLI compatibility alias; keep the provider stop wire action internal; and fail closed without adopting or deleting a pre-existing adapter workspace on an explicit ID conflict.
@@ -35,7 +36,7 @@
 - Reject stale same-generation credential-policy registrations, preflight and atomically stage failed managed Sandbox claims, require the provision bearer for standalone stop after backend removal, and backfill D1-only terminal archives when R2 is enabled later.
 - Proactively generation-wrap migrated legacy Sandbox credential policies under a live durable lease before cleanup, preserve live pre-token sessions, and use crash-safe cron retries that retain unattended session credentials.
 - Bound every runtime-adapter response stream, revalidate desktop authorization after minting, make legacy local stops atomic with scheduled crash recovery, and redact credentials before opaque provider identifiers.
-- Recover active credential policies after a post-registration crash, redact provider identities from structured adapter errors, and propagate terminal dimensions through direct bridge and runner PTY routes without rewriting opaque adapter URLs.
+- Recover active credential policies after a post-registration crash, redact provider identities from structured adapter errors, and propagate terminal dimensions through configured bridge and runner PTY routes without rewriting opaque adapter URLs.
 - Support an optional authoritative `GITHUB_REDIRECT_URI` deployment binding with strict HTTPS callback validation, canonical-origin login handoff, and callback host/path enforcement while retaining safe request-origin defaults.
 - Replace native browser confirms and prompts with accessible Crabfleet dialogs for session cleanup, shutdown, and share-link fallback.
 - Sharpen the app visual system with flatter controls, tighter surfaces, and restrained overlay elevation.

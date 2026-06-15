@@ -289,7 +289,7 @@ An adapter-reported `failed` workspace is not locally terminal until Crabfleet c
 
 ### GET /api/terminal/ws
 
-Session owner, maintainer/owner role, viewer with a current delegated control grant, or a public shared-link token for read-only sessions. Same-origin multiplex WebSocket endpoint used by the Ghostty WASM session grid. One browser socket can subscribe to multiple interactive sessions, receive PTY output frames, resize terminals, and send input only when the current user has control.
+Session owner, maintainer/owner role, viewer with a current delegated control grant, SSH gateway linked-key identity, scoped session agent, or a public shared-link token for read-only sessions. Multiplex WebSocket endpoint used by the Ghostty WASM session grid, Go CLI, and SSH gateway. One socket can subscribe to multiple interactive sessions, receive PTY output frames, resize terminals, and send input only when the current user has control.
 
 The wire format is a compact binary frame:
 
@@ -303,7 +303,7 @@ u32 payload_length
 payload bytes
 ```
 
-Supported browser actions:
+Supported client actions:
 
 - `Subscribe`: attach to a session with output/snapshot/event flags and optional initial cols/rows.
 - `Unsubscribe`: detach one session without closing the hub.
@@ -311,8 +311,17 @@ Supported browser actions:
 - `Resize`: forward terminal dimensions to the upstream PTY.
 - `Stop`: close the upstream subscription.
 - `Ping`: keepalive, answered with `Pong`.
+- `Ack`: acknowledge consumed output bytes for negotiated flow control.
 
-Server messages include `Welcome`, `Output`, `Event`, `Error`, `ControlRevoked`, and `Pong`. Shared-link viewers can subscribe and scroll output, but input frames are rejected unless an owner/maintainer grants writable control. Subscriptions require the current `terminal` capability; withdrawing it prevents new attaches, closes existing terminal sockets on the next authorization check, suppresses raw attach URLs and attachable state from app, API, fleet, CLI, and SSH responses, and removes Fleet terminal/SSH affordances. Recurring and per-input authorization use short-lived D1 snapshots only; throttled subscription reconciliation runs independently and never blocks an input frame on provider I/O.
+Server messages include `Welcome`, `Output`, `Event`, `Error`, `ControlRevoked`, and `Pong`. Shared-link viewers can subscribe and scroll output, but input frames are rejected unless an owner/maintainer grants writable control. Subscriptions require the current `terminal` capability; withdrawing it prevents new attaches, closes existing terminal sockets on the next authorization check, suppresses attachable state from app, API, fleet, CLI, and SSH responses, and removes Fleet terminal/SSH affordances. Recurring and per-input authorization use short-lived D1 snapshots only; throttled subscription reconciliation runs independently and never blocks an input frame on provider I/O.
+
+Target resolution:
+
+- `CRABBOX_PTY_BRIDGE_URL`: explicit bridge WebSocket URL/template. Templates support `{id}`, `{leaseId}`, `{repo}`, `{branch}`, and `{runtime}`. Crabfleet appends `sessionId`, `leaseId`, `repo`, `branch`, `runtime`, and `command` query parameters.
+- Provider terminal connection: if the provision adapter returned a `wss://` URL, or literal loopback `ws://` URL, Crabfleet retains it server-side and proxies to it unchanged, including its path and signed query string.
+- `CRABBOX_CLOUDFLARE_RUNNER_URL`: for `cloudflare:<sandbox>` leases, Crabfleet proxies to `/v1/sandboxes/:sandbox/pty` on the runner.
+
+The hub appends terminal `cols` and `rows` only to configured bridge and Cloudflare runner endpoints, never to an adapter `attachUrl`. Crabfleet authenticates versioned-adapter terminal upgrades with `CRABBOX_RUNTIME_ADAPTER_TOKEN` only when the terminal shares the persisted and currently configured adapter origin; adapter URLs never carry reusable shell credentials. If `CRABBOX_PTY_BRIDGE_TOKEN` or `CRABBOX_CLOUDFLARE_RUNNER_TOKEN` is set, Crabfleet sends it as a bearer token only to the upstream bridge/runner. Clients never receive upstream credentials.
 
 ### POST /api/interactive-sessions/:id/clipboard
 
@@ -321,18 +330,6 @@ Viewer+ with writable terminal control. Uploads a browser clipboard image/file b
 ### GET /api/interactive-sessions/:id/vnc
 
 Viewer+ with writable session control. For `runtime-v1`, Crabfleet authenticates the browser session, asks the adapter to mint a current desktop connection, validates its HTTPS URL and optional bounded expiry, and issues a no-store redirect. Versioned-adapter desktop URLs are never persisted in D1 or returned by fleet state. API and CLI session views expose an absolute canonical Crabfleet browser URL for this cookie-authenticated route; the SSH gateway does not mint or receive the underlying adapter URL. Legacy adapters retain their existing validated absolute VNC URL behavior for browser and CLI clients.
-
-### GET /api/interactive-sessions/:id/pty
-
-Session owner, maintainer/owner role, or viewer with a current delegated control grant. Legacy single-session WebSocket endpoint. Crabfleet authenticates the browser session, verifies the interactive session is still attachable, verifies terminal control, then proxies PTY bytes to the configured runner.
-
-Target resolution:
-
-- `CRABBOX_PTY_BRIDGE_URL`: explicit bridge WebSocket URL/template. Templates support `{id}`, `{leaseId}`, `{repo}`, `{branch}`, and `{runtime}`. Crabfleet appends `sessionId`, `leaseId`, `repo`, `branch`, `runtime`, and `command` query parameters.
-- Provider terminal connection: if the provision adapter returned a `wss://` URL, or literal loopback `ws://` URL, Crabfleet retains it server-side and proxies to it unchanged, including its path and signed query string.
-- `CRABBOX_CLOUDFLARE_RUNNER_URL`: for `cloudflare:<sandbox>` leases, Crabfleet proxies to `/v1/sandboxes/:sandbox/pty` on the runner.
-
-Both multiplex and legacy direct PTY routes append terminal `cols` and `rows` only to configured bridge and Cloudflare runner endpoints, never to an adapter `attachUrl`. Crabfleet authenticates versioned-adapter terminal upgrades with `CRABBOX_RUNTIME_ADAPTER_TOKEN` only when the terminal shares the persisted and currently configured adapter origin; adapter URLs never carry reusable shell credentials. If `CRABBOX_PTY_BRIDGE_TOKEN` or `CRABBOX_CLOUDFLARE_RUNNER_TOKEN` is set, Crabfleet sends it as a bearer token only to the upstream bridge/runner. The browser never receives upstream credentials.
 
 ### POST /api/openclaw/action-sessions
 
@@ -425,7 +422,7 @@ Fields:
 
 If `CRABBOX_RUNTIME_ADAPTER_URL` or `CRABBOX_RUNTIME_ADAPTER_URL_TEMPLATE` is configured, the Worker creates and reconciles the versioned adapter workspace and records its resolved lifecycle identity, status, capabilities, expiry, and terminal connection. Otherwise `CRABBOX_INTERACTIVE_PROVISION_URL` retains the legacy create-only behavior. Without an adapter the session is stored as `pending_adapter`.
 
-Session responses include `ptyAvailable`, the authenticated Worker's authoritative answer for whether the current terminal capability, lifecycle state, and configured Sandbox/bridge/runner route can resolve a PTY connection. A controllable `runtime-v1` session exposes only the Worker-owned `/api/interactive-sessions/:id/pty` route in `attachUrl`; the signed provider connection remains server-side even for owners and controllers.
+Session responses include `ptyAvailable`, the authenticated Worker's authoritative answer for whether the current terminal capability, lifecycle state, and configured Sandbox/bridge/runner route can resolve a PTY connection. Every controllable session exposes only the Worker-owned `/api/terminal/ws` route in `attachUrl`; signed provider connections remain server-side even for owners and controllers.
 
 When the selected runtime profile configures `codexSsh`, a ready `runtime-v1` session response may include `codexSsh: { alias, setupCommand }` for session managers. The alias and optional command are resolved from bounded `{providerResourceId}`, `{workspaceId}`, `{sessionId}`, and `{profile}` placeholders. Alias components use a strict OpenSSH-safe character set. `codexSsh.setupCommand` is an argv-like array whose first and static items use a shell-safe character set and whose dynamic items must each be one complete placeholder; Crabfleet POSIX-shell-quotes every substituted argument so opaque provider identifiers remain data. Missing values, an unsafe resolved alias, or a current profile route that differs from the workspace's immutable registered adapter control plane suppresses the handoff. Shared links and delegated terminal-only controllers never receive it. The command is display/copy data only; Crabfleet never executes it.
 
@@ -522,7 +519,8 @@ CRABBOX_SSH_GATEWAY_TOKEN`. These endpoints are not browser APIs.
 - `GET /api/ssh/interactive-sessions/:id/checkpoints`: lists Cloudflare Sandbox checkpoints.
 - `POST /api/ssh/interactive-sessions/:id/checkpoints`: creates a Cloudflare Sandbox checkpoint.
 - `POST /api/ssh/interactive-sessions/:id/checkpoints/:checkpoint/restore`: restores a checkpoint.
-- `GET /api/ssh/interactive-sessions/:id/pty`: WebSocket PTY attach for the gateway, scoped by linked key fingerprint.
+
+PTY attach and message commands use `/api/terminal/ws` with the gateway bearer and linked-key fingerprint headers.
 
 ## Agent Session API
 
@@ -534,7 +532,8 @@ Crabfleet-issued session agents use `Authorization: Bearer <CRABFLEET_AGENT_TOKE
 - `GET /api/agent/interactive-sessions/:id/logs`: returns event logs.
 - `GET /api/agent/interactive-sessions/:id/transcript`: returns the Markdown transcript.
 - `POST /api/agent/interactive-sessions/:id/summary`: updates `purpose` and/or `summary`.
-- `GET /api/agent/interactive-sessions/:id/pty`: WebSocket PTY attach/input for same-owner steering; the CLI uses this for `crabfleet message`.
+
+Same-owner terminal steering uses `/api/terminal/ws` with the agent bearer and session ID header; the CLI uses this protocol for `crabfleet message`.
 
 ## OpenClaw Service
 

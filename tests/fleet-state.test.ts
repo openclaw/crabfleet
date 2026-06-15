@@ -15,7 +15,7 @@ const baseSession = {
   summary: "tracking fleet visibility",
   status: "ready" as const,
   leaseId: "sandbox:crabbox-s1-abcd1234:terminal-s1-abcd1234:autostart-v4",
-  attachUrl: "/api/interactive-sessions/s1/pty",
+  attachUrl: "/api/terminal/ws",
   vncUrl: null,
   lastEvent: "Cloudflare Sandbox ready",
   createdAt: 10,
