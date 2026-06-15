@@ -3,18 +3,12 @@ import { useEffect, useMemo, useRef, useState } from "preact/hooks";
 import { AdminDrawer } from "./admin-drawer.jsx";
 import { api } from "./api.js";
 import { useAppData } from "./app-data.js";
+import { useAppNavigation } from "./app-navigation.js";
 import { AppShell } from "./app-shell.jsx";
 import { ActionDialog, useActionDialog } from "./dialogs.jsx";
 import { LoginScreen } from "./login.jsx";
 import { isLoginScreenHidden } from "./login-state.js";
-import {
-  appViewUrl,
-  initialAppView,
-  parseSessionLink,
-  restoreSessionReturnUrl,
-  sessionRouteUrl,
-} from "./routing.js";
-import { loadSessionLayout, saveSessionLayout } from "./session-layout.js";
+import { parseSessionLink, restoreSessionReturnUrl } from "./routing.js";
 import { canCleanInteractiveSession, isTerminalKeyTarget } from "./session-state.js";
 import { SessionsDrawer } from "./session-workspace.jsx";
 import {
@@ -25,12 +19,7 @@ import {
   sessionItems,
   titleFromPrompt,
 } from "./utils.js";
-import {
-  configureTerminalHub,
-  disposeAllTerminals,
-  disposeTerminal,
-  warmGhosttyModule,
-} from "./terminal.js";
+import { configureTerminalHub, disposeAllTerminals, disposeTerminal } from "./terminal.js";
 import { CardDrawer, InteractiveDrawer, RunDrawer } from "./work-drawers.jsx";
 
 function App() {
@@ -40,12 +29,33 @@ function App() {
   }, []);
   const [filter, setFilter] = useState("all");
   const [search, setSearch] = useState("");
-  const [appView, setAppViewState] = useState(initialAppView);
-  const [drawers, setDrawers] = useState(initialSessionLink.route ? { sessions: true } : {});
-  const [activeRunId, setActiveRunId] = useState(null);
-  const [focusedSessionId, setFocusedSessionId] = useState(initialSessionLink.id);
-  const [sharedSessionId, setSharedSessionId] = useState(initialSessionLink.id);
-  const [sharedToken, setSharedToken] = useState(initialSessionLink.token);
+  const sessionItemByIdRef = useRef(new Map());
+  const {
+    appView,
+    setAppView,
+    drawers,
+    activeRunId,
+    setActiveRunId,
+    focusedSessionId,
+    focusedSessionIdRef,
+    setFocusedSessionId,
+    sharedSessionId,
+    setSharedSessionId,
+    sharedToken,
+    setSharedToken,
+    theme,
+    setTheme,
+    sessionLayout,
+    setSessionLayout,
+    draggedSessionId,
+    openDrawer,
+    closeDrawer,
+    closeAllDrawers,
+    closeTopDrawer,
+    showSessionGrid,
+    openSessionGrid,
+    setSessionUrl,
+  } = useAppNavigation({ initialSessionLink, sessionItemByIdRef });
   const [initialSessionOpened, setInitialSessionOpened] = useState(false);
   const [refPreview, setRefPreview] = useState({
     number: "",
@@ -53,16 +63,10 @@ function App() {
     matches: [],
     error: "",
   });
-  const [theme, setThemeState] = useState(
-    document.documentElement.dataset.theme === "light" ? "light" : "dark",
-  );
   const { dialog, openActionDialog, closeActionDialog, confirmActionDialog } = useActionDialog();
-  const [sessionLayout, setSessionLayout] = useState(loadSessionLayout);
   const [terminalStatus, setTerminalStatus] = useState({});
-  const focusedSessionIdRef = useRef(focusedSessionId);
   const refPreviewTimer = useRef(null);
   const refPreviewSeq = useRef(0);
-  const draggedSessionId = useRef(null);
   const {
     state,
     setState,
@@ -103,8 +107,8 @@ function App() {
     () => new Map(allSessionItems.map((item) => [item.id, item])),
     [allSessionItems],
   );
+  sessionItemByIdRef.current = sessionItemById;
 
-  focusedSessionIdRef.current = focusedSessionId;
   useEffect(() => {
     return () => {
       if (refPreviewTimer.current) clearTimeout(refPreviewTimer.current);
@@ -116,19 +120,6 @@ function App() {
     document.documentElement.dataset.appRuntime = "preact";
     document.body.classList.toggle("locked", !signedIn && !(sharedSessionId && sharedToken));
   }, [signedIn, sharedSessionId, sharedToken]);
-
-  useEffect(() => {
-    const onPopState = () => setAppViewState(initialAppView());
-    window.addEventListener("popstate", onPopState);
-    return () => window.removeEventListener("popstate", onPopState);
-  }, []);
-
-  useEffect(() => {
-    document.documentElement.dataset.theme = theme;
-    try {
-      localStorage.setItem("crabbox-theme", theme);
-    } catch {}
-  }, [theme]);
 
   useEffect(() => {
     configureTerminalHub({
@@ -244,84 +235,6 @@ function App() {
         (session) => session.id !== id,
       ),
     }));
-  }
-
-  function openDrawer(id) {
-    setDrawers((current) => ({ ...current, [id]: true }));
-  }
-
-  function closeDrawer(id) {
-    setDrawers((current) => ({ ...current, [id]: false }));
-    if (id === "run") setActiveRunId(null);
-    if (id === "sessions") {
-      setFocusedSessionId(null);
-      if (!sharedToken) setSessionUrl(null);
-      disposeAllTerminals();
-    }
-  }
-
-  function closeAllDrawers() {
-    setDrawers({});
-    setActiveRunId(null);
-    setFocusedSessionId(null);
-    if (!sharedToken) setSessionUrl(null);
-    disposeAllTerminals();
-  }
-
-  function setAppView(value) {
-    const next = value === "board" ? "board" : "fleet";
-    setAppViewState(next);
-    closeAllDrawers();
-    if (!history.pushState) return;
-    history.pushState(null, "", appViewUrl(location.href, next));
-  }
-
-  function closeTopDrawer() {
-    const order = ["card", "interactive", "run", "sessions", "admin"];
-    const id = order.findLast((key) => drawers[key]);
-    if (!id) return false;
-    closeDrawer(id);
-    return true;
-  }
-
-  function showSessionGrid() {
-    setFocusedSessionId(null);
-    if (!sharedToken) setSessionUrl(null, { grid: true });
-    setDrawers((current) => ({ ...current, sessions: true }));
-  }
-
-  function openSessionGrid(id, options = {}) {
-    const targetId = id === undefined ? focusedSessionIdRef.current : id;
-    if (targetId) setFocusedSessionId(targetId);
-    else if (id === null) setFocusedSessionId(null);
-    const deepLink =
-      options.deepLink ??
-      Boolean(targetId && sessionItemById.get(targetId)?.kind === "interactive");
-    const urlSessionId =
-      targetId && deepLink && !String(targetId).startsWith("LOCAL-") ? targetId : null;
-    if (urlSessionId) setSessionUrl(urlSessionId);
-    else if (!sharedToken) setSessionUrl(null, { grid: true });
-    warmGhosttyModule();
-    setDrawers((current) => ({ ...current, sessions: true }));
-  }
-
-  function setSessionUrl(id, options = {}) {
-    if (!history.replaceState) return;
-    history.replaceState(
-      null,
-      "",
-      sessionRouteUrl(location.href, {
-        id,
-        grid: options.grid,
-        appView,
-        sharedSessionId,
-        sharedToken,
-      }),
-    );
-  }
-
-  function setTheme(value) {
-    setThemeState(value === "light" ? "light" : "dark");
   }
 
   async function cardAction(id, action) {
@@ -611,14 +524,6 @@ function App() {
     setState(await api("/api/admin/policy", { method: "PUT", body: policy }));
   }
 
-  function updateSessionLayout(updater) {
-    setSessionLayout((current) => {
-      const next = typeof updater === "function" ? updater(current) : updater;
-      saveSessionLayout(next);
-      return next;
-    });
-  }
-
   const props = {
     state,
     appView,
@@ -645,7 +550,7 @@ function App() {
     dialog,
     terminalStatus,
     sessionLayout,
-    setSessionLayout: updateSessionLayout,
+    setSessionLayout,
     draggedSessionId,
     allSessionItems,
     sessionItemById,

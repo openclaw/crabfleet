@@ -166,7 +166,15 @@ function SessionTools({
           Clean dead ({deadCount})
         </button>
       ) : null}
-      <button class="icon" aria-label="Close sessions" onClick={() => closeDrawer("sessions")}>
+      <button
+        class="icon"
+        aria-label="Close sessions"
+        onClick={(event) => {
+          event.currentTarget.blur();
+          closeDrawer("sessions");
+          setTimeout(() => document.querySelector('button[aria-label="Sessions"]')?.focus(), 0);
+        }}
+      >
         <Icon name="x" />
       </button>
     </div>
