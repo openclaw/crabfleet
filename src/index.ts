@@ -41,11 +41,7 @@ import {
 import { allocateInteractiveSessionIdSql, formatInteractiveSessionId } from "./session-id";
 import { cachedBooleanGrant } from "./terminal-authorization";
 import { openClawGitHubRepoParts, openClawRoomMaxSessions } from "./openclaw-service";
-import {
-  sanitizeTrustedProxyRequest,
-  trustedProxyPublicOrigin,
-  type TrustedProxyAuthResult,
-} from "./trusted-proxy-auth";
+import { trustedProxyPublicOrigin, type TrustedProxyAuthResult } from "./trusted-proxy-auth";
 import {
   browserAppOrigin,
   browserSessionUrl,
@@ -53,9 +49,7 @@ import {
   defaultPreferredRepo,
   deploymentConfig,
   publicDeploymentConfig,
-  selectedRuntimeProfile,
 } from "./worker/deployment";
-import { clampedSeconds } from "./worker/duration";
 import { mapWithConcurrency } from "./worker/concurrency";
 import type { RuntimeEnv } from "./worker/env";
 import {
@@ -78,7 +72,6 @@ import {
   securityHeaders,
   serviceUnavailable,
   text,
-  unauthorized,
   wantsMarkdown,
 } from "./worker/http";
 import { enforceWorkerIngressAuth, prepareWorkerIngress } from "./worker/ingress";
@@ -255,7 +248,12 @@ import {
 import { sharedInteractiveSession } from "./worker/session-sharing";
 import { InteractiveProvisioningService } from "./worker/provisioning/service";
 import { RuntimeAdapterProvisioningService } from "./worker/provisioning/runtime-adapter";
-import { failedProvision, safeProviderError } from "./worker/provisioning/result";
+import {
+  InteractiveProvisioningEndpoints,
+  standaloneSandboxAttachUrl,
+  standaloneSandboxProvisionTtlMs,
+} from "./worker/provisioning/endpoints";
+import { safeProviderError } from "./worker/provisioning/result";
 import {
   failRuntimeAdapterWorkspaceIdConflict,
   persistRuntimeAdapterStopEvidence,
@@ -268,8 +266,6 @@ import {
   commitManagedSandboxProvision,
 } from "./worker/provisioning/sandbox-repository";
 import {
-  isManagedInteractiveSessionId,
-  standaloneSandboxDefaultTtlSeconds,
   standaloneSandboxProvisionRequestHashInput,
   StandaloneSandboxProvisioningService,
 } from "./worker/provisioning/standalone-sandbox";
@@ -285,8 +281,6 @@ import type {
   InteractiveProvisionResult,
 } from "./worker/provisioning/types";
 import {
-  activeSandboxCredentialPolicyCondition,
-  activeSandboxCredentialPolicyGeneration,
   queueSandboxCredentialPolicyCleanup,
   type SandboxCredentialPolicyOwnershipFence,
 } from "./worker/sandbox-credential-policy-repository";
@@ -301,16 +295,11 @@ import {
   createSandboxSession,
   openSandboxTerminalResponse,
   sandboxSetupSessionId,
-  sandboxTerminalShellPath,
   sandboxWorkdir,
   setupSandboxTerminalSession,
-  terminalSize,
   type SandboxRuntimeSession,
 } from "./worker/sandbox-runtime";
 import {
-  interactiveCommand,
-  interactiveSessionPurpose,
-  interactiveSessionSummary,
   resolveInteractiveSessionCreateRequest,
   type InteractiveSessionCreateRequest,
 } from "./worker/session-create-request";
@@ -351,10 +340,7 @@ import {
 } from "./worker/session-control-do";
 import { defaultSandboxEgressHosts, sandboxPlaceholderOpenAIKey } from "./worker/sandbox-outbound";
 import { sandboxOutbound } from "./worker/sandbox-outbound-service";
-import {
-  bridgeWebSockets,
-  terminalOutputAcknowledgements,
-} from "./worker/terminal-websocket-bridge";
+import { terminalOutputAcknowledgements } from "./worker/terminal-websocket-bridge";
 
 type SandboxClassWithOutbound = {
   outbound?: typeof sandboxOutbound;
@@ -485,16 +471,6 @@ type RunAttempt = {
   createdAt: number;
   updatedAt: number;
   error: string | null;
-};
-
-type StandaloneSandboxTerminalOwnership = {
-  provisionId: string;
-  requestHash: string;
-  sandboxId: string;
-  leaseId: string;
-  expiresAt: number;
-  updatedAt: number;
-  policyGeneration: string;
 };
 
 type ChangedFile = {
@@ -756,10 +732,11 @@ function controlPlaneRouteDependencies(
 }
 
 function provisioningRouteDependencies(env: RuntimeEnv): ProvisioningRouteDependencies {
+  const endpoints = interactiveProvisioningEndpoints(env);
   return {
-    provision: (request) => provisionInteractiveEndpoint(request, env),
-    stop: (request, provisionId) => stopStandaloneSandboxProvision(request, env, provisionId),
-    openPty: (request, provisionId) => standaloneSandboxPty(request, env, provisionId),
+    provision: (request) => endpoints.provision(request),
+    stop: (request, provisionId) => endpoints.stop(request, provisionId),
+    openPty: (request, provisionId) => endpoints.openPty(request, provisionId),
   };
 }
 
@@ -2993,9 +2970,7 @@ function managedSandboxProvisioningService(env: RuntimeEnv): ManagedSandboxProvi
 function standaloneSandboxProvisioningService(
   env: RuntimeEnv,
 ): StandaloneSandboxProvisioningService {
-  const provisionTtlMs =
-    clampedSeconds(env.CRABBOX_STANDALONE_SANDBOX_TTL_SECONDS, standaloneSandboxDefaultTtlSeconds) *
-    1000;
+  const provisionTtlMs = standaloneSandboxProvisionTtlMs(env);
   return new StandaloneSandboxProvisioningService({
     now: Date.now,
     requestHash: (session) =>
@@ -3026,245 +3001,14 @@ function standaloneSandboxProvisioningService(
   });
 }
 
-async function provisionInteractiveEndpoint(
-  request: Request,
-  env: RuntimeEnv,
-): Promise<InteractiveProvisionResult> {
-  authorizeProvisionBearerToken(request, env);
-  const session = await readJson<Partial<InteractiveProvisionRequest>>(request);
-  const id = clean(session.id, 120);
-  const repo = normalizeRepo(session.repo);
-  const branch = clean(session.branch, 120) || "main";
-  const runtime = oneOf(session.runtime, ["crabbox", "container"], "container") as
-    | "crabbox"
-    | "container";
-  const command = interactiveCommand(session.command);
-  const { profile } = selectedRuntimeProfile(deploymentConfig(env), session.profile);
-  const prompt = clean(session.prompt, 4000);
-  const purpose = interactiveSessionPurpose(session.purpose, prompt, repo, branch, command);
-  const summary = interactiveSessionSummary(session.summary, purpose, prompt);
-  const owner = clean(session.owner, 240);
-  const githubToken = clean(session.githubToken, 4000) || undefined;
-  if (!id || !repo || !owner) {
-    return failedProvision("interactive provision failed: invalid session request");
-  }
-  const payload: InteractiveProvisionRequest = {
-    id,
-    repo,
-    branch,
-    runtime,
-    profile,
-    command,
-    prompt,
-    purpose,
-    summary,
-    owner,
-    createdBy: clean(session.createdBy, 240) || owner,
-    parentSessionId: clean(session.parentSessionId, 120) || null,
-    rootSessionId: clean(session.rootSessionId, 120) || id,
-    ...(githubToken ? { githubToken } : {}),
-  };
-  const managed = await database(env)
-    .selectFrom("interactive_sessions")
-    .selectAll()
-    .where("id", "=", payload.id)
-    .executeTakeFirst();
-  if (managed && managed.preparation_pending !== 0) {
-    return failedProvision("interactive provision failed: managed session preparation is pending");
-  }
-  if (managed) {
-    if (payload.runtime !== "container" || !env.SANDBOX) {
-      return failedProvision(
-        "interactive provision failed: managed session id is not available to this backend",
-      );
-    }
-    return managedSandboxProvisioningService(env).provision(payload, managed);
-  }
-  if (interactiveProvisioningService(env).supportsStandalone(payload.runtime)) {
-    return standaloneSandboxProvisioningService(env).provision(payload);
-  }
-  return failedProvision(
-    payload.runtime === "container"
-      ? "interactive provision failed: Cloudflare Sandbox binding is not configured"
-      : "interactive provision failed: standalone provision supports container runtime only",
-  );
-}
-
-async function stopStandaloneSandboxProvision(
-  request: Request,
-  env: RuntimeEnv,
-  provisionId: string,
-): Promise<InteractiveProvisionResult> {
-  authorizeProvisionBearerToken(request, env);
-  const owner = await database(env)
-    .selectFrom("standalone_sandbox_provisions")
-    .selectAll()
-    .where("id", "=", provisionId)
-    .executeTakeFirst();
-  if (!owner) throw notFound("standalone Sandbox provision not found");
-  const now = Date.now();
-  const staged = await stageStandaloneSandboxProvisionCleanup(
-    env,
-    owner,
-    "standalone Sandbox stop requested",
-    now,
-  );
-  if (!staged) throw conflict("standalone Sandbox ownership changed; retry stop");
-  await reconcileCredentialPolicyCleanupBatch(env, now, provisionId);
-  const remaining = await database(env)
-    .selectFrom("standalone_sandbox_provisions")
-    .select("state")
-    .where("id", "=", provisionId)
-    .executeTakeFirst();
-  return {
-    status: remaining ? "stopping" : "stopped",
-    leaseId: null,
-    attachUrl: null,
-    vncUrl: null,
-    expiresAt: null,
-    expiresAtPresent: true,
-    message: remaining ? "standalone Sandbox cleanup pending" : "standalone Sandbox stopped",
-  };
-}
-
-function standaloneSandboxAttachUrl(env: RuntimeEnv, provisionId: string): string {
-  const url = new URL(
-    `/api/provision/interactive/${encodeURIComponent(provisionId)}/pty`,
-    deploymentConfig(env).canonicalUrl,
-  );
-  url.protocol = url.protocol === "http:" ? "ws:" : "wss:";
-  return url.toString();
-}
-
-async function standaloneSandboxPty(
-  request: Request,
-  env: RuntimeEnv,
-  provisionId: string,
-): Promise<Response> {
-  authorizeProvisionBearerToken(request, env);
-  if (request.headers.get("upgrade")?.toLowerCase() !== "websocket") {
-    throw badRequest("websocket upgrade required");
-  }
-  if (!env.SANDBOX) throw serviceUnavailable("Sandbox binding is not configured");
-  const owner = await database(env)
-    .selectFrom("standalone_sandbox_provisions")
-    .selectAll()
-    .where("id", "=", provisionId)
-    .where("state", "=", "active")
-    .executeTakeFirst();
-  if (
-    !owner?.lease_id ||
-    !isCurrentSandboxLease(owner.lease_id) ||
-    !owner.expires_at ||
-    owner.expires_at <= Date.now() ||
-    isManagedInteractiveSessionId(provisionId)
-  ) {
-    if (owner) {
-      const now = Date.now();
-      await stageStandaloneSandboxProvisionCleanup(
-        env,
-        owner,
-        isManagedInteractiveSessionId(provisionId)
-          ? "standalone provision used the reserved managed session namespace"
-          : "standalone Sandbox provision expired",
-        now,
-      );
-      await reconcileCredentialPolicyCleanupBatch(env, now, provisionId);
-    }
-    throw notFound("standalone Sandbox provision not found");
-  }
-  const lease = sandboxLeaseInfo({ id: provisionId, leaseId: owner.lease_id });
-  if (lease.sandboxId !== owner.sandbox_id) {
-    throw serviceUnavailable("standalone Sandbox ownership is inconsistent");
-  }
-  const policyGeneration = await activeSandboxCredentialPolicyGeneration(
-    env,
-    provisionId,
-    owner.sandbox_id,
-  );
-  if (!policyGeneration) {
-    throw serviceUnavailable("standalone Sandbox credentials are unavailable");
-  }
-  const terminalOwnership: StandaloneSandboxTerminalOwnership = {
-    provisionId,
-    requestHash: owner.request_hash,
-    sandboxId: owner.sandbox_id,
-    leaseId: owner.lease_id,
-    expiresAt: owner.expires_at,
-    updatedAt: owner.updated_at,
-    policyGeneration,
-  };
-  const terminalGrant = standaloneSandboxTerminalGrant(env, terminalOwnership);
-  if (!(await terminalGrant())) {
-    throw serviceUnavailable("standalone Sandbox terminal authorization changed");
-  }
-  const sandbox = getSandbox(env.SANDBOX, owner.sandbox_id);
-  let response: Response;
-  try {
-    const terminalSession = await sandbox.getSession(lease.terminalSessionId);
-    const terminalHeaders = new Headers(sanitizeTrustedProxyRequest(request, env).headers);
-    terminalHeaders.delete("authorization");
-    terminalHeaders.delete("cookie");
-    response = await terminalSession.terminal(new Request(request, { headers: terminalHeaders }), {
-      cols: terminalSize(request, "cols", 120),
-      rows: terminalSize(request, "rows", 34),
-      shell: sandboxTerminalShellPath(provisionId),
-    });
-  } catch (error) {
-    throw serviceUnavailable(`standalone Sandbox terminal failed: ${safeProviderError(error)}`);
-  }
-  if (!response.webSocket || response.status !== 101) {
-    throw serviceUnavailable(`standalone Sandbox terminal HTTP ${response.status}`);
-  }
-  const pair = new WebSocketPair();
-  const client = pair[0];
-  const server = pair[1];
-  server.accept();
-  response.webSocket.accept();
-  bridgeWebSockets(server, response.webSocket, {
-    canSendLeft: terminalGrant,
-    deniedReason: "standalone Sandbox authorization revoked or expired",
+function interactiveProvisioningEndpoints(env: RuntimeEnv): InteractiveProvisioningEndpoints {
+  const interactive = interactiveProvisioningService(env);
+  return new InteractiveProvisioningEndpoints(env, {
+    provisionManaged: (session, owner) =>
+      managedSandboxProvisioningService(env).provision(session, owner),
+    provisionStandalone: (session) => standaloneSandboxProvisioningService(env).provision(session),
+    supportsStandalone: (runtime) => interactive.supportsStandalone(runtime),
   });
-  return new Response(null, { status: 101, webSocket: client });
-}
-
-function standaloneSandboxTerminalGrant(
-  env: RuntimeEnv,
-  ownership: StandaloneSandboxTerminalOwnership,
-): () => Promise<boolean> {
-  return cachedBooleanGrant(async () => {
-    const now = Date.now();
-    const owner = await database(env)
-      .selectFrom("standalone_sandbox_provisions")
-      .select("id")
-      .where("id", "=", ownership.provisionId)
-      .where("request_hash", "=", ownership.requestHash)
-      .where("sandbox_id", "=", ownership.sandboxId)
-      .where("state", "=", "active")
-      .where("lease_id", "=", ownership.leaseId)
-      .where("expires_at", "=", ownership.expiresAt)
-      .where("expires_at", ">", now)
-      .where("updated_at", "=", ownership.updatedAt)
-      .where(
-        activeSandboxCredentialPolicyCondition(
-          env,
-          ownership.provisionId,
-          ownership.sandboxId,
-          ownership.policyGeneration,
-          ownership.updatedAt,
-        ),
-      )
-      .executeTakeFirst();
-    return Boolean(owner);
-  });
-}
-
-function authorizeProvisionBearerToken(request: Request, env: RuntimeEnv): void {
-  if (!env.CRABBOX_INTERACTIVE_PROVISION_TOKEN) {
-    throw serviceUnavailable("interactive provision token is not configured");
-  }
-  const expected = `Bearer ${env.CRABBOX_INTERACTIVE_PROVISION_TOKEN}`;
-  if (request.headers.get("authorization") !== expected) throw unauthorized();
 }
 
 function sandboxProvisionPreflightError(

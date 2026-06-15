@@ -749,6 +749,10 @@ test("stateless Sandbox provision hook acquires durable standalone ownership", a
     new URL("../src/worker/provisioning/standalone-sandbox-repository.ts", import.meta.url),
     "utf8",
   );
+  const endpointServiceSource = await readFile(
+    new URL("../src/worker/provisioning/endpoints.ts", import.meta.url),
+    "utf8",
+  );
   const policyRepositorySource = await readFile(
     new URL("../src/worker/sandbox-credential-policy-repository.ts", import.meta.url),
     "utf8",
@@ -769,9 +773,9 @@ test("stateless Sandbox provision hook acquires durable standalone ownership", a
     new URL("../migrations/0023_standalone_sandbox_expiry.sql", import.meta.url),
     "utf8",
   );
-  const endpointStart = source.indexOf("async function provisionInteractiveEndpoint");
-  const endpointEnd = source.indexOf("function authorizeProvisionBearerToken", endpointStart);
-  const endpointSource = source.slice(endpointStart, endpointEnd);
+  const endpointStart = endpointServiceSource.indexOf("async provision(");
+  const endpointEnd = endpointServiceSource.indexOf("async stop(", endpointStart);
+  const endpointSource = endpointServiceSource.slice(endpointStart, endpointEnd);
   const ownershipStart = policyRepositorySource.indexOf(
     "function sandboxCredentialPolicyOwnerCondition",
   );
@@ -780,15 +784,18 @@ test("stateless Sandbox provision hook acquires durable standalone ownership", a
     ownershipStart,
   );
   const ownershipSource = policyRepositorySource.slice(ownershipStart, ownershipEnd);
-  const ptyStart = source.indexOf("async function standaloneSandboxPty");
-  const ptyEnd = source.indexOf("function authorizeProvisionBearerToken", ptyStart);
-  const ptySource = source.slice(ptyStart, ptyEnd);
+  const ptyStart = endpointServiceSource.indexOf("async openPty(");
+  const ptyEnd = endpointServiceSource.indexOf(
+    "export function standaloneSandboxAttachUrl",
+    ptyStart,
+  );
+  const ptySource = endpointServiceSource.slice(ptyStart, ptyEnd);
   const sandboxStart = source.indexOf("async function provisionWithSandbox");
   const sandboxEnd = source.indexOf("async function registerSandboxCredentialPolicy", sandboxStart);
   const sandboxSource = source.slice(sandboxStart, sandboxEnd);
-  const stopStart = source.indexOf("async function stopStandaloneSandboxProvision");
-  const stopEnd = source.indexOf("function standaloneSandboxAttachUrl", stopStart);
-  const stopSource = source.slice(stopStart, stopEnd);
+  const stopStart = endpointServiceSource.indexOf("async stop(");
+  const stopEnd = endpointServiceSource.indexOf("async openPty(", stopStart);
+  const stopSource = endpointServiceSource.slice(stopStart, stopEnd);
   const expiryStart = standaloneRepositorySource.indexOf(
     "async function expireStandaloneSandboxProvisions",
   );
@@ -804,25 +811,22 @@ test("stateless Sandbox provision hook acquires durable standalone ownership", a
     standaloneCleanupStart,
     standaloneCleanupEnd,
   );
-  const strictAuthStart = source.indexOf("function authorizeProvisionBearerToken");
-  const strictAuthEnd = source.indexOf("function sandboxProvisionPreflightError", strictAuthStart);
-  const strictAuthSource = source.slice(strictAuthStart, strictAuthEnd);
+  const strictAuthStart = endpointServiceSource.indexOf("private authorize(");
+  const strictAuthEnd = endpointServiceSource.indexOf("private terminalGrant(", strictAuthStart);
+  const strictAuthSource = endpointServiceSource.slice(strictAuthStart, strictAuthEnd);
 
   assert.match(endpointSource, /selectFrom\("interactive_sessions"\)/);
   assert.match(endpointSource, /managed && managed\.preparation_pending !== 0/);
   assert.match(endpointSource, /if \(managed\)/);
   assert.ok(
     endpointSource.indexOf("if (managed)") <
-      endpointSource.indexOf("return standaloneSandboxProvisioningService(env).provision(payload)"),
+      endpointSource.indexOf("return this.dependencies.provisionStandalone(payload)"),
   );
-  assert.match(
-    endpointSource,
-    /managedSandboxProvisioningService\(env\)\.provision\(payload, managed\)/,
-  );
-  assert.match(endpointSource, /standaloneSandboxProvisioningService\(env\)\.provision\(payload\)/);
+  assert.match(endpointSource, /this\.dependencies\.provisionManaged\(payload, managed\)/);
+  assert.match(endpointSource, /this\.dependencies\.provisionStandalone\(payload\)/);
   assert.match(ownershipSource, /FROM standalone_sandbox_provisions AS owner/);
   assert.match(ownershipSource, /owner\.ownership_claim = \$\{ownershipFence\.claim\}/);
-  assert.match(ptySource, /authorizeProvisionBearerToken\(request, env\)/);
+  assert.match(ptySource, /this\.authorize\(request\)/);
   assert.match(ptySource, /standalone_sandbox_provisions/);
   assert.match(ptySource, /where\("state", "=", "active"\)/);
   assert.match(ptySource, /owner\.expires_at <= Date\.now\(\)/);
@@ -832,7 +836,7 @@ test("stateless Sandbox provision hook acquires durable standalone ownership", a
   assert.match(ptySource, /const pair = new WebSocketPair\(\)/);
   assert.match(ptySource, /response\.webSocket\.accept\(\)/);
   assert.match(ptySource, /bridgeWebSockets\(/);
-  assert.match(ptySource, /standaloneSandboxTerminalGrant/);
+  assert.match(ptySource, /this\.terminalGrant/);
   assert.match(ptySource, /cachedBooleanGrant/);
   assert.match(ptySource, /where\("request_hash", "=", ownership\.requestHash\)/);
   assert.match(ptySource, /where\("expires_at", ">", now\)/);
@@ -857,15 +861,15 @@ test("stateless Sandbox provision hook acquires durable standalone ownership", a
   assert.match(expirySource, /state = 'active'/);
   assert.match(expirySource, /expires_at <= \$\{now\}/);
   assert.match(expirySource, /substr\(lower\(id\), 4\) NOT GLOB '\*\[\^0-9\]\*'/);
-  assert.match(stopSource, /authorizeProvisionBearerToken\(request, env\)/);
-  assert.match(strictAuthSource, /if \(!env\.CRABBOX_INTERACTIVE_PROVISION_TOKEN\)/);
+  assert.match(stopSource, /this\.authorize\(request\)/);
+  assert.match(strictAuthSource, /if \(!this\.env\.CRABBOX_INTERACTIVE_PROVISION_TOKEN\)/);
   assert.match(strictAuthSource, /throw serviceUnavailable/);
   assert.doesNotMatch(strictAuthSource, /hasBackend/);
   assert.match(stopSource, /stageStandaloneSandboxProvisionCleanup/);
-  assert.match(stopSource, /reconcileCredentialPolicyCleanupBatch/);
+  assert.match(stopSource, /reconcileSandboxCredentialPolicyCleanupBatch/);
   assert.match(stopSource, /status: remaining \? "stopping" : "stopped"/);
-  assert.match(source, /CRABBOX_STANDALONE_SANDBOX_TTL_SECONDS/);
-  assert.match(source, /stopStandaloneSandboxProvision/);
+  assert.match(endpointServiceSource, /CRABBOX_STANDALONE_SANDBOX_TTL_SECONDS/);
+  assert.match(endpointServiceSource, /async stop\(/);
   assert.match(
     sandboxOutboundSource,
     /policy\?\.expiresAt !== undefined && policy\.expiresAt <= now/,

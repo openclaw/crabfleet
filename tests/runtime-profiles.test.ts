@@ -186,7 +186,10 @@ test("runtime profiles resolve bounded Codex SSH handoff data", () => {
 });
 
 test("profile allowlisting stays enforced before provisioning", async () => {
-  const source = await readFile(new URL("../src/index.ts", import.meta.url), "utf8");
+  const source = await readFile(
+    new URL("../src/worker/provisioning/endpoints.ts", import.meta.url),
+    "utf8",
+  );
   const selectionStart = source.indexOf("const profile = clean(body.profile");
   assert.equal(selectionStart, -1);
   const deployment = deploymentConfig({
@@ -195,5 +198,7 @@ test("profile allowlisting stays enforced before provisioning", async () => {
   });
   assert.equal(selectedRuntimeProfile(deployment, "linux").descriptor?.id, "linux");
   assert.throws(() => selectedRuntimeProfile(deployment, "unknown"), /profile is not configured/);
-  assert.ok(source.indexOf("selectedRuntimeProfile(deploymentConfig(env), session.profile)") > 0);
+  assert.ok(
+    source.indexOf("selectedRuntimeProfile(deploymentConfig(this.env), session.profile)") > 0,
+  );
 });
