@@ -185,6 +185,10 @@ import {
 } from "./worker/session-model";
 import { normalizeRepo } from "./worker/repositories";
 import { handlePublicAuthRoute, handleSessionAuthRoute } from "./worker/routes/auth";
+import {
+  handleBrowserSessionRoute,
+  type BrowserSessionRouteDependencies,
+} from "./worker/routes/browser-sessions";
 import { handleOpenClawRoute } from "./worker/routes/openclaw";
 import {
   handleServiceSessionRoute,
@@ -1547,155 +1551,13 @@ async function api(
     return json(await searchGitHubRefs(request, env));
   }
 
-  if (request.method === "POST" && url.pathname === "/api/interactive-sessions") {
-    requireRole(user, "maintainer");
-    return json(await createInteractiveSession(request, env, user), { status: 201 });
-  }
-
-  if (request.method === "POST" && url.pathname === "/api/interactive-sessions/cleanup") {
-    requireRole(user, "viewer");
-    return json(await cleanupInteractiveSessions(request, env, user));
-  }
-
-  const interactiveSessionReadMatch = url.pathname.match(/^\/api\/interactive-sessions\/([^/]+)$/);
-  if (request.method === "GET" && interactiveSessionReadMatch) {
-    requireRole(user, "viewer");
-    const session = await readFreshInteractiveSession(
-      env,
-      decodeURIComponent(interactiveSessionReadMatch[1] ?? ""),
-    );
-    if (!session) throw notFound("interactive session not found");
-    return json({ session: decorateInteractiveSession(session, user, env) });
-  }
-
-  const interactiveSessionLogsMatch = url.pathname.match(
-    /^\/api\/interactive-sessions\/([^/]+)\/logs$/,
+  const browserSessionResponse = await handleBrowserSessionRoute(
+    request,
+    url,
+    user,
+    browserSessionRouteDependencies(env),
   );
-  if (request.method === "GET" && interactiveSessionLogsMatch) {
-    requireRole(user, "viewer");
-    return json(
-      await readInteractiveSessionLogBundle(
-        env,
-        user,
-        decodeURIComponent(interactiveSessionLogsMatch[1] ?? ""),
-      ),
-    );
-  }
-
-  const interactiveSessionTranscriptMatch = url.pathname.match(
-    /^\/api\/interactive-sessions\/([^/]+)\/transcript$/,
-  );
-  if (request.method === "GET" && interactiveSessionTranscriptMatch) {
-    const user = await requireUser(request, env, requestAuth);
-    return interactiveSessionTranscriptResponse(
-      env,
-      user,
-      decodeURIComponent(interactiveSessionTranscriptMatch[1] ?? ""),
-    );
-  }
-
-  const interactiveSessionSummaryMatch = url.pathname.match(
-    /^\/api\/interactive-sessions\/([^/]+)\/summary$/,
-  );
-  if (request.method === "POST" && interactiveSessionSummaryMatch) {
-    const user = await requireUser(request, env, requestAuth);
-    return json(
-      await updateInteractiveSessionSummary(
-        request,
-        env,
-        user,
-        decodeURIComponent(interactiveSessionSummaryMatch[1] ?? ""),
-      ),
-    );
-  }
-
-  const interactiveSessionDiagnosticsMatch = url.pathname.match(
-    /^\/api\/interactive-sessions\/([^/]+)\/diagnostics$/,
-  );
-  if (request.method === "GET" && interactiveSessionDiagnosticsMatch) {
-    requireRole(user, "viewer");
-    return json(
-      await readInteractiveSessionDiagnostics(
-        env,
-        user,
-        decodeURIComponent(interactiveSessionDiagnosticsMatch[1] ?? ""),
-      ),
-    );
-  }
-
-  const interactiveSessionVncMatch = url.pathname.match(
-    /^\/api\/interactive-sessions\/([^/]+)\/vnc$/,
-  );
-  if (request.method === "GET" && interactiveSessionVncMatch) {
-    requireRole(user, "viewer");
-    return interactiveSessionVnc(
-      env,
-      user,
-      decodeURIComponent(interactiveSessionVncMatch[1] ?? ""),
-    );
-  }
-
-  const interactiveSessionCheckpointsMatch = url.pathname.match(
-    /^\/api\/interactive-sessions\/([^/]+)\/checkpoints$/,
-  );
-  if (interactiveSessionCheckpointsMatch) {
-    requireRole(user, "viewer");
-    const id = decodeURIComponent(interactiveSessionCheckpointsMatch[1] ?? "");
-    if (request.method === "GET")
-      return json(await listInteractiveSessionCheckpoints(env, user, id));
-    if (request.method === "POST") {
-      return json(await checkpointInteractiveSession(env, user, id), { status: 201 });
-    }
-  }
-
-  const interactiveSessionRestoreMatch = url.pathname.match(
-    /^\/api\/interactive-sessions\/([^/]+)\/checkpoints\/([^/]+)\/restore$/,
-  );
-  if (request.method === "POST" && interactiveSessionRestoreMatch) {
-    requireRole(user, "viewer");
-    return json(
-      await restoreInteractiveSessionCheckpoint(
-        env,
-        user,
-        decodeURIComponent(interactiveSessionRestoreMatch[1] ?? ""),
-        decodeURIComponent(interactiveSessionRestoreMatch[2] ?? ""),
-      ),
-    );
-  }
-
-  const interactiveSessionMatch = url.pathname.match(
-    /^\/api\/interactive-sessions\/([^/]+)\/actions$/,
-  );
-  if (request.method === "POST" && interactiveSessionMatch) {
-    const body = await readJson<{ action?: string }>(request);
-    const action = body.action ?? "";
-    requireRole(user, "viewer");
-    return json(
-      await mutateInteractiveSession(
-        request,
-        env,
-        user,
-        decodeURIComponent(interactiveSessionMatch[1] ?? ""),
-        action,
-      ),
-    );
-  }
-
-  const interactiveClipboardMatch = url.pathname.match(
-    /^\/api\/interactive-sessions\/([^/]+)\/clipboard$/,
-  );
-  if (request.method === "POST" && interactiveClipboardMatch) {
-    requireRole(user, "viewer");
-    return json(
-      await uploadInteractiveSessionClipboard(
-        request,
-        env,
-        user,
-        decodeURIComponent(interactiveClipboardMatch[1] ?? ""),
-      ),
-      { status: 201 },
-    );
-  }
+  if (browserSessionResponse) return browserSessionResponse;
 
   if (request.method === "POST" && url.pathname === "/api/cards") {
     requireRole(user, "maintainer");
@@ -1895,6 +1757,29 @@ function sshLinkConfirmHtml(
   </form>
 </body>
 </html>`;
+}
+
+function browserSessionRouteDependencies(env: RuntimeEnv): BrowserSessionRouteDependencies {
+  return {
+    createSession: (request, user) => createInteractiveSession(request, env, user),
+    cleanupSessions: (request, user) => cleanupInteractiveSessions(request, env, user),
+    readFreshSession: (sessionId) => readFreshInteractiveSession(env, sessionId),
+    presentSession: (session, user) => decorateInteractiveSession(session, user, env),
+    readLogs: (user, sessionId) => readInteractiveSessionLogBundle(env, user, sessionId),
+    readTranscript: (user, sessionId) => interactiveSessionTranscriptResponse(env, user, sessionId),
+    updateSummary: (request, user, sessionId) =>
+      updateInteractiveSessionSummary(request, env, user, sessionId),
+    mutateSession: (request, user, sessionId, action) =>
+      mutateInteractiveSession(request, env, user, sessionId, action),
+    listCheckpoints: (user, sessionId) => listInteractiveSessionCheckpoints(env, user, sessionId),
+    createCheckpoint: (user, sessionId) => checkpointInteractiveSession(env, user, sessionId),
+    restoreCheckpoint: (user, sessionId, checkpointId) =>
+      restoreInteractiveSessionCheckpoint(env, user, sessionId, checkpointId),
+    readDiagnostics: (user, sessionId) => readInteractiveSessionDiagnostics(env, user, sessionId),
+    openVnc: (user, sessionId) => interactiveSessionVnc(env, user, sessionId),
+    uploadClipboard: (request, user, sessionId) =>
+      uploadInteractiveSessionClipboard(request, env, user, sessionId),
+  };
 }
 
 function serviceSessionRouteDependencies(env: RuntimeEnv): ServiceSessionRouteDependencies {

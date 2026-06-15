@@ -1,6 +1,7 @@
-import { json, notFound, readJson } from "../http.ts";
+import { json } from "../http.ts";
 import type { User } from "../models.ts";
 import type { InteractiveSession } from "../session-model.ts";
+import { handleInteractiveSessionResourceRoute } from "./interactive-session-resources.ts";
 
 type ServiceSessionPrincipal = "ssh" | "agent";
 
@@ -61,61 +62,24 @@ export async function handleServiceSessionRoute(
     return dependencies.openAgentRunnerPty(request, sessionId);
   }
 
-  if (request.method === "GET" && !resource) {
-    const user = await requirePrincipal(request, principal, dependencies);
-    const session = await dependencies.readFreshSession(sessionId);
-    if (!session) throw notFound("interactive session not found");
-    return json({ session: dependencies.presentSession(session, user) });
-  }
-
-  if (principal === "ssh" && request.method === "POST" && resource === "actions") {
-    const user = await dependencies.requireSshViewer(request);
-    const body = await readJson<{ action?: string }>(request);
-    return json(await dependencies.mutateSession(request, user, sessionId, body.action ?? ""));
-  }
-
-  if (principal === "ssh" && resource === "checkpoints") {
-    const user = await dependencies.requireSshViewer(request);
-    if (request.method === "GET") {
-      return json(await dependencies.listCheckpoints(user, sessionId));
-    }
-    if (request.method === "POST") {
-      return json(await dependencies.createCheckpoint(user, sessionId), { status: 201 });
-    }
-    return null;
-  }
-
-  const restoreMatch =
-    principal === "ssh" ? resource.match(/^checkpoints\/([^/]+)\/restore$/) : null;
-  if (request.method === "POST" && restoreMatch) {
-    const user = await dependencies.requireSshViewer(request);
-    return json(await dependencies.restoreCheckpoint(user, sessionId, decoded(restoreMatch[1])));
-  }
-
-  if (request.method === "GET" && resource === "logs") {
-    const user = await requirePrincipal(request, principal, dependencies);
-    return json(await dependencies.readLogs(user, sessionId));
-  }
-  if (request.method === "GET" && resource === "transcript") {
-    const user = await requirePrincipal(request, principal, dependencies);
-    return dependencies.readTranscript(user, sessionId);
-  }
-  if (request.method === "POST" && resource === "summary") {
-    const user = await requirePrincipal(request, principal, dependencies);
-    return json(await dependencies.updateSummary(request, user, sessionId));
-  }
-
-  return null;
-}
-
-function requirePrincipal(
-  request: Request,
-  principal: ServiceSessionPrincipal,
-  dependencies: ServiceSessionRouteDependencies,
-): Promise<User> {
-  return principal === "ssh"
-    ? dependencies.requireSshViewer(request)
-    : dependencies.requireAgentUser(request);
+  return handleInteractiveSessionResourceRoute(request, url, {
+    basePath: `/api/${principal}/interactive-sessions`,
+    requireUser:
+      principal === "ssh" ? dependencies.requireSshViewer : dependencies.requireAgentUser,
+    readFreshSession: dependencies.readFreshSession,
+    presentSession: dependencies.presentSession,
+    readLogs: dependencies.readLogs,
+    readTranscript: dependencies.readTranscript,
+    updateSummary: dependencies.updateSummary,
+    ...(principal === "ssh"
+      ? {
+          mutateSession: dependencies.mutateSession,
+          listCheckpoints: dependencies.listCheckpoints,
+          createCheckpoint: dependencies.createCheckpoint,
+          restoreCheckpoint: dependencies.restoreCheckpoint,
+        }
+      : {}),
+  });
 }
 
 function decoded(value: string | undefined): string {
