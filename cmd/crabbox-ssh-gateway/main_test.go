@@ -10,6 +10,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/openclaw/crabfleet/internal/fleetapi"
 	"golang.org/x/crypto/ssh"
 )
 
@@ -53,7 +54,6 @@ func TestParseCreateKeepsLineageAndSummaryFlags(t *testing.T) {
 			"continue work",
 		},
 		nil,
-		"",
 	)
 	if got, want := create.request.ParentSessionID, "IS-1"; got != want {
 		t.Fatalf("parent = %q, want %q", got, want)
@@ -83,7 +83,7 @@ func TestParseMessageKeepsNoEnterAndText(t *testing.T) {
 }
 
 func TestParseCreateLeavesRuntimeToDeploymentDefault(t *testing.T) {
-	create := parseCreate([]string{"--repo", "openclaw/crabfleet", "fix it"}, nil, "")
+	create := parseCreate([]string{"--repo", "openclaw/crabfleet", "fix it"}, nil)
 	if create.request.Runtime != "" {
 		t.Fatalf("runtime = %q, want deployment default", create.request.Runtime)
 	}
@@ -91,7 +91,6 @@ func TestParseCreateLeavesRuntimeToDeploymentDefault(t *testing.T) {
 	create = parseCreate(
 		[]string{"--repo", "openclaw/crabfleet", "--runtime", "container", "fix it"},
 		nil,
-		"",
 	)
 	if create.request.Runtime != "container" {
 		t.Fatalf("runtime = %q, want explicit override", create.request.Runtime)
@@ -102,36 +101,9 @@ func TestParseCreateAcceptsProfileOverride(t *testing.T) {
 	create := parseCreate(
 		[]string{"--repo", "openclaw/crabfleet", "--profile", "desktop-a", "fix it"},
 		nil,
-		"",
 	)
 	if create.request.Profile != "desktop-a" {
 		t.Fatalf("profile = %q, want explicit override", create.request.Profile)
-	}
-}
-
-func TestTerminalCapabilityWithdrawalSuppressesAttach(t *testing.T) {
-	if !terminalCapable(interactiveSession{}) {
-		t.Fatal("legacy session without capabilities should remain attachable")
-	}
-	if terminalCapable(interactiveSession{
-		Capabilities: &sessionCapabilities{Terminal: false},
-	}) {
-		t.Fatal("explicit terminal capability withdrawal should suppress attach")
-	}
-}
-
-func TestCreateAutoAttachRequiresReadyResolvablePTY(t *testing.T) {
-	if attachable(interactiveSession{Status: "provisioning", PtyAvailable: true}) {
-		t.Fatal("provisioning create must succeed without auto-attach")
-	}
-	if attachable(interactiveSession{Status: "ready", PtyAvailable: false}) {
-		t.Fatal("ready session without a PTY route must not auto-attach")
-	}
-	if !attachable(interactiveSession{Status: "ready", PtyAvailable: true}) {
-		t.Fatal("ready session with a PTY route should auto-attach")
-	}
-	if attachable(interactiveSession{Status: "detached", AttachURL: "/api/terminal/ws"}) {
-		t.Fatal("attach URL must not override missing PTY availability")
 	}
 }
 
@@ -200,7 +172,7 @@ func TestDeleteCommandAndStopAliasUseWorkspaceStopAction(t *testing.T) {
 
 func TestHelpNamesDeleteAsCanonicalCommand(t *testing.T) {
 	var output bytes.Buffer
-	printHelp(&output, user{Login: "operator", Role: "owner"})
+	printHelp(&output, fleetapi.User{Login: "operator", Role: "owner"})
 	if got := output.String(); !strings.Contains(got, "delete SESSION_ID") || strings.Contains(got, "stop SESSION_ID") {
 		t.Fatalf("help = %q", got)
 	}
@@ -208,40 +180,19 @@ func TestHelpNamesDeleteAsCanonicalCommand(t *testing.T) {
 
 func TestHelpDocumentsProfileOverride(t *testing.T) {
 	var output bytes.Buffer
-	printHelp(&output, user{Login: "operator", Role: "owner"})
+	printHelp(&output, fleetapi.User{Login: "operator", Role: "owner"})
 	if got := output.String(); !strings.Contains(got, "[--profile name]") ||
 		!strings.Contains(got, "--profile overrides the deployment default") {
 		t.Fatalf("help = %q", got)
 	}
 }
 
-func TestLegacyProviderCleanupWarningRequiresConfirmedLegacyStop(t *testing.T) {
-	if !legacyProviderCleanupMayBeRequired(interactiveSession{Status: "stopped"}) {
-		t.Fatal("confirmed legacy stop should retain the cleanup warning")
-	}
-	for _, session := range []interactiveSession{
-		{Status: "failed"},
-		{Status: "stopped", Adapter: "runtime-v1"},
-		{Status: "stopped", Runtime: "github_actions"},
-	} {
-		if legacyProviderCleanupMayBeRequired(session) {
-			t.Fatalf("session %#v must not recommend provider cleanup", session)
-		}
-	}
-	if got := lifecycleStopNote(interactiveSession{Status: "stopped", Runtime: "github_actions"}); !strings.Contains(got, "not canceled") {
-		t.Fatalf("GitHub Actions note = %q", got)
-	}
-	if got := lifecycleStopNote(interactiveSession{Status: "failed"}); got != "" {
-		t.Fatalf("failed unowned workspace note = %q", got)
-	}
-}
-
 func TestPrintListShowsOwnersAndSessionTree(t *testing.T) {
 	var out bytes.Buffer
-	printList(&out, stateResponse{
-		User:  user{Login: "steipete", Role: "owner"},
+	printList(&out, fleetapi.State{
+		User:  fleetapi.User{Login: "steipete", Role: "owner"},
 		Repos: []string{"openclaw/crabfleet"},
-		InteractiveSessions: []interactiveSession{
+		InteractiveSessions: []fleetapi.Session{
 			{
 				ID:              "IS-2",
 				Owner:           "steipete",

@@ -6,6 +6,7 @@ on:
       - main
     paths:
       - "cmd/**"
+      - "internal/**"
       - "go.mod"
       - "go.sum"
       - "Dockerfile.ssh-gateway"
@@ -13,6 +14,7 @@ on:
   pull_request:
     paths:
       - "cmd/**"
+      - "internal/**"
       - "go.mod"
       - "go.sum"
       - "Dockerfile.ssh-gateway"
