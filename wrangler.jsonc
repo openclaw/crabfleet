@@ -86,9 +86,8 @@
   "triggers": {
     "crons": ["* * * * *"],
   },
-  // The canonical app/API host is a Worker Custom Domain. The public
-  // crabfleet.ai product site uses wrangler.product.jsonc.
-  "routes": [{ "pattern": "crabfleet.openclaw.ai", "custom_domain": true }],
+  // Worker Custom Domains are converged by ensure-cloudflare-domains.mjs so
+  // the regular deploy token does not need zone-route permissions.
   "observability": {
     "enabled": true,
   },

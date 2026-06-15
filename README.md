@@ -154,7 +154,7 @@ merge:
 ### Prerequisites
 
 - Cloudflare account
-- `crabfleet.openclaw.ai` route in Cloudflare
+- `crabfleet.openclaw.ai` Worker Custom Domain in Cloudflare
 - GitHub OAuth app (optional but recommended)
 - Bootstrap token secret
 
@@ -163,15 +163,14 @@ merge:
 Pushes to `main` run `.github/workflows/deploy-worker.yml`, which checks, tests, builds,
 deploys the generic product router, applies remote D1 migrations, and deploys the app
 Worker. Configure the repository secret `CLOUDFLARE_API_TOKEN` with permissions for
-Workers deploys and D1 migrations.
-`crabfleet.openclaw.ai` is the only app Worker Custom Domain declared in the app
-Wrangler config. The `crabfleet.ai` product Custom Domain and `crabd.sh` DNS
-convergence are handled by
+Workers deploys and D1 migrations; it does not need zone-route access.
+The `crabfleet.openclaw.ai` app Custom Domain, `crabfleet.ai` product Custom
+Domain, and `crabd.sh` DNS convergence are handled by
 `scripts/ensure-cloudflare-domains.mjs`; set `CLOUDFLARE_DNS_API_TOKEN` for
-manual deploys and when CI should manage those records. Without that
-DNS-scoped repository secret, CI skips domain convergence but still fails the
-deploy unless the app health endpoint is reachable and `crabfleet.ai` resolves
-to `docs.crabfleet.ai`.
+manual deploys and when CI should manage those records. The DNS-scoped token is
+required for first deployment and domain repair. Without it, CI skips domain
+convergence but still fails unless the existing app and product endpoints are
+healthy.
 The product router source and deploy configuration live in `src/product-router.ts` and
 `wrangler.product.jsonc`.
 

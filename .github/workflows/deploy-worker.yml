@@ -128,7 +128,7 @@ jobs:
             echo "CLOUDFLARE_DNS_API_TOKEN is not set; skipping DNS/domain convergence."
             exit 0
           fi
-          node scripts/ensure-cloudflare-domains.mjs --product-only
+          node scripts/ensure-cloudflare-domains.mjs
 
       - name: Verify deployment
         run: |

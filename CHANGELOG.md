@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Fix automated Worker deployments by converging the app Custom Domain with the DNS-scoped deployment token instead of requiring zone-route access from the Worker token.
+
 ## 0.2.0 - 2026-06-15
 
 - Add session-scoped OpenClaw terminal embed tickets, deployment-configured interactive runtime choices, explicit Ghostty WASM delivery, and shared embedded PTY readiness without restoring provider or protocol compatibility paths.

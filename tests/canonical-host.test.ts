@@ -56,23 +56,36 @@ test("deployment exposes only canonical app and product hosts", async () => {
     new URL("../scripts/ensure-cloudflare-domains.mjs", import.meta.url),
     "utf8",
   );
-  const productStart = convergence.indexOf("async function ensureProductHosts");
-  const productEnd = convergence.indexOf("async function ensureCrabfleetDocsRecord", productStart);
-  const productSource = convergence.slice(productStart, productEnd);
+  const workflow = await readFile(
+    new URL("../.github/workflows/deploy-worker.yml", import.meta.url),
+    "utf8",
+  );
+  const hostStart = convergence.indexOf("async function ensureWorkerHosts");
+  const hostEnd = convergence.indexOf("async function ensureCrabfleetDocsRecord", hostStart);
+  const hostSource = convergence.slice(hostStart, hostEnd);
 
   assert.match(appConfig, /"workers_dev": false/);
-  assert.match(appConfig, /"pattern": "crabfleet\.openclaw\.ai"/);
+  assert.doesNotMatch(appConfig, /"routes"/);
   assert.doesNotMatch(appConfig, /clawfleet\.openclaw\.ai|crabyard\.openclaw\.ai/);
   assert.doesNotMatch(productConfig, /"routes"/);
   assert.match(
-    productSource,
-    /\/accounts\/\$\{cloudflareAccountId\}\/workers\/scripts\/\$\{productWorkerScript\}\/domains\/records/,
+    hostSource,
+    /\/accounts\/\$\{cloudflareAccountId\}\/workers\/scripts\/\$\{workerScript\}\/domains\/records/,
   );
-  assert.match(productSource, /method: "PUT"/);
-  assert.match(productSource, /override_existing_origin: true/);
-  assert.match(productSource, /override_existing_dns_record: true/);
-  assert.match(productSource, /origins: hosts\.map/);
-  assert.match(convergence, /ensureProductHosts\("crabfleet\.ai", \["crabfleet\.ai"\]\)/);
+  assert.match(hostSource, /method: "PUT"/);
+  assert.match(hostSource, /override_existing_origin: true/);
+  assert.match(hostSource, /override_existing_dns_record: true/);
+  assert.match(hostSource, /origins: hosts\.map/);
+  assert.match(
+    convergence,
+    /ensureWorkerHosts\(appWorkerScript, "openclaw\.ai", \["crabfleet\.openclaw\.ai"\]\)/,
+  );
+  assert.match(
+    convergence,
+    /ensureWorkerHosts\(productWorkerScript, "crabfleet\.ai", \["crabfleet\.ai"\]\)/,
+  );
+  assert.match(workflow, /node scripts\/ensure-cloudflare-domains\.mjs\s*$/m);
+  assert.doesNotMatch(workflow, /ensure-cloudflare-domains\.mjs --product-only/);
   assert.doesNotMatch(
     convergence,
     /www\.crabfleet\.ai|clawfleet\.openclaw\.ai|crabyard\.openclaw\.ai/,
