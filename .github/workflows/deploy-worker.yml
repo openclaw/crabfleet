@@ -79,16 +79,30 @@ jobs:
           CRABBOX_OPENCLAW_TOKEN: ${{ secrets.CRABBOX_OPENCLAW_TOKEN }}
         run: |
           set -euo pipefail
-          test -n "$CRABBOX_OPENCLAW_TOKEN"
+          runtime_token="$(
+            node -e '
+              const { createHmac } = require("node:crypto");
+              const root = process.env.CRABBOX_OPENCLAW_TOKEN?.trim();
+              if (!root) process.exit(1);
+              process.stdout.write(
+                createHmac("sha256", root)
+                  .update("openclaw/crabbox-runtime-adapter/v1")
+                  .digest("base64url"),
+              );
+            '
+          )"
           secrets_file="$(mktemp)"
           trap 'rm -f "$secrets_file"' EXIT
           SECRETS_FILE="$secrets_file" \
+            CRABBOX_RUNTIME_ADAPTER_TOKEN="$runtime_token" \
             node -e '
               const { writeFileSync } = require("node:fs");
               writeFileSync(
                 process.env.SECRETS_FILE,
                 JSON.stringify({
                   CRABBOX_OPENCLAW_TOKEN: process.env.CRABBOX_OPENCLAW_TOKEN,
+                  CRABBOX_RUNTIME_ADAPTER_TOKEN:
+                    process.env.CRABBOX_RUNTIME_ADAPTER_TOKEN,
                 }),
               );
             '

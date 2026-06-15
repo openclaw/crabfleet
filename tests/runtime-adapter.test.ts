@@ -21,7 +21,6 @@ import {
   runtimeAdapterControlPlaneForProfile,
   runtimeAdapterControlPlaneIdentity,
   runtimeAdapterCreatePayload,
-  runtimeAdapterCredential,
   runtimeAdapterBrowserVncUrl,
   runtimeAdapterDesktopUrl,
   runtimeAdapterReplayRequest,
@@ -37,14 +36,6 @@ import {
   shouldReplayRuntimeAdapterCreate,
   validatedRuntimeAdapterCreatePayloadJson,
 } from "../src/runtime-adapter.ts";
-
-test("runtime adapter credential derives from the OpenClaw service token", () => {
-  assert.equal(
-    runtimeAdapterCredential("root-token", "stale-configured-token"),
-    "FXfsL5ao-wZuz_ggZwg1cEAMypAAOMkFgXi-E7OooVw",
-  );
-  assert.equal(runtimeAdapterCredential("", "configured-token"), "configured-token");
-});
 
 test("adapter create payload matches the strict controller contract", () => {
   const payload = runtimeAdapterCreatePayload({
@@ -750,6 +741,22 @@ test("public auth deployment metadata excludes runtime routing", async () => {
   assert.match(source, /deployment: publicDeploymentConfig\(env\)/);
   assert.match(publicSource, /label, canonicalUrl, productUrl, sshHost/);
   assert.doesNotMatch(publicSource, /preferredRepo|defaultRuntime|defaultProfile|RUNTIME_ADAPTER/);
+});
+
+test("worker deployment installs the shared runtime adapter credential", async () => {
+  const source = await readFile(new URL("../src/index.ts", import.meta.url), "utf8");
+  const workflow = await readFile(
+    new URL("../.github/workflows/deploy-worker.yml", import.meta.url),
+    "utf8",
+  );
+  const tokenStart = source.indexOf("function runtimeAdapterToken");
+  const tokenEnd = source.indexOf("function runtimeAdapterProviderConfigured", tokenStart);
+  const tokenSource = source.slice(tokenStart, tokenEnd);
+
+  assert.match(workflow, /CRABBOX_RUNTIME_ADAPTER_TOKEN="\$runtime_token"/);
+  assert.match(workflow, /CRABBOX_RUNTIME_ADAPTER_TOKEN:\s*\n\s*process\.env/);
+  assert.match(tokenSource, /env\.CRABBOX_RUNTIME_ADAPTER_TOKEN/);
+  assert.doesNotMatch(tokenSource, /CRABBOX_OPENCLAW_TOKEN|createHmac|crypto\.subtle/);
 });
 
 test("strict session rows and cleanup preserve terminal finalization anchors", async () => {

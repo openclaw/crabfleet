@@ -1,9 +1,6 @@
-import { createHmac } from "node:crypto";
-
 export const runtimeAdapterVersion = "crabfleet/v1";
 export const runtimeAdapterName = "runtime-v1";
 export const runtimeAdapterDesktopMaxTtlMs = 15 * 60 * 1000;
-const runtimeAdapterCredentialContext = "openclaw/crabbox-runtime-adapter/v1";
 const runtimeAdapterProfileRoutePlaceholder = "{profile}";
 const runtimeAdapterProfileRoutePattern = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/;
 
@@ -35,13 +32,6 @@ export const clearedAdapterCapabilities: AdapterCapabilities = {
   logs: false,
   artifacts: false,
 };
-
-export function runtimeAdapterCredential(openClawToken: string, configuredToken: string): string {
-  if (!openClawToken) return configuredToken;
-  return createHmac("sha256", openClawToken)
-    .update(runtimeAdapterCredentialContext)
-    .digest("base64url");
-}
 
 export type AdapterWorkspaceResult = {
   status: AdapterSessionStatus;
