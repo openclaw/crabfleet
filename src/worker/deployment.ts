@@ -94,8 +94,21 @@ export function browserAppOrigin(env: DeploymentEnv): string {
   return trustedProxyPublicOrigin(env) ?? deploymentConfig(env).canonicalUrl;
 }
 
+export function browserRequestOrigin(request: Request, env: DeploymentEnv): string {
+  return trustedProxyPublicOrigin(env) ?? new URL(request.url).origin;
+}
+
 export function browserSessionUrl(env: DeploymentEnv, sessionId: string): string {
   return `${browserAppOrigin(env)}/app/sessions/${encodeURIComponent(sessionId)}`;
+}
+
+export function browserSessionShareUrl(
+  request: Request,
+  env: DeploymentEnv,
+  sessionId: string,
+  token: string,
+): string {
+  return `${browserRequestOrigin(request, env)}/sessions/${encodeURIComponent(sessionId)}?token=${encodeURIComponent(token)}`;
 }
 
 function clean(value: unknown, maximum: number): string {

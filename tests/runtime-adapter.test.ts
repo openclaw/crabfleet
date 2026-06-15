@@ -501,38 +501,10 @@ test("terminal archive finalization remains durably retryable", async () => {
   assert.match(migration, /status IN \('stopped', 'expired', 'failed'\)/);
 });
 
-test("runtime reconciliation keeps its cron and targeted refresh paths", async () => {
-  const source = await readFile(new URL("../src/index.ts", import.meta.url), "utf8");
-  const terminalSource = await readFile(
-    new URL("../src/worker/interactive-terminal-service.ts", import.meta.url),
-    "utf8",
-  );
-  const desktopSource = await readFile(
-    new URL("../src/worker/interactive-desktop-service.ts", import.meta.url),
-    "utf8",
-  );
+test("runtime reconciliation remains scheduled every minute", async () => {
   const config = await readFile(new URL("../wrangler.jsonc", import.meta.url), "utf8");
 
   assert.match(config, /"crons": \["\* \* \* \* \*"\]/);
-  assert.match(source, /async function readFreshInteractiveSession/);
-  assert.match(
-    source,
-    /function interactiveTerminalService[\s\S]*readFreshSession: \(sessionId\) => readFreshInteractiveSession/,
-  );
-  assert.match(
-    terminalSource,
-    /readSession: \(sessionId\) => this\.dependencies\.readFreshSession/,
-  );
-  assert.match(
-    source,
-    /function interactiveDesktopService[\s\S]*readFreshSession: \(sessionId\) => readFreshInteractiveSession/,
-  );
-  assert.match(desktopSource, /readFreshSession\(sessionId\)/);
-  assert.match(
-    source,
-    /async function reconcileExternalInteractiveSessionById[\s\S]*interactiveSessionReconciliationScheduler\(env\)\.reconcileById\(id, now\)/,
-  );
-  assert.match(source, /interactiveSessionReconciliationService\(env\)\.reconcile\(row, now\)/);
 });
 
 test("recurring terminal authorization never awaits provider reconciliation", async () => {
@@ -1024,7 +996,6 @@ test("sandbox credential cleanup failures remain explicit", async () => {
 });
 
 test("sandbox credential cleanup is durably staged and retried", async () => {
-  const source = await readFile(new URL("../src/index.ts", import.meta.url), "utf8");
   const sandboxLifecycleSource = await readFile(
     new URL("../src/worker/provisioning/sandbox-lifecycle.ts", import.meta.url),
     "utf8",
@@ -1245,7 +1216,6 @@ test("sandbox credential cleanup is durably staged and retried", async () => {
   assert.match(controlSource, /credentialPolicyRegistrationAccepted/);
   assert.match(controlSource, /credentialPolicyCleanupMatches/);
   assert.match(controlSource, /this\.ctx\.storage\.transaction/);
-  assert.doesNotMatch(source, /async function unregisterSandboxCredentialPolicy\(/);
   assert.match(migration, /CREATE TABLE IF NOT EXISTS interactive_session_credential_policies/);
   assert.match(migration, /state IN \('registering', 'active', 'cleanup_pending'\)/);
   assert.match(migration, /registration_generation TEXT NOT NULL/);

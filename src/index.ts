@@ -19,9 +19,10 @@ import {
   runtimeAdapterReplayRequest,
 } from "./runtime-adapter";
 import { openClawRoomMaxSessions } from "./openclaw-service";
-import { trustedProxyPublicOrigin, type TrustedProxyAuthResult } from "./trusted-proxy-auth";
+import type { TrustedProxyAuthResult } from "./trusted-proxy-auth";
 import {
   browserAppOrigin,
+  browserSessionShareUrl,
   browserSessionUrl,
   clientDeploymentConfig,
   deploymentConfig,
@@ -92,6 +93,7 @@ import { CardLifecycleService, type CardCreateInput } from "./worker/card-lifecy
 import { CardRepository } from "./worker/card-repository";
 import { AdminRepository } from "./worker/admin-repository";
 import { AdminService } from "./worker/admin-service";
+import { BrowserSessionCreationService } from "./worker/browser-session-creation";
 import { GitHubReferenceService } from "./worker/github-reference-service";
 import { createWorkflowService, type WorkflowService } from "./worker/workflow-service";
 import { normalizeRepo, sortRepos } from "./worker/repositories";
@@ -574,8 +576,15 @@ function sessionIngressRouteDependencies(
 }
 
 function browserSessionRouteDependencies(env: RuntimeEnv): BrowserSessionRouteDependencies {
+  const creation = new BrowserSessionCreationService({
+    readGitHubToken: (request, user) => sessionGitHubToken(request, env, user.subject),
+    createSession: (user, input, githubToken) =>
+      createInteractiveSessionFromInput(env, user, input, githubToken).then(
+        (result) => result.session,
+      ),
+  });
   return {
-    createSession: (request, user) => createInteractiveSession(request, env, user),
+    createSession: (request, user) => creation.create(request, user),
     cleanupSessions: (request, user) => cleanupInteractiveSessions(request, env, user),
     readFreshSession: (sessionId) => readFreshInteractiveSession(env, sessionId),
     presentSession: (session, user) => decorateInteractiveSession(session, user, env),
@@ -1191,31 +1200,6 @@ async function readFleetState(
   });
 }
 
-async function createInteractiveSession(
-  request: Request,
-  env: RuntimeEnv,
-  user: User,
-): Promise<{ session: InteractiveSession }> {
-  const body = await readJson<{
-    repo?: string;
-    branch?: string;
-    runtime?: string;
-    command?: string;
-    prompt?: string;
-    parentSessionId?: string;
-    rootSessionId?: string;
-    purpose?: string;
-    summary?: string;
-  }>(request);
-  const githubToken = user.subject.startsWith("github:")
-    ? await sessionGitHubToken(request, env, user.subject)
-    : undefined;
-  if (user.subject.startsWith("github:") && !githubToken) {
-    throw forbidden("GitHub PR credentials are not connected; sign in with GitHub again");
-  }
-  return createInteractiveSessionFromInput(env, user, body, githubToken);
-}
-
 async function createInteractiveSessionFromInput(
   env: RuntimeEnv,
   user: User,
@@ -1512,7 +1496,9 @@ async function mutateInteractiveSession(
     });
     return {
       session: decorateInteractiveSession(result.session, user, env),
-      ...(result.shareToken ? { shareUrl: shareUrl(request, env, id, result.shareToken) } : {}),
+      ...(result.shareToken
+        ? { shareUrl: browserSessionShareUrl(request, env, id, result.shareToken) }
+        : {}),
     };
   }
 
@@ -1820,14 +1806,6 @@ function decorateInteractiveSession(
 function canGrantDelegatedControl(env: RuntimeEnv, session: InteractiveSession): boolean {
   if (!env.SANDBOX && isSandboxInteractiveSession(session)) return false;
   return true;
-}
-
-function shareUrl(request: Request, env: RuntimeEnv, id: string, token: string): string {
-  return `${externalRequestOrigin(request, env)}/sessions/${encodeURIComponent(id)}?token=${encodeURIComponent(token)}`;
-}
-
-function externalRequestOrigin(request: Request, env: RuntimeEnv): string {
-  return trustedProxyPublicOrigin(env) ?? new URL(request.url).origin;
 }
 
 function clean(value: unknown, max: number): string {

@@ -3,6 +3,8 @@ import { test } from "node:test";
 
 import {
   browserAppOrigin,
+  browserRequestOrigin,
+  browserSessionShareUrl,
   browserSessionUrl,
   clientDeploymentConfig,
   deploymentConfig,
@@ -90,12 +92,34 @@ test("public and client deployment views exclude server-only routing data", () =
   });
   assert.equal(browserAppOrigin(env), "https://fleet.example");
   assert.equal(
+    browserRequestOrigin(new Request("https://backend.example/api/interactive-sessions"), env),
+    "https://fleet.example",
+  );
+  assert.equal(
     browserSessionUrl(env, "IS/with spaces"),
     "https://fleet.example/app/sessions/IS%2Fwith%20spaces",
+  );
+  assert.equal(
+    browserSessionShareUrl(
+      new Request("https://backend.example/api/interactive-sessions"),
+      env,
+      "IS/with spaces",
+      "token/value",
+    ),
+    "https://fleet.example/sessions/IS%2Fwith%20spaces?token=token%2Fvalue",
   );
 
   const client = clientDeploymentConfig(env);
   assert.equal(client.preferredRepo, "openclaw/crabfleet");
   assert.equal(client.runtimeProfiles[0]?.codexSsh, undefined);
   assert.equal("CRABBOX_RUNTIME_ADAPTER_URL" in client, false);
+});
+
+test("browser request links use the incoming origin without a trusted proxy", () => {
+  const request = new Request("https://tenant.example/api/interactive-sessions");
+  assert.equal(browserRequestOrigin(request, {}), "https://tenant.example");
+  assert.equal(
+    browserSessionShareUrl(request, {}, "IS-1", "share-token"),
+    "https://tenant.example/sessions/IS-1?token=share-token",
+  );
 });
