@@ -189,6 +189,10 @@ import {
   handleBrowserSessionRoute,
   type BrowserSessionRouteDependencies,
 } from "./worker/routes/browser-sessions";
+import {
+  handleControlPlaneRoute,
+  type ControlPlaneRouteDependencies,
+} from "./worker/routes/control-plane";
 import { handleOpenClawRoute } from "./worker/routes/openclaw";
 import {
   handleServiceSessionRoute,
@@ -1537,19 +1541,13 @@ async function api(
   });
   if (sessionAuthResponse) return sessionAuthResponse;
 
-  if (request.method === "GET" && url.pathname === "/api/state") {
-    return json(await readState(request, env, user, context));
-  }
-
-  if (request.method === "GET" && url.pathname === "/api/fleet") {
-    requireRole(user, "viewer");
-    return json({ fleet: await readFleetState(env, user, undefined, context) });
-  }
-
-  if (request.method === "GET" && url.pathname === "/api/github/refs") {
-    requireRole(user, "maintainer");
-    return json(await searchGitHubRefs(request, env));
-  }
+  const controlPlaneResponse = await handleControlPlaneRoute(
+    request,
+    url,
+    user,
+    controlPlaneRouteDependencies(env, context),
+  );
+  if (controlPlaneResponse) return controlPlaneResponse;
 
   const browserSessionResponse = await handleBrowserSessionRoute(
     request,
@@ -1558,61 +1556,6 @@ async function api(
     browserSessionRouteDependencies(env),
   );
   if (browserSessionResponse) return browserSessionResponse;
-
-  if (request.method === "POST" && url.pathname === "/api/cards") {
-    requireRole(user, "maintainer");
-    return json(await createCard(request, env, user), { status: 201 });
-  }
-
-  const runsMatch = url.pathname.match(/^\/api\/cards\/([^/]+)\/runs$/);
-  if (request.method === "GET" && runsMatch) {
-    const cardId = decodeURIComponent(runsMatch[1] ?? "");
-    const card = await readCard(env, cardId);
-    if (!card) throw notFound("card not found");
-    return json({ runs: await readRunsForCard(env, cardId) });
-  }
-
-  if (request.method === "PUT" && url.pathname === "/api/admin/policy") {
-    requireRole(user, "owner");
-    return json(await updatePolicy(request, env, user));
-  }
-
-  if (request.method === "POST" && url.pathname === "/api/admin/workflows/evaluate") {
-    requireRole(user, "owner");
-    return json(await evaluateWorkflow(request, env, user));
-  }
-
-  const actionMatch = url.pathname.match(/^\/api\/cards\/([^/]+)\/actions$/);
-  if (request.method === "POST" && actionMatch) {
-    const body = await readJson<{ action?: string }>(request);
-    const action = body.action ?? "";
-    requireRole(user, action === "attach" || action === "watch" ? "viewer" : "maintainer");
-    return json(await mutateCard(env, user, decodeURIComponent(actionMatch[1] ?? ""), action));
-  }
-
-  if (request.method === "POST" && url.pathname === "/api/admin/allow") {
-    requireRole(user, "owner");
-    return json(await addAllowEntry(request, env, user), { status: 201 });
-  }
-
-  const allowMatch = url.pathname.match(/^\/api\/admin\/allow\/(.+)$/);
-  if (request.method === "DELETE" && allowMatch) {
-    requireRole(user, "owner");
-    return json(
-      await removeAllowEntry(request, env, user, decodeURIComponent(allowMatch[1] ?? "")),
-    );
-  }
-
-  if (request.method === "POST" && url.pathname === "/api/admin/repos") {
-    requireRole(user, "owner");
-    return json(await addRepo(request, env, user), { status: 201 });
-  }
-
-  const repoMatch = url.pathname.match(/^\/api\/admin\/repos\/(.+)$/);
-  if (request.method === "DELETE" && repoMatch) {
-    requireRole(user, "owner");
-    return json(await removeRepo(request, env, user, decodeURIComponent(repoMatch[1] ?? "")));
-  }
 
   return json({ error: "not found" }, { status: 404 });
 }
@@ -1757,6 +1700,27 @@ function sshLinkConfirmHtml(
   </form>
 </body>
 </html>`;
+}
+
+function controlPlaneRouteDependencies(
+  env: RuntimeEnv,
+  context: ExecutionContext,
+): ControlPlaneRouteDependencies {
+  return {
+    readState: (request, user) => readState(request, env, user, context),
+    readFleet: (user) => readFleetState(env, user, undefined, context),
+    searchGitHubRefs: (request) => searchGitHubRefs(request, env),
+    createCard: (request, user) => createCard(request, env, user),
+    readCardRuns: async (cardId) =>
+      (await readCard(env, cardId)) ? readRunsForCard(env, cardId) : null,
+    mutateCard: (user, cardId, action) => mutateCard(env, user, cardId, action),
+    updatePolicy: (request, user) => updatePolicy(request, env, user),
+    evaluateWorkflow: (request, user) => evaluateWorkflow(request, env, user),
+    addAllowEntry: (request, user) => addAllowEntry(request, env, user),
+    removeAllowEntry: (request, user, entry) => removeAllowEntry(request, env, user, entry),
+    addRepo: (request, user) => addRepo(request, env, user),
+    removeRepo: (request, user, repo) => removeRepo(request, env, user, repo),
+  };
 }
 
 function browserSessionRouteDependencies(env: RuntimeEnv): BrowserSessionRouteDependencies {
