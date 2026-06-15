@@ -855,12 +855,12 @@ test("Sandbox credential egress proves the durable generation and owner", async 
   const readStart = source.indexOf("async function sandboxCredentialPolicy(");
   const readEnd = source.indexOf("async function sandboxOutbound", readStart);
   const readSource = source.slice(readStart, readEnd);
-  const controlStart = source.indexOf("export class SessionControlDO");
-  const controlEnd = source.indexOf(
-    "function validSandboxCredentialPolicyRegistration",
-    controlStart,
-  );
-  const controlSource = source.slice(controlStart, controlEnd);
+  const controlSource = (
+    await Promise.all([
+      readFile(new URL("../src/worker/session-control-do.ts", import.meta.url), "utf8"),
+      readFile(new URL("../src/worker/session-control-policy.ts", import.meta.url), "utf8"),
+    ])
+  ).join("\n");
   const egressStart = controlSource.indexOf("const egressMatch");
   const egressEnd = controlSource.indexOf("const sandboxMatch", egressStart);
   const egressSource = controlSource.slice(egressStart, egressEnd);
@@ -897,9 +897,12 @@ test("cron generation-wraps migrated legacy policies under exact live ownership"
     beginStart,
   );
   const repairSource = source.slice(beginStart, renewStart);
-  const controlStart = source.indexOf("export class SessionControlDO");
-  const controlEnd = source.indexOf("function storedSandboxCredentialPolicy", controlStart);
-  const controlSource = source.slice(controlStart, controlEnd);
+  const controlSource = (
+    await Promise.all([
+      readFile(new URL("../src/worker/session-control-do.ts", import.meta.url), "utf8"),
+      readFile(new URL("../src/worker/session-control-policy.ts", import.meta.url), "utf8"),
+    ])
+  ).join("\n");
 
   assert.ok(
     batchSource.indexOf("repairLegacySandboxCredentialPolicyBatch") <
@@ -1087,9 +1090,12 @@ test("sandbox credential cleanup is durably staged and retried", async () => {
     scanDecisionStart,
   );
   const scanDecisionSource = source.slice(scanDecisionStart, scanDecisionEnd);
-  const controlStart = source.indexOf("export class SessionControlDO");
-  const controlEnd = source.indexOf("function dedupeSandboxPolicies", controlStart);
-  const controlSource = source.slice(controlStart, controlEnd);
+  const controlSource = (
+    await Promise.all([
+      readFile(new URL("../src/worker/session-control-do.ts", import.meta.url), "utf8"),
+      readFile(new URL("../src/worker/session-control-policy.ts", import.meta.url), "utf8"),
+    ])
+  ).join("\n");
   const refreshStart = source.indexOf("async function ensureCurrentSandboxLease");
   const refreshEnd = source.indexOf("async function prepareSandboxWorkspace", refreshStart);
   const refreshSource = source.slice(refreshStart, refreshEnd);

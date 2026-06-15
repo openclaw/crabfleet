@@ -4,26 +4,17 @@ import {
   Sandbox as CloudflareSandboxBase,
   getSandbox,
   type BackupOptions,
-  type DirectoryBackup,
   type Sandbox as CloudflareSandbox,
   type SessionTerminatedError as CloudflareSandboxSessionError,
 } from "@cloudflare/sandbox";
-import { DurableObject } from "cloudflare:workers";
 import {
   attributedTerminalInputPayloads,
   newTerminalInputState,
   terminalSubmittedLine,
   type TerminalInputState,
 } from "./terminal-multiplayer";
-import { buildFleetState, type FleetSandboxPolicySummary, type FleetState } from "./fleet-state";
-import {
-  buildGitHubActionsRunnerPtyUrl,
-  forwardGitHubActionsRelayMessage,
-  githubActionsRelayRole,
-  githubActionsRuntime,
-  notifyGitHubActionsViewers,
-  replaceGitHubActionsRunner,
-} from "./github-actions-runtime";
+import { buildFleetState, type FleetState } from "./fleet-state";
+import { buildGitHubActionsRunnerPtyUrl, githubActionsRuntime } from "./github-actions-runtime";
 import { githubRequestCanUseRepoCredential, matchesAnyHost } from "./sandbox-security";
 import { githubOAuthCanonicalSshLinkUrl, githubOAuthRedirectUri } from "./oauth";
 import {
@@ -60,16 +51,7 @@ import {
   trustedProxyPublicOrigin,
   type TrustedProxyAuthResult,
 } from "./trusted-proxy-auth";
-import {
-  credentialPolicyCleanupMatches,
-  credentialPolicyMigrationCleanupMatches,
-  credentialPolicyRegistrationAccepted,
-  credentialPolicySandboxIsExpected,
-  migratedCredentialPolicyRecord,
-  type CredentialPolicyGenerationRecord,
-  type CredentialPolicyGenerationTombstone,
-  type CredentialPolicyLegacyMigration,
-} from "./credential-policy-fence";
+import { credentialPolicySandboxIsExpected } from "./credential-policy-fence";
 import {
   browserAppOrigin,
   browserSessionUrl,
@@ -364,6 +346,20 @@ import {
   type TerminalUpstream,
 } from "./worker/terminal-hub";
 import {
+  githubActionsRelayStub,
+  readSandboxFleetPolicies,
+  sandboxControlStub,
+  type SandboxCheckpoint,
+} from "./worker/session-control-do";
+import {
+  credentialPolicyLegacyGenerationPrefix,
+  credentialPolicyLegacyRepairClaimPrefix,
+  type SandboxCredentialPolicy,
+  type SandboxCredentialPolicyLegacyMigration,
+  type SandboxCredentialPolicyRegistration,
+  type StoredSandboxCredentialPolicy,
+} from "./worker/session-control-policy";
+import {
   bridgeWebSockets,
   terminalOutputAcknowledgements,
 } from "./worker/terminal-websocket-bridge";
@@ -403,6 +399,7 @@ export class Sandbox extends CloudflareSandboxBase<RuntimeEnv> {
 (Sandbox as unknown as SandboxClassWithOutbound).outbound = sandboxOutbound;
 
 export { ContainerProxy };
+export { SessionControlDO } from "./worker/session-control-do";
 
 type GitHubIssuePayload = {
   number: number;
@@ -527,46 +524,6 @@ type SandboxCredentialPolicyOwnershipFence =
   | SandboxManagedOwnershipFence
   | StandaloneSandboxProvisionFence;
 
-type SandboxCredentialPolicy = {
-  allowedHosts: string[];
-  expiresAt?: number;
-  githubCredentialSource?: "none" | "session" | "worker";
-  githubRepo: string;
-  githubRepoNodeId?: string;
-  githubTokenCiphertext?: string;
-  openAIBaseUrl?: string;
-  openAIOrgId?: string;
-  owner: string;
-  sandboxId: string;
-  sessionId: string;
-};
-
-type StoredSandboxCredentialPolicy = CredentialPolicyGenerationRecord<SandboxCredentialPolicy>;
-
-type SandboxCredentialPolicyLegacyMigration = CredentialPolicyLegacyMigration & {
-  sandboxIds: string[];
-};
-
-type SandboxCredentialPolicyRegistration = {
-  generation: string;
-  claim: string;
-  lookupIds: string[];
-};
-
-type SandboxFleetPolicyResult = {
-  available: boolean;
-  policies: FleetSandboxPolicySummary[];
-};
-
-type SandboxCheckpoint = {
-  backup: DirectoryBackup;
-  createdAt: number;
-  id: string;
-  name: string;
-  sessionId: string;
-  workdir: string;
-};
-
 type StandaloneSandboxTerminalOwnership = {
   provisionId: string;
   requestHash: string;
@@ -618,8 +575,6 @@ const credentialPolicyScanLimit = 32;
 const credentialPolicyCleanupClaimMs = 30_000;
 const credentialPolicyRegistrationClaimMs = 60_000;
 const credentialPolicyProvisioningStaleMs = 15 * 60_000;
-const credentialPolicyLegacyGenerationPrefix = "legacy:";
-const credentialPolicyLegacyRepairClaimPrefix = "legacy-repair:";
 const defaultSandboxEgressHosts = [
   "api.github.com",
   "api.openai.com",
@@ -636,14 +591,6 @@ const defaultSandboxEgressHosts = [
   "*.openai.com",
   "*.yarnpkg.com",
 ];
-
-const sandboxControlObjectName = "__session-control";
-const sandboxPolicyKey = (sandboxId: string) => `sandbox:${sandboxId}`;
-const sandboxPolicyTombstoneKey = (sandboxId: string, generation: string) =>
-  `sandbox-tombstone:${encodeURIComponent(sandboxId)}:${encodeURIComponent(generation)}`;
-const sandboxCheckpointListKey = (sessionId: string) => `checkpoints:${sessionId}`;
-const sandboxCheckpointKey = (sessionId: string, checkpointId: string) =>
-  `checkpoint:${sessionId}:${checkpointId}`;
 
 function withAuthorization(request: Request, authorization?: string): Request {
   const next = new Request(request);
@@ -679,21 +626,6 @@ function withoutSandboxPlaceholderAuthorization(request: Request): Request {
     return request;
   }
   return withAuthorization(request, undefined);
-}
-
-function sandboxControlStub(env: RuntimeEnv): DurableObjectStub<SessionControlDO> | null {
-  if (!env.SESSION_CONTROL) return null;
-  const id = env.SESSION_CONTROL.idFromName(sandboxControlObjectName);
-  return env.SESSION_CONTROL.get(id);
-}
-
-function githubActionsRelayStub(
-  env: RuntimeEnv,
-  sessionId: string,
-): DurableObjectStub<SessionControlDO> | null {
-  if (!env.SESSION_CONTROL) return null;
-  const id = env.SESSION_CONTROL.idFromName(`github-actions:${sessionId}`);
-  return env.SESSION_CONTROL.get(id);
 }
 
 async function sandboxCredentialPolicy(
@@ -861,436 +793,6 @@ function openAIRequestMatchesPolicy(url: URL, policy: SandboxCredentialPolicy): 
   if (baseUrl.pathname === "/" || baseUrl.pathname === "") return true;
   const basePath = baseUrl.pathname.endsWith("/") ? baseUrl.pathname : `${baseUrl.pathname}/`;
   return url.pathname === baseUrl.pathname || url.pathname.startsWith(basePath);
-}
-
-export class SessionControlDO extends DurableObject<RuntimeEnv> {
-  override async fetch(request: Request): Promise<Response> {
-    const url = new URL(request.url);
-    try {
-      if (
-        request.method === "GET" &&
-        url.pathname === "/api/session-control/github-actions/runner"
-      ) {
-        return this.openGitHubActionsRelay("runner");
-      }
-
-      if (
-        request.method === "GET" &&
-        url.pathname === "/api/session-control/github-actions/viewer"
-      ) {
-        return this.openGitHubActionsRelay("viewer");
-      }
-
-      if (
-        request.method === "POST" &&
-        url.pathname === "/api/session-control/github-actions/disconnect-runner"
-      ) {
-        const disconnected = replaceGitHubActionsRunner(
-          this.ctx.getWebSockets("github-actions-runner"),
-          1000,
-          "runner disconnected",
-        );
-        return json({ disconnected });
-      }
-
-      if (request.method === "POST" && url.pathname === "/api/session-control/register") {
-        const registration = (await request.json()) as StoredSandboxCredentialPolicy;
-        if (!validSandboxCredentialPolicyRegistration(registration)) {
-          return json({ error: "invalid credential policy registration" }, { status: 400 });
-        }
-        const outcome = await this.ctx.storage.transaction(async (transaction) => {
-          const [stored, tombstone] = await Promise.all([
-            transaction.get<StoredSandboxCredentialPolicy | SandboxCredentialPolicy>(
-              sandboxPolicyKey(registration.policy.sandboxId),
-            ),
-            transaction.get<CredentialPolicyGenerationTombstone>(
-              sandboxPolicyTombstoneKey(registration.policy.sandboxId, registration.generation),
-            ),
-          ]);
-          const current = storedSandboxCredentialPolicy(stored);
-          const legacy = legacySandboxCredentialPolicy(stored);
-          if (legacy && legacy.sessionId !== registration.policy.sessionId) return "conflict";
-          if (!credentialPolicyRegistrationAccepted(current, tombstone, registration, Date.now())) {
-            return tombstone ? "tombstoned" : "conflict";
-          }
-          await transaction.put(sandboxPolicyKey(registration.policy.sandboxId), registration);
-          return "stored";
-        });
-        if (outcome !== "stored") {
-          return json({ error: `credential policy generation ${outcome}` }, { status: 409 });
-        }
-        return json({ ok: true });
-      }
-
-      if (request.method === "POST" && url.pathname === "/api/session-control/migrate-legacy") {
-        const migration = (await request.json()) as SandboxCredentialPolicyLegacyMigration;
-        if (!validSandboxCredentialPolicyLegacyMigration(migration)) {
-          return json({ error: "invalid legacy credential policy migration" }, { status: 400 });
-        }
-        const outcome = await this.ctx.storage.transaction(async (transaction) => {
-          const records = await Promise.all(
-            migration.sandboxIds.map(async (sandboxId) => ({
-              sandboxId,
-              stored: await transaction.get<
-                StoredSandboxCredentialPolicy | SandboxCredentialPolicy
-              >(sandboxPolicyKey(sandboxId)),
-              tombstone: await transaction.get<CredentialPolicyGenerationTombstone>(
-                sandboxPolicyTombstoneKey(sandboxId, migration.generation),
-              ),
-            })),
-          );
-          const sourcePolicy = records
-            .map(
-              ({ stored }) =>
-                storedSandboxCredentialPolicy(stored)?.policy ??
-                legacySandboxCredentialPolicy(stored),
-            )
-            .find((policy) => policy?.sessionId === migration.sessionId);
-          if (!sourcePolicy) return "conflict";
-          const migratedRecords: Array<{
-            sandboxId: string;
-            policy: StoredSandboxCredentialPolicy;
-          }> = [];
-          for (const record of records) {
-            const current = storedSandboxCredentialPolicy(record.stored);
-            const legacy =
-              legacySandboxCredentialPolicy(record.stored) ??
-              (!current ? { ...sourcePolicy, sandboxId: record.sandboxId } : undefined);
-            const migrated = migratedCredentialPolicyRecord(
-              current,
-              legacy,
-              record.tombstone,
-              migration,
-              Date.now(),
-            );
-            if (!migrated || migrated.policy.sandboxId !== record.sandboxId) {
-              return record.tombstone ? "tombstoned" : "conflict";
-            }
-            migratedRecords.push({ sandboxId: record.sandboxId, policy: migrated });
-          }
-          for (const record of migratedRecords) {
-            await transaction.put(sandboxPolicyKey(record.sandboxId), record.policy);
-          }
-          return "stored";
-        });
-        if (outcome !== "stored") {
-          return json({ error: `legacy credential policy migration ${outcome}` }, { status: 409 });
-        }
-        return json({ ok: true });
-      }
-
-      if (request.method === "GET" && url.pathname === "/api/session-control/policies") {
-        const entries = await this.ctx.storage.list<
-          StoredSandboxCredentialPolicy | SandboxCredentialPolicy
-        >({
-          prefix: "sandbox:",
-        });
-        const policies = dedupeSandboxPolicies(
-          [...entries.values()]
-            .map((stored) => sandboxCredentialPolicyFromStorage(stored))
-            .filter((policy): policy is SandboxCredentialPolicy => Boolean(policy)),
-        ).map((policy) => redactSandboxPolicy(policy, Boolean(this.env.GITHUB_TOKEN)));
-        return json({ policies });
-      }
-
-      const egressMatch = url.pathname.match(/^\/api\/session-control\/egress\/([^/]+)$/);
-      if (request.method === "GET" && egressMatch) {
-        const sandboxId = decodeURIComponent(egressMatch[1] ?? "");
-        const key = sandboxPolicyKey(sandboxId);
-        const stored = await this.ctx.storage.get<
-          StoredSandboxCredentialPolicy | SandboxCredentialPolicy
-        >(key);
-        const current = storedSandboxCredentialPolicy(stored);
-        const legacy = legacySandboxCredentialPolicy(stored);
-        const policy = sandboxCredentialPolicyFromStorage(stored);
-        if (!current || !policy) {
-          if (legacy) {
-            return json(
-              { error: "legacy credential policy migration required", sessionId: legacy.sessionId },
-              { status: 409 },
-            );
-          }
-          return json({ error: "not found" }, { status: 404 });
-        }
-        return json(policy, {
-          headers: { "x-crabfleet-policy-generation": current.generation },
-        });
-      }
-
-      const sandboxMatch = url.pathname.match(/^\/api\/session-control\/sandbox\/([^/]+)$/);
-      if (request.method === "DELETE" && sandboxMatch) {
-        const sandboxId = decodeURIComponent(sandboxMatch[1] ?? "");
-        const tombstone = (await request.json()) as CredentialPolicyGenerationTombstone;
-        if (!validCredentialPolicyTombstone(tombstone)) {
-          return json({ error: "invalid credential policy tombstone" }, { status: 400 });
-        }
-        await this.ctx.storage.transaction(async (transaction) => {
-          const key = sandboxPolicyKey(sandboxId);
-          const stored = await transaction.get<
-            StoredSandboxCredentialPolicy | SandboxCredentialPolicy
-          >(key);
-          const current = storedSandboxCredentialPolicy(stored);
-          const legacy = legacySandboxCredentialPolicy(stored);
-          await transaction.put(
-            sandboxPolicyTombstoneKey(sandboxId, tombstone.generation),
-            tombstone,
-          );
-          if (
-            credentialPolicyCleanupMatches(current, tombstone.generation, tombstone.sessionId) ||
-            credentialPolicyMigrationCleanupMatches(
-              current,
-              tombstone.generation,
-              tombstone.sessionId,
-            ) ||
-            legacy?.sessionId === tombstone.sessionId
-          ) {
-            await transaction.delete(key);
-          }
-        });
-        return json({ ok: true });
-      }
-
-      if (request.method === "POST" && url.pathname === "/api/session-control/checkpoints") {
-        const checkpoint = (await request.json()) as SandboxCheckpoint;
-        await this.ctx.storage.put(
-          sandboxCheckpointKey(checkpoint.sessionId, checkpoint.id),
-          checkpoint,
-        );
-        const listKey = sandboxCheckpointListKey(checkpoint.sessionId);
-        const list = (await this.ctx.storage.get<SandboxCheckpoint[]>(listKey)) ?? [];
-        const next = [checkpoint, ...list.filter((item) => item.id !== checkpoint.id)].slice(0, 20);
-        await this.ctx.storage.put(listKey, next);
-        return json({ checkpoint });
-      }
-
-      const checkpointsMatch = url.pathname.match(/^\/api\/session-control\/checkpoints\/([^/]+)$/);
-      if (request.method === "GET" && checkpointsMatch) {
-        const sessionId = decodeURIComponent(checkpointsMatch[1] ?? "");
-        const checkpoints =
-          (await this.ctx.storage.get<SandboxCheckpoint[]>(sandboxCheckpointListKey(sessionId))) ??
-          [];
-        return json({ checkpoints });
-      }
-
-      const checkpointMatch = url.pathname.match(
-        /^\/api\/session-control\/checkpoints\/([^/]+)\/([^/]+)$/,
-      );
-      if (request.method === "GET" && checkpointMatch) {
-        const sessionId = decodeURIComponent(checkpointMatch[1] ?? "");
-        const checkpointId = decodeURIComponent(checkpointMatch[2] ?? "");
-        const checkpoint = await this.ctx.storage.get<SandboxCheckpoint>(
-          sandboxCheckpointKey(sessionId, checkpointId),
-        );
-        return checkpoint ? json({ checkpoint }) : json({ error: "not found" }, { status: 404 });
-      }
-    } catch (error) {
-      return json(
-        { error: error instanceof Error ? error.message : String(error) },
-        { status: 500 },
-      );
-    }
-    return json({ error: "not found" }, { status: 404 });
-  }
-
-  override webSocketMessage(socket: WebSocket, message: string | ArrayBuffer): void {
-    const role = githubActionsRelayRole(this.ctx.getTags(socket));
-    if (!role) {
-      socket.close(1008, "unknown relay peer");
-      return;
-    }
-    forwardGitHubActionsRelayMessage(
-      role,
-      message,
-      this.ctx.getWebSockets("github-actions-runner"),
-      this.ctx.getWebSockets("github-actions-viewer"),
-    );
-  }
-
-  override webSocketClose(socket: WebSocket): void {
-    const role = githubActionsRelayRole(this.ctx.getTags(socket));
-    if (role === "runner" && this.ctx.getWebSockets("github-actions-runner").length === 0) {
-      notifyGitHubActionsViewers(
-        this.ctx.getWebSockets("github-actions-viewer"),
-        "runner_disconnected",
-      );
-    }
-  }
-
-  override webSocketError(socket: WebSocket): void {
-    socket.close(1011, "relay peer error");
-  }
-
-  private openGitHubActionsRelay(role: "runner" | "viewer"): Response {
-    const pair = new WebSocketPair();
-    const client = pair[0];
-    const server = pair[1];
-    if (role === "runner") {
-      replaceGitHubActionsRunner(this.ctx.getWebSockets("github-actions-runner"));
-      this.ctx.acceptWebSocket(server, ["github-actions-runner"]);
-      notifyGitHubActionsViewers(
-        this.ctx.getWebSockets("github-actions-viewer"),
-        "runner_connected",
-      );
-    } else {
-      this.ctx.acceptWebSocket(server, ["github-actions-viewer"]);
-      if (this.ctx.getWebSockets("github-actions-runner").length === 0) {
-        server.send(JSON.stringify({ type: "runner_waiting" }));
-      }
-    }
-    return new Response(null, { status: 101, webSocket: client });
-  }
-}
-
-function storedSandboxCredentialPolicy(
-  value: StoredSandboxCredentialPolicy | SandboxCredentialPolicy | undefined,
-): StoredSandboxCredentialPolicy | undefined {
-  if (
-    value &&
-    "policy" in value &&
-    typeof value.generation === "string" &&
-    typeof value.registrationClaim === "string" &&
-    typeof value.registrationExpiresAt === "number"
-  ) {
-    return value;
-  }
-  return undefined;
-}
-
-function legacySandboxCredentialPolicy(
-  value: StoredSandboxCredentialPolicy | SandboxCredentialPolicy | undefined,
-): SandboxCredentialPolicy | undefined {
-  return value && !("policy" in value) ? value : undefined;
-}
-
-function sandboxCredentialPolicyFromStorage(
-  value: StoredSandboxCredentialPolicy | SandboxCredentialPolicy | undefined,
-): SandboxCredentialPolicy | undefined {
-  const current = storedSandboxCredentialPolicy(value);
-  if (!current) return undefined;
-  if (
-    current.policy.expiresAt !== undefined &&
-    (!Number.isFinite(current.policy.expiresAt) || current.policy.expiresAt <= Date.now())
-  ) {
-    return undefined;
-  }
-  return current.policy;
-}
-
-function validSandboxCredentialPolicyRegistration(value: StoredSandboxCredentialPolicy): boolean {
-  return Boolean(
-    value &&
-    typeof value.generation === "string" &&
-    value.generation.length > 0 &&
-    value.generation.length <= 200 &&
-    typeof value.registrationClaim === "string" &&
-    value.registrationClaim.length > 0 &&
-    value.registrationClaim.length <= 200 &&
-    Number.isFinite(value.registrationExpiresAt) &&
-    value.policy &&
-    typeof value.policy.sandboxId === "string" &&
-    typeof value.policy.sessionId === "string" &&
-    (value.policy.expiresAt === undefined ||
-      (Number.isFinite(value.policy.expiresAt) && value.policy.expiresAt > Date.now())),
-  );
-}
-
-function validSandboxCredentialPolicyLegacyMigration(
-  value: SandboxCredentialPolicyLegacyMigration,
-): boolean {
-  return Boolean(
-    value &&
-    typeof value.generation === "string" &&
-    value.generation.length > 0 &&
-    value.generation.length <= 200 &&
-    !value.generation.startsWith(credentialPolicyLegacyGenerationPrefix) &&
-    typeof value.registrationClaim === "string" &&
-    value.registrationClaim.startsWith(credentialPolicyLegacyRepairClaimPrefix) &&
-    value.registrationClaim.length <= 200 &&
-    Number.isFinite(value.registrationExpiresAt) &&
-    Array.isArray(value.sandboxIds) &&
-    value.sandboxIds.length > 0 &&
-    value.sandboxIds.length <= 8 &&
-    new Set(value.sandboxIds).size === value.sandboxIds.length &&
-    value.sandboxIds.every(
-      (sandboxId) =>
-        typeof sandboxId === "string" && sandboxId.length > 0 && sandboxId.length <= 200,
-    ) &&
-    typeof value.sessionId === "string" &&
-    value.sessionId.length > 0 &&
-    value.sessionId.length <= 200,
-  );
-}
-
-function validCredentialPolicyTombstone(value: CredentialPolicyGenerationTombstone): boolean {
-  return Boolean(
-    value &&
-    typeof value.generation === "string" &&
-    value.generation.length > 0 &&
-    value.generation.length <= 200 &&
-    typeof value.sessionId === "string" &&
-    value.sessionId.length > 0 &&
-    value.sessionId.length <= 200 &&
-    Number.isFinite(value.tombstonedAt),
-  );
-}
-
-function dedupeSandboxPolicies(policies: SandboxCredentialPolicy[]): SandboxCredentialPolicy[] {
-  const seen = new Set<string>();
-  const result: SandboxCredentialPolicy[] = [];
-  for (const policy of policies.sort((a, b) => a.sandboxId.localeCompare(b.sandboxId))) {
-    const key = `${policy.sessionId}:${policy.owner}:${policy.githubRepo}`;
-    if (seen.has(key)) continue;
-    seen.add(key);
-    result.push(policy);
-  }
-  return result;
-}
-
-function redactSandboxPolicy(
-  policy: SandboxCredentialPolicy,
-  workerCredentialAvailable = false,
-): FleetSandboxPolicySummary {
-  const githubCredentialSource =
-    policy.githubCredentialSource ??
-    (policy.githubTokenCiphertext ? "session" : workerCredentialAvailable ? "worker" : "none");
-  return {
-    allowedHostCount: policy.allowedHosts.length,
-    allowedHosts: [...policy.allowedHosts].sort(),
-    githubCredentialSource,
-    githubRepo: policy.githubRepo,
-    hasGithubRepoNodeId: Boolean(policy.githubRepoNodeId),
-    hasGithubToken: githubCredentialSource !== "none",
-    openAIBaseUrlHost: urlHost(policy.openAIBaseUrl),
-    openAIOrgConfigured: Boolean(policy.openAIOrgId),
-    owner: policy.owner,
-    sandboxId: policy.sandboxId,
-    sessionId: policy.sessionId,
-  };
-}
-
-function urlHost(value: string | undefined): string | null {
-  if (!value) return null;
-  try {
-    return new URL(value).host;
-  } catch {
-    return null;
-  }
-}
-
-async function readSandboxFleetPolicies(env: RuntimeEnv): Promise<SandboxFleetPolicyResult> {
-  const stub = sandboxControlStub(env);
-  if (!stub) return { available: false, policies: [] };
-  try {
-    const response = await stub.fetch("https://crabfleet.internal/api/session-control/policies");
-    if (!response.ok) return { available: false, policies: [] };
-    const body = (await response.json()) as { policies?: FleetSandboxPolicySummary[] };
-    return {
-      available: true,
-      policies: Array.isArray(body.policies) ? body.policies : [],
-    };
-  } catch {
-    return { available: false, policies: [] };
-  }
 }
 
 export default {
