@@ -751,7 +751,7 @@ test("session events and terminal finalization preserve archive anchors", async 
 test("summary events update metadata and refresh archive snapshots", async () => {
   const source = await readFile(new URL("../src/index.ts", import.meta.url), "utf8");
   const summaryStart = source.indexOf("async function updateInteractiveSessionSummary");
-  const summaryEnd = source.indexOf("async function updateGitHubActionsWorkState", summaryStart);
+  const summaryEnd = source.indexOf("async function githubActionsRunnerPty", summaryStart);
   const summarySource = source.slice(summaryStart, summaryEnd);
   const metadataStart = source.indexOf(
     "async function mutateInteractiveSessionWithEventAtomically",

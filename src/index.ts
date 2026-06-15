@@ -35,13 +35,9 @@ import {
 import {
   buildGitHubActionsRunnerPtyUrl,
   forwardGitHubActionsRelayMessage,
-  gitHubActionsSessionStatus,
-  gitHubActionsWorkEvent,
   githubActionsRelayRole,
   githubActionsRuntime,
-  isTerminalGitHubActionsWorkState,
   notifyGitHubActionsViewers,
-  parseGitHubActionsWorkState,
   replaceGitHubActionsRunner,
 } from "./github-actions-runtime";
 import { githubRequestCanUseRepoCredential, matchesAnyHost } from "./sandbox-security";
@@ -202,6 +198,11 @@ import {
   type GitHubActionsSessionRegistrationInput,
   type GitHubActionsSessionRegistrationStore,
 } from "./worker/github-actions-session-registration";
+import {
+  GitHubActionsWorkStateService,
+  type GitHubActionsWorkStateInput,
+  type GitHubActionsWorkStateStore,
+} from "./worker/github-actions-session-work-state";
 import {
   containerCapabilities,
   crabboxCapabilities,
@@ -11793,82 +11794,30 @@ async function updateGitHubActionsWorkState(
   id: string,
 ): Promise<{ session: InteractiveSession }> {
   const { session, user } = await agentSessionAuthentication(env).require(request, id);
-  if (session.runtime !== githubActionsRuntime || !session.workKey) {
-    throw badRequest("session is not a GitHub Actions work session");
-  }
-  const body = await readJson<{
-    state?: string;
-    phase?: string;
-    summary?: string;
-    codexThreadId?: string | null;
-    codexTurnId?: string | null;
-    completionReason?: string | null;
-  }>(request);
-  const state = parseGitHubActionsWorkState(body.state);
-  if (!state) throw badRequest("invalid work state");
-  const row = await database(env)
-    .selectFrom("interactive_sessions")
-    .selectAll()
-    .where("id", "=", id)
-    .executeTakeFirst();
-  if (!row) throw notFound("interactive session not found");
-  const phase = body.phase === undefined ? row.work_phase : clean(body.phase, 160);
-  const summary = body.summary === undefined ? row.summary : clean(body.summary, 500);
-  const codexThreadId =
-    body.codexThreadId === undefined ? row.codex_thread_id : clean(body.codexThreadId, 240) || null;
-  const codexTurnId =
-    body.codexTurnId === undefined ? row.codex_turn_id : clean(body.codexTurnId, 240) || null;
-  const completionReason =
-    body.completionReason === undefined
-      ? isTerminalGitHubActionsWorkState(state)
-        ? row.completion_reason
-        : null
-      : clean(body.completionReason, 500) || null;
-  const terminal = isTerminalGitHubActionsWorkState(state);
-  const status = terminal
-    ? gitHubActionsSessionStatus(state)
-    : ["ready", "attached", "detached"].includes(row.status)
-      ? row.status
-      : "ready";
-  const lastEvent = gitHubActionsWorkEvent(state, phase);
-  const changed =
-    row.work_state !== state ||
-    row.work_phase !== phase ||
-    row.summary !== summary ||
-    row.codex_thread_id !== codexThreadId ||
-    row.codex_turn_id !== codexTurnId ||
-    row.completion_reason !== completionReason;
-  const now = Date.now();
-  await database(env)
-    .updateTable("interactive_sessions")
-    .set({
-      status,
-      summary,
-      work_state: state,
-      work_phase: phase,
-      codex_thread_id: codexThreadId,
-      codex_turn_id: codexTurnId,
-      last_heartbeat_at: now,
-      completion_reason: completionReason,
-      last_event: lastEvent,
-      last_seen_at: now,
-      updated_at: now,
-      stopped_at: terminal ? now : null,
-    })
-    .where("id", "=", id)
-    .execute();
-  if (changed) {
-    await appendInteractiveSessionEvent(env, id, user, lastEvent, now);
-  }
-  if (terminal) {
-    await disconnectGitHubActionsRunner(env, id).catch(() => undefined);
-  }
+  const body = await readJson<GitHubActionsWorkStateInput>(request);
+  const store: GitHubActionsWorkStateStore = {
+    now: () => Date.now(),
+    readRow: async (sessionId) =>
+      (await database(env)
+        .selectFrom("interactive_sessions")
+        .selectAll()
+        .where("id", "=", sessionId)
+        .executeTakeFirst()) ?? null,
+    persist: async (sessionId, values) => {
+      await database(env)
+        .updateTable("interactive_sessions")
+        .set(values)
+        .where("id", "=", sessionId)
+        .execute();
+    },
+    appendEvent: (sessionId, message, now) =>
+      appendInteractiveSessionEvent(env, sessionId, user, message, now),
+    disconnectRunner: (sessionId) => disconnectGitHubActionsRunner(env, sessionId),
+    readSession: (sessionId) => readInteractiveSession(env, sessionId),
+  };
+  const current = await new GitHubActionsWorkStateService(store).update(session, body);
   return {
-    session: decorateInteractiveSession(
-      (await readInteractiveSession(env, id)) as InteractiveSession,
-      user,
-      env,
-    ),
+    session: decorateInteractiveSession(current, user, env),
   };
 }
 

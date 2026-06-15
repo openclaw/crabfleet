@@ -34,6 +34,7 @@
 - Replace duplicate bounded-concurrency loops with one directly tested worker utility.
 - Extract agent-session authentication and remove the legacy `X-Crabbox-Session-ID` alias.
 - Extract GitHub Actions session validation, idempotent registration, token rotation, resume reset, runner replacement, and evidence ordering.
+- Extract GitHub Actions work-state projection, heartbeat persistence, event suppression, terminal mapping, runner disconnect, and reread.
 - Centralize OpenClaw room visibility, log-free summaries, and bounded transcript sentinel/truncation policy behind direct query tests.
 - Isolate OpenClaw recursive root-stop admission, reservation cleanup, lifecycle retries, reconciliation, and stable-completion polling behind a directly tested service.
 - Extract OpenClaw root-scoped authorization, lineage supervision, reservation outcomes, rollback, and activation orchestration into a directly tested service boundary.
