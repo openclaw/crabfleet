@@ -1,5 +1,6 @@
 import type { StandaloneSandboxProvisionRow } from "../database.ts";
 import { sandboxLeaseId, type SandboxLease } from "../sandbox-lease.ts";
+import { failedProvision } from "./result.ts";
 import type { InteractiveProvisionRequest, InteractiveProvisionResult } from "./types.ts";
 
 export const standaloneSandboxDefaultTtlSeconds = 14_400;
@@ -192,15 +193,5 @@ function activeProvisionResult(owner: StandaloneSandboxProvisionRow): Interactiv
     expiresAt: owner.expires_at,
     expiresAtPresent: true,
     message: owner.message,
-  };
-}
-
-function failedProvision(message: string): InteractiveProvisionResult {
-  return {
-    status: "failed",
-    leaseId: null,
-    attachUrl: null,
-    vncUrl: null,
-    message,
   };
 }

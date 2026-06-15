@@ -4,6 +4,7 @@ import type {
   InteractiveProvisionRuntime,
   SandboxProvisionOwnership,
 } from "./types.ts";
+import { failedProvision } from "./result.ts";
 
 export type ManagedInteractiveProvisionBackend = "sandbox" | "runtime-adapter";
 
@@ -57,14 +58,4 @@ export class InteractiveProvisioningService {
     if (this.dependencies.runtimeAdapterAvailable) return "runtime-adapter";
     return null;
   }
-}
-
-function failedProvision(message: string): InteractiveProvisionResult {
-  return {
-    status: "failed",
-    leaseId: null,
-    attachUrl: null,
-    vncUrl: null,
-    message,
-  };
 }

@@ -6,6 +6,7 @@
 - Remove the configurable PTY bridge so managed terminal upstreams are limited to built-in Sandbox, versioned runtime-adapter attach, and GitHub Actions relay behind the multiplex terminal protocol.
 - Remove generic create-only provisioning, the external Cloudflare runner, and the ClawFleet compatibility provider so managed workspaces use only built-in Sandbox or the versioned runtime adapter.
 - Remove unsupported provider stop/recovery compatibility; historical provider rows remain readable while live lifecycle mutations are limited to Sandbox, runtime-v1, and GitHub Actions.
+- Centralize failed provisioning results and provider-error redaction across managed Sandbox, standalone Sandbox, and runtime-adapter lifecycle paths.
 - Extract OpenClaw nudge and stop validation, audit ordering, terminal delivery, and best-effort delivery records into a directly tested mutation service.
 - Extract OpenClaw crabbox normalization, replay handling, branch preparation, timeout policy, and creation audit into a directly tested service.
 - Extract interactive-session lineage normalization, parent visibility, and canonical root derivation into a directly tested service.

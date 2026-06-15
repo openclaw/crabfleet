@@ -7,7 +7,6 @@ import {
   normalizeAdapterNamespace,
   normalizeAdapterWorkspaceId,
   parseAdapterWorkspaceResult,
-  redactedAdapterMessage,
   redactedAdapterResponseMessage,
   runtimeAdapterCollectionUrl,
   runtimeAdapterCreatePayload,
@@ -25,6 +24,7 @@ import {
   type RuntimeCapabilities,
 } from "../session-model.ts";
 import type { RuntimeAdapterWorkspaceStopResult } from "../session-runtime-adapter-stop.ts";
+import { failedProvision, safeProviderError } from "./result.ts";
 import type { InteractiveProvisionRequest, InteractiveProvisionResult } from "./types.ts";
 
 export type RuntimeAdapterCreateAttemptFence = {
@@ -544,29 +544,6 @@ function unresolvedRuntimeAdapterProvision(
     terminalStatus: "failed",
     createPending: true,
   };
-}
-
-function failedProvision(message: string): InteractiveProvisionResult {
-  return {
-    status: "failed",
-    leaseId: null,
-    attachUrl: null,
-    vncUrl: null,
-    message,
-  };
-}
-
-function safeProviderError(
-  error: unknown,
-  identifiers: Array<string | null> = [],
-  connectionValues: Array<string | null> = [],
-): string {
-  return redactedAdapterMessage(
-    clean(error instanceof Error ? error.message : String(error), 2000),
-    "failed",
-    identifiers,
-    connectionValues,
-  );
 }
 
 function clean(value: unknown, maximum: number): string {

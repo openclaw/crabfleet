@@ -320,6 +320,7 @@ import {
   RuntimeAdapterProvisioningService,
   runtimeAdapterProvisionResult,
 } from "./worker/provisioning/runtime-adapter";
+import { failedProvision, safeProviderError } from "./worker/provisioning/result";
 import {
   failRuntimeAdapterWorkspaceIdConflict,
   persistRuntimeAdapterStopEvidence,
@@ -8336,29 +8337,6 @@ async function stopRuntimeAdapterWorkspaceForSession(
 function runtimeAdapterProviderConfigured(env: RuntimeEnv): boolean {
   return Boolean(
     configuredRuntimeAdapterControlPlane(env, "profile-route") && runtimeAdapterToken(env),
-  );
-}
-
-function failedProvision(message: string): InteractiveProvisionResult {
-  return {
-    status: "failed",
-    leaseId: null,
-    attachUrl: null,
-    vncUrl: null,
-    message,
-  };
-}
-
-function safeProviderError(
-  error: unknown,
-  identifiers: Array<string | null> = [],
-  connectionValues: Array<string | null> = [],
-): string {
-  return redactedAdapterMessage(
-    clean(error instanceof Error ? error.message : String(error), 2000),
-    "failed",
-    identifiers,
-    connectionValues,
   );
 }
 

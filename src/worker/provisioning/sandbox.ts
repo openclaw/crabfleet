@@ -4,6 +4,7 @@ import {
   type SandboxLease,
   type SandboxLeaseRefreshFence,
 } from "../sandbox-lease.ts";
+import { failedProvision } from "./result.ts";
 import type { InteractiveProvisionRequest, InteractiveProvisionResult } from "./types.ts";
 
 export type ManagedSandboxProvisionClaim = {
@@ -166,14 +167,4 @@ function managedSandboxOwnerReady(session: InteractiveSessionRow): boolean {
     session.adapter === null &&
     session.credential_cleanup_terminal_status === null
   );
-}
-
-function failedProvision(message: string): InteractiveProvisionResult {
-  return {
-    status: "failed",
-    leaseId: null,
-    attachUrl: null,
-    vncUrl: null,
-    message,
-  };
 }
