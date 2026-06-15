@@ -121,54 +121,24 @@ test("bounded transcript tails remain valid UTF-8 and report truncation", () => 
   assert.equal(openClawRoomMaxSessions, 64);
 });
 
-test("OpenClaw room reservations stay hidden until activation", async () => {
-  const source = await readFile(new URL("../src/index.ts", import.meta.url), "utf8");
+test("OpenClaw room reservations use explicit preparation state", async () => {
   const migration = await readFile(
     new URL("../migrations/0025_interactive_session_preparation.sql", import.meta.url),
     "utf8",
   );
-  const createStart = source.indexOf("async function createInteractiveSessionFromInput");
-  const createEnd = source.indexOf("function initialRuntimeAdapterWorkspaceId", createStart);
-  const createSource = source.slice(createStart, createEnd);
-  const readStart = source.indexOf("async function readInteractiveSessions");
-  const readEnd = source.indexOf("async function readSharedInteractiveSession", readStart);
-  const readSource = source.slice(readStart, readEnd);
 
   assert.match(migration, /ADD COLUMN preparation_pending INTEGER NOT NULL DEFAULT 0/);
-  assert.match(readSource, /\.where\("preparation_pending", "=", 0\)/);
-  assert.match(
-    createSource,
-    /adapter: adapterWorkspaceId && !preparationReservation \? runtimeAdapterName : null/,
-  );
-  assert.match(
-    createSource,
-    /adapter_create_pending: adapterWorkspaceId && !preparationReservation \? 1 : 0/,
-  );
-  assert.match(
-    createSource,
-    /const preparationReservation = Boolean\(options\.afterReserve \|\| supervisedRootSessionId\)/,
-  );
-  assert.match(createSource, /preparation_pending: preparationReservation \? 1 : 0/);
 });
 
 test("OpenClaw crabbox persistence reserves durable idempotency before provisioning", async () => {
-  const source = await readFile(new URL("../src/index.ts", import.meta.url), "utf8");
   const migration = await readFile(
     new URL("../migrations/0026_openclaw_lifecycle_guarantees.sql", import.meta.url),
     "utf8",
   );
-  const createStart = source.indexOf("async function createInteractiveSessionFromInput");
-  const createEnd = source.indexOf("function initialRuntimeAdapterWorkspaceId", createStart);
-  const createSource = source.slice(createStart, createEnd);
   assert.match(migration, /ADD COLUMN openclaw_request_id TEXT/);
   assert.match(migration, /UNIQUE INDEX IF NOT EXISTS idx_interactive_sessions_openclaw_request/);
   assert.match(migration, /CREATE TABLE IF NOT EXISTS openclaw_request_replays/);
   assert.equal(openClawRequestId("request-1"), "request-1");
-  assert.match(createSource, /openclaw_request_id: options\.openClawRequestId \?\? null/);
-  assert.match(createSource, /openclaw_request_hash: options\.openClawRequestHash \?\? null/);
-  assert.match(createSource, /\.insertInto\("openclaw_request_replays"\)/);
-  assert.match(createSource, /!reservationInserted &&\s+isConstraintError\(error\)/);
-  assert.match(createSource, /if \(reservationInserted \|\| !isConstraintError\(error\)/);
 });
 
 test("OpenClaw lifecycle guarantees are documented", async () => {

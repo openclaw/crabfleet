@@ -41,6 +41,12 @@ import {
   publicDeploymentConfig,
   selectedRuntimeProfile,
 } from "../src/worker/deployment.ts";
+import type { RuntimeEnv } from "../src/worker/env.ts";
+import {
+  configuredRuntimeAdapterControlPlane,
+  requireRuntimeAdapterCreatePreflight,
+  runtimeAdapterToken,
+} from "../src/worker/runtime-adapter-preflight.ts";
 
 test("adapter create payload matches the strict controller contract", () => {
   const payload = runtimeAdapterCreatePayload({
@@ -764,19 +770,20 @@ test("public auth deployment metadata excludes runtime routing", () => {
 });
 
 test("worker deployment installs the shared runtime adapter credential", async () => {
-  const source = await readFile(new URL("../src/index.ts", import.meta.url), "utf8");
   const workflow = await readFile(
     new URL("../.github/workflows/deploy-worker.yml", import.meta.url),
     "utf8",
   );
-  const tokenStart = source.indexOf("function runtimeAdapterToken");
-  const tokenEnd = source.indexOf("function runtimeAdapterProviderConfigured", tokenStart);
-  const tokenSource = source.slice(tokenStart, tokenEnd);
 
   assert.match(workflow, /CRABBOX_RUNTIME_ADAPTER_TOKEN="\$runtime_token"/);
   assert.match(workflow, /CRABBOX_RUNTIME_ADAPTER_TOKEN:\s*\n\s*process\.env/);
-  assert.match(tokenSource, /env\.CRABBOX_RUNTIME_ADAPTER_TOKEN/);
-  assert.doesNotMatch(tokenSource, /CRABBOX_OPENCLAW_TOKEN|createHmac|crypto\.subtle/);
+  assert.equal(
+    runtimeAdapterToken({
+      CRABBOX_RUNTIME_ADAPTER_TOKEN: " shared-token ",
+      CRABBOX_OPENCLAW_TOKEN: "unrelated-token",
+    } as RuntimeEnv),
+    "shared-token",
+  );
 });
 
 test("production runtime adapter calls use the Crabbox service binding", async () => {
@@ -867,31 +874,24 @@ test("summary and sharing events invalidate terminal cleanup snapshots", async (
   assert.ok(metadataSource.indexOf("eventQuery") < metadataSource.indexOf("updateQuery"));
 });
 
-test("runtime adapter credentials are preflighted before session allocation", async () => {
-  const source = await readFile(new URL("../src/index.ts", import.meta.url), "utf8");
-  const createStart = source.indexOf("async function createInteractiveSessionFromInput");
-  const createEnd = source.indexOf("function initialRuntimeAdapterWorkspaceId", createStart);
-  const createSource = source.slice(createStart, createEnd);
-  const preflightStart = source.indexOf("function requireRuntimeAdapterCreatePreflight");
-  const preflightEnd = source.indexOf(
-    "async function stopSupersededRuntimeAdapterProvision",
-    preflightStart,
-  );
-  const preflightSource = source.slice(preflightStart, preflightEnd);
+test("runtime adapter credentials are preflighted before session allocation", () => {
+  const env = {
+    CRABBOX_RUNTIME_ADAPTER_URL: "https://adapter.example.test",
+  } as RuntimeEnv;
+  assert.throws(() => requireRuntimeAdapterCreatePreflight(env, "crabbox", "default"), {
+    message: "runtime adapter token is not configured",
+  });
 
-  assert.ok(
-    createSource.indexOf("requireRuntimeAdapterCreatePreflight(env, runtime, profile)") <
-      createSource.indexOf("nextInteractiveSessionId(env)"),
-  );
-  assert.ok(
-    createSource.indexOf("requireRuntimeAdapterCreatePreflight(env, runtime, profile)") <
-      createSource.indexOf('.insertInto("interactive_sessions")'),
-  );
-  assert.match(preflightSource, /runtime === "container" && env\.SANDBOX/);
-  assert.match(preflightSource, /runtimeAdapterToken\(env\)/);
-  assert.match(preflightSource, /configuredRuntimeAdapterControlPlane\(env, profile\)/);
-  assert.match(preflightSource, /runtimeAdapterControlPlaneForProfile/);
-  assert.match(preflightSource, /runtime adapter token is not configured/);
+  env.CRABBOX_RUNTIME_ADAPTER_TOKEN = " token ";
+  assert.doesNotThrow(() => requireRuntimeAdapterCreatePreflight(env, "crabbox", "default"));
+
+  env.CRABBOX_RUNTIME_ADAPTER_URL = "not-a-url";
+  assert.throws(() => requireRuntimeAdapterCreatePreflight(env, "crabbox", "default"), {
+    message: "runtime adapter URL or profile route template must be valid and unambiguous",
+  });
+
+  env.SANDBOX = {} as DurableObjectNamespace;
+  assert.doesNotThrow(() => requireRuntimeAdapterCreatePreflight(env, "container", "default"));
 });
 
 test("runtime adapter operations stay bound to the registered control plane", async () => {
@@ -900,7 +900,7 @@ test("runtime adapter operations stay bound to the registered control plane", as
     new URL("../migrations/0020_runtime_adapter_lifecycle.sql", import.meta.url),
     "utf8",
   );
-  const bindingStart = source.indexOf("function configuredRuntimeAdapterControlPlane");
+  const bindingStart = source.indexOf("function requireRegisteredRuntimeAdapterControlPlane");
   const bindingEnd = source.indexOf(
     "async function stopSupersededRuntimeAdapterProvision",
     bindingStart,
@@ -921,6 +921,15 @@ test("runtime adapter operations stay bound to the registered control plane", as
 
   assert.match(migration, /ADD COLUMN adapter_control_plane TEXT/);
   assert.match(source, /adapter_control_plane: adapterControlPlane/);
+  assert.equal(
+    configuredRuntimeAdapterControlPlane(
+      {
+        CRABBOX_RUNTIME_ADAPTER_URL: "https://adapter.example.test",
+      } as RuntimeEnv,
+      "default",
+    ),
+    "https://adapter.example.test/",
+  );
   assert.match(bindingSource, /configuredControlPlane !== registeredControlPlane/);
   assert.match(bindingSource, /configuredRuntimeAdapterControlPlane\(env, profile\)/);
   assert.match(bindingSource, /control plane differs from workspace registration/);
@@ -1850,7 +1859,7 @@ test("definitive adapter create errors retain a redacted provider reason before 
   );
   const releaseSource = source.slice(releaseStart, releaseEnd);
   const bodyStart = source.indexOf("async function readRuntimeAdapterResponseBody");
-  const bodyEnd = source.indexOf("function runtimeAdapterToken", bodyStart);
+  const bodyEnd = source.indexOf("function runtimeAdapterProviderConfigured", bodyStart);
   const bodySource = source.slice(bodyStart, bodyEnd);
 
   const bodyReadIndex = createSource.indexOf(
@@ -2083,7 +2092,7 @@ test("adapter bodies share the bounded stream reader", async () => {
     assert.doesNotMatch(operation, /response\.(?:json|text)\(/);
   }
   const readerStart = source.indexOf("async function readRuntimeAdapterResponseBody");
-  const readerEnd = source.indexOf("function runtimeAdapterToken", readerStart);
+  const readerEnd = source.indexOf("function runtimeAdapterProviderConfigured", readerStart);
   const readerSource = source.slice(readerStart, readerEnd);
   assert.match(readerSource, /readBoundedResponseText\(response\)/);
   assert.doesNotMatch(readerSource, /response\.(?:json|text)\(/);

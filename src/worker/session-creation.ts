@@ -1,3 +1,5 @@
+import type { InteractiveSession } from "./session-model.ts";
+
 export type InteractiveSessionCreationReservation = {
   id: string;
   insertedAt: number;
@@ -19,6 +21,8 @@ export type InteractiveSessionCreationStore = {
     adapterWorkspaceId: string | null,
   ): Promise<void>;
   recordRequest(insertedSessionId: string, insertedAt: number): Promise<void>;
+  isConstraintError(error: unknown): boolean;
+  readRequestReplay(requestId: string, requestHash: string): Promise<InteractiveSession | null>;
 };
 
 export class InteractiveSessionCreationService {
@@ -55,5 +59,35 @@ export class InteractiveSessionCreationService {
     }
     await this.store.recordRequest(reservation.id, reservation.insertedAt);
     return provision();
+  }
+
+  async recoverReservationFailure(
+    error: unknown,
+    context: {
+      reservationInserted: boolean;
+      attempt: number;
+      maximumAttempts: number;
+      requestId: string | null;
+      requestHash: string | null;
+    },
+  ): Promise<InteractiveSession | null> {
+    const constraintError = this.store.isConstraintError(error);
+    if (
+      !context.reservationInserted &&
+      constraintError &&
+      context.requestId &&
+      context.requestHash
+    ) {
+      const existing = await this.store.readRequestReplay(context.requestId, context.requestHash);
+      if (existing) return existing;
+    }
+    if (
+      context.reservationInserted ||
+      !constraintError ||
+      context.attempt === context.maximumAttempts - 1
+    ) {
+      throw error;
+    }
+    return null;
   }
 }

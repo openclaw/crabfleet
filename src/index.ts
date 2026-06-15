@@ -82,7 +82,6 @@ import {
   redactedAdapterResponseMessage,
   runtimeAdapterCreatePayload,
   runtimeAdapterCollectionUrl,
-  runtimeAdapterControlPlaneForProfile,
   runtimeAdapterControlPlaneIdentity,
   runtimeAdapterBrowserVncUrl,
   runtimeAdapterDesktopUrl,
@@ -258,6 +257,18 @@ import {
   InteractiveSessionCreationService,
   type InteractiveSessionCreationStore,
 } from "./worker/session-creation";
+import {
+  insertInteractiveSessionReservation,
+  readVisibleInteractiveSessionRow,
+  readVisibleInteractiveSessionRows,
+  type InteractiveSessionReservationValues,
+} from "./worker/session-repository";
+import {
+  configuredRuntimeAdapterControlPlane,
+  requireRuntimeAdapterCreatePreflight,
+  runtimeAdapterConfigurationPresent,
+  runtimeAdapterToken,
+} from "./worker/runtime-adapter-preflight";
 
 const defaultInteractiveCommand = "codex --yolo";
 
@@ -3761,7 +3772,7 @@ async function createInteractiveSessionFromInput(
       ? JSON.stringify(adapterCreatePayload)
       : null;
     try {
-      const insertSession = db.insertInto("interactive_sessions").values({
+      const reservationValues: InteractiveSessionReservationValues = {
         id,
         parent_session_id: lineage.parentSessionId,
         root_session_id: rootSessionId,
@@ -3825,20 +3836,16 @@ async function createInteractiveSessionFromInput(
         codex_turn_id: null,
         last_heartbeat_at: null,
         completion_reason: null,
-      });
+      };
       if (options.openClawRequestId && options.openClawRequestHash) {
-        await executeBatch(env, [
-          db.insertInto("openclaw_request_replays").values({
-            request_id: options.openClawRequestId,
-            request_hash: options.openClawRequestHash,
-            session_id: id,
-            created_at: now,
-            updated_at: now,
-          }),
-          insertSession,
-        ]);
+        await insertInteractiveSessionReservation(env, reservationValues, {
+          requestId: options.openClawRequestId,
+          requestHash: options.openClawRequestHash,
+          sessionId: id,
+          createdAt: now,
+        });
       } else {
-        await insertSession.execute();
+        await insertInteractiveSessionReservation(env, reservationValues, null);
       }
       reservationInserted = true;
       const provisioned = await creation.provision(
@@ -4017,20 +4024,14 @@ async function createInteractiveSessionFromInput(
         ),
       };
     } catch (error) {
-      if (
-        !reservationInserted &&
-        isConstraintError(error) &&
-        options.openClawRequestId &&
-        options.openClawRequestHash
-      ) {
-        const existing = await readOpenClawRequestSession(
-          env,
-          options.openClawRequestId,
-          options.openClawRequestHash,
-        );
-        if (existing) return { session: decorateInteractiveSession(existing, user, env) };
-      }
-      if (reservationInserted || !isConstraintError(error) || attempt === 2) throw error;
+      const replay = await creation.recoverReservationFailure(error, {
+        reservationInserted,
+        attempt,
+        maximumAttempts: 3,
+        requestId: options.openClawRequestId ?? null,
+        requestHash: options.openClawRequestHash ?? null,
+      });
+      if (replay) return { session: replay };
     }
   }
   throw new Error("failed to allocate interactive session id");
@@ -4053,34 +4054,6 @@ function initialRuntimeAdapterWorkspaceId(
   const adapterWorkspaceId = namespacedAdapterWorkspaceId(namespace, sessionId);
   if (!adapterWorkspaceId) throw serviceUnavailable("runtime adapter workspace id is invalid");
   return adapterWorkspaceId;
-}
-
-function requireRuntimeAdapterCreatePreflight(
-  env: RuntimeEnv,
-  runtime: "crabbox" | "container",
-  profile: string,
-): void {
-  if (!runtimeAdapterConfigurationPresent(env) || (runtime === "container" && env.SANDBOX)) return;
-  if (!configuredRuntimeAdapterControlPlane(env, profile)) {
-    throw serviceUnavailable(
-      "runtime adapter URL or profile route template must be valid and unambiguous",
-    );
-  }
-  if (!runtimeAdapterToken(env)) {
-    throw serviceUnavailable("runtime adapter token is not configured");
-  }
-}
-
-function runtimeAdapterConfigurationPresent(env: RuntimeEnv): boolean {
-  return Boolean(env.CRABBOX_RUNTIME_ADAPTER_URL || env.CRABBOX_RUNTIME_ADAPTER_URL_TEMPLATE);
-}
-
-function configuredRuntimeAdapterControlPlane(env: RuntimeEnv, profile: string): string | null {
-  return runtimeAdapterControlPlaneForProfile(
-    env.CRABBOX_RUNTIME_ADAPTER_URL,
-    env.CRABBOX_RUNTIME_ADAPTER_URL_TEMPLATE,
-    profile,
-  );
 }
 
 function requireRegisteredRuntimeAdapterControlPlane(
@@ -4328,6 +4301,11 @@ function interactiveSessionCreationService(
         "interactive workspace requested",
         insertedAt,
       ),
+    isConstraintError,
+    readRequestReplay: async (requestId, requestHash) => {
+      const session = await readOpenClawRequestSession(env, requestId, requestHash);
+      return session ? decorateInteractiveSession(session, user, env) : null;
+    },
   };
   return new InteractiveSessionCreationService(store);
 }
@@ -12012,10 +11990,6 @@ async function readRuntimeAdapterResponseBody(response: Response): Promise<unkno
   }
 }
 
-function runtimeAdapterToken(env: RuntimeEnv): string {
-  return clean(env.CRABBOX_RUNTIME_ADAPTER_TOKEN, 4000);
-}
-
 function runtimeAdapterProviderConfigured(env: RuntimeEnv): boolean {
   return Boolean(
     configuredRuntimeAdapterControlPlane(env, "profile-route") && runtimeAdapterToken(env),
@@ -12981,13 +12955,7 @@ async function readRunsForCard(env: RuntimeEnv, cardId: string): Promise<RunAtte
 }
 
 async function readInteractiveSessions(env: RuntimeEnv, user: User): Promise<InteractiveSession[]> {
-  const rows = await database(env)
-    .selectFrom("interactive_sessions")
-    .selectAll()
-    .where("preparation_pending", "=", 0)
-    .orderBy("updated_at", "desc")
-    .limit(80)
-    .execute();
+  const rows = await readVisibleInteractiveSessionRows(env);
   if (!rows.length) return [];
   const logs = await readInteractiveSessionLogs(
     env,
@@ -13010,12 +12978,7 @@ async function readInteractiveSession(
   env: RuntimeEnv,
   id: string,
 ): Promise<InteractiveSession | null> {
-  const row = await database(env)
-    .selectFrom("interactive_sessions")
-    .selectAll()
-    .where("id", "=", id)
-    .where("preparation_pending", "=", 0)
-    .executeTakeFirst();
+  const row = await readVisibleInteractiveSessionRow(env, id);
   if (!row) return null;
   const logs = await readInteractiveSessionLogs(env, [id]);
   const archives = await readInteractiveSessionLogArchives(env, [id]);

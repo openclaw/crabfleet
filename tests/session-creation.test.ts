@@ -6,6 +6,9 @@ import {
   type InteractiveSessionCreationReservation,
   type InteractiveSessionCreationStore,
 } from "../src/worker/session-creation.ts";
+import type { InteractiveSession } from "../src/worker/session-model.ts";
+import { interactiveSession } from "../src/worker/session-model.ts";
+import { sessionRow } from "./helpers/session-row.ts";
 
 const reservation: InteractiveSessionCreationReservation = {
   id: "IS-2",
@@ -23,8 +26,14 @@ function creationStore(
     rollbackReservation: async () => undefined,
     activateReservation: async () => undefined,
     recordRequest: async () => undefined,
+    isConstraintError: () => false,
+    readRequestReplay: async () => null,
     ...overrides,
   };
+}
+
+function session(values: Parameters<typeof sessionRow>[0] = {}): InteractiveSession {
+  return interactiveSession(sessionRow(values), []);
 }
 
 test("session creation orders supervision, preparation, activation, evidence, and provisioning", async () => {
@@ -129,4 +138,65 @@ test("session creation skips optional supervision, preparation, and activation",
     },
   );
   assert.deepEqual(calls, ["record", "provision"]);
+});
+
+test("session creation recovers an idempotent replay after a reservation race", async () => {
+  const replay = session({ id: "IS-9" });
+  const service = new InteractiveSessionCreationService(
+    creationStore({
+      isConstraintError: () => true,
+      readRequestReplay: async (requestId, requestHash) => {
+        assert.equal(requestId, "request-1");
+        assert.equal(requestHash, "hash-1");
+        return replay;
+      },
+    }),
+  );
+
+  assert.equal(
+    await service.recoverReservationFailure(new Error("unique"), {
+      reservationInserted: false,
+      attempt: 0,
+      maximumAttempts: 3,
+      requestId: "request-1",
+      requestHash: "hash-1",
+    }),
+    replay,
+  );
+});
+
+test("session creation retries only unowned constraint failures before the final attempt", async () => {
+  const constraint = new Error("unique");
+  const service = new InteractiveSessionCreationService(
+    creationStore({
+      isConstraintError: (error) => error === constraint,
+    }),
+  );
+  const context = {
+    reservationInserted: false,
+    attempt: 0,
+    maximumAttempts: 3,
+    requestId: null,
+    requestHash: null,
+  };
+
+  assert.equal(await service.recoverReservationFailure(constraint, context), null);
+  await assert.rejects(
+    service.recoverReservationFailure(constraint, {
+      ...context,
+      reservationInserted: true,
+    }),
+    constraint,
+  );
+  await assert.rejects(
+    service.recoverReservationFailure(constraint, {
+      ...context,
+      attempt: 2,
+    }),
+    constraint,
+  );
+  await assert.rejects(
+    service.recoverReservationFailure(new Error("provider"), context),
+    /provider/,
+  );
 });
