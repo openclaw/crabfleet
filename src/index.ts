@@ -143,7 +143,6 @@ import {
   type CompilableQuery,
   type Database,
   type InteractiveSessionCredentialPolicyTable,
-  type InteractiveSessionLogArchiveTable,
   type InteractiveSessionRow,
   type RepoWorkflowTable,
   type RunAttemptTable,
@@ -290,12 +289,9 @@ import {
   canManageInteractiveSession,
 } from "./worker/session-access";
 import { presentInteractiveSession } from "./worker/session-presentation";
-import {
-  archiveInteractiveSessionLogs,
-  cleanupSessionLogArchiveObjects,
-  sessionLogTranscript,
-} from "./worker/session-log-archive";
+import { archiveInteractiveSessionLogs, sessionLogTranscript } from "./worker/session-log-archive";
 import { appendInteractiveSessionEventRecord } from "./worker/session-events";
+import { createInteractiveSessionCleanupService } from "./worker/session-cleanup";
 import { finalizeTerminalInteractiveSession } from "./worker/session-terminal-finalization";
 import {
   InteractiveSessionMetadataService,
@@ -648,7 +644,6 @@ const runtimeAdapterReconcileConcurrency = 3;
 const runtimeAdapterReconcileForegroundBudgetMs = 750;
 const openClawPreparationTimeoutMs = 60_000;
 const interactiveSessionPreparationStaleMs = 5 * 60_000;
-const terminalCleanupDeletePending = 2;
 const credentialPolicyCleanupLimit = 8;
 const credentialPolicyScanLimit = 32;
 const credentialPolicyCleanupClaimMs = 30_000;
@@ -4144,204 +4139,14 @@ async function cleanupInteractiveSessions(
   const ids = Array.isArray(body.ids)
     ? [...new Set(body.ids.map((id) => clean(String(id), 80)).filter(Boolean))]
     : [];
-  const db = database(env);
-  let query = db
-    .selectFrom("interactive_sessions")
-    .selectAll()
-    .where("status", "in", deadInteractiveSessionStatuses)
-    .where("terminal_finalize_pending", "=", 0).where(sql<boolean>`
-      NOT EXISTS (
-        SELECT 1
-        FROM interactive_session_credential_policies AS policy
-        WHERE policy.session_id = interactive_sessions.id
-      )
-    `).where(sql<boolean>`
-      COALESCE(
-        (
-          SELECT event_count
-          FROM interactive_session_log_archives AS archive
-          WHERE archive.session_id = interactive_sessions.id
-        ),
-        -1
-      ) >= (
-        SELECT count(*)
-        FROM interactive_session_events AS event
-        WHERE event.session_id = interactive_sessions.id
-      )
-    `).where(sql<boolean>`
-      EXISTS (
-        SELECT 1
-        FROM interactive_session_log_archives AS archive
-        WHERE archive.session_id = interactive_sessions.id
-          AND archive.session_updated_at = interactive_sessions.updated_at
-      )
-    `).where(sql<boolean>`
-      NOT EXISTS (
-        WITH RECURSIVE active_ancestor(id) AS (
-          SELECT parent_session_id
-          FROM interactive_sessions
-          WHERE status NOT IN ('stopped', 'expired', 'failed')
-            AND parent_session_id IS NOT NULL
-          UNION
-          SELECT session.parent_session_id
-          FROM interactive_sessions AS session
-          JOIN active_ancestor ON session.id = active_ancestor.id
-          WHERE session.parent_session_id IS NOT NULL
-        )
-        SELECT 1
-        FROM active_ancestor
-        WHERE id = interactive_sessions.id
-      )
-    `).where(sql<boolean>`
-      ${env.SESSION_LOGS ? 1 : 0} = 0
-      OR EXISTS (
-        SELECT 1
-        FROM interactive_session_log_archives AS archive
-        WHERE archive.session_id = interactive_sessions.id
-          AND archive.events_key IS NOT NULL
-          AND archive.transcript_key IS NOT NULL
-          AND archive.summary_key IS NOT NULL
-      )
-    `);
-  if (ids.length) query = query.where("id", "in", ids);
-  const candidates = (await query.execute()).filter((row) =>
+  const cleanup = createInteractiveSessionCleanupService(env);
+  const removedIds = await cleanup.cleanup(ids, (row) =>
     canManageInteractiveSession(user, interactiveSession(row, [])),
   );
-  const removedIds = (
-    await Promise.all(
-      candidates.map(async (row) => {
-        const archive = await db
-          .selectFrom("interactive_session_log_archives")
-          .selectAll()
-          .where("session_id", "=", row.id)
-          .executeTakeFirst();
-        const removed = await deleteFinalizedInteractiveSession(env, row, archive);
-        if (!removed) return null;
-        await cleanupSessionLogArchiveObjects(env, archive).catch((error) => {
-          console.error(`session archive object cleanup leaked for ${row.id}`, error);
-        });
-        return row.id;
-      }),
-    )
-  ).filter((id): id is string => Boolean(id));
   if (removedIds.length) {
     await audit(env, user, `interactive sessions cleaned ${removedIds.join(",")}`, Date.now());
   }
   return { state: await readState(request, env, user), removedIds };
-}
-
-async function deleteFinalizedInteractiveSession(
-  env: RuntimeEnv,
-  row: InteractiveSessionRow,
-  archive: Selectable<InteractiveSessionLogArchiveTable> | undefined,
-): Promise<boolean> {
-  const db = database(env);
-  const claimToken = `cleanup:${crypto.randomUUID()}`;
-  const finalClaim = db
-    .updateTable("interactive_sessions")
-    .set({
-      terminal_finalize_pending: terminalCleanupDeletePending,
-      reconcile_error: claimToken,
-    })
-    .where("id", "=", row.id)
-    .where("status", "=", row.status)
-    .where("updated_at", "=", row.updated_at)
-    .where("terminal_finalize_pending", "=", 0).where(sql<boolean>`
-      NOT EXISTS (
-        SELECT 1
-        FROM interactive_session_credential_policies
-        WHERE session_id = ${row.id}
-      )
-    `).where(sql<boolean>`
-      NOT EXISTS (
-        WITH RECURSIVE active_ancestor(id) AS (
-          SELECT parent_session_id
-          FROM interactive_sessions
-          WHERE status NOT IN ('stopped', 'expired', 'failed')
-            AND parent_session_id IS NOT NULL
-          UNION
-          SELECT session.parent_session_id
-          FROM interactive_sessions AS session
-          JOIN active_ancestor ON session.id = active_ancestor.id
-          WHERE session.parent_session_id IS NOT NULL
-        )
-        SELECT 1
-        FROM active_ancestor
-        WHERE id = ${row.id}
-      )
-    `).where(sql<boolean>`
-      ${archive ? 1 : 0} = 1
-        AND EXISTS (
-          SELECT 1
-          FROM interactive_session_log_archives
-          WHERE session_id = ${row.id}
-            AND event_count = ${archive?.event_count ?? -1}
-            AND session_updated_at IS ${archive?.session_updated_at ?? null}
-            AND session_updated_at = ${row.updated_at}
-            AND events_key IS ${archive?.events_key ?? null}
-            AND transcript_key IS ${archive?.transcript_key ?? null}
-            AND summary_key IS ${archive?.summary_key ?? null}
-            AND archived_at = ${archive?.archived_at ?? -1}
-            AND updated_at = ${archive?.updated_at ?? -1}
-        )
-    `).where(sql<boolean>`
-      COALESCE(
-        (
-          SELECT event_count
-          FROM interactive_session_log_archives
-          WHERE session_id = ${row.id}
-        ),
-        -1
-      ) >= (
-        SELECT count(*)
-        FROM interactive_session_events
-        WHERE session_id = ${row.id}
-      )
-    `).where(sql<boolean>`
-      ${env.SESSION_LOGS ? 1 : 0} = 0
-      OR EXISTS (
-        SELECT 1
-        FROM interactive_session_log_archives
-        WHERE session_id = ${row.id}
-          AND events_key IS NOT NULL
-          AND transcript_key IS NOT NULL
-          AND summary_key IS NOT NULL
-      )
-    `);
-  const ownsFinalClaim = sql<boolean>`EXISTS (
-    SELECT 1
-    FROM interactive_sessions
-    WHERE id = ${row.id}
-      AND status = ${row.status}
-      AND updated_at = ${row.updated_at}
-      AND terminal_finalize_pending = ${terminalCleanupDeletePending}
-      AND reconcile_error = ${claimToken}
-  )`;
-  // D1 batches are transactional, so no event can interleave between the claim and row deletes.
-  await executeBatch(env, [
-    finalClaim,
-    db
-      .deleteFrom("interactive_session_events")
-      .where("session_id", "=", row.id)
-      .where(ownsFinalClaim),
-    db
-      .deleteFrom("interactive_session_log_archives")
-      .where("session_id", "=", row.id)
-      .where(ownsFinalClaim),
-    db
-      .deleteFrom("interactive_sessions")
-      .where("id", "=", row.id)
-      .where("status", "=", row.status)
-      .where("updated_at", "=", row.updated_at)
-      .where("terminal_finalize_pending", "=", terminalCleanupDeletePending)
-      .where("reconcile_error", "=", claimToken),
-  ]);
-  const current = await db
-    .selectFrom("interactive_sessions")
-    .select("id")
-    .where("id", "=", row.id)
-    .executeTakeFirst();
-  return !current;
 }
 
 async function mutateInteractiveSessionWithEventAtomically(

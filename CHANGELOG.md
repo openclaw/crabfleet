@@ -28,6 +28,7 @@
 - Extract interactive-session capability, control, provider redaction, desktop, and Codex SSH presentation policy behind direct tests.
 - Move terminal completion evidence, archive freshness checks, and finalization-marker persistence into one lifecycle module.
 - Unify session event batching, message bounds, finalization invalidation, and best-effort archive refresh behind one service.
+- Extract finalized-session admission, fenced transactional deletion, authorization filtering, and archive-object cleanup behind one service.
 - Centralize OpenClaw room visibility, log-free summaries, and bounded transcript sentinel/truncation policy behind direct query tests.
 - Isolate OpenClaw recursive root-stop admission, reservation cleanup, lifecycle retries, reconciliation, and stable-completion polling behind a directly tested service.
 - Extract OpenClaw root-scoped authorization, lineage supervision, reservation outcomes, rollback, and activation orchestration into a directly tested service boundary.

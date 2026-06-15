@@ -599,7 +599,6 @@ test("terminal archive finalization remains durably retryable", async () => {
 
   assert.match(source, /expression\("terminal_finalize_pending", "=", 1\)/);
   assert.match(source, /row\.terminal_finalize_pending === 1/);
-  assert.match(source, /const terminalCleanupDeletePending = 2/);
   assert.match(finalizationSource, /completeTerminalFinalization/);
   assert.match(finalizationSource, /SET terminal_finalize_pending = 0/);
   assert.match(archiveSource, /interactive_session_log_archives\.events_key IS NULL/);
@@ -802,8 +801,7 @@ test("production runtime adapter calls use the Crabbox service binding", async (
   assert.match(lifecycleSource, /fetcher\.fetch\(target/);
 });
 
-test("strict session rows and cleanup preserve terminal finalization anchors", async () => {
-  const source = await readFile(new URL("../src/index.ts", import.meta.url), "utf8");
+test("session events and terminal finalization preserve archive anchors", async () => {
   const eventSource = await readFile(
     new URL("../src/worker/session-events.ts", import.meta.url),
     "utf8",
@@ -812,43 +810,15 @@ test("strict session rows and cleanup preserve terminal finalization anchors", a
     new URL("../src/worker/session-terminal-finalization.ts", import.meta.url),
     "utf8",
   );
-  const cleanupStart = source.indexOf("async function cleanupInteractiveSessions");
-  const cleanupEnd = source.indexOf("async function mutateInteractiveSession", cleanupStart);
-  const cleanupSource = source.slice(cleanupStart, cleanupEnd);
 
-  assert.match(cleanupSource, /where\("terminal_finalize_pending", "=", 0\)/);
-  assert.match(cleanupSource, /deleteFinalizedInteractiveSession\(env, row, archive\)/);
-  assert.match(cleanupSource, /terminalCleanupDeletePending/);
-  assert.match(cleanupSource, /updated_at", "=", row\.updated_at/);
-  assert.match(cleanupSource, /executeBatch\(env, \[/);
-  const archiveIndex = cleanupSource.indexOf('.selectFrom("interactive_session_log_archives")');
-  const deleteIndex = cleanupSource.indexOf("deleteFinalizedInteractiveSession(env, row, archive)");
-  const objectCleanupIndex = cleanupSource.indexOf("cleanupSessionLogArchiveObjects(env, archive)");
-  assert.ok(archiveIndex >= 0 && deleteIndex > archiveIndex && objectCleanupIndex > deleteIndex);
-  assert.match(cleanupSource, /session archive object cleanup leaked/);
-  assert.match(cleanupSource, /events_key IS \$\{archive\?\.events_key/);
-  assert.match(cleanupSource, /transcript_key IS \$\{archive\?\.transcript_key/);
-  assert.match(cleanupSource, /summary_key IS \$\{archive\?\.summary_key/);
-  assert.match(cleanupSource, /deleteFrom\("interactive_session_events"\)/);
-  assert.match(cleanupSource, /deleteFrom\("interactive_session_log_archives"\)/);
-  assert.match(cleanupSource, /deleteFrom\("interactive_sessions"\)/);
-  assert.match(cleanupSource, /FROM interactive_session_credential_policies/);
-  assert.equal(cleanupSource.match(/WITH RECURSIVE active_ancestor\(id\)/g)?.length, 2);
-  assert.match(cleanupSource, /SELECT parent_session_id[\s\S]*FROM interactive_sessions/);
-  assert.match(cleanupSource, /JOIN active_ancestor ON session\.id = active_ancestor\.id/);
-  assert.match(cleanupSource, /WHERE id = interactive_sessions\.id/);
-  assert.match(cleanupSource, /WHERE id = \$\{row\.id\}/);
   assert.match(eventSource, /terminalFinalizationPendingQuery/);
   assert.match(eventSource, /executeBatch\(env, \[[\s\S]*interactive_session_events/);
   assert.match(finalizationSource, /COALESCE\([\s\S]*event_count[\s\S]*count\(\*\)/);
   assert.match(finalizationSource, /events_key IS NOT NULL/);
 });
 
-test("summary events invalidate terminal cleanup snapshots", async () => {
+test("summary events update metadata and refresh archive snapshots", async () => {
   const source = await readFile(new URL("../src/index.ts", import.meta.url), "utf8");
-  const cleanupStart = source.indexOf("async function deleteFinalizedInteractiveSession");
-  const cleanupEnd = source.indexOf("async function mutateInteractiveSession", cleanupStart);
-  const cleanupSource = source.slice(cleanupStart, cleanupEnd);
   const summaryStart = source.indexOf("async function updateInteractiveSessionSummary");
   const summaryEnd = source.indexOf("async function updateGitHubActionsWorkState", summaryStart);
   const summarySource = source.slice(summaryStart, summaryEnd);
@@ -858,11 +828,6 @@ test("summary events invalidate terminal cleanup snapshots", async () => {
   const metadataEnd = source.indexOf("async function mutateInteractiveSession(", metadataStart);
   const metadataSource = source.slice(metadataStart, metadataEnd);
 
-  assert.match(cleanupSource, /where\("updated_at", "=", row\.updated_at\)/);
-  assert.match(cleanupSource, /terminal_finalize_pending: terminalCleanupDeletePending/);
-  assert.match(cleanupSource, /event_count = \$\{archive\?\.event_count/);
-  assert.match(cleanupSource, /archived_at = \$\{archive\?\.archived_at/);
-  assert.match(cleanupSource, /count\(\*\)/);
   assert.match(summarySource, /mutateInteractiveSessionWithEventAtomically/);
   assert.match(metadataSource, /persistInteractiveSessionEventMutation/);
   assert.match(metadataSource, /archiveInteractiveSessionLogs/);
