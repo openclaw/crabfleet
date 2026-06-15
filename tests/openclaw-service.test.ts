@@ -251,19 +251,24 @@ test("OpenClaw target authorization precedes targeted reconciliation", async () 
 });
 
 test("OpenClaw embed ticket minting stays root fenced and terminal scoped", async () => {
-	const source = await readFile(new URL("../src/index.ts", import.meta.url), "utf8");
+  const source = await readFile(new URL("../src/index.ts", import.meta.url), "utf8");
 	const start = source.indexOf("async function openClawCreateCrabboxEmbedTicket");
 	const end = source.indexOf("async function openClawRootScopedCrabbox", start);
 	const mintSource = source.slice(start, end);
 	const inputStart = source.indexOf("function terminalInputGrant");
 	const inputEnd = source.indexOf("function terminalSubscriptionReconciler", inputStart);
-	const inputSource = source.slice(inputStart, inputEnd);
+  const inputSource = source.slice(inputStart, inputEnd);
+  const secretStart = source.indexOf("function openClawEmbedTicketSecret");
+  const secretEnd = source.indexOf("function requireOpenClawServiceToken", secretStart);
+  const secretSource = source.slice(secretStart, secretEnd);
 
-	assert.match(mintSource, /requireOpenClawRoomService/);
+  assert.match(mintSource, /requireOpenClawRoomService/);
 	assert.match(mintSource, /openClawRootScopedCrabbox\(request, env, id, body\.rootSessionId\)/);
 	assert.match(mintSource, /createOpenClawEmbedTicket/);
-	assert.match(mintSource, /session does not advertise terminal access/);
-	assert.match(inputSource, /canControlEmbeddedTerminalRequest/);
+  assert.match(mintSource, /session does not advertise terminal access/);
+  assert.match(inputSource, /canControlEmbeddedTerminalRequest/);
+  assert.match(secretSource, /CRABBOX_EMBED_TICKET_SECRET/);
+  assert.doesNotMatch(secretSource, /CRABBOX_MULTICODEX_TOKEN|CRABBOX_OPENCLAW_TOKEN/);
 });
 
 test("interactive lineage rejects caller-claimed roots without a parent", async () => {

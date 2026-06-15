@@ -623,7 +623,9 @@ Embed-ticket bodies require `rootSessionId` and may include `ttlSeconds`.
 Lifetimes default to one hour and are clamped between one minute and four
 hours. The returned signed bearer is scoped to one terminal session and never
 exposes the room service credential. It cannot read fleet state, manage the
-session, paste files, or access sibling sessions.
+session, paste files, or access sibling sessions. Ticket signing requires the
+Crabfleet-only `CRABBOX_EMBED_TICKET_SECRET`; room-service consumers must never
+receive that signing secret.
 
 Message request:
 

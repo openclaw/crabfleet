@@ -234,6 +234,7 @@ type RuntimeEnv = Env & {
   CRABFLEET_SSH_GATEWAY_TOKEN?: string;
   CRABBOX_OPENCLAW_TOKEN?: string;
   CRABBOX_MULTICODEX_TOKEN?: string;
+  CRABBOX_EMBED_TICKET_SECRET?: string;
   CRABBOX_TOKEN_ENCRYPTION_KEY?: string;
   BACKUP_BUCKET_NAME?: string;
   CLOUDFLARE_ACCOUNT_ID?: string;
@@ -4273,7 +4274,7 @@ function requireOpenClawRoomService(request: Request, env: RuntimeEnv): void {
 }
 
 function openClawEmbedTicketSecret(env: RuntimeEnv): string {
-	return env.CRABBOX_MULTICODEX_TOKEN || env.CRABBOX_OPENCLAW_TOKEN || "";
+  return env.CRABBOX_EMBED_TICKET_SECRET || "";
 }
 
 function requireOpenClawServiceToken(
