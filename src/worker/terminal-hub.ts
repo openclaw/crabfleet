@@ -49,7 +49,11 @@ export type TerminalHubDependencies = {
     user: User | null,
     session: InteractiveSession,
   ): Promise<boolean>;
-  inputGrant(user: User | null, session: InteractiveSession): () => Promise<boolean>;
+  inputGrant(
+    request: Request,
+    user: User | null,
+    session: InteractiveSession,
+  ): () => Promise<boolean>;
   viewGrant(
     request: Request,
     user: User | null,
@@ -325,7 +329,7 @@ export class TerminalHub {
     }
 
     try {
-      const canInput = this.dependencies.inputGrant(user, session);
+      const canInput = this.dependencies.inputGrant(request, user, session);
       const canInputNow = await canInput();
       const canView = this.dependencies.viewGrant(request, user, session);
       const reconcileSubscription = this.dependencies.reconcileSubscription(id);

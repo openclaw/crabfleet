@@ -67,3 +67,41 @@ test("shared session policy removes expired delegated control", () => {
   assert.equal(shared.controlGrantedAt, null);
   assert.equal(shared.controlExpiresAt, null);
 });
+
+test("embedded session policy grants scoped terminal control without provider authority", () => {
+  const session = interactiveSession(
+    sessionRow({
+      status: "ready",
+      adapter: "runtime-v1",
+      adapter_workspace_id: "workspace-2",
+      attach_url: "wss://adapter.example/pty",
+    }),
+    [],
+  );
+  const embedded = sharedInteractiveSession(session, 100, {
+    canControl: true,
+    terminalRouteAvailable: true,
+  });
+
+  assert.equal(embedded.canControl, true);
+  assert.equal(embedded.sharedReadOnly, false);
+  assert.equal(embedded.ptyAvailable, true);
+  assert.equal(embedded.attachUrl, null);
+  assert.equal(embedded.adapter, null);
+  assert.equal(embedded.adapterWorkspaceId, null);
+
+  assert.equal(
+    sharedInteractiveSession({ ...session, status: "stopping" }, 100, {
+      canControl: true,
+      terminalRouteAvailable: true,
+    }).ptyAvailable,
+    false,
+  );
+  assert.equal(
+    sharedInteractiveSession(session, 100, {
+      canControl: true,
+      terminalRouteAvailable: false,
+    }).ptyAvailable,
+    false,
+  );
+});

@@ -1,4 +1,5 @@
 import { ptyRouteKind, type PtyRouteKind } from "../fleet-state.ts";
+import { githubActionsRuntime } from "../github-actions-runtime.ts";
 import {
   runtimeAdapterName,
   runtimeAdapterTerminalOriginMatches,
@@ -68,6 +69,17 @@ export function interactivePtyRouteKind(
   return ptyRouteKind(session, {
     sandboxAvailable: Boolean(env.SANDBOX),
   });
+}
+
+export function interactiveTerminalRouteAvailable(
+  env: RuntimeEnv,
+  session: InteractiveSession,
+): boolean {
+  if (session.runtime === githubActionsRuntime) return true;
+  const routeKind = interactivePtyRouteKind(env, session);
+  return routeKind === "sandbox"
+    ? Boolean(env.SANDBOX)
+    : Boolean(interactiveTerminalTarget(env, session, routeKind));
 }
 
 export function interactiveTerminalHeaders(

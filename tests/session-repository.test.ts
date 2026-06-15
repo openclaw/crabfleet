@@ -16,7 +16,7 @@ import {
   readInteractiveSessionLogs,
   readInteractiveSessionRecord,
   readInteractiveSessionRecords,
-  readSharedInteractiveSessionRow,
+  readInteractiveSessionShareCredential,
   readInteractiveSessionTerminalCleanupIntent,
   readRuntimeAdapterCreatePending,
   readVisibleInteractiveSessionRow,
@@ -173,23 +173,28 @@ test("agent credential reads require visible sessions and preserve token hashes"
   assert.equal(await readAgentSessionCredential(env, "IS-3"), null);
 });
 
-test("shared session reads require visible link-read rows", async () => {
+test("shared session credentials preserve private rows for signed embeds", async () => {
   const row = sessionRow({
     id: "IS-2",
     preparation_pending: 0,
-    share_mode: "link_read",
     share_token_hash: "hash",
   });
   const env = runtimeEnv((sql, parameters, kind) => {
     assert.equal(kind, "all");
-    assert.match(sql, /from "interactive_sessions"/i);
-    assert.match(sql, /"preparation_pending" =/i);
-    assert.match(sql, /"share_mode" =/i);
-    assert.deepEqual(parameters, ["IS-2", 0, "link_read"]);
-    return { results: [row] };
+    if (/from "interactive_sessions"/i.test(sql)) {
+      assert.match(sql, /"preparation_pending" =/i);
+      assert.deepEqual(parameters, ["IS-2", 0]);
+      return { results: [row] };
+    }
+    if (/from interactive_session_events/i.test(sql)) return { results: [] };
+    if (/from "interactive_session_log_archives"/i.test(sql)) return { results: [] };
+    throw new Error(`unexpected query: ${sql}`);
   });
 
-  assert.equal((await readSharedInteractiveSessionRow(env, "IS-2"))?.share_token_hash, "hash");
+  const credential = await readInteractiveSessionShareCredential(env, "IS-2");
+  assert.equal(credential?.session.id, "IS-2");
+  assert.equal(credential?.session.shareMode, "private");
+  assert.equal(credential?.tokenHash, "hash");
 });
 
 test("session aggregates combine rows, recent logs, and archive metadata", async () => {

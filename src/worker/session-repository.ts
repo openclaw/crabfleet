@@ -30,6 +30,11 @@ export type InteractiveSessionReplayReservation = {
   createdAt: number;
 };
 
+export type InteractiveSessionShareCredential = {
+  session: InteractiveSession;
+  tokenHash: string | null;
+};
+
 export type InteractiveSessionReservationValues = Insertable<InteractiveSessionTable>;
 
 export type InteractiveSessionReservationBuildInput = {
@@ -161,19 +166,20 @@ export async function readVisibleInteractiveSessionRow(
   );
 }
 
-export async function readSharedInteractiveSessionRow(
+export async function readInteractiveSessionShareCredential(
   env: RuntimeEnv,
   id: string,
-): Promise<InteractiveSessionRow | null> {
-  return (
-    (await database(env)
-      .selectFrom("interactive_sessions")
-      .selectAll()
-      .where("id", "=", id)
-      .where("preparation_pending", "=", 0)
-      .where("share_mode", "=", "link_read")
-      .executeTakeFirst()) ?? null
-  );
+): Promise<InteractiveSessionShareCredential | null> {
+  const row = await readVisibleInteractiveSessionRow(env, id);
+  if (!row) return null;
+  const [logs, archives] = await Promise.all([
+    readInteractiveSessionLogs(env, [id]),
+    readInteractiveSessionLogArchives(env, [id]),
+  ]);
+  return {
+    session: interactiveSession(row, logs.get(id) ?? [], archives.get(id) ?? null),
+    tokenHash: row.share_token_hash,
+  };
 }
 
 export async function readInteractiveSessionRecords(

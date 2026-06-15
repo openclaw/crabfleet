@@ -1,7 +1,11 @@
 import { openClawServiceAuthorized } from "../../openclaw-service.ts";
 import type { GitHubActionsSessionRegistrationInput } from "../github-actions-session-registration.ts";
 import { badRequest, json, readJson, serviceUnavailable, unauthorized } from "../http.ts";
-import type { OpenClawController, OpenClawMessageInput } from "../openclaw-controller.ts";
+import type {
+  OpenClawController,
+  OpenClawEmbedTicketInput,
+  OpenClawMessageInput,
+} from "../openclaw-controller.ts";
 import type { OpenClawCreateInput } from "../openclaw-create.ts";
 
 export type OpenClawRouteDependencies = {
@@ -92,6 +96,22 @@ export async function handleOpenClawRoute(
         decodedIdentifier(crabboxActionMatch[1]),
         requiredRootSessionId(request, body.rootSessionId),
       ),
+    );
+  }
+
+  const crabboxEmbedTicketMatch = url.pathname.match(
+    /^\/api\/openclaw\/crabboxes\/([^/]+)\/embed-ticket$/,
+  );
+  if (request.method === "POST" && crabboxEmbedTicketMatch) {
+    requireServiceToken(request, dependencies.roomTokens);
+    const body = await readJson<OpenClawEmbedTicketInput & { rootSessionId?: unknown }>(request);
+    return json(
+      await dependencies.controller.createCrabboxEmbedTicket(
+        decodedIdentifier(crabboxEmbedTicketMatch[1]),
+        requiredRootSessionId(request, body.rootSessionId),
+        body,
+      ),
+      { status: 201 },
     );
   }
 

@@ -5,6 +5,7 @@ import type { RuntimeEnv } from "../src/worker/env.ts";
 import {
   interactivePtyRouteKind,
   interactiveTerminalHeaders,
+  interactiveTerminalRouteAvailable,
   interactiveTerminalTarget,
   runtimeAdapterTerminalAuthorization,
 } from "../src/worker/session-terminal-route.ts";
@@ -36,6 +37,37 @@ test("terminal route selection follows managed backend priority", () => {
   assert.equal(
     interactivePtyRouteKind({} as RuntimeEnv, session({ lease_id: null, attach_url: null })),
     null,
+  );
+});
+
+test("terminal route availability covers Sandbox, attach, and GitHub Actions backends", () => {
+  assert.equal(
+    interactiveTerminalRouteAvailable(
+      { SANDBOX: {} } as RuntimeEnv,
+      session({ lease_id: "sandbox:owned" }),
+    ),
+    true,
+  );
+  assert.equal(
+    interactiveTerminalRouteAvailable(
+      {} as RuntimeEnv,
+      session({ adapter: null, attach_url: "wss://terminal.example/pty" }),
+    ),
+    true,
+  );
+  assert.equal(
+    interactiveTerminalRouteAvailable(
+      {} as RuntimeEnv,
+      session({ adapter: null, attach_url: null }),
+    ),
+    false,
+  );
+  assert.equal(
+    interactiveTerminalRouteAvailable(
+      {} as RuntimeEnv,
+      session({ runtime: "github_actions", attach_url: null }),
+    ),
+    true,
   );
 });
 

@@ -16,6 +16,10 @@ import { database } from "./database.ts";
 import type { RuntimeEnv } from "./env.ts";
 import { badRequest, forbidden, notFound, serviceUnavailable } from "./http.ts";
 import type { User } from "./models.ts";
+import {
+  canControlOpenClawEmbeddedTerminalRequest,
+  isOpenClawEmbedSessionToken,
+} from "./openclaw-embed-access.ts";
 import { SandboxLifecycleService } from "./provisioning/sandbox-lifecycle.ts";
 import {
   readTerminalClipboardBytes,
@@ -207,7 +211,7 @@ export class InteractiveTerminalService {
       readSession: (sessionId) => this.dependencies.readFreshSession(sessionId),
       canViewSession: (request, user, session) =>
         canViewTerminalSession(request, this.env, user, session),
-      inputGrant: (user, session) => terminalInputGrant(this.env, user, session),
+      inputGrant: (request, user, session) => terminalInputGrant(request, this.env, user, session),
       viewGrant: (request, user, session) => terminalViewGrant(request, this.env, user, session),
       reconcileSubscription: (sessionId) =>
         terminalSubscriptionReconciler(this.dependencies, sessionId),
@@ -378,12 +382,17 @@ async function markInteractiveTerminalUnavailable(
 }
 
 function terminalInputGrant(
+  request: Request,
   env: RuntimeEnv,
   user: User | null,
   session: InteractiveSession,
 ): () => Promise<boolean> {
-  if (!user || !session.capabilities.terminal) return async () => false;
-  return cachedBooleanGrant(() => canControlInteractiveSessionById(env, user, session.id));
+  if (!session.capabilities.terminal) return async () => false;
+  return cachedBooleanGrant(() =>
+    user
+      ? canControlInteractiveSessionById(env, user, session.id)
+      : canControlOpenClawEmbeddedTerminalRequest(request, env, session.id),
+  );
 }
 
 function terminalSubscriptionReconciler(
@@ -459,6 +468,7 @@ async function isSharedSessionToken(
   token: string,
 ): Promise<boolean> {
   if (!token) return false;
+  if (await isOpenClawEmbedSessionToken(env, sessionId, token)) return true;
   const row = await database(env)
     .selectFrom("interactive_sessions")
     .select(["share_token_hash", "share_mode", "status", "runtime", "capabilities_json"])

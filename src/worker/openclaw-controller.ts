@@ -2,6 +2,7 @@ import type {
   GitHubActionsSessionRegistration,
   GitHubActionsSessionRegistrationInput,
 } from "./github-actions-session-registration.ts";
+import { openClawEmbedTicketTtlSeconds } from "../openclaw-service.ts";
 import { badRequest } from "./http.ts";
 import type { OpenClawCreateInput } from "./openclaw-create.ts";
 import {
@@ -25,6 +26,10 @@ export type OpenClawMessageInput = {
   enter?: unknown;
 };
 
+export type OpenClawEmbedTicketInput = {
+  ttlSeconds?: unknown;
+};
+
 export type OpenClawControllerStore = {
   createCrabbox(input: OpenClawCreateInput): Promise<InteractiveSession>;
   readRoomRoot(rootSessionId: string): Promise<InteractiveSession | null>;
@@ -45,8 +50,11 @@ export type OpenClawControllerStore = {
   registerActionSession(
     input: GitHubActionsSessionRegistrationInput,
   ): Promise<GitHubActionsSessionRegistration>;
+  now(): number;
+  createEmbedTicket(sessionId: string, expiresAt: number): Promise<string>;
   decorateSession(session: InteractiveSession): InteractiveSession;
   browserUrl(sessionId: string): string;
+  browserEmbedUrl(sessionId: string, token: string): string;
   runnerPtyUrl(sessionId: string, agentToken: string): string;
 };
 
@@ -146,6 +154,32 @@ export class OpenClawController {
     await this.rootScopedSession(sessionId, rootSessionId);
     const session = await this.store.stopSession(request, sessionId);
     return this.crabboxSummaryResponse(session);
+  }
+
+  async createCrabboxEmbedTicket(
+    sessionId: string,
+    rootSessionId: string,
+    input: OpenClawEmbedTicketInput,
+  ): Promise<{ browserUrl: string; expiresAt: number }> {
+    if (
+      input.ttlSeconds !== undefined &&
+      (typeof input.ttlSeconds !== "number" || !Number.isFinite(input.ttlSeconds))
+    ) {
+      throw badRequest("ttlSeconds must be a finite number");
+    }
+    const session = await this.rootScopedSession(sessionId, rootSessionId);
+    if (["stopping", "stopped", "expired", "failed"].includes(session.status)) {
+      throw badRequest(`session is ${session.status}`);
+    }
+    if (!session.capabilities.terminal) {
+      throw badRequest("session does not advertise terminal access");
+    }
+    const expiresAt = this.store.now() + openClawEmbedTicketTtlSeconds(input.ttlSeconds) * 1000;
+    const token = await this.store.createEmbedTicket(session.id, expiresAt);
+    return {
+      browserUrl: this.store.browserEmbedUrl(session.id, token),
+      expiresAt,
+    };
   }
 
   async registerActionSession(input: GitHubActionsSessionRegistrationInput): Promise<{

@@ -78,8 +78,15 @@ function routeController(calls: string[]): OpenClawController {
         workKey: String(input.workKey),
       };
     },
+    now: () => 1_800_000_000_000,
+    createEmbedTicket: async (sessionId, expiresAt) => {
+      calls.push(`ticket:${sessionId}:${expiresAt}`);
+      return "embed-token";
+    },
     decorateSession: (session) => session,
     browserUrl: (sessionId) => `https://fleet.example/sessions/${sessionId}`,
+    browserEmbedUrl: (sessionId, token) =>
+      `https://fleet.example/app/sessions/${sessionId}?token=${token}`,
     runnerPtyUrl: (sessionId) => `wss://fleet.example/actions/${sessionId}`,
   };
   return new OpenClawController(store);
@@ -172,6 +179,14 @@ test("OpenClaw routes dispatch every exact service endpoint", async () => {
       }),
       expectedStatus: 200,
       expectedCalls: ["scope:IS/2:IS-1", "stop:IS/2"],
+    },
+    {
+      request: request("POST", "/api/openclaw/crabboxes/IS%2F2/embed-ticket", "room", {
+        rootSessionId: "IS-1",
+        ttlSeconds: 90,
+      }),
+      expectedStatus: 201,
+      expectedCalls: ["scope:IS/2:IS-1", "ticket:IS/2:1800000090000"],
     },
     {
       request: request("GET", "/api/openclaw/crabboxes/IS%2F2", "room", undefined, {

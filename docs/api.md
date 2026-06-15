@@ -406,7 +406,7 @@ Fields:
 
 - `repo`: required, enabled repo.
 - `branch`: optional, default `main`.
-- `runtime`: optional `crabbox` or `container`; omission uses `CRABFLEET_DEFAULT_RUNTIME`, which defaults to `container`.
+- `runtime`: optional `crabbox` or `container`; the value must be enabled by `CRABFLEET_INTERACTIVE_RUNTIMES`. Omission uses `CRABFLEET_DEFAULT_RUNTIME`, which defaults to `container` when enabled or otherwise the only enabled runtime.
 - `profile`: optional opaque adapter profile, defaulted by `CRABFLEET_DEFAULT_PROFILE`. When `CRABFLEET_RUNTIME_PROFILES_JSON` is configured, the value must name a configured profile; its capability flags seed the requested adapter capabilities for Crabbox sessions.
 - `github_actions` is service-created through `/api/openclaw/action-sessions` and is not accepted by this endpoint.
 - `command`: optional, default `codex`.
@@ -588,6 +588,8 @@ using browser cookies or an individual session's agent token:
 - `GET /api/openclaw/crabboxes/:id/transcript`: read a bounded recent transcript.
 - `POST /api/openclaw/crabboxes/:id/message`: send one terminal message/nudge.
 - `POST /api/openclaw/crabboxes/:id/actions`: request the supported `stop` action.
+- `POST /api/openclaw/crabboxes/:id/embed-ticket`: mint a short-lived browser URL
+  that can view and control only that crabbox terminal without a Crabfleet login.
 - `POST /api/openclaw/session-roots/:rootSessionId/actions`: freeze room-tree
   admission and recursively stop every pending or active descendant.
 
@@ -612,6 +614,14 @@ as not found. Creation rejects a supervised descendant that would exceed the
 responses contain at most the newest 240 events and
 64 KiB of UTF-8 text and report whether evidence was truncated. Every message
 and stop request writes an audit event.
+
+Embed-ticket bodies require `rootSessionId` and may include `ttlSeconds`.
+Lifetimes default to one hour and are clamped between one minute and four
+hours. The returned signed bearer is scoped to one terminal session and never
+exposes the room service credential. It cannot read fleet state, manage the
+session, paste files, or access sibling sessions. Ticket signing requires the
+Crabfleet-only `CRABBOX_EMBED_TICKET_SECRET`; room-service consumers must never
+receive that signing secret.
 
 Message request:
 

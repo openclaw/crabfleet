@@ -54,8 +54,12 @@ function controllerStore(
       resumed: false,
       workKey: "work-1",
     }),
+    now: () => 1_800_000_000_000,
+    createEmbedTicket: async (sessionId, expiresAt) => `ticket:${sessionId}:${expiresAt}`,
     decorateSession: (value) => ({ ...value, summary: `decorated:${value.summary}` }),
     browserUrl: (sessionId) => `https://fleet.example/sessions/${sessionId}`,
+    browserEmbedUrl: (sessionId, token) =>
+      `https://fleet.example/app/sessions/${sessionId}?token=${encodeURIComponent(token)}`,
     runnerPtyUrl: (sessionId, token) => `wss://fleet.example/actions/${sessionId}?token=${token}`,
     ...overrides,
   };
@@ -181,4 +185,49 @@ test("OpenClaw controller fences mutations by root before delivery or stop", asy
     "stop:IS-2",
     "stop-root:IS-1",
   ]);
+});
+
+test("OpenClaw controller issues bounded terminal tickets only for active root-scoped sessions", async () => {
+  const calls: string[] = [];
+  const controller = new OpenClawController(
+    controllerStore({
+      requireRootScopedSession: async (sessionId, rootSessionId) => {
+        calls.push(`scope:${sessionId}:${rootSessionId}`);
+        return session(sessionId, { status: "ready" });
+      },
+      createEmbedTicket: async (sessionId, expiresAt) => {
+        calls.push(`ticket:${sessionId}:${expiresAt}`);
+        return "signed ticket";
+      },
+    }),
+  );
+
+  assert.deepEqual(await controller.createCrabboxEmbedTicket("IS-2", "IS-1", { ttlSeconds: 30 }), {
+    browserUrl: "https://fleet.example/app/sessions/IS-2?token=signed%20ticket",
+    expiresAt: 1_800_000_060_000,
+  });
+  assert.deepEqual(calls, ["scope:IS-2:IS-1", "ticket:IS-2:1800000060000"]);
+
+  await assert.rejects(
+    controller.createCrabboxEmbedTicket("IS-2", "IS-1", { ttlSeconds: Number.NaN }),
+    /ttlSeconds must be a finite number/,
+  );
+  const stopped = new OpenClawController(
+    controllerStore({
+      requireRootScopedSession: async () => session("IS-2", { status: "stopped" }),
+    }),
+  );
+  await assert.rejects(stopped.createCrabboxEmbedTicket("IS-2", "IS-1", {}), /session is stopped/);
+  const withoutTerminal = new OpenClawController(
+    controllerStore({
+      requireRootScopedSession: async () =>
+        session("IS-2", {
+          capabilities_json: JSON.stringify({ terminal: false }),
+        }),
+    }),
+  );
+  await assert.rejects(
+    withoutTerminal.createCrabboxEmbedTicket("IS-2", "IS-1", {}),
+    /session does not advertise terminal access/,
+  );
 });

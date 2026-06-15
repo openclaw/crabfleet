@@ -1,3 +1,4 @@
+import type { ConfigurableInteractiveRuntime } from "../interactive-runtimes.ts";
 import { runtimeProfileCapabilities } from "../runtime-profiles.ts";
 import { deploymentConfig, selectedRuntimeProfile } from "./deployment.ts";
 import type { RuntimeEnv } from "./env.ts";
@@ -28,7 +29,7 @@ export type InteractiveSessionCreateRequest = {
 export type ResolvedInteractiveSessionCreateRequest = {
   repo: string;
   branch: string;
-  runtime: "crabbox" | "container";
+  runtime: ConfigurableInteractiveRuntime;
   profile: string;
   requestedCapabilities: RuntimeCapabilities;
   command: string;
@@ -48,7 +49,14 @@ export function resolveInteractiveSessionCreateRequest(
   if (!repo) throw badRequest("repo is required");
   const branch = clean(body.branch, 120) || "main";
   const deployment = deploymentConfig(env);
-  const runtime = oneOf(body.runtime, ["crabbox", "container"] as const, deployment.defaultRuntime);
+  const requestedRuntime = clean(body.runtime, 40);
+  if (
+    requestedRuntime &&
+    !deployment.interactiveRuntimes.includes(requestedRuntime as ConfigurableInteractiveRuntime)
+  ) {
+    throw badRequest("runtime is not enabled for interactive sessions");
+  }
+  const runtime = (requestedRuntime || deployment.defaultRuntime) as ConfigurableInteractiveRuntime;
   const { profile, descriptor: runtimeProfile } = selectedRuntimeProfile(deployment, body.profile);
   requireRuntimeAdapterCreatePreflight(env, runtime, profile);
   const requestedCapabilities = runtimeProfileCapabilities(
@@ -106,8 +114,4 @@ function clean(value: unknown, maximum: number): string {
   return String(value ?? "")
     .trim()
     .slice(0, maximum);
-}
-
-function oneOf<T extends string>(value: unknown, options: readonly T[], fallback: T): T {
-  return options.includes(value as T) ? (value as T) : fallback;
 }

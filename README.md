@@ -214,6 +214,7 @@ The Crabbox namespace cutover intentionally has no old-name compatibility. Exist
 - `CRABBOX_RUNTIME_ADAPTER_IDLE_SECONDS` – Optional requested workspace idle timeout, default `1800`
 - `CRABBOX_OPENCLAW_TOKEN` – Internal bearer token for OpenClaw service crabbox and GitHub Actions session registration
 - `CRABBOX_MULTICODEX_TOKEN` – Optional dedicated bearer token for MultiCodex room supervision
+- `CRABBOX_EMBED_TICKET_SECRET` – Crabfleet-only signing key for short-lived, session-scoped terminal embed tickets
 - `CRABFLEET_SSH_GATEWAY_TOKEN` – Shared bearer token for the Go SSH gateway internal API
 - `CRABFLEET_LOCAL_SANDBOX_BACKUPS` – Optional Cloudflare Sandbox checkpoint mode override; defaults to R2 binding uploads, set `0` for SDK presigned R2 uploads
 - `CRABFLEET_LABEL` – Optional tenant label shown in the app, default `Crabfleet`
@@ -221,7 +222,8 @@ The Crabbox namespace cutover intentionally has no old-name compatibility. Exist
 - `CRABFLEET_PRODUCT_URL` – Optional tenant product/docs origin, default `https://crabfleet.ai`; requires HTTPS except literal loopback HTTP
 - `CRABFLEET_SSH_HOST` – Optional SSH command host shown in the app, default `crabd.sh`
 - `CRABFLEET_PREFERRED_REPO` – Optional first/default enabled repo, default `openclaw/crabfleet`
-- `CRABFLEET_DEFAULT_RUNTIME` – Optional interactive runtime default, `container` or `crabbox`; defaults to `container`
+- `CRABFLEET_DEFAULT_RUNTIME` – Optional interactive runtime default, `container` or `crabbox`; defaults to `container` when enabled or otherwise the only enabled runtime
+- `CRABFLEET_INTERACTIVE_RUNTIMES` – Optional comma-separated allowlist of manual interactive runtimes, `container`, `crabbox`, or both; defaults to `container,crabbox`
 - `CRABFLEET_DEFAULT_PROFILE` – Optional opaque runtime-adapter profile, default `default`
 - `CRABFLEET_RUNTIME_PROFILES_JSON` – Optional bounded JSON array of generic profile descriptors (`id`, `label`, optional `target`, optional boolean `capabilities`, and optional `codexSsh`) shown to authenticated users when creating Crabbox sessions; when configured, `CRABFLEET_DEFAULT_PROFILE` must name one entry. `codexSsh.aliasTemplate` may use `{providerResourceId}`, `{workspaceId}`, `{sessionId}`, and `{profile}`. Optional `codexSsh.setupCommand` is an argv-like JSON string array: its first item and static items are shell-safe tokens, while any later item may be one complete placeholder. Crabfleet shell-quotes every substituted argument.
 - `CRABFLEET_DEV_LOGIN_ENABLED` – Explicit local-only development identity login gate; disabled unless exactly `true`, and still restricted to literal localhost requests
@@ -232,6 +234,7 @@ teaching Crabfleet about either provider:
 
 ```dotenv
 CRABFLEET_DEFAULT_RUNTIME="crabbox"
+CRABFLEET_INTERACTIVE_RUNTIMES="crabbox"
 CRABFLEET_DEFAULT_PROFILE="linux-desktop"
 CRABFLEET_RUNTIME_PROFILES_JSON='[{"id":"linux-desktop","label":"Linux","target":"linux","capabilities":{"terminal":true,"desktop":true,"vnc":true},"codexSsh":{"aliasTemplate":"codex-{providerResourceId}","setupCommand":["fleet-connect","{providerResourceId}"]}},{"id":"macos-desktop","label":"macOS","target":"macos","capabilities":{"terminal":true,"desktop":true,"vnc":true}}]'
 CRABBOX_RUNTIME_ADAPTER_URL_TEMPLATE="https://controller.example/v1/adapters/{profile}/proxy"

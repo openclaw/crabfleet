@@ -3,8 +3,6 @@ import { buildFleetState, type FleetState } from "./fleet-state";
 import { buildGitHubActionsRunnerPtyUrl, githubActionsRuntime } from "./github-actions-runtime";
 import {
   APP_HTML,
-  GHOSTTY_BROWSER_EXTERNAL_JS,
-  GHOSTTY_WEB_JS,
   LOGO_PNG_BASE64,
   OG_IMAGE_PNG_BASE64,
   SPEC_HTML,
@@ -18,10 +16,11 @@ import {
   runtimeAdapterName,
   runtimeAdapterReplayRequest,
 } from "./runtime-adapter";
-import { openClawRoomMaxSessions } from "./openclaw-service";
+import { createOpenClawEmbedTicket, openClawRoomMaxSessions } from "./openclaw-service";
 import type { TrustedProxyAuthResult } from "./trusted-proxy-auth";
 import {
   browserAppOrigin,
+  browserSessionEmbedUrl,
   browserSessionShareUrl,
   browserSessionUrl,
   clientDeploymentConfig,
@@ -169,10 +168,9 @@ import {
   readInteractiveSessionTerminalCleanupIntent,
   readInteractiveSessionEventRows,
   readInteractiveSessionLogArchives,
-  readInteractiveSessionLogs,
   readInteractiveSessionRecord as readInteractiveSession,
   readInteractiveSessionRecords,
-  readSharedInteractiveSessionRow,
+  readInteractiveSessionShareCredential,
   readRuntimeAdapterCreatePending,
 } from "./worker/session-repository";
 import { nextInteractiveSessionId } from "./worker/session-id-repository";
@@ -186,6 +184,10 @@ import {
   canManageInteractiveSession,
 } from "./worker/session-access";
 import { presentInteractiveSession } from "./worker/session-presentation";
+import {
+  isOpenClawEmbedSessionToken,
+  openClawEmbedTicketSecret,
+} from "./worker/openclaw-embed-access";
 import { scheduleInteractiveSessionReconciliation } from "./worker/scheduled";
 import { archiveInteractiveSessionLogs, sessionLogTranscript } from "./worker/session-log-archive";
 import { appendInteractiveSessionEventRecord } from "./worker/session-events";
@@ -219,7 +221,10 @@ import {
   RuntimeAdapterStopService,
   type RuntimeAdapterStopStore,
 } from "./worker/session-runtime-adapter-stop";
-import { sharedInteractiveSession } from "./worker/session-sharing";
+import {
+  SharedSessionService,
+  type SharedSessionServiceStore,
+} from "./worker/shared-session-service";
 import { InteractiveProvisioningService } from "./worker/provisioning/service";
 import { RuntimeAdapterProvisioningService } from "./worker/provisioning/runtime-adapter";
 import { InteractiveProvisioningEndpoints } from "./worker/provisioning/endpoints";
@@ -272,10 +277,8 @@ import {
   RuntimeAdapterWorkspaceLifecycle,
   runtimeAdapterProviderConfigured,
 } from "./worker/runtime-adapter-workspaces";
-import {
-  interactivePtyRouteKind,
-  interactiveTerminalTarget,
-} from "./worker/session-terminal-route";
+import { interactiveTerminalRouteAvailable } from "./worker/session-terminal-route";
+import { terminalAssetResponse } from "./worker/terminal-assets";
 import { githubActionsRelayStub, readSandboxFleetPolicies } from "./worker/session-control-do";
 import { defaultSandboxEgressHosts, sandboxPlaceholderOpenAIKey } from "./worker/sandbox-outbound";
 import { sandboxOutbound } from "./worker/sandbox-outbound-service";
@@ -347,13 +350,8 @@ export default {
         });
       }
 
-      if (url.pathname === "/vendor/ghostty-web.js") {
-        return text(GHOSTTY_WEB_JS, "text/javascript; charset=utf-8");
-      }
-
-      if (url.pathname === "/vendor/__vite-browser-external-2447137e.js") {
-        return text(GHOSTTY_BROWSER_EXTERNAL_JS, "text/javascript; charset=utf-8");
-      }
+      const terminalAsset = terminalAssetResponse(url.pathname);
+      if (terminalAsset) return terminalAsset;
 
       if (url.pathname === "/docs/spec.md") {
         return text(SPEC_MARKDOWN, "text/markdown; charset=utf-8");
@@ -556,14 +554,26 @@ function sessionIngressRouteDependencies(
   env: RuntimeEnv,
   requestAuth: TrustedProxyAuthResult,
 ): SessionIngressRouteDependencies {
+  const sharedSessions = sharedSessionService(env);
   return {
-    readSharedSession: (sessionId, token) => readSharedInteractiveSession(env, sessionId, token),
+    readSharedSession: (sessionId, token) => sharedSessions.read(sessionId, token),
     openTerminal: async (request) =>
       interactiveTerminalService(env).open(
         request,
         await terminalHubUser(request, env, requestAuth),
       ),
   };
+}
+
+function sharedSessionService(env: RuntimeEnv): SharedSessionService {
+  const store: SharedSessionServiceStore = {
+    now: () => Date.now(),
+    readCredential: (sessionId) => readInteractiveSessionShareCredential(env, sessionId),
+    hashToken: sha256,
+    isEmbedToken: (sessionId, token) => isOpenClawEmbedSessionToken(env, sessionId, token),
+    terminalRouteAvailable: (session) => interactiveTerminalRouteAvailable(env, session),
+  };
+  return new SharedSessionService(store);
 }
 
 function browserSessionRouteDependencies(env: RuntimeEnv): BrowserSessionRouteDependencies {
@@ -903,8 +913,15 @@ function openClawController(env: RuntimeEnv): OpenClawController {
       openClawMutationService(request, env, serviceUser).stopSession(sessionId),
     registerActionSession: (input) =>
       openClawActionSessionRegistrationService(env, serviceUser).register(input),
+    now: () => Date.now(),
+    createEmbedTicket: (sessionId, expiresAt) => {
+      const secret = openClawEmbedTicketSecret(env);
+      if (!secret) throw serviceUnavailable("OpenClaw embed ticket secret is not configured");
+      return createOpenClawEmbedTicket(secret, sessionId, expiresAt);
+    },
     decorateSession: (session) => decorateInteractiveSession(session, serviceUser, env),
     browserUrl: (sessionId) => browserSessionUrl(env, sessionId),
+    browserEmbedUrl: (sessionId, token) => browserSessionEmbedUrl(env, sessionId, token),
     runnerPtyUrl: (sessionId, agentToken) =>
       buildGitHubActionsRunnerPtyUrl(appCanonicalOrigin, sessionId, agentToken),
   };
@@ -1623,20 +1640,6 @@ async function readFreshInteractiveSession(
   return readInteractiveSession(env, id);
 }
 
-async function readSharedInteractiveSession(
-  env: RuntimeEnv,
-  id: string,
-  token: string,
-): Promise<{ session: InteractiveSession }> {
-  const row = await readSharedInteractiveSessionRow(env, id);
-  if (!row || !row.share_token_hash || !token) throw notFound("shared session not found");
-  if ((await sha256(token)) !== row.share_token_hash) throw notFound("shared session not found");
-  const logs = await readInteractiveSessionLogs(env, [id]);
-  const archives = await readInteractiveSessionLogArchives(env, [id]);
-  const session = interactiveSession(row, logs.get(id) ?? [], archives.get(id) ?? null);
-  return { session: sharedInteractiveSession(session, Date.now()) };
-}
-
 async function readInteractiveSessionLogBundle(
   env: RuntimeEnv,
   user: User,
@@ -1777,16 +1780,10 @@ function decorateInteractiveSession(
   user: User,
   env: RuntimeEnv,
 ): InteractiveSession {
-  const routeKind = interactivePtyRouteKind(env, session);
-  const routeAvailable =
-    session.runtime === githubActionsRuntime ||
-    (routeKind === "sandbox"
-      ? Boolean(env.SANDBOX)
-      : Boolean(interactiveTerminalTarget(env, session, routeKind)));
   return presentInteractiveSession(session, user, {
     now: Date.now(),
     delegatedControlAvailable: canGrantDelegatedControl(env, session),
-    terminalRouteAvailable: routeAvailable,
+    terminalRouteAvailable: interactiveTerminalRouteAvailable(env, session),
     runtimeProfiles: deploymentConfig(env).runtimeProfiles,
     configuredRuntimeAdapterControlPlane: (profile) =>
       configuredRuntimeAdapterControlPlane(env, profile),

@@ -4,6 +4,7 @@ import { test } from "node:test";
 import {
   browserAppOrigin,
   browserRequestOrigin,
+  browserSessionEmbedUrl,
   browserSessionShareUrl,
   browserSessionUrl,
   clientDeploymentConfig,
@@ -34,6 +35,7 @@ test("deployment configuration validates defaults and normalizes public values",
     CRABFLEET_SSH_HOST: " ssh.example ",
     CRABFLEET_PREFERRED_REPO: "https://github.com/OpenClaw/Crabfleet.git",
     CRABFLEET_DEFAULT_RUNTIME: "crabbox",
+    CRABFLEET_INTERACTIVE_RUNTIMES: "crabbox,container",
     CRABFLEET_DEFAULT_PROFILE: "linux",
     CRABFLEET_RUNTIME_PROFILES_JSON: runtimeProfiles,
   });
@@ -44,6 +46,7 @@ test("deployment configuration validates defaults and normalizes public values",
   assert.equal(deployment.sshHost, "ssh.example");
   assert.equal(deployment.preferredRepo, "openclaw/crabfleet");
   assert.equal(deployment.defaultRuntime, "crabbox");
+  assert.deepEqual(deployment.interactiveRuntimes, ["crabbox", "container"]);
   assert.equal(deployment.defaultProfile, "linux");
   assert.equal(deployment.runtimeProfiles[0]?.target, "linux");
 });
@@ -100,6 +103,10 @@ test("public and client deployment views exclude server-only routing data", () =
     "https://fleet.example/app/sessions/IS%2Fwith%20spaces",
   );
   assert.equal(
+    browserSessionEmbedUrl(env, "IS/with spaces", "token/value"),
+    "https://fleet.example/app/sessions/IS%2Fwith%20spaces?token=token%2Fvalue",
+  );
+  assert.equal(
     browserSessionShareUrl(
       new Request("https://backend.example/api/interactive-sessions"),
       env,
@@ -121,5 +128,20 @@ test("browser request links use the incoming origin without a trusted proxy", ()
   assert.equal(
     browserSessionShareUrl(request, {}, "IS-1", "share-token"),
     "https://tenant.example/sessions/IS-1?token=share-token",
+  );
+});
+
+test("deployment runtime defaults must name an enabled runtime", () => {
+  assert.equal(
+    deploymentConfig({ CRABFLEET_INTERACTIVE_RUNTIMES: "crabbox" }).defaultRuntime,
+    "crabbox",
+  );
+  assert.throws(
+    () =>
+      deploymentConfig({
+        CRABFLEET_INTERACTIVE_RUNTIMES: "crabbox",
+        CRABFLEET_DEFAULT_RUNTIME: "container",
+      }),
+    /must name an enabled interactive runtime/,
   );
 });

@@ -35,6 +35,7 @@ const terminalTheme = {
 };
 
 let ghosttyModulePromise = null;
+const ghosttyWasmPath = "__GHOSTTY_WASM_PATH__";
 let terminalEpoch = 0;
 let terminalHubSocket = null;
 let terminalHubReconnectTimer = null;
@@ -95,6 +96,7 @@ export async function mountTerminal(session, mount, options = {}) {
     if (!module?.Terminal) throw new Error("Ghostty module missing Terminal");
     mount.innerHTML = "";
     const term = new module.Terminal({
+      ghostty: module.ghostty,
       disableStdin: !canInput,
       fontSize: options.focused ? 14 : 13,
       theme: terminalTheme,
@@ -702,13 +704,13 @@ function updateMountedTerminal(host, text) {
 }
 
 function loadGhosttyModule() {
-  ghosttyModulePromise ||= import("/vendor/ghostty-web.js").then(async (module) => {
-    if (typeof module.init === "function") await module.init();
-    return module;
-  });
+  ghosttyModulePromise ||= import("/vendor/ghostty-web.js").then((module) =>
+    loadGhosttyRuntime(module, ghosttyWasmPath),
+  );
   return ghosttyModulePromise;
 }
 
 function setTerminalStatus(id, label) {
   terminalHubOptions.onStatus?.(id, label);
 }
+import { loadGhosttyRuntime } from "./ghostty-loader.js";

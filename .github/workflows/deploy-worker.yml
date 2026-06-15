@@ -77,8 +77,13 @@ jobs:
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CRABBOX_OPENCLAW_TOKEN: ${{ secrets.CRABBOX_OPENCLAW_TOKEN }}
+          CRABBOX_EMBED_TICKET_SECRET: ${{ secrets.CRABBOX_EMBED_TICKET_SECRET }}
         run: |
           set -euo pipefail
+          if [ -z "${CRABBOX_EMBED_TICKET_SECRET:-}" ]; then
+            echo "::error::Set CRABBOX_EMBED_TICKET_SECRET before deploying Crabfleet."
+            exit 1
+          fi
           runtime_token="$(
             node -e '
               const { createHmac } = require("node:crypto");
@@ -95,12 +100,15 @@ jobs:
           trap 'rm -f "$secrets_file"' EXIT
           SECRETS_FILE="$secrets_file" \
             CRABBOX_RUNTIME_ADAPTER_TOKEN="$runtime_token" \
+            CRABBOX_EMBED_TICKET_SECRET="$CRABBOX_EMBED_TICKET_SECRET" \
             node -e '
               const { writeFileSync } = require("node:fs");
               writeFileSync(
                 process.env.SECRETS_FILE,
                 JSON.stringify({
                   CRABBOX_OPENCLAW_TOKEN: process.env.CRABBOX_OPENCLAW_TOKEN,
+                  CRABBOX_EMBED_TICKET_SECRET:
+                    process.env.CRABBOX_EMBED_TICKET_SECRET,
                   CRABBOX_RUNTIME_ADAPTER_TOKEN:
                     process.env.CRABBOX_RUNTIME_ADAPTER_TOKEN,
                 }),

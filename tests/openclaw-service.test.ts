@@ -4,7 +4,11 @@ import test from "node:test";
 
 import {
   boundedUtf8Tail,
+  createOpenClawEmbedTicket,
   openClawBranchPreparationCanDefer,
+  openClawEmbedTicketDefaultSeconds,
+  openClawEmbedTicketMaxSeconds,
+  openClawEmbedTicketTtlSeconds,
   openClawGitBranchAllowed,
   openClawRoomMaxSessions,
   openClawRoomRootAllowed,
@@ -13,6 +17,7 @@ import {
   openClawServiceAuthorized,
   openClawTranscriptMaxBytes,
   sessionBelongsToRoot,
+  verifyOpenClawEmbedTicket,
 } from "../src/openclaw-service.ts";
 import { githubRepoParts } from "../src/worker/repositories.ts";
 import { openClawRequestId } from "../src/worker/openclaw-request.ts";
@@ -22,6 +27,30 @@ test("OpenClaw service authorization accepts dedicated scoped consumers", () => 
   assert.equal(openClawServiceAuthorized("Bearer multicodex", ["openclaw", "multicodex"]), true);
   assert.equal(openClawServiceAuthorized("Bearer public", ["openclaw", "multicodex"]), false);
   assert.equal(openClawServiceAuthorized(null, [undefined, null]), false);
+});
+
+test("OpenClaw embed tickets are signed, session scoped, and expiring", async () => {
+  const now = 1_800_000_000_000;
+  const token = await createOpenClawEmbedTicket("dedicated-secret", "IS-10", now + 60_000);
+  assert.equal(await verifyOpenClawEmbedTicket("dedicated-secret", token, "IS-10", now), true);
+  assert.equal(await verifyOpenClawEmbedTicket("other-secret", token, "IS-10", now), false);
+  assert.equal(await verifyOpenClawEmbedTicket("dedicated-secret", token, "IS-11", now), false);
+  assert.equal(
+    await verifyOpenClawEmbedTicket("dedicated-secret", token, "IS-10", now + 60_000),
+    false,
+  );
+  assert.equal(
+    await verifyOpenClawEmbedTicket("dedicated-secret", `${token}x`, "IS-10", now),
+    false,
+  );
+  assert.equal(await verifyOpenClawEmbedTicket("dedicated-secret", "invalid", "IS-10", now), false);
+});
+
+test("OpenClaw embed ticket lifetimes stay short and bounded", () => {
+  assert.equal(openClawEmbedTicketTtlSeconds(), openClawEmbedTicketDefaultSeconds);
+  assert.equal(openClawEmbedTicketTtlSeconds(1), 60);
+  assert.equal(openClawEmbedTicketTtlSeconds(3_600.9), 3_600);
+  assert.equal(openClawEmbedTicketTtlSeconds(99_999), openClawEmbedTicketMaxSeconds);
 });
 
 test("OpenClaw branch preparation defers masked control-plane permission failures", () => {

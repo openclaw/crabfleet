@@ -10,6 +10,7 @@ export const defaultDeployment = {
   sshHost: "crabd.sh",
   preferredRepo,
   defaultRuntime: "container",
+  interactiveRuntimes: ["container", "crabbox"],
   defaultProfile: "default",
   runtimeProfiles: [],
 };

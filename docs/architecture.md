@@ -121,6 +121,8 @@ Sessions can carry parent/root lineage, purpose, summary, share state, delegated
 
 An optional `CRABFLEET_RUNTIME_PROFILES_JSON` allowlist exposes generic Crabbox profile labels and capability previews without teaching the Worker provider-specific semantics. The Worker validates the opaque profile ID. A fixed adapter maps it internally, or `CRABBOX_RUNTIME_ADAPTER_URL_TEMPLATE` selects a distinct outbound adapter by lowercase DNS-label profile; each adapter enforces its real provider capabilities.
 
+`CRABFLEET_INTERACTIVE_RUNTIMES` is the single manual-session runtime allowlist consumed by the API and browser create drawer. Deployments may expose built-in `container`, versioned-adapter `crabbox`, or both; a single enabled runtime becomes implicit in the UI.
+
 ## Versioned Adapter
 
 `CRABBOX_RUNTIME_ADAPTER_URL`, or the mutually exclusive profile-routed `CRABBOX_RUNTIME_ADAPTER_URL_TEMPLATE`, enables the provider-neutral lifecycle contract:

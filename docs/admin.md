@@ -200,6 +200,7 @@ Proxy-only identity cannot link SSH keys. Use a separate OAuth-capable origin th
 
 - SSH gateway: `CRABFLEET_SSH_GATEWAY_TOKEN`.
 - OpenClaw service: `CRABBOX_OPENCLAW_TOKEN`.
+- OpenClaw terminal embeds: `CRABBOX_EMBED_TICKET_SECRET`, retained only by Crabfleet.
 - Session agent: `CRABFLEET_AGENT_TOKEN` plus session ID.
 - Stateless provision hook: `CRABBOX_INTERACTIVE_PROVISION_TOKEN`.
 - Runtime adapter: `CRABBOX_RUNTIME_ADAPTER_TOKEN`.

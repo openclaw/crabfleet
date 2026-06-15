@@ -89,3 +89,36 @@ test("session create requests fail before allocation when adapter routing is inc
     /runtime adapter token is not configured/,
   );
 });
+
+test("session create requests reject runtimes outside deployment policy", () => {
+  const env = runtimeEnv({
+    CRABFLEET_INTERACTIVE_RUNTIMES: "crabbox",
+    CRABFLEET_DEFAULT_RUNTIME: "crabbox",
+  });
+  assert.equal(
+    resolveInteractiveSessionCreateRequest(
+      env,
+      { repo: "openclaw/crabfleet" },
+      { owner: "maintainer", createdBy: "maintainer" },
+    ).runtime,
+    "crabbox",
+  );
+  assert.throws(
+    () =>
+      resolveInteractiveSessionCreateRequest(
+        env,
+        { repo: "openclaw/crabfleet", runtime: "container" },
+        { owner: "maintainer", createdBy: "maintainer" },
+      ),
+    /runtime is not enabled for interactive sessions/,
+  );
+  assert.throws(
+    () =>
+      resolveInteractiveSessionCreateRequest(
+        runtimeEnv(),
+        { repo: "openclaw/crabfleet", runtime: "github_actions" },
+        { owner: "maintainer", createdBy: "maintainer" },
+      ),
+    /runtime is not enabled for interactive sessions/,
+  );
+});

@@ -12,6 +12,7 @@ import {
 } from "./session-access.ts";
 import { interactiveSessionAdapterControlPlane, type InteractiveSession } from "./session-model.ts";
 import { activeDelegatedController } from "./session-sharing.ts";
+import { interactiveSessionPtyAvailable } from "./session-terminal-availability.ts";
 
 export type InteractiveSessionPresentationContext = {
   now: number;
@@ -41,8 +42,11 @@ export function presentInteractiveSession(
     ready &&
     session.adapter === runtimeAdapterName &&
     (session.capabilities.vnc || session.capabilities.desktop);
-  const ptyAvailable =
-    canControl && session.capabilities.terminal && ready && context.terminalRouteAvailable;
+  const ptyAvailable = interactiveSessionPtyAvailable(
+    session,
+    canControl,
+    context.terminalRouteAvailable,
+  );
   const codexSshReady =
     session.adapter === runtimeAdapterName &&
     session.capabilities.terminal &&

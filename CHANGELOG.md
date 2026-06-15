@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Add session-scoped OpenClaw terminal embed tickets, deployment-configured interactive runtime choices, explicit Ghostty WASM delivery, and shared embedded PTY readiness without restoring provider or protocol compatibility paths.
 - Keep SSH terminal dimensions synchronized after attach and verify the TypeScript and Go multiplex clients against shared protocol vectors.
 - Remove the configurable PTY bridge so managed terminal upstreams are limited to built-in Sandbox, versioned runtime-adapter attach, and GitHub Actions relay behind the multiplex terminal protocol.
 - Remove generic create-only provisioning, the external Cloudflare runner, and the ClawFleet compatibility provider so managed workspaces use only built-in Sandbox or the versioned runtime adapter.

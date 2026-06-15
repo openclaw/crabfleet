@@ -146,6 +146,8 @@ Crabfleet persists the canonical adapter identity, namespaced workspace ID, immu
 
 Deployments may expose a bounded allowlist of generic runtime profiles through `CRABFLEET_RUNTIME_PROFILES_JSON`. Authenticated users see those labels when creating Crabbox sessions. The selected opaque profile ID is validated server-side, included in the immutable adapter request, and can seed the requested capability preview. The adapter remains responsible for mapping the profile to a provider and enforcing actual capabilities. Profiles may define a generic `codexSsh` alias and setup-command template. Crabfleet resolves only bounded non-secret identifiers, returns the handoff only to managers of ready versioned-adapter sessions, and leaves provider-specific alias installation outside the public control plane.
 
+`CRABFLEET_INTERACTIVE_RUNTIMES` limits manual session creation to `container`, `crabbox`, or both. The authenticated deployment metadata drives the create drawer, and the API enforces the same allowlist. A deployment with only one enabled runtime omits the selector; `crabbox`-only deployments therefore expose profiles without advertising an unavailable built-in container runtime.
+
 Required properties:
 
 - adapter base URL uses HTTPS, except literal loopback HTTP;

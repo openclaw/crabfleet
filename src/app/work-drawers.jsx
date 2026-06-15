@@ -110,17 +110,24 @@ export function InteractiveDrawer({ drawers, closeDrawer, createInteractiveSessi
           Branch
           <input name="branch" defaultValue="main" placeholder="main" />
         </label>
-        <label>
-          Runtime
-          <select
-            name="runtime"
-            value={runtime}
-            onChange={(event) => setRuntime(event.currentTarget.value)}
-          >
-            <option value="container">Cloudflare Sandbox</option>
-            <option value="crabbox">Crabbox</option>
-          </select>
-        </label>
+        {defaults.runtimes.length > 1 ? (
+          <label>
+            Runtime
+            <select
+              name="runtime"
+              value={runtime}
+              onChange={(event) => setRuntime(event.currentTarget.value)}
+            >
+              {defaults.runtimes.map((option) => (
+                <option key={option.id} value={option.id}>
+                  {option.label}
+                </option>
+              ))}
+            </select>
+          </label>
+        ) : (
+          <input type="hidden" name="runtime" value={runtime} />
+        )}
         {runtime === "crabbox" && defaults.profiles.length > 0 ? (
           <label>
             Profile

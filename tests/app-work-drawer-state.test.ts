@@ -8,13 +8,23 @@ test("interactive creation defaults follow deployment policy", () => {
   assert.deepEqual(
     interactiveCreationDefaults({
       defaultRuntime: "crabbox",
+      interactiveRuntimes: ["crabbox"],
       defaultProfile: "large",
       runtimeProfiles: profiles,
     }),
-    { runtime: "crabbox", profile: "large", profiles },
+    {
+      runtime: "crabbox",
+      runtimes: [{ id: "crabbox", label: "Crabbox" }],
+      profile: "large",
+      profiles,
+    },
   );
   assert.deepEqual(interactiveCreationDefaults(null), {
     runtime: "container",
+    runtimes: [
+      { id: "container", label: "Cloudflare Sandbox" },
+      { id: "crabbox", label: "Crabbox" },
+    ],
     profile: "default",
     profiles: [],
   });
