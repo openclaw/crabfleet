@@ -7,7 +7,7 @@ import {
   type InteractiveSessionCreationStore,
 } from "../src/worker/session-creation.ts";
 import type { InteractiveSession } from "../src/worker/session-model.ts";
-import { interactiveSession } from "../src/worker/session-model.ts";
+import { containerCapabilities, interactiveSession } from "../src/worker/session-model.ts";
 import { sessionRow } from "./helpers/session-row.ts";
 
 const reservation: InteractiveSessionCreationReservation = {
@@ -28,6 +28,14 @@ function creationStore(
     recordRequest: async () => undefined,
     isConstraintError: () => false,
     readRequestReplay: async () => null,
+    persistProvisionResult: async () => ({
+      updated: true,
+      terminalStatus: null,
+      terminalAt: 101,
+    }),
+    markPendingAdapter: async () => undefined,
+    recordProvisionEvent: async () => undefined,
+    finalizeTerminal: async () => undefined,
     ...overrides,
   };
 }
@@ -199,4 +207,77 @@ test("session creation retries only unowned constraint failures before the final
     service.recoverReservationFailure(new Error("provider"), context),
     /provider/,
   );
+});
+
+test("session creation persists provision evidence before terminal finalization", async () => {
+  const calls: string[] = [];
+  const service = new InteractiveSessionCreationService(
+    creationStore({
+      persistProvisionResult: async () => {
+        calls.push("persist");
+        return { updated: true, terminalStatus: "failed", terminalAt: 150 };
+      },
+      recordProvisionEvent: async (_sessionId, message, now) => {
+        calls.push(`event:${message}:${now}`);
+      },
+      finalizeTerminal: async (_sessionId, status, now) => {
+        calls.push(`finalize:${status}:${now}`);
+      },
+    }),
+  );
+
+  assert.deepEqual(
+    await service.completeProvision(
+      {
+        sessionId: "IS-2",
+        insertedAt: 100,
+        profile: "default",
+        requestedCapabilities: containerCapabilities,
+        initialLeaseId: null,
+        initialAgentTokenHash: "agent-hash",
+        adapterName: "runtime-adapter",
+      },
+      {
+        status: "failed",
+        leaseId: null,
+        attachUrl: null,
+        vncUrl: null,
+        message: "provider failed",
+      },
+    ),
+    { updated: true, terminalStatus: "failed", terminalAt: 150 },
+  );
+  assert.deepEqual(calls, ["persist", "event:provider failed:101", "finalize:failed:150"]);
+});
+
+test("session creation records pending adapters without finalization", async () => {
+  const calls: string[] = [];
+  const service = new InteractiveSessionCreationService(
+    creationStore({
+      markPendingAdapter: async () => {
+        calls.push("pending");
+      },
+      recordProvisionEvent: async (_sessionId, message, now) => {
+        calls.push(`event:${message}:${now}`);
+      },
+      finalizeTerminal: async () => {
+        calls.push("finalize");
+      },
+    }),
+  );
+
+  const result = await service.completeProvision(
+    {
+      sessionId: "IS-2",
+      insertedAt: 100,
+      profile: "default",
+      requestedCapabilities: containerCapabilities,
+      initialLeaseId: null,
+      initialAgentTokenHash: "agent-hash",
+      adapterName: "runtime-adapter",
+    },
+    null,
+  );
+  assert.deepEqual(result, { updated: true, terminalStatus: null, terminalAt: 101 });
+  assert.deepEqual(calls, ["pending", "event:waiting for interactive runtime adapter:101"]);
 });

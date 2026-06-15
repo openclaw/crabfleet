@@ -1,4 +1,9 @@
 import type { InteractiveSession } from "./session-model.ts";
+import type {
+  InteractiveProvisionPersistence,
+  InteractiveProvisionPersistenceInput,
+  InteractiveProvisionResult,
+} from "./session-provisioning.ts";
 
 export type InteractiveSessionCreationReservation = {
   id: string;
@@ -23,6 +28,22 @@ export type InteractiveSessionCreationStore = {
   recordRequest(insertedSessionId: string, insertedAt: number): Promise<void>;
   isConstraintError(error: unknown): boolean;
   readRequestReplay(requestId: string, requestHash: string): Promise<InteractiveSession | null>;
+  persistProvisionResult(
+    input: InteractiveProvisionPersistenceInput,
+    result: InteractiveProvisionResult,
+  ): Promise<InteractiveProvisionPersistence>;
+  markPendingAdapter(
+    input: Pick<
+      InteractiveProvisionPersistenceInput,
+      "sessionId" | "insertedAt" | "initialLeaseId" | "initialAgentTokenHash"
+    >,
+  ): Promise<void>;
+  recordProvisionEvent(sessionId: string, message: string, now: number): Promise<void>;
+  finalizeTerminal(
+    sessionId: string,
+    status: "stopped" | "expired" | "failed",
+    now: number,
+  ): Promise<void>;
 };
 
 export class InteractiveSessionCreationService {
@@ -89,5 +110,34 @@ export class InteractiveSessionCreationService {
       throw error;
     }
     return null;
+  }
+
+  async completeProvision(
+    input: InteractiveProvisionPersistenceInput,
+    result: InteractiveProvisionResult | null,
+  ): Promise<InteractiveProvisionPersistence> {
+    if (!result) {
+      await this.store.markPendingAdapter(input);
+      await this.store.recordProvisionEvent(
+        input.sessionId,
+        "waiting for interactive runtime adapter",
+        input.insertedAt + 1,
+      );
+      return {
+        updated: true,
+        terminalStatus: null,
+        terminalAt: input.insertedAt + 1,
+      };
+    }
+
+    const persisted = await this.store.persistProvisionResult(input, result);
+    if (!persisted.updated) return persisted;
+    await this.store.recordProvisionEvent(input.sessionId, result.message, input.insertedAt + 1);
+    if (persisted.terminalStatus) {
+      await this.store
+        .finalizeTerminal(input.sessionId, persisted.terminalStatus, persisted.terminalAt)
+        .catch(() => undefined);
+    }
+    return persisted;
   }
 }

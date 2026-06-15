@@ -259,10 +259,13 @@ import {
 } from "./worker/session-creation";
 import {
   insertInteractiveSessionReservation,
+  markInteractiveSessionPendingAdapter,
+  persistInteractiveSessionProvisionResult,
   readVisibleInteractiveSessionRow,
   readVisibleInteractiveSessionRows,
   type InteractiveSessionReservationValues,
 } from "./worker/session-repository";
+import type { InteractiveProvisionResult } from "./worker/session-provisioning";
 import {
   configuredRuntimeAdapterControlPlane,
   requireRuntimeAdapterCreatePreflight,
@@ -475,27 +478,6 @@ type InteractiveProvisionRequest = {
   owner: string;
   createdBy: string;
   githubToken?: string;
-};
-
-type InteractiveProvisionResult = {
-  status: InteractiveSessionStatus;
-  leaseId: string | null;
-  attachUrl: string | null;
-  attachUrlPresent?: boolean;
-  vncUrl: string | null;
-  message: string;
-  adapter?: string | null;
-  profile?: string;
-  adapterWorkspaceId?: string | null;
-  providerResourceId?: string | null;
-  capabilities?: RuntimeCapabilities | null;
-  capabilitiesPresent?: boolean;
-  expiresAt?: number | null;
-  expiresAtPresent?: boolean;
-  reconciledAt?: number | null;
-  reconcileError?: string | null;
-  terminalStatus?: "failed" | null;
-  createPending?: boolean;
 };
 
 type SandboxCredentialPolicy = {
@@ -3720,7 +3702,6 @@ async function createInteractiveSessionFromInput(
   const supervisedRootSessionId = await supervision.supervisedRootForCreate(createdBy, lineage);
   const preparationReservation = Boolean(options.afterReserve || supervisedRootSessionId);
   const now = Date.now();
-  const db = database(env);
   for (let attempt = 0; attempt < 3; attempt += 1) {
     let reservationInserted = false;
     const id = await nextInteractiveSessionId(env);
@@ -3892,123 +3873,55 @@ async function createInteractiveSessionFromInput(
               : undefined,
           ),
       );
-      if (provisioned) {
-        const initialTerminalStatus: "stopped" | "expired" | "failed" | null =
-          provisioned.status === "stopped" ||
-          provisioned.status === "expired" ||
-          provisioned.status === "failed"
-            ? provisioned.status
-            : null;
-        const terminalAt = provisioned.reconciledAt ?? now + 1;
-        const completionVersionFloor = Math.max(terminalAt, now + 1);
-        const provisionUpdate = await db
-          .updateTable("interactive_sessions")
-          .set({
-            status: provisioned.status,
-            lease_id: provisioned.adapter === runtimeAdapterName ? null : provisioned.leaseId,
-            attach_url: initialTerminalStatus ? null : provisioned.attachUrl,
-            // Versioned adapter desktop URLs are minted on demand and never persisted.
-            vnc_url: provisioned.adapter === runtimeAdapterName ? null : provisioned.vncUrl,
-            adapter: provisioned.adapter ?? null,
-            profile: provisioned.profile ?? profile,
-            adapter_workspace_id: provisioned.adapterWorkspaceId ?? null,
-            provider_resource_id: provisioned.providerResourceId ?? null,
-            capabilities_json: JSON.stringify(provisioned.capabilities ?? requestedCapabilities),
-            expires_at: provisioned.expiresAt ?? null,
-            last_reconciled_at: provisioned.reconciledAt ?? null,
-            reconcile_error: provisioned.reconcileError ?? null,
-            terminal_status: initialTerminalStatus ? null : (provisioned.terminalStatus ?? null),
-            adapter_create_pending: initialTerminalStatus ? 0 : provisioned.createPending ? 1 : 0,
-            terminal_finalize_pending: initialTerminalStatus ? 1 : 0,
-            ...(initialTerminalStatus
-              ? {
-                  stopped_at: terminalAt,
-                  agent_token_hash: null,
-                  controller: null,
-                  control_requested_by: null,
-                  control_requested_at: null,
-                  control_granted_at: null,
-                  control_expires_at: null,
-                }
-              : {}),
-            last_event: provisioned.message,
-            updated_at: sql<number>`MAX(updated_at + 1, ${completionVersionFloor})`,
-          })
-          .where("id", "=", id)
-          .where("status", "in", ["provisioning", "pending_adapter"])
-          .where(sql<boolean>`lease_id IS ${initialSandboxOwnership?.leaseId ?? null}`)
-          .where("agent_token_hash", "=", initialAgentTokenHash)
-          .where("sandbox_refresh_sandbox_id", "is", null)
-          .where("sandbox_refresh_claim", "is", null)
-          .where("sandbox_refresh_claim_expires_at", "is", null)
-          .executeTakeFirst();
-        if ((provisionUpdate.numUpdatedRows ?? 0n) === 0n) {
-          let current = await readInteractiveSession(env, id);
-          const currentAdapterProvision = Boolean(
-            current &&
-            current.adapter === runtimeAdapterName &&
-            current.adapterWorkspaceId === provisioned.adapterWorkspaceId &&
-            ["provisioning", "pending_adapter", "ready", "attached", "detached"].includes(
-              current.status,
-            ),
-          );
-          if (
-            !currentAdapterProvision &&
-            provisioned.adapter === runtimeAdapterName &&
-            provisioned.adapterWorkspaceId
-          ) {
-            await stopSupersededRuntimeAdapterProvision(
-              env,
-              id,
-              provisioned.adapterWorkspaceId,
-              provisioned.createPending === true,
-              Date.now(),
-            );
-          }
-          if (
-            provisioned.adapter !== runtimeAdapterName &&
-            provisioned.leaseId?.startsWith(sandboxLeasePrefix)
-          ) {
-            await queueSandboxCredentialPolicyCleanup(
-              env,
-              id,
-              sandboxLeaseInfo({ id, leaseId: provisioned.leaseId }).sandboxId,
-            );
-            await reconcileCredentialPolicyCleanupBatch(env, Date.now(), id);
-            current = await readInteractiveSession(env, id);
-          }
-          if (!current) throw new Error("interactive session disappeared during provisioning");
-          return { session: decorateInteractiveSession(current, user, env) };
-        }
-        await appendInteractiveSessionEvent(env, id, user, provisioned.message, now + 1);
-        if (initialTerminalStatus) {
-          await finalizeTerminalInteractiveSession(
+      const provisionPersistence = await creation.completeProvision(
+        {
+          sessionId: id,
+          insertedAt: now,
+          profile,
+          requestedCapabilities,
+          initialLeaseId: initialSandboxOwnership?.leaseId ?? null,
+          initialAgentTokenHash,
+          adapterName: runtimeAdapterName,
+        },
+        provisioned,
+      );
+      if (!provisionPersistence.updated && provisioned) {
+        let current = await readInteractiveSession(env, id);
+        const currentAdapterProvision = Boolean(
+          current &&
+          current.adapter === runtimeAdapterName &&
+          current.adapterWorkspaceId === provisioned.adapterWorkspaceId &&
+          ["provisioning", "pending_adapter", "ready", "attached", "detached"].includes(
+            current.status,
+          ),
+        );
+        if (
+          !currentAdapterProvision &&
+          provisioned.adapter === runtimeAdapterName &&
+          provisioned.adapterWorkspaceId
+        ) {
+          await stopSupersededRuntimeAdapterProvision(
             env,
             id,
-            initialTerminalStatus,
-            terminalAt,
-          ).catch(() => undefined);
+            provisioned.adapterWorkspaceId,
+            provisioned.createPending === true,
+            Date.now(),
+          );
         }
-      } else {
-        await db
-          .updateTable("interactive_sessions")
-          .set({
-            status: "pending_adapter",
-            last_event: "waiting for interactive runtime adapter",
-            updated_at: sql<number>`MAX(updated_at + 1, ${now + 1})`,
-          })
-          .where("id", "=", id)
-          .where("status", "=", "provisioning")
-          .where(sql<boolean>`lease_id IS ${initialSandboxOwnership?.leaseId ?? null}`)
-          .where("agent_token_hash", "=", initialAgentTokenHash)
-          .execute();
-        await appendInteractiveSessionEvent(
-          env,
-          id,
-          user,
-          "waiting for interactive runtime adapter",
-          now + 1,
-        );
+        if (
+          provisioned.adapter !== runtimeAdapterName &&
+          provisioned.leaseId?.startsWith(sandboxLeasePrefix)
+        ) {
+          await queueSandboxCredentialPolicyCleanup(
+            env,
+            id,
+            sandboxLeaseInfo({ id, leaseId: provisioned.leaseId }).sandboxId,
+          );
+          await reconcileCredentialPolicyCleanupBatch(env, Date.now(), id);
+          current = await readInteractiveSession(env, id);
+        }
+        if (!current) throw new Error("interactive session disappeared during provisioning");
+        return { session: decorateInteractiveSession(current, user, env) };
       }
       await audit(
         env,
@@ -4306,6 +4219,13 @@ function interactiveSessionCreationService(
       const session = await readOpenClawRequestSession(env, requestId, requestHash);
       return session ? decorateInteractiveSession(session, user, env) : null;
     },
+    persistProvisionResult: (input, result) =>
+      persistInteractiveSessionProvisionResult(env, input, result),
+    markPendingAdapter: (input) => markInteractiveSessionPendingAdapter(env, input),
+    recordProvisionEvent: (sessionId, message, now) =>
+      appendInteractiveSessionEvent(env, sessionId, user, message, now),
+    finalizeTerminal: (sessionId, status, now) =>
+      finalizeTerminalInteractiveSession(env, sessionId, status, now),
   };
   return new InteractiveSessionCreationService(store);
 }

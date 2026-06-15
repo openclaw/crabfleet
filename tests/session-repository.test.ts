@@ -4,9 +4,12 @@ import test from "node:test";
 import type { RuntimeEnv } from "../src/worker/env.ts";
 import {
   insertInteractiveSessionReservation,
+  markInteractiveSessionPendingAdapter,
+  persistInteractiveSessionProvisionResult,
   readVisibleInteractiveSessionRow,
   readVisibleInteractiveSessionRows,
 } from "../src/worker/session-repository.ts";
+import { containerCapabilities } from "../src/worker/session-model.ts";
 import { sessionRow } from "./helpers/session-row.ts";
 
 type D1Result = { results?: unknown[]; changes?: number };
@@ -128,4 +131,75 @@ test("session reservations without request identity use one insert", async () =>
     null,
   );
   assert.equal(inserts, 1);
+});
+
+test("terminal provision results atomically enter durable finalization", async () => {
+  let updateSql = "";
+  const result = await persistInteractiveSessionProvisionResult(
+    runtimeEnv((sql, parameters, kind) => {
+      assert.equal(kind, "run");
+      updateSql = sql;
+      assert.ok(parameters.includes("IS-2"));
+      assert.ok(parameters.includes("agent-hash"));
+      return { changes: 1 };
+    }),
+    {
+      sessionId: "IS-2",
+      insertedAt: 100,
+      profile: "default",
+      requestedCapabilities: containerCapabilities,
+      initialLeaseId: "sandbox:lease",
+      initialAgentTokenHash: "agent-hash",
+      adapterName: "runtime-adapter",
+    },
+    {
+      status: "failed",
+      leaseId: "provider-lease",
+      attachUrl: "wss://terminal.example.test",
+      vncUrl: "https://desktop.example.test",
+      message: "provider failed",
+      adapter: "runtime-adapter",
+      adapterWorkspaceId: "workspace-2",
+      reconciledAt: 150,
+      createPending: true,
+    },
+  );
+
+  assert.deepEqual(result, {
+    updated: true,
+    terminalStatus: "failed",
+    terminalAt: 150,
+  });
+  assert.match(updateSql, /"terminal_finalize_pending"/i);
+  assert.match(updateSql, /"stopped_at"/i);
+  assert.match(updateSql, /"agent_token_hash"/i);
+  assert.match(updateSql, /MAX\(updated_at \+ 1/i);
+  assert.match(updateSql, /lease_id IS/i);
+  assert.match(updateSql, /"sandbox_refresh_sandbox_id" is null/i);
+  assert.match(updateSql, /"sandbox_refresh_claim" is null/i);
+  assert.match(updateSql, /"sandbox_refresh_claim_expires_at" is null/i);
+});
+
+test("missing provision adapters persist the fenced pending state", async () => {
+  let updateSql = "";
+  await markInteractiveSessionPendingAdapter(
+    runtimeEnv((sql, parameters, kind) => {
+      assert.equal(kind, "run");
+      updateSql = sql;
+      assert.ok(parameters.includes("IS-2"));
+      assert.ok(parameters.includes("agent-hash"));
+      assert.ok(parameters.includes(null));
+      return { changes: 1 };
+    }),
+    {
+      sessionId: "IS-2",
+      insertedAt: 100,
+      initialLeaseId: null,
+      initialAgentTokenHash: "agent-hash",
+    },
+  );
+  assert.match(updateSql, /"status" =/i);
+  assert.match(updateSql, /"last_event" =/i);
+  assert.match(updateSql, /MAX\(updated_at \+ 1/i);
+  assert.match(updateSql, /lease_id IS/i);
 });

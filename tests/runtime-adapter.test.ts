@@ -1345,35 +1345,6 @@ test("Sandbox credential registration always proves exact durable ownership", as
   );
 });
 
-test("initial terminal adapter responses enter durable finalization", async () => {
-  const source = await readFile(new URL("../src/index.ts", import.meta.url), "utf8");
-  const createStart = source.indexOf("async function createInteractiveSessionFromInput");
-  const createEnd = source.indexOf("function initialRuntimeAdapterWorkspaceId", createStart);
-  const createSource = source.slice(createStart, createEnd);
-  const completionStart = createSource.indexOf("const provisionUpdate");
-  const completionEnd = createSource.indexOf(
-    "if ((provisionUpdate.numUpdatedRows",
-    completionStart,
-  );
-  const completionSource = createSource.slice(completionStart, completionEnd);
-
-  assert.ok(createStart >= 0 && createEnd > createStart);
-  assert.match(createSource, /const initialTerminalStatus: "stopped" \| "expired" \| "failed"/);
-  assert.match(createSource, /terminal_finalize_pending: initialTerminalStatus \? 1 : 0/);
-  assert.match(createSource, /stopped_at: terminalAt/);
-  assert.match(createSource, /agent_token_hash: null/);
-  assert.match(createSource, /attach_url: initialTerminalStatus \? null/);
-  assert.match(createSource, /adapter_create_pending: initialTerminalStatus/);
-  assert.match(completionSource, /MAX\(updated_at \+ 1, \$\{completionVersionFloor\}\)/);
-  assert.doesNotMatch(completionSource, /where\("updated_at"/);
-  assert.match(createSource, /lease_id IS \$\{initialSandboxOwnership\?\.leaseId \?\? null\}/);
-  assert.match(createSource, /where\("agent_token_hash", "=", initialAgentTokenHash\)/);
-  assert.match(createSource, /where\("sandbox_refresh_sandbox_id", "is", null\)/);
-  assert.match(createSource, /where\("sandbox_refresh_claim", "is", null\)/);
-  assert.match(createSource, /where\("sandbox_refresh_claim_expires_at", "is", null\)/);
-  assert.match(createSource, /finalizeTerminalInteractiveSession/);
-});
-
 test("create-only adapters reject stopping responses before persistence", async () => {
   const source = await readFile(new URL("../src/index.ts", import.meta.url), "utf8");
   const externalStart = source.indexOf("async function provisionInteractiveSession");
