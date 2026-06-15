@@ -859,10 +859,6 @@ test("stateless Sandbox provision hook acquires durable standalone ownership", a
     ownershipStart,
   );
   const ownershipSource = source.slice(ownershipStart, ownershipEnd);
-  const managedStart = source.indexOf("async function provisionManagedSandboxEndpoint");
-  const managedEnd = source.indexOf("async function provisionStandaloneSandbox", managedStart);
-  const managedSource = source.slice(managedStart, managedEnd);
-  const managedCommitSource = managedSource.slice(managedSource.indexOf("const commitRevision"));
   const ptyStart = source.indexOf("async function standaloneSandboxPty");
   const ptyEnd = source.indexOf("function authorizeProvisionBearerToken", ptyStart);
   const ptySource = source.slice(ptyStart, ptyEnd);
@@ -894,7 +890,10 @@ test("stateless Sandbox provision hook acquires durable standalone ownership", a
     endpointSource.indexOf("if (managed)") <
       endpointSource.indexOf("return provisionStandaloneSandbox(env, payload)"),
   );
-  assert.match(endpointSource, /provisionManagedSandboxEndpoint\(env, payload, managed\)/);
+  assert.match(
+    endpointSource,
+    /managedSandboxProvisioningService\(env\)\.provision\(payload, managed\)/,
+  );
   assert.match(endpointSource, /managedInteractiveSessionId\(payload\.id\)/);
   assert.match(endpointSource, /managed session namespace/);
   assert.match(endpointSource, /INSERT INTO standalone_sandbox_provisions/);
@@ -905,36 +904,6 @@ test("stateless Sandbox provision hook acquires durable standalone ownership", a
   assert.match(endpointSource, /state: "active"/);
   assert.match(ownershipSource, /FROM standalone_sandbox_provisions AS owner/);
   assert.match(ownershipSource, /owner\.ownership_claim = \$\{ownershipFence\.claim\}/);
-  assert.match(managedSource, /managedSandboxProvisionPayloadMatches/);
-  assert.ok(
-    managedSource.indexOf("managedSandboxProvisionPayloadMatches") <
-      managedSource.indexOf("newSandboxLease(payload.id)"),
-  );
-  assert.match(managedSource, /where\("updated_at", "=", session\.updated_at\)/);
-  assert.match(managedSource, /session\.preparation_pending !== 0/);
-  assert.match(managedSource, /\.where\("preparation_pending", "=", 0\)/);
-  assert.match(managedSource, /sandbox_refresh_claim: fence\.claim/);
-  assert.match(managedSource, /const agentToken = newAgentToken\(\)/);
-  assert.match(managedSource, /const agentTokenHash = await sha256\(agentToken\)/);
-  assert.match(managedSource, /agent_token_hash: agentTokenHash/);
-  assert.match(managedSource, /agent_token_hash IS \$\{session\.agent_token_hash\}/);
-  assert.match(managedSource, /provisionWithSandbox\(env, payload, agentToken, lease, fence\)/);
-  assert.ok(
-    managedSource.indexOf("sandboxProvisionPreflightError(env, payload)") <
-      managedSource.indexOf("const agentToken = newAgentToken()"),
-  );
-  assert.match(managedSource, /stageFailedManagedSandboxProvision/);
-  assert.match(managedSource, /where\("agent_token_hash", "=", agentTokenHash\)/);
-  assert.doesNotMatch(managedSource, /provisionWithSandbox\(env, payload, undefined/);
-  assert.match(managedSource, /executeBatch\(env, commitQueries\)/);
-  assert.match(managedCommitSource, /MAX\(updated_at \+ 1, \$\{commitRevision\}\)/);
-  assert.doesNotMatch(managedCommitSource, /where\("updated_at", "=", now\)/);
-  assert.match(managedCommitSource, /lease_id IS \$\{fence\.refreshLeaseId\}/);
-  assert.match(managedCommitSource, /sandbox_refresh_claim", "=", fence\.claim/);
-  assert.match(managedCommitSource, /sandbox_refresh_claim_expires_at", "=", fence\.expiresAt/);
-  assert.match(managedSource, /previousSandboxId/);
-  assert.match(managedSource, /state: "cleanup_pending"/);
-  assert.match(managedSource, /claimed\.numUpdatedRows/);
   assert.match(ptySource, /authorizeProvisionBearerToken\(request, env\)/);
   assert.match(ptySource, /standalone_sandbox_provisions/);
   assert.match(ptySource, /where\("state", "=", "active"\)/);

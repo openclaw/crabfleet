@@ -320,6 +320,11 @@ import {
   stageFailedRuntimeAdapterRelease,
   stageRuntimeAdapterProvision,
 } from "./worker/provisioning/runtime-adapter-repository";
+import { ManagedSandboxProvisioningService } from "./worker/provisioning/sandbox";
+import {
+  claimManagedSandboxProvision,
+  commitManagedSandboxProvision,
+} from "./worker/provisioning/sandbox-repository";
 import type {
   InteractiveProvisionRequest,
   InteractiveProvisionResult,
@@ -6577,6 +6582,24 @@ function runtimeAdapterProvisioningService(env: RuntimeEnv): RuntimeAdapterProvi
   });
 }
 
+function managedSandboxProvisioningService(env: RuntimeEnv): ManagedSandboxProvisioningService {
+  return new ManagedSandboxProvisioningService({
+    now: Date.now,
+    preflight: (session) => sandboxProvisionPreflightError(env, session),
+    claim: (session, owner, now) =>
+      claimManagedSandboxProvision(env, session, owner, now, credentialPolicyProvisioningStaleMs),
+    provision: (session, claim) =>
+      provisionWithSandbox(env, session, claim.agentToken, claim.lease, claim.fence),
+    stageFailure: (sessionId, fence, message, now) =>
+      stageFailedManagedSandboxProvision(env, sessionId, fence, message, now),
+    commit: (sessionId, claim, result, now) =>
+      commitManagedSandboxProvision(env, sessionId, claim, result, now),
+    reconcileCleanup: (sessionId, now) =>
+      reconcileCredentialPolicyCleanupBatch(env, now, sessionId),
+    providerError: safeProviderError,
+  });
+}
+
 async function provisionInteractiveEndpoint(
   request: Request,
   env: RuntimeEnv,
@@ -6629,7 +6652,7 @@ async function provisionInteractiveEndpoint(
         "interactive provision failed: managed session id is not available to this backend",
       );
     }
-    return provisionManagedSandboxEndpoint(env, payload, managed);
+    return managedSandboxProvisioningService(env).provision(payload, managed);
   }
   if (interactiveProvisioningService(env).supportsStandalone(payload.runtime)) {
     if (managedInteractiveSessionId(payload.id)) {
@@ -6644,224 +6667,6 @@ async function provisionInteractiveEndpoint(
       ? "interactive provision failed: Cloudflare Sandbox binding is not configured"
       : "interactive provision failed: standalone provision supports container runtime only",
   );
-}
-
-function managedSandboxProvisionPayloadMatches(
-  payload: InteractiveProvisionRequest,
-  session: InteractiveSessionRow,
-): boolean {
-  return (
-    payload.id === session.id &&
-    payload.parentSessionId === session.parent_session_id &&
-    payload.rootSessionId === (session.root_session_id ?? session.id) &&
-    payload.repo === session.repo &&
-    payload.branch === session.branch &&
-    payload.runtime === session.runtime &&
-    payload.profile === session.profile &&
-    payload.command === session.command &&
-    payload.prompt === session.prompt &&
-    payload.purpose === session.purpose &&
-    payload.summary === session.summary &&
-    payload.owner === session.owner &&
-    payload.createdBy === session.created_by
-  );
-}
-
-async function provisionManagedSandboxEndpoint(
-  env: RuntimeEnv,
-  payload: InteractiveProvisionRequest,
-  session: InteractiveSessionRow,
-): Promise<InteractiveProvisionResult> {
-  if (
-    !managedSandboxProvisionPayloadMatches(payload, session) ||
-    !["provisioning", "pending_adapter"].includes(session.status) ||
-    session.preparation_pending !== 0 ||
-    session.adapter === runtimeAdapterName ||
-    session.credential_cleanup_terminal_status !== null
-  ) {
-    return failedProvision(
-      "interactive provision failed: managed session request does not match durable ownership",
-    );
-  }
-  const preflightError = sandboxProvisionPreflightError(env, payload);
-  if (preflightError) return failedProvision(preflightError);
-  const now = Date.now();
-  const claimRevision = Math.max(now, session.updated_at + 1);
-  const agentToken = newAgentToken();
-  const agentTokenHash = await sha256(agentToken);
-  const lease = newSandboxLease(payload.id);
-  const fence: SandboxLeaseRefreshFence = {
-    claim: `managed-provision:${crypto.randomUUID()}`,
-    expiresAt: now + credentialPolicyProvisioningStaleMs,
-    refreshLeaseId: session.lease_id,
-    sandboxId: lease.sandboxId,
-  };
-  const claimed = await database(env)
-    .updateTable("interactive_sessions")
-    .set({
-      sandbox_refresh_sandbox_id: fence.sandboxId,
-      sandbox_refresh_claim: fence.claim,
-      sandbox_refresh_claim_expires_at: fence.expiresAt,
-      agent_token_hash: agentTokenHash,
-      last_event: "managed Sandbox provision claimed",
-      updated_at: claimRevision,
-    })
-    .where("id", "=", session.id)
-    .where("updated_at", "=", session.updated_at)
-    .where("status", "in", ["provisioning", "pending_adapter"])
-    .where("preparation_pending", "=", 0)
-    .where(sql<boolean>`parent_session_id IS ${payload.parentSessionId}`)
-    .where(sql<boolean>`COALESCE(root_session_id, id) = ${payload.rootSessionId}`)
-    .where("runtime", "=", payload.runtime)
-    .where("repo", "=", payload.repo)
-    .where("branch", "=", payload.branch)
-    .where("profile", "=", payload.profile)
-    .where("command", "=", payload.command)
-    .where("prompt", "=", payload.prompt)
-    .where("purpose", "=", payload.purpose)
-    .where("summary", "=", payload.summary)
-    .where("owner", "=", payload.owner)
-    .where("created_by", "=", payload.createdBy)
-    .where((expression) =>
-      expression.or([
-        expression("adapter", "is", null),
-        expression("adapter", "!=", runtimeAdapterName),
-      ]),
-    )
-    .where("credential_cleanup_terminal_status", "is", null)
-    .where(sql<boolean>`agent_token_hash IS ${session.agent_token_hash}`)
-    .where(sql<boolean>`lease_id IS ${session.lease_id}`)
-    .where((expression) =>
-      expression.or([
-        expression("sandbox_refresh_claim", "is", null),
-        expression("sandbox_refresh_claim_expires_at", "<=", now),
-      ]),
-    )
-    .executeTakeFirst();
-  if ((claimed.numUpdatedRows ?? 0n) === 0n) {
-    return failedProvision("interactive provision failed: managed session claim was not acquired");
-  }
-
-  let provisioned: InteractiveProvisionResult;
-  try {
-    provisioned = await provisionWithSandbox(env, payload, agentToken, lease, fence);
-  } catch (error) {
-    const message = `Cloudflare Sandbox provision failed: ${safeProviderError(error)}`;
-    await stageFailedManagedSandboxProvision(env, session.id, fence, message, Date.now());
-    return failedProvision(message);
-  }
-  if (provisioned.status !== "ready") {
-    await stageFailedManagedSandboxProvision(
-      env,
-      session.id,
-      fence,
-      provisioned.message,
-      Date.now(),
-    );
-    return provisioned;
-  }
-  const expectedLeaseId = sandboxLeaseId(lease);
-  const previousSandboxId = session.lease_id?.startsWith(sandboxLeasePrefix)
-    ? sandboxLeaseInfo({
-        id: session.id,
-        leaseId: sandboxLeaseWithoutRefresh(session.lease_id),
-      }).sandboxId
-    : null;
-  const finishedAt = Date.now();
-  if (provisioned.leaseId !== expectedLeaseId) {
-    const message = "interactive provision failed: managed Sandbox lease mismatch";
-    const staged = await stageTerminalCredentialPolicyCleanupById(
-      env,
-      session.id,
-      "failed",
-      message,
-      finishedAt,
-      message,
-      fence,
-    );
-    if (!staged) {
-      return failedProvision("interactive provision failed: managed session ownership changed");
-    }
-    await reconcileCredentialPolicyCleanupBatch(env, finishedAt, session.id);
-    return failedProvision(message);
-  }
-  const db = database(env);
-  const commitRevision = Math.max(finishedAt, claimRevision + 1);
-  const commitQueries: CompilableQuery[] = [
-    db
-      .updateTable("interactive_sessions")
-      .set({
-        status: "ready",
-        lease_id: expectedLeaseId,
-        attach_url: provisioned.attachUrl,
-        vnc_url: provisioned.vncUrl,
-        sandbox_refresh_sandbox_id: null,
-        sandbox_refresh_claim: null,
-        sandbox_refresh_claim_expires_at: null,
-        last_event: provisioned.message,
-        updated_at: sql<number>`MAX(updated_at + 1, ${commitRevision})`,
-      })
-      .where("id", "=", session.id)
-      .where("status", "in", ["provisioning", "pending_adapter"])
-      .where(sql<boolean>`lease_id IS ${fence.refreshLeaseId}`)
-      .where("sandbox_refresh_sandbox_id", "=", fence.sandboxId)
-      .where("sandbox_refresh_claim", "=", fence.claim)
-      .where("sandbox_refresh_claim_expires_at", "=", fence.expiresAt)
-      .where("sandbox_refresh_claim_expires_at", ">", finishedAt)
-      .where("agent_token_hash", "=", agentTokenHash),
-  ];
-  if (previousSandboxId && previousSandboxId !== lease.sandboxId) {
-    commitQueries.push(
-      db
-        .updateTable("interactive_session_credential_policies")
-        .set({
-          state: "cleanup_pending",
-          cleanup_claim: null,
-          cleanup_claim_expires_at: null,
-          updated_at: commitRevision,
-        })
-        .where("session_id", "=", session.id)
-        .where("sandbox_id", "=", previousSandboxId).where(sql<boolean>`
-          EXISTS (
-            SELECT 1
-            FROM interactive_sessions AS owner
-            WHERE owner.id = ${session.id}
-              AND owner.status = 'ready'
-              AND owner.lease_id = ${expectedLeaseId}
-              AND owner.agent_token_hash = ${agentTokenHash}
-              AND owner.credential_cleanup_terminal_status IS NULL
-              AND owner.sandbox_refresh_sandbox_id IS NULL
-              AND owner.sandbox_refresh_claim IS NULL
-              AND owner.sandbox_refresh_claim_expires_at IS NULL
-          )
-        `),
-    );
-  }
-  await executeBatch(env, commitQueries);
-  const current = await db
-    .selectFrom("interactive_sessions")
-    .select(["lease_id", "status", "sandbox_refresh_claim", "agent_token_hash"])
-    .where("id", "=", session.id)
-    .executeTakeFirst();
-  if (
-    current?.lease_id === expectedLeaseId &&
-    current.sandbox_refresh_claim === null &&
-    current.agent_token_hash === agentTokenHash &&
-    ["ready", "attached", "detached"].includes(current.status)
-  ) {
-    if (previousSandboxId && previousSandboxId !== lease.sandboxId) {
-      await reconcileCredentialPolicyCleanupBatch(env, commitRevision, session.id);
-    }
-    return provisioned;
-  }
-  await stageFailedManagedSandboxProvision(
-    env,
-    session.id,
-    fence,
-    "interactive provision failed: managed session ownership changed",
-    finishedAt,
-  );
-  return failedProvision("interactive provision failed: managed session ownership changed");
 }
 
 async function provisionStandaloneSandbox(
