@@ -135,6 +135,7 @@ import {
   selectedRuntimeProfile,
 } from "./worker/deployment";
 import { clampedSeconds } from "./worker/duration";
+import { mapWithConcurrency } from "./worker/concurrency";
 import type { RuntimeEnv } from "./worker/env";
 import {
   database,
@@ -3289,24 +3290,6 @@ function interactiveSessionReconciliationService(
       ),
   };
   return new InteractiveSessionReconciliationService(store, runtimeAdapterName);
-}
-
-async function mapWithConcurrency<T>(
-  values: T[],
-  concurrency: number,
-  operation: (value: T) => Promise<void>,
-): Promise<void> {
-  let cursor = 0;
-  const worker = async () => {
-    while (cursor < values.length) {
-      const index = cursor;
-      cursor += 1;
-      await operation(values[index] as T);
-    }
-  };
-  await Promise.all(
-    Array.from({ length: Math.min(Math.max(1, concurrency), values.length) }, () => worker()),
-  );
 }
 
 async function readState(

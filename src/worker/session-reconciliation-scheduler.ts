@@ -1,6 +1,7 @@
 import { sql } from "kysely";
 
 import { githubActionsRuntime } from "../github-actions-runtime.ts";
+import { mapWithConcurrency } from "./concurrency.ts";
 import { database, type InteractiveSessionRow } from "./database.ts";
 import type { RuntimeEnv } from "./env.ts";
 import type { InteractiveSessionStatus } from "./models.ts";
@@ -219,22 +220,4 @@ export async function readInteractiveSessionReconciliationRow(
     .selectAll()
     .where("id", "=", sessionId)
     .executeTakeFirst();
-}
-
-async function mapWithConcurrency<T>(
-  values: readonly T[],
-  concurrency: number,
-  operation: (value: T) => Promise<void>,
-): Promise<void> {
-  let cursor = 0;
-  const worker = async () => {
-    while (cursor < values.length) {
-      const index = cursor;
-      cursor += 1;
-      await operation(values[index] as T);
-    }
-  };
-  await Promise.all(
-    Array.from({ length: Math.min(Math.max(1, concurrency), values.length) }, () => worker()),
-  );
 }
