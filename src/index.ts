@@ -146,16 +146,13 @@ import {
   actor,
   authMethods,
   authorize,
-  bootstrapSubject,
-  createSession,
-  devIdentityEnabled,
-  devIdentityId,
+  devIdentityLogin,
   logout,
   optionalUser,
-  parseRole,
   requireRole,
   requireUser,
   sessionGitHubToken,
+  tokenLogin,
   upsertUser,
 } from "./worker/auth";
 import { base64FromBytes, openSecret, sealSecret, sha256 } from "./worker/crypto";
@@ -192,6 +189,7 @@ import {
   type RuntimeCapabilities,
 } from "./worker/session-model";
 import { normalizeRepo } from "./worker/repositories";
+import { handlePublicAuthRoute, handleSessionAuthRoute } from "./worker/routes/auth";
 import {
   isCurrentSandboxLease,
   newSandboxLease,
@@ -1409,18 +1407,20 @@ export default {
         return text(SPEC_HTML, "text/html; charset=utf-8", { vary: "Accept" });
       }
 
-      if (url.pathname === "/login/github") {
-        return await githubLogin(request, env);
-      }
-
-      if (url.pathname === "/auth/github/callback") {
-        return await githubCallback(request, env);
-      }
-
-      const sshLinkMatch = url.pathname.match(/^\/ssh\/link\/([^/]+)$/);
-      if (sshLinkMatch && (request.method === "GET" || request.method === "POST")) {
-        return await sshLink(request, env, decodeURIComponent(sshLinkMatch[1] ?? ""), trustedProxy);
-      }
+      const authResponse = await handlePublicAuthRoute(request, url, trustedProxy, {
+        githubLogin: (authRequest) => githubLogin(authRequest, env),
+        githubCallback: (authRequest) => githubCallback(authRequest, env),
+        sshLink: (authRequest, code, requestAuth) => sshLink(authRequest, env, code, requestAuth),
+        tokenLogin: (authRequest) => tokenLogin(authRequest, env),
+        devIdentityLogin: (authRequest) => devIdentityLogin(authRequest, env),
+        logout: (authRequest) => logout(authRequest, env),
+        authState: (authRequest) =>
+          json({
+            auth: authMethods(env, authRequest),
+            deployment: publicDeploymentConfig(env),
+          }),
+      });
+      if (authResponse) return authResponse;
 
       if (url.pathname.startsWith("/api/")) {
         return await api(request, env, context, trustedProxy);
@@ -1473,22 +1473,6 @@ async function api(
   requestAuth: TrustedProxyAuthResult,
 ): Promise<Response> {
   const url = new URL(request.url);
-
-  if (request.method === "POST" && url.pathname === "/api/login/token") {
-    return tokenLogin(request, env);
-  }
-
-  if (request.method === "POST" && url.pathname === "/api/login/dev") {
-    return devIdentityLogin(request, env);
-  }
-
-  if (request.method === "POST" && url.pathname === "/api/logout") {
-    return logout(request, env);
-  }
-
-  if (request.method === "GET" && url.pathname === "/api/auth") {
-    return json({ auth: authMethods(env, request), deployment: publicDeploymentConfig(env) });
-  }
 
   const standaloneProvisionPtyMatch = url.pathname.match(
     /^\/api\/provision\/interactive\/([^/]+)\/pty$/,
@@ -1819,9 +1803,11 @@ async function api(
 
   const user = await requireUser(request, env, requestAuth);
 
-  if (request.method === "GET" && url.pathname === "/api/session") {
-    return json({ user, auth: authMethods(env, request) });
-  }
+  const sessionAuthResponse = handleSessionAuthRoute(request, url, user, {
+    sessionState: (authRequest, authenticatedUser) =>
+      json({ user: authenticatedUser, auth: authMethods(env, authRequest) }),
+  });
+  if (sessionAuthResponse) return sessionAuthResponse;
 
   if (request.method === "GET" && url.pathname === "/api/state") {
     return json(await readState(request, env, user, context));
@@ -2043,55 +2029,6 @@ async function api(
   }
 
   return json({ error: "not found" }, { status: 404 });
-}
-
-async function tokenLogin(request: Request, env: RuntimeEnv): Promise<Response> {
-  const { token } = await readJson<{ token?: string }>(request);
-  if (!env.CRABBOX_BOOTSTRAP_TOKEN || token !== env.CRABBOX_BOOTSTRAP_TOKEN) {
-    return json({ error: "invalid token" }, { status: 401 });
-  }
-
-  const now = Date.now();
-  const subject = await bootstrapSubject(env);
-  const user: User = {
-    subject,
-    login: "bootstrap",
-    email: null,
-    name: "Bootstrap Admin",
-    role: "owner",
-    allowed: true,
-    teams: [],
-  };
-  await upsertUser(env, user, now);
-  const cookieHeader = await createSession(env, request, user.subject, now);
-  return json(
-    { user, auth: authMethods(env, request) },
-    { headers: { "set-cookie": cookieHeader } },
-  );
-}
-
-async function devIdentityLogin(request: Request, env: RuntimeEnv): Promise<Response> {
-  if (!devIdentityEnabled(env, request)) return json({ error: "not found" }, { status: 404 });
-
-  const body = await readJson<{ id?: string; name?: string; role?: string }>(request);
-  const id = devIdentityId(body.id);
-  const role = parseRole(body.role);
-  const user: User = {
-    subject: `dev:${id}`,
-    login: id,
-    email: null,
-    name: clean(body.name, 120) || id,
-    role,
-    allowed: true,
-    teams: [],
-  };
-  const now = Date.now();
-  await upsertUser(env, user, now);
-  const cookieHeader = await createSession(env, request, user.subject, now);
-  return json(
-    { user, auth: authMethods(env, request) },
-    { headers: { "set-cookie": cookieHeader } },
-  );
 }
 
 async function sshLink(

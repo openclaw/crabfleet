@@ -8,12 +8,14 @@ import {
   authorize,
   bootstrapSubject,
   createSession,
+  devIdentityLogin,
   devIdentityId,
   logout,
   parseRole,
   requireRole,
   requireUser,
   sessionGitHubToken,
+  tokenLogin,
 } from "../src/worker/auth.ts";
 import { openSecret, sealSecret, sha256 } from "../src/worker/crypto.ts";
 import type { RuntimeEnv } from "../src/worker/env.ts";
@@ -178,6 +180,75 @@ test("session creation and logout persist only hashed browser tokens", async () 
   assert.equal(response.status, 200);
   assert.match(response.headers.get("set-cookie") ?? "", /Max-Age=0/);
   assert.match(writes.at(-1)?.sql ?? "", /^delete from "sessions"/i);
+});
+
+test("bootstrap and development login handlers own their validation and sessions", async () => {
+  const writes: string[] = [];
+  const env = runtimeEnv(
+    d1((sql, _parameters, kind) => {
+      if (kind === "run") writes.push(sql);
+      return { changes: 1 };
+    }),
+    {
+      CRABBOX_BOOTSTRAP_TOKEN: "bootstrap",
+      CRABFLEET_DEV_LOGIN_ENABLED: "true",
+    },
+  );
+  const invalid = await tokenLogin(
+    new Request("https://fleet.example/api/login/token", {
+      method: "POST",
+      body: JSON.stringify({ token: "wrong" }),
+    }),
+    env,
+  );
+  assert.equal(invalid.status, 401);
+  assert.equal(writes.length, 0);
+
+  const bootstrap = await tokenLogin(
+    new Request("https://fleet.example/api/login/token", {
+      method: "POST",
+      body: JSON.stringify({ token: "bootstrap" }),
+    }),
+    env,
+  );
+  assert.equal(bootstrap.status, 200);
+  assert.match(bootstrap.headers.get("set-cookie") ?? "", /^crabbox_session=/);
+  assert.equal(
+    (await bootstrap.json<{ user: User }>()).user.subject.startsWith("bootstrap:"),
+    true,
+  );
+
+  const development = await devIdentityLogin(
+    new Request("http://127.0.0.1:8787/api/login/dev", {
+      method: "POST",
+      body: JSON.stringify({ id: " Jane Doe ", name: "Jane", role: "maintainer" }),
+    }),
+    env,
+  );
+  assert.equal(development.status, 200);
+  assert.deepEqual((await development.json<{ user: User }>()).user, {
+    subject: "dev:jane-doe",
+    login: "jane-doe",
+    email: null,
+    name: "Jane",
+    role: "maintainer",
+    allowed: true,
+    teams: [],
+  });
+  assert.ok(writes.some((sql) => /^insert into "users"/i.test(sql)));
+  assert.ok(writes.some((sql) => /^insert into "sessions"/i.test(sql)));
+});
+
+test("development login is hidden outside its explicit local gate", async () => {
+  const response = await devIdentityLogin(
+    new Request("https://fleet.example/api/login/dev", {
+      method: "POST",
+      body: JSON.stringify({ id: "owner" }),
+    }),
+    runtimeEnv({} as D1Database, { CRABFLEET_DEV_LOGIN_ENABLED: "true" }),
+  );
+
+  assert.equal(response.status, 404);
 });
 
 test("auth policy helpers normalize identities, advertise configured methods, and enforce roles", async () => {

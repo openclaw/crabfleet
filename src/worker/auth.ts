@@ -7,7 +7,7 @@ import {
 import { openSecret, sealSecret, sha256 } from "./crypto.ts";
 import { database } from "./database.ts";
 import type { RuntimeEnv } from "./env.ts";
-import { cookie, cookies, forbidden, json, unauthorized } from "./http.ts";
+import { cookie, cookies, forbidden, json, readJson, unauthorized } from "./http.ts";
 import type { Role, User } from "./models.ts";
 
 const sessionCookie = "crabbox_session";
@@ -205,6 +205,55 @@ export async function logout(request: Request, env: RuntimeEnv): Promise<Respons
   return json({ ok: true }, { headers: { "set-cookie": cookie(request, sessionCookie, "", 0) } });
 }
 
+export async function tokenLogin(request: Request, env: RuntimeEnv): Promise<Response> {
+  const { token } = await readJson<{ token?: string }>(request);
+  if (!env.CRABBOX_BOOTSTRAP_TOKEN || token !== env.CRABBOX_BOOTSTRAP_TOKEN) {
+    return json({ error: "invalid token" }, { status: 401 });
+  }
+
+  const now = Date.now();
+  const subject = await bootstrapSubject(env);
+  const user: User = {
+    subject,
+    login: "bootstrap",
+    email: null,
+    name: "Bootstrap Admin",
+    role: "owner",
+    allowed: true,
+    teams: [],
+  };
+  await upsertUser(env, user, now);
+  const cookieHeader = await createSession(env, request, user.subject, now);
+  return json(
+    { user, auth: authMethods(env, request) },
+    { headers: { "set-cookie": cookieHeader } },
+  );
+}
+
+export async function devIdentityLogin(request: Request, env: RuntimeEnv): Promise<Response> {
+  if (!devIdentityEnabled(env, request)) return json({ error: "not found" }, { status: 404 });
+
+  const body = await readJson<{ id?: string; name?: string; role?: string }>(request);
+  const id = devIdentityId(body.id);
+  const role = parseRole(body.role);
+  const user: User = {
+    subject: `dev:${id}`,
+    login: id,
+    email: null,
+    name: clean(body.name, 120) || id,
+    role,
+    allowed: true,
+    teams: [],
+  };
+  const now = Date.now();
+  await upsertUser(env, user, now);
+  const cookieHeader = await createSession(env, request, user.subject, now);
+  return json(
+    { user, auth: authMethods(env, request) },
+    { headers: { "set-cookie": cookieHeader } },
+  );
+}
+
 export function authMethods(env: RuntimeEnv, request?: Request): Record<string, boolean> {
   return {
     github: Boolean(env.GITHUB_CLIENT_ID && env.GITHUB_CLIENT_SECRET),
@@ -290,6 +339,12 @@ function parseJson<T>(value: string, fallback: T): T {
   } catch {
     return fallback;
   }
+}
+
+function clean(value: unknown, maximum: number): string {
+  return String(value ?? "")
+    .trim()
+    .slice(0, maximum);
 }
 
 async function deleteSession(db: ReturnType<typeof database>, tokenHash: string): Promise<void> {
