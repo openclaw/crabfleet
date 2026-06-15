@@ -6,6 +6,7 @@ import {
 } from "../runtime-profiles.ts";
 import { trustedProxyPublicOrigin, type TrustedProxyEnv } from "../trusted-proxy-auth.ts";
 import { configuredHttpOrigin } from "../url-security.ts";
+import { badRequest } from "./http.ts";
 
 export const defaultPreferredRepo = "openclaw/crabfleet";
 
@@ -65,7 +66,7 @@ export function selectedRuntimeProfile(
   const profile = clean(value, 120) || deployment.defaultProfile;
   const descriptor = runtimeProfileByID(deployment.runtimeProfiles, profile);
   if (deployment.runtimeProfiles.length > 0 && !descriptor) {
-    throw Object.assign(new Error("profile is not configured"), { status: 400 });
+    throw badRequest("profile is not configured");
   }
   return { profile, descriptor };
 }

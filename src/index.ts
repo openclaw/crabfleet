@@ -179,6 +179,25 @@ import type {
   RunStatus,
   WorkflowStatus,
 } from "./worker/models";
+import {
+  badRequest,
+  bearer,
+  bearerToken,
+  conflict,
+  cookie,
+  cookies,
+  forbidden,
+  json,
+  notFound,
+  readJson,
+  redirect,
+  securityHeaders,
+  serviceUnavailable,
+  text,
+  tooManyRequests,
+  unauthorized,
+  wantsMarkdown,
+} from "./worker/http";
 
 const defaultInteractiveCommand = "codex --yolo";
 
@@ -3967,12 +3986,6 @@ function agentSessionId(request: Request): string {
     clean(request.headers.get("x-crabbox-session-id"), 120) ||
     clean(url.searchParams.get("sessionId"), 120)
   );
-}
-
-function bearerToken(request: Request): string {
-  const authorization = request.headers.get("authorization") ?? "";
-  const [scheme, token] = authorization.split(/\s+/, 2);
-  return scheme?.toLowerCase() === "bearer" ? clean(token, 200) : "";
 }
 
 function sshGatewayTokens(env: RuntimeEnv): string[] {
@@ -14990,14 +15003,6 @@ function devIdentityId(value: unknown): string {
   return id || "dev";
 }
 
-async function readJson<T>(request: Request): Promise<T> {
-  try {
-    return (await request.json()) as T;
-  } catch {
-    throw badRequest("invalid json");
-  }
-}
-
 function parseJson<T>(value: string, fallback: T): T {
   try {
     return JSON.parse(value) as T;
@@ -15588,21 +15593,6 @@ function systemUser(): User {
   };
 }
 
-function cookies(request: Request): Map<string, string> {
-  const result = new Map<string, string>();
-  for (const part of (request.headers.get("cookie") ?? "").split(";")) {
-    const index = part.indexOf("=");
-    if (index === -1) continue;
-    result.set(part.slice(0, index).trim(), decodeURIComponent(part.slice(index + 1).trim()));
-  }
-  return result;
-}
-
-function cookie(request: Request, name: string, value: string, maxAge: number): string {
-  const secure = new URL(request.url).protocol === "https:" ? "; Secure" : "";
-  return `${name}=${encodeURIComponent(value)}; HttpOnly${secure}; SameSite=Lax; Path=/; Max-Age=${maxAge}`;
-}
-
 async function sha256(value: string): Promise<string> {
   const digest = await crypto.subtle.digest("SHA-256", encoder.encode(value));
   return [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
@@ -15735,10 +15725,6 @@ function httpToWebSocketUrl(rawUrl: string): string {
   } catch {
     return "";
   }
-}
-
-function bearer(token: string | undefined): string | null {
-  return token ? `Bearer ${token}` : null;
 }
 
 function sandboxIdForSession(id: string): string {
@@ -16023,58 +16009,6 @@ function isConstraintError(error: unknown): boolean {
   return error instanceof Error && /constraint|unique/i.test(error.message);
 }
 
-function wantsMarkdown(request: Request): boolean {
-  const accept = request.headers.get("accept") ?? "";
-  return accept.includes("text/markdown");
-}
-
-function text(
-  body: string,
-  contentType: string,
-  extraHeaders: HeadersInit = {},
-  status = 200,
-): Response {
-  return new Response(body, {
-    status,
-    headers: {
-      ...securityHeaders(contentType),
-      ...extraHeaders,
-      "content-length": String(encoder.encode(body).byteLength),
-    },
-  });
-}
-
-function json(body: unknown, init: ResponseInit & { headers?: HeadersInit } = {}): Response {
-  const textBody = JSON.stringify(body);
-  return new Response(textBody, {
-    ...init,
-    headers: {
-      ...securityHeaders("application/json; charset=utf-8", false),
-      ...init.headers,
-      "content-length": String(encoder.encode(textBody).byteLength),
-    },
-  });
-}
-
-function redirect(location: string, headers: HeadersInit = {}): Response {
-  return new Response(null, {
-    status: 302,
-    headers: {
-      location,
-      ...headers,
-    },
-  });
-}
-
-function securityHeaders(contentType: string, cache = true): HeadersInit {
-  return {
-    "content-type": contentType,
-    "x-content-type-options": "nosniff",
-    "referrer-policy": "no-referrer",
-    "cache-control": cache ? "public, max-age=300" : "no-store",
-  };
-}
-
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -16086,32 +16020,4 @@ function base64Bytes(value: string): Uint8Array {
     bytes[index] = binary.charCodeAt(index);
   }
   return bytes;
-}
-
-function unauthorized(): Error {
-  return Object.assign(new Error("unauthorized"), { status: 401 });
-}
-
-function forbidden(message: string): Error {
-  return Object.assign(new Error(message), { status: 403 });
-}
-
-function conflict(message: string): Error {
-  return Object.assign(new Error(message), { status: 409 });
-}
-
-function serviceUnavailable(message: string): Error {
-  return Object.assign(new Error(message), { status: 503 });
-}
-
-function badRequest(message: string): Error {
-  return Object.assign(new Error(message), { status: 400 });
-}
-
-function tooManyRequests(message: string): Error {
-  return Object.assign(new Error(message), { status: 429 });
-}
-
-function notFound(message: string): Error {
-  return Object.assign(new Error(message), { status: 404 });
 }

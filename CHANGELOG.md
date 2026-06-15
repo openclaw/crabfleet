@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Centralize Worker HTTP responses, security headers, status errors, JSON parsing, bearer authentication, and cookie handling behind a directly tested module.
 - Give shared Worker models and the complete Kysely/D1 schema, dialect, factory, and batch execution dedicated foundation modules.
 - Extract Worker environment and deployment/profile policy into testable foundation modules, replacing source inspection with behavioral coverage for public and client configuration.
 - Centralize secure URL, origin, and literal-loopback validation across OAuth, trusted proxy, runtime adapter, and Fleet routing.
