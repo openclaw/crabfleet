@@ -1,6 +1,7 @@
 import { json, notFound, readJson } from "../http.ts";
 import type { User } from "../models.ts";
 import type { InteractiveSession } from "../session-model.ts";
+import type { InteractiveSessionSummaryInput } from "../session-metadata.ts";
 
 export type InteractiveSessionResourceRouteDependencies = {
   basePath: string;
@@ -9,7 +10,11 @@ export type InteractiveSessionResourceRouteDependencies = {
   presentSession(session: InteractiveSession, user: User): InteractiveSession;
   readLogs(user: User, sessionId: string): Promise<unknown>;
   readTranscript(user: User, sessionId: string): Promise<Response>;
-  updateSummary(request: Request, user: User, sessionId: string): Promise<unknown>;
+  updateSummary(
+    user: User,
+    sessionId: string,
+    input: InteractiveSessionSummaryInput,
+  ): Promise<unknown>;
   mutateSession?(request: Request, user: User, sessionId: string, action: string): Promise<unknown>;
   listCheckpoints?(user: User, sessionId: string): Promise<unknown>;
   createCheckpoint?(user: User, sessionId: string): Promise<unknown>;
@@ -47,7 +52,13 @@ export async function handleInteractiveSessionResourceRoute(
   }
   if (request.method === "POST" && resource === "summary") {
     const user = await dependencies.requireUser(request);
-    return json(await dependencies.updateSummary(request, user, sessionId));
+    return json(
+      await dependencies.updateSummary(
+        user,
+        sessionId,
+        await readJson<InteractiveSessionSummaryInput>(request),
+      ),
+    );
   }
   if (request.method === "POST" && resource === "actions" && dependencies.mutateSession) {
     const user = await dependencies.requireUser(request);

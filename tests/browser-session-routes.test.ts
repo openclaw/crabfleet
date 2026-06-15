@@ -57,7 +57,7 @@ function dependencies(calls: string[]): BrowserSessionRouteDependencies {
       calls.push(`transcript:${user.login}:${sessionId}`);
       return response("transcript");
     },
-    async updateSummary(_request, user, sessionId) {
+    async updateSummary(user, sessionId) {
       calls.push(`summary:${user.login}:${sessionId}`);
       return { handler: "summary" };
     },

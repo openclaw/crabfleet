@@ -25,6 +25,7 @@ type PersistedMutation = {
 function fixture(
   options: {
     session?: InteractiveSession;
+    readSession?: InteractiveSession | null;
     persist?: boolean;
     archiveFailure?: boolean;
   } = {},
@@ -47,7 +48,7 @@ function fixture(
     audit: async (message) => {
       audits.push(message);
     },
-    readSession: async () => session,
+    readSession: async () => (options.readSession === undefined ? session : options.readSession),
   };
   const service = new InteractiveSessionMetadataService(
     store,
@@ -243,4 +244,98 @@ test("archive refresh failures do not roll back persisted metadata", async () =>
   assert.equal(result.session, context.session);
   assert.deepEqual(context.archives, ["IS-7"]);
   assert.deepEqual(context.audits, ["interactive session share disabled IS-7"]);
+});
+
+test("summary updates normalize fields and refresh archives before rereading", async () => {
+  const context = fixture();
+  const result = await context.service.updateSummary({
+    sessionId: "IS-7",
+    actor: "operator",
+    purpose: ` ${"p".repeat(600)} `,
+    summary: " done ",
+    now: 100,
+    canManage: () => true,
+  });
+
+  assert.equal(result, context.session);
+  assert.deepEqual(context.mutations, [
+    {
+      actor: "operator",
+      message: "session summary updated",
+      values: {
+        purpose: "p".repeat(500),
+        summary: "done",
+      },
+      now: 100,
+    },
+  ]);
+  assert.deepEqual(context.archives, ["IS-7"]);
+});
+
+test("purpose-only updates retain distinct evidence", async () => {
+  const context = fixture();
+  await context.service.updateSummary({
+    sessionId: "IS-7",
+    actor: "operator",
+    purpose: " investigate ",
+    now: 100,
+    canManage: () => true,
+  });
+
+  assert.equal(context.mutations[0]?.message, "session purpose updated");
+  assert.deepEqual(context.mutations[0]?.values, { purpose: "investigate" });
+});
+
+test("summary updates reject missing, unauthorized, and stale sessions", async () => {
+  const missing = fixture({ readSession: null });
+  await assert.rejects(
+    missing.service.updateSummary({
+      sessionId: "IS-missing",
+      actor: "operator",
+      summary: "missing",
+      now: 100,
+      canManage: () => true,
+    }),
+    hasStatus(404),
+  );
+
+  const blank = fixture();
+  await assert.rejects(
+    blank.service.updateSummary({
+      sessionId: "IS-7",
+      actor: "operator",
+      purpose: " ",
+      summary: "",
+      now: 100,
+      canManage: () => true,
+    }),
+    hasStatus(400),
+  );
+  assert.deepEqual(blank.mutations, []);
+
+  const unauthorized = fixture();
+  await assert.rejects(
+    unauthorized.service.updateSummary({
+      sessionId: "IS-7",
+      actor: "operator",
+      summary: "hidden",
+      now: 100,
+      canManage: () => false,
+    }),
+    hasStatus(403),
+  );
+  assert.deepEqual(unauthorized.mutations, []);
+
+  const stale = fixture({ persist: false });
+  await assert.rejects(
+    stale.service.updateSummary({
+      sessionId: "IS-7",
+      actor: "operator",
+      summary: "raced",
+      now: 100,
+      canManage: () => true,
+    }),
+    hasStatus(409),
+  );
+  assert.deepEqual(stale.archives, []);
 });

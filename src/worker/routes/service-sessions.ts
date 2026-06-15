@@ -1,6 +1,7 @@
 import { json } from "../http.ts";
 import type { User } from "../models.ts";
 import type { InteractiveSession } from "../session-model.ts";
+import type { InteractiveSessionSummaryInput } from "../session-metadata.ts";
 import { handleInteractiveSessionResourceRoute } from "./interactive-session-resources.ts";
 
 type ServiceSessionPrincipal = "ssh" | "agent";
@@ -23,7 +24,11 @@ export type ServiceSessionRouteDependencies = {
   restoreCheckpoint(user: User, sessionId: string, checkpointId: string): Promise<unknown>;
   readLogs(user: User, sessionId: string): Promise<unknown>;
   readTranscript(user: User, sessionId: string): Promise<Response>;
-  updateSummary(request: Request, user: User, sessionId: string): Promise<unknown>;
+  updateSummary(
+    user: User,
+    sessionId: string,
+    input: InteractiveSessionSummaryInput,
+  ): Promise<unknown>;
 };
 
 export async function handleServiceSessionRoute(

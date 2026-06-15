@@ -100,7 +100,7 @@ function dependencies(calls: string[]): ServiceSessionRouteDependencies {
       calls.push(`transcript:${user.login}:${sessionId}`);
       return response("transcript");
     },
-    async updateSummary(_request: Request, user: User, sessionId: string) {
+    async updateSummary(user: User, sessionId: string) {
       calls.push(`summary:${user.login}:${sessionId}`);
       return { handler: "summary" };
     },

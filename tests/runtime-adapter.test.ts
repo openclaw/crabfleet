@@ -624,22 +624,6 @@ test("session events and terminal finalization preserve archive anchors", async 
   assert.match(finalizationSource, /events_key IS NOT NULL/);
 });
 
-test("summary events update metadata and refresh archive snapshots", async () => {
-  const source = await readFile(new URL("../src/index.ts", import.meta.url), "utf8");
-  const summaryStart = source.indexOf("async function updateInteractiveSessionSummary");
-  const summaryEnd = source.indexOf("async function githubActionsRunnerPty", summaryStart);
-  const summarySource = source.slice(summaryStart, summaryEnd);
-  const metadataStart = source.indexOf(
-    "async function mutateInteractiveSessionWithEventAtomically",
-  );
-  const metadataEnd = source.indexOf("async function mutateInteractiveSession(", metadataStart);
-  const metadataSource = source.slice(metadataStart, metadataEnd);
-
-  assert.match(summarySource, /mutateInteractiveSessionWithEventAtomically/);
-  assert.match(metadataSource, /persistInteractiveSessionEventMutation/);
-  assert.match(metadataSource, /archiveInteractiveSessionLogs/);
-});
-
 test("runtime adapter credentials are preflighted before session allocation", () => {
   const env = {
     CRABBOX_RUNTIME_ADAPTER_URL: "https://adapter.example.test",

@@ -1,4 +1,3 @@
-import type { UpdateObject } from "kysely";
 import { ContainerProxy, Sandbox as CloudflareSandboxBase } from "@cloudflare/sandbox";
 import { buildFleetState, type FleetState } from "./fleet-state";
 import { buildGitHubActionsRunnerPtyUrl, githubActionsRuntime } from "./github-actions-runtime";
@@ -30,11 +29,10 @@ import {
 } from "./worker/deployment";
 import { mapWithConcurrency } from "./worker/concurrency";
 import type { RuntimeEnv } from "./worker/env";
-import type { Database, InteractiveSessionRow } from "./worker/database";
+import type { InteractiveSessionRow } from "./worker/database";
 import type { User } from "./worker/models";
 import {
   badRequest,
-  conflict,
   forbidden,
   json,
   notFound,
@@ -205,6 +203,7 @@ import {
   InteractiveSessionMetadataService,
   isInteractiveSessionMetadataAction,
   type InteractiveSessionMetadataStore,
+  type InteractiveSessionSummaryInput,
 } from "./worker/session-metadata";
 import {
   InteractiveSessionStopService,
@@ -578,8 +577,8 @@ function browserSessionRouteDependencies(env: RuntimeEnv): BrowserSessionRouteDe
     presentSession: (session, user) => decorateInteractiveSession(session, user, env),
     readLogs: (user, sessionId) => readInteractiveSessionLogBundle(env, user, sessionId),
     readTranscript: (user, sessionId) => interactiveSessionTranscriptResponse(env, user, sessionId),
-    updateSummary: (request, user, sessionId) =>
-      updateInteractiveSessionSummary(request, env, user, sessionId),
+    updateSummary: (user, sessionId, input) =>
+      updateInteractiveSessionSummary(env, user, sessionId, input),
     mutateSession: (request, user, sessionId, action) =>
       mutateInteractiveSession(request, env, user, sessionId, action),
     listCheckpoints: (user, sessionId) =>
@@ -625,8 +624,8 @@ function serviceSessionRouteDependencies(env: RuntimeEnv): ServiceSessionRouteDe
       sandboxSessionResourceService(env).restoreCheckpoint(user, sessionId, checkpointId),
     readLogs: (user, sessionId) => readInteractiveSessionLogBundle(env, user, sessionId),
     readTranscript: (user, sessionId) => interactiveSessionTranscriptResponse(env, user, sessionId),
-    updateSummary: (request, user, sessionId) =>
-      updateInteractiveSessionSummary(request, env, user, sessionId),
+    updateSummary: (user, sessionId, input) =>
+      updateInteractiveSessionSummary(env, user, sessionId, input),
   };
 }
 
@@ -1344,22 +1343,6 @@ async function cleanupInteractiveSessions(
   return { state: await readState(request, env, user), removedIds };
 }
 
-async function mutateInteractiveSessionWithEventAtomically(
-  env: RuntimeEnv,
-  session: Pick<InteractiveSession, "id" | "status" | "updatedAt">,
-  user: User,
-  message: string,
-  values: UpdateObject<Database, "interactive_sessions">,
-  now = Date.now(),
-): Promise<void> {
-  if (
-    !(await persistInteractiveSessionEventMutation(env, session, actor(user), message, values, now))
-  ) {
-    throw conflict("interactive session lifecycle changed; retry metadata update");
-  }
-  await archiveInteractiveSessionLogs(env, session.id, now).catch(() => undefined);
-}
-
 function interactiveSessionAttachService(env: RuntimeEnv): InteractiveSessionAttachService {
   const store: InteractiveSessionAttachStore = {
     persist: (session, actorName, transition, now) =>
@@ -1731,33 +1714,20 @@ async function interactiveSessionTranscriptResponse(
 }
 
 async function updateInteractiveSessionSummary(
-  request: Request,
   env: RuntimeEnv,
   user: User,
   id: string,
+  input: InteractiveSessionSummaryInput,
 ): Promise<{ session: InteractiveSession }> {
-  const session = await readInteractiveSession(env, id);
-  if (!session) throw notFound("interactive session not found");
-  if (!canManageInteractiveSession(user, session)) throw forbidden("session is not visible");
-  const body = await readJson<{ purpose?: string; summary?: string }>(request);
-  const purpose = clean(body.purpose, 500);
-  const summary = clean(body.summary, 500);
-  if (!purpose && !summary) throw badRequest("summary or purpose is required");
-  const now = Date.now();
-  await mutateInteractiveSessionWithEventAtomically(
-    env,
-    session,
-    user,
-    summary ? "session summary updated" : "session purpose updated",
-    {
-      ...(purpose ? { purpose } : {}),
-      ...(summary ? { summary } : {}),
-    },
-    now,
-  );
   return {
     session: decorateInteractiveSession(
-      (await readInteractiveSession(env, id)) as InteractiveSession,
+      await interactiveSessionMetadataService(env, user).updateSummary({
+        ...input,
+        sessionId: id,
+        actor: actor(user),
+        now: Date.now(),
+        canManage: (session) => canManageInteractiveSession(user, session),
+      }),
       user,
       env,
     ),

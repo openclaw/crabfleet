@@ -39,6 +39,18 @@ export type InteractiveSessionMetadataResult = {
   shareToken?: string;
 };
 
+export type InteractiveSessionSummaryInput = {
+  purpose?: unknown;
+  summary?: unknown;
+};
+
+export type InteractiveSessionSummaryMutation = InteractiveSessionSummaryInput & {
+  sessionId: string;
+  actor: string;
+  now: number;
+  canManage(session: InteractiveSession): boolean;
+};
+
 export type InteractiveSessionMetadataStore = {
   persist(
     session: Pick<InteractiveSession, "id" | "status" | "updatedAt">,
@@ -225,6 +237,25 @@ export class InteractiveSessionMetadataService {
     return { session: await this.readSession(session.id) };
   }
 
+  async updateSummary(input: InteractiveSessionSummaryMutation): Promise<InteractiveSession> {
+    const session = await this.readSession(input.sessionId);
+    if (!input.canManage(session)) throw forbidden("session is not visible");
+    const purpose = clean(input.purpose, 500);
+    const summary = clean(input.summary, 500);
+    if (!purpose && !summary) throw badRequest("summary or purpose is required");
+    await this.persist(
+      session,
+      input.actor,
+      summary ? "session summary updated" : "session purpose updated",
+      {
+        ...(purpose ? { purpose } : {}),
+        ...(summary ? { summary } : {}),
+      },
+      input.now,
+    );
+    return this.readSession(session.id);
+  }
+
   private requireDelegatedControl(policy: InteractiveSessionMetadataPolicy): void {
     if (!policy.delegatedControlAvailable) {
       throw badRequest("delegated terminal control requires a revocable live terminal");
@@ -261,4 +292,10 @@ export function interactiveSessionShareToken(): string {
   const first = crypto.randomUUID().replaceAll("-", "");
   const second = crypto.randomUUID().replaceAll("-", "");
   return `${first}${second}`;
+}
+
+function clean(value: unknown, maximum: number): string {
+  return String(value ?? "")
+    .trim()
+    .slice(0, maximum);
 }
