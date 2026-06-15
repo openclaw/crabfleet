@@ -289,6 +289,11 @@ import {
   type InteractiveSessionAttachStore,
 } from "./worker/session-attach";
 import {
+  canChangeInteractiveSessionMultiplayer,
+  canControlInteractiveSession,
+  canManageInteractiveSession,
+} from "./worker/session-access";
+import {
   InteractiveSessionMetadataService,
   isInteractiveSessionMetadataAction,
   type InteractiveSessionMetadataStore,
@@ -13324,42 +13329,6 @@ function decorateInteractiveSession(
     canControl,
     canRequestControl: delegatedControl && !canControl,
   };
-}
-
-function canChangeInteractiveSessionMultiplayer(user: User, session: InteractiveSession): boolean {
-  return userActorCandidates(user).has(session.owner);
-}
-
-function canManageInteractiveSession(user: User, session: InteractiveSession): boolean {
-  return (
-    userActorCandidates(user).has(session.owner) ||
-    user.role === "maintainer" ||
-    user.role === "owner"
-  );
-}
-
-function userActorCandidates(user: User): Set<string> {
-  return new Set(
-    [actor(user), user.subject, user.login, user.email].filter((value): value is string =>
-      Boolean(value),
-    ),
-  );
-}
-
-function canControlInteractiveSession(
-  user: User,
-  session: InteractiveSession,
-  now: number,
-  delegatedControl = true,
-): boolean {
-  if (canManageInteractiveSession(user, session)) return true;
-  if (!delegatedControl) return false;
-  const userActor = actor(user);
-  return (
-    session.controller === userActor &&
-    typeof session.controlExpiresAt === "number" &&
-    session.controlExpiresAt > now
-  );
 }
 
 async function canControlInteractiveSessionById(

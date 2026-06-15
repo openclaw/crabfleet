@@ -171,7 +171,7 @@ test("runtime profiles resolve bounded manager-only Codex SSH handoff data", asy
 
   const source = await readFile(new URL("../src/index.ts", import.meta.url), "utf8");
   const start = source.indexOf("function decorateInteractiveSession");
-  const end = source.indexOf("function canChangeInteractiveSessionMultiplayer", start);
+  const end = source.indexOf("async function canControlInteractiveSessionById", start);
   const decoration = source.slice(start, end);
   assert.match(decoration, /canManage && codexSshReady/);
   assert.match(decoration, /codexSsh,/);

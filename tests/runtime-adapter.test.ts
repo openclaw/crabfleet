@@ -1641,7 +1641,7 @@ test("terminal endpoints enforce current runtime capabilities", async () => {
   const source = await readFile(new URL("../src/index.ts", import.meta.url), "utf8");
   const decorateStart = source.indexOf("function decorateInteractiveSession");
   const decorateEnd = source.indexOf(
-    "function canChangeInteractiveSessionMultiplayer",
+    "async function canControlInteractiveSessionById",
     decorateStart,
   );
   const decorateSource = source.slice(decorateStart, decorateEnd);
@@ -2049,7 +2049,7 @@ test("runtime adapter terminals use the server-side adapter bearer", async () =>
   assert.doesNotMatch(targetSource, /searchParams\.set\([^)]*(?:token|ticket)/u);
   const decorateStart = source.indexOf("function decorateInteractiveSession");
   const decorateEnd = source.indexOf(
-    "function canChangeInteractiveSessionMultiplayer",
+    "async function canControlInteractiveSessionById",
     decorateStart,
   );
   const decorateSource = source.slice(decorateStart, decorateEnd);
