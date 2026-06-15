@@ -55,20 +55,10 @@ jobs:
       - name: Deploy
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-        working-directory: worker
-        run: |
-          for attempt in 1 2 3; do
-            npx wrangler deploy --config wrangler.jsonc && exit 0
-            sleep $((attempt * 5))
-          done
-          npx wrangler deploy --config wrangler.jsonc
-
-      - name: Sync runtime adapter token
-        env:
-          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CRABBOX_OPENCLAW_TOKEN: ${{ secrets.CRABBOX_OPENCLAW_TOKEN }}
         working-directory: worker
         run: |
+          set -euo pipefail
           token="$(
             node -e '
               const { createHmac } = require("node:crypto");
@@ -81,15 +71,52 @@ jobs:
               );
             '
           )"
-          printf '%s' "$token" |
-            npx wrangler secret put CRABBOX_RUNTIME_ADAPTER_TOKEN --config wrangler.jsonc
-          status="$(
-            curl --silent --show-error --output /dev/null --write-out '%{http_code}' \
-              --header "Authorization: Bearer $token" \
-              https://crabbox.openclaw.ai/v1/workspaces/deploy-auth-check
-          )"
-          test "$status" != "401"
-          test "$status" != "403"
+          secrets_file="$(mktemp)"
+          trap 'rm -f "$secrets_file"' EXIT
+          SECRETS_FILE="$secrets_file" \
+            CRABBOX_RUNTIME_ADAPTER_TOKEN="$token" \
+            node -e '
+              const { writeFileSync } = require("node:fs");
+              writeFileSync(
+                process.env.SECRETS_FILE,
+                JSON.stringify({
+                  CRABBOX_RUNTIME_ADAPTER_TOKEN:
+                    process.env.CRABBOX_RUNTIME_ADAPTER_TOKEN,
+                }),
+              );
+            '
+          deployed=0
+          for attempt in 1 2 3; do
+            if npx wrangler deploy --config wrangler.jsonc --secrets-file "$secrets_file"; then
+              deployed=1
+              break
+            fi
+            sleep $((attempt * 5))
+          done
+          test "$deployed" = "1"
+          verified=0
+          for attempt in $(seq 1 30); do
+            workspace_status="$(
+              curl --silent --show-error --output /dev/null --write-out '%{http_code}' \
+                --header "Authorization: Bearer $token" \
+                https://crabbox.openclaw.ai/v1/workspaces/deploy-auth-check
+            )"
+            lease_status="$(
+              curl --silent --show-error --output /dev/null --write-out '%{http_code}' \
+                --header "Authorization: Bearer $token" \
+                https://crabbox.openclaw.ai/v1/leases
+            )"
+            if [ "$workspace_status" = "404" ] && [ "$lease_status" = "401" ]; then
+              verified=$((verified + 1))
+              if [ "$verified" = "12" ]; then
+                break
+              fi
+            else
+              verified=0
+            fi
+            sleep 2
+          done
+          test "$verified" = "12"
 
       - name: Verify deployment
         run: |
