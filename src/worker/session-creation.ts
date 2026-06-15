@@ -13,6 +13,13 @@ export type InteractiveSessionCreationReservation = {
   adapterWorkspaceId: string | null;
 };
 
+export type InteractiveSessionProvisionRecoveryInput = {
+  sessionId: string;
+  adapterName: string;
+  sandboxLeasePrefix: string;
+  now: number;
+};
+
 export type InteractiveSessionCreationStore = {
   enforceSupervision(
     rootSessionId: string,
@@ -44,6 +51,14 @@ export type InteractiveSessionCreationStore = {
     status: "stopped" | "expired" | "failed",
     now: number,
   ): Promise<void>;
+  readSession(sessionId: string): Promise<InteractiveSession | null>;
+  stopSupersededAdapter(
+    sessionId: string,
+    adapterWorkspaceId: string,
+    createPending: boolean,
+    now: number,
+  ): Promise<void>;
+  cleanupSupersededSandbox(sessionId: string, leaseId: string): Promise<void>;
 };
 
 export class InteractiveSessionCreationService {
@@ -139,5 +154,39 @@ export class InteractiveSessionCreationService {
         .catch(() => undefined);
     }
     return persisted;
+  }
+
+  async recoverSupersededProvision(
+    input: InteractiveSessionProvisionRecoveryInput,
+    result: InteractiveProvisionResult,
+  ): Promise<InteractiveSession> {
+    let current = await this.store.readSession(input.sessionId);
+    const currentAdapterProvision = Boolean(
+      current &&
+      current.adapter === input.adapterName &&
+      current.adapterWorkspaceId === result.adapterWorkspaceId &&
+      ["provisioning", "pending_adapter", "ready", "attached", "detached"].includes(current.status),
+    );
+    if (
+      !currentAdapterProvision &&
+      result.adapter === input.adapterName &&
+      result.adapterWorkspaceId
+    ) {
+      await this.store.stopSupersededAdapter(
+        input.sessionId,
+        result.adapterWorkspaceId,
+        result.createPending === true,
+        input.now,
+      );
+    }
+    if (
+      result.adapter !== input.adapterName &&
+      result.leaseId?.startsWith(input.sandboxLeasePrefix)
+    ) {
+      await this.store.cleanupSupersededSandbox(input.sessionId, result.leaseId);
+      current = await this.store.readSession(input.sessionId);
+    }
+    if (!current) throw new Error("interactive session disappeared during provisioning");
+    return current;
   }
 }

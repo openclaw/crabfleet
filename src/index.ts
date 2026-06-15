@@ -3788,41 +3788,15 @@ async function createInteractiveSessionFromInput(
         provisioned,
       );
       if (!provisionPersistence.updated && provisioned) {
-        let current = await readInteractiveSession(env, id);
-        const currentAdapterProvision = Boolean(
-          current &&
-          current.adapter === runtimeAdapterName &&
-          current.adapterWorkspaceId === provisioned.adapterWorkspaceId &&
-          ["provisioning", "pending_adapter", "ready", "attached", "detached"].includes(
-            current.status,
-          ),
+        const current = await creation.recoverSupersededProvision(
+          {
+            sessionId: id,
+            adapterName: runtimeAdapterName,
+            sandboxLeasePrefix,
+            now: Date.now(),
+          },
+          provisioned,
         );
-        if (
-          !currentAdapterProvision &&
-          provisioned.adapter === runtimeAdapterName &&
-          provisioned.adapterWorkspaceId
-        ) {
-          await stopSupersededRuntimeAdapterProvision(
-            env,
-            id,
-            provisioned.adapterWorkspaceId,
-            provisioned.createPending === true,
-            Date.now(),
-          );
-        }
-        if (
-          provisioned.adapter !== runtimeAdapterName &&
-          provisioned.leaseId?.startsWith(sandboxLeasePrefix)
-        ) {
-          await queueSandboxCredentialPolicyCleanup(
-            env,
-            id,
-            sandboxLeaseInfo({ id, leaseId: provisioned.leaseId }).sandboxId,
-          );
-          await reconcileCredentialPolicyCleanupBatch(env, Date.now(), id);
-          current = await readInteractiveSession(env, id);
-        }
-        if (!current) throw new Error("interactive session disappeared during provisioning");
         return { session: decorateInteractiveSession(current, user, env) };
       }
       await audit(
@@ -4109,6 +4083,17 @@ function interactiveSessionCreationService(
       appendInteractiveSessionEvent(env, sessionId, user, message, now),
     finalizeTerminal: (sessionId, status, now) =>
       finalizeTerminalInteractiveSession(env, sessionId, status, now),
+    readSession: (sessionId) => readInteractiveSession(env, sessionId),
+    stopSupersededAdapter: (sessionId, adapterWorkspaceId, createPending, now) =>
+      stopSupersededRuntimeAdapterProvision(env, sessionId, adapterWorkspaceId, createPending, now),
+    cleanupSupersededSandbox: async (sessionId, leaseId) => {
+      await queueSandboxCredentialPolicyCleanup(
+        env,
+        sessionId,
+        sandboxLeaseInfo({ id: sessionId, leaseId }).sandboxId,
+      );
+      await reconcileCredentialPolicyCleanupBatch(env, Date.now(), sessionId);
+    },
   };
   return new InteractiveSessionCreationService(store);
 }

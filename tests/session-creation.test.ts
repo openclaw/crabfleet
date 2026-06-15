@@ -36,6 +36,9 @@ function creationStore(
     markPendingAdapter: async () => undefined,
     recordProvisionEvent: async () => undefined,
     finalizeTerminal: async () => undefined,
+    readSession: async () => null,
+    stopSupersededAdapter: async () => undefined,
+    cleanupSupersededSandbox: async () => undefined,
     ...overrides,
   };
 }
@@ -280,4 +283,146 @@ test("session creation records pending adapters without finalization", async () 
   );
   assert.deepEqual(result, { updated: true, terminalStatus: null, terminalAt: 101 });
   assert.deepEqual(calls, ["pending", "event:waiting for interactive runtime adapter:101"]);
+});
+
+test("session creation preserves the currently owned adapter provision", async () => {
+  const current = session({
+    id: "IS-2",
+    status: "ready",
+    adapter: "runtime-v1",
+    adapter_workspace_id: "workspace-current",
+  });
+  const calls: string[] = [];
+  const service = new InteractiveSessionCreationService(
+    creationStore({
+      readSession: async () => current,
+      stopSupersededAdapter: async () => {
+        calls.push("stop");
+      },
+    }),
+  );
+
+  assert.equal(
+    await service.recoverSupersededProvision(
+      {
+        sessionId: "IS-2",
+        adapterName: "runtime-v1",
+        sandboxLeasePrefix: "sandbox:",
+        now: 150,
+      },
+      {
+        status: "ready",
+        leaseId: null,
+        attachUrl: null,
+        vncUrl: null,
+        message: "ready",
+        adapter: "runtime-v1",
+        adapterWorkspaceId: "workspace-current",
+      },
+    ),
+    current,
+  );
+  assert.deepEqual(calls, []);
+});
+
+test("session creation stops superseded adapter workspaces", async () => {
+  const current = session({
+    id: "IS-2",
+    status: "ready",
+    adapter: "runtime-v1",
+    adapter_workspace_id: "workspace-current",
+  });
+  const calls: string[] = [];
+  const service = new InteractiveSessionCreationService(
+    creationStore({
+      readSession: async () => current,
+      stopSupersededAdapter: async (sessionId, workspaceId, createPending, now) => {
+        calls.push(`stop:${sessionId}:${workspaceId}:${createPending}:${now}`);
+      },
+    }),
+  );
+
+  assert.equal(
+    await service.recoverSupersededProvision(
+      {
+        sessionId: "IS-2",
+        adapterName: "runtime-v1",
+        sandboxLeasePrefix: "sandbox:",
+        now: 150,
+      },
+      {
+        status: "ready",
+        leaseId: null,
+        attachUrl: null,
+        vncUrl: null,
+        message: "late create",
+        adapter: "runtime-v1",
+        adapterWorkspaceId: "workspace-late",
+        createPending: true,
+      },
+    ),
+    current,
+  );
+  assert.deepEqual(calls, ["stop:IS-2:workspace-late:true:150"]);
+});
+
+test("session creation cleans superseded sandbox ownership and rereads durability", async () => {
+  const before = session({ id: "IS-2", status: "stopping" });
+  const after = session({ id: "IS-2", status: "failed" });
+  let reads = 0;
+  const calls: string[] = [];
+  const service = new InteractiveSessionCreationService(
+    creationStore({
+      readSession: async () => {
+        reads += 1;
+        return reads === 1 ? before : after;
+      },
+      cleanupSupersededSandbox: async (sessionId, leaseId) => {
+        calls.push(`cleanup:${sessionId}:${leaseId}`);
+      },
+    }),
+  );
+
+  assert.equal(
+    await service.recoverSupersededProvision(
+      {
+        sessionId: "IS-2",
+        adapterName: "runtime-v1",
+        sandboxLeasePrefix: "sandbox:",
+        now: 150,
+      },
+      {
+        status: "ready",
+        leaseId: "sandbox:late",
+        attachUrl: null,
+        vncUrl: null,
+        message: "late sandbox",
+      },
+    ),
+    after,
+  );
+  assert.deepEqual(calls, ["cleanup:IS-2:sandbox:late"]);
+  assert.equal(reads, 2);
+});
+
+test("session creation fails explicitly when durable ownership disappears", async () => {
+  const service = new InteractiveSessionCreationService(creationStore());
+  await assert.rejects(
+    service.recoverSupersededProvision(
+      {
+        sessionId: "IS-2",
+        adapterName: "runtime-v1",
+        sandboxLeasePrefix: "sandbox:",
+        now: 150,
+      },
+      {
+        status: "ready",
+        leaseId: null,
+        attachUrl: null,
+        vncUrl: null,
+        message: "ready",
+      },
+    ),
+    /interactive session disappeared during provisioning/,
+  );
 });
