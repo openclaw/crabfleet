@@ -171,7 +171,9 @@ export function ActionDialog({ dialog, onCancel, onConfirm }) {
               </button>
               <button class="primary" onClick={() => void copyValue()}>
                 <Icon name={copied ? "check" : "copy"} />
-                {copied ? "Copied" : "Copy link"}
+                <span aria-live="polite" aria-atomic="true">
+                  {copied ? "Copied" : "Copy link"}
+                </span>
               </button>
             </>
           ) : (

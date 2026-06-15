@@ -2,7 +2,9 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  interactiveShareDialog,
   interactiveStopDialog,
+  presentInteractiveShareLink,
   removeInteractiveSessionState,
   replaceCardState,
   upsertInteractiveSessionState,
@@ -72,4 +74,33 @@ test("interactive stop dialogs distinguish workspace deletion and workflow detac
   assert.equal(fallback.title, "Stop Crabbox session?");
   assert.equal(fallback.confirmLabel, "Stop session");
   assert.match(fallback.description, /releases the managed Sandbox resources/);
+});
+
+test("interactive sharing always presents a visible HTML dialog", async () => {
+  const actions: Array<[string, string]> = [];
+  const dialogs: unknown[] = [];
+  const result = await presentInteractiveShareLink(
+    "IS-4",
+    async (id, action) => {
+      actions.push([id, action]);
+      return { shareUrl: "https://crabfleet.openclaw.ai/share/IS-4?token=redacted" };
+    },
+    (dialog) => dialogs.push(dialog),
+  );
+
+  assert.deepEqual(actions, [["IS-4", "share_link"]]);
+  assert.equal(result.shareUrl, "https://crabfleet.openclaw.ai/share/IS-4?token=redacted");
+  assert.deepEqual(dialogs, [
+    interactiveShareDialog("https://crabfleet.openclaw.ai/share/IS-4?token=redacted"),
+  ]);
+});
+
+test("interactive sharing does not open an empty dialog", async () => {
+  const dialogs: unknown[] = [];
+  await presentInteractiveShareLink(
+    "IS-5",
+    async () => ({}),
+    (dialog) => dialogs.push(dialog),
+  );
+  assert.deepEqual(dialogs, []);
 });

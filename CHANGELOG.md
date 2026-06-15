@@ -111,7 +111,7 @@
 - Bound every runtime-adapter response stream, revalidate desktop authorization after minting, make legacy local stops atomic with scheduled crash recovery, and redact credentials before opaque provider identifiers.
 - Recover active credential policies after a post-registration crash and redact provider identities from structured adapter errors.
 - Support an optional authoritative `GITHUB_REDIRECT_URI` deployment binding with strict HTTPS callback validation, canonical-origin login handoff, and callback host/path enforcement while retaining safe request-origin defaults.
-- Replace native browser confirms and prompts with accessible Crabfleet dialogs for session cleanup, shutdown, and share-link fallback.
+- Replace native browser confirms and prompts with accessible Crabfleet dialogs for session cleanup, shutdown, and share links; keep dialogs above drawer navigation on Escape.
 - Sharpen the app visual system with flatter controls, tighter surfaces, and restrained overlay elevation.
 - Add Crabfleet session supervision metadata, owner/session tree listing, transcript retrieval, PTY messaging, and summary updates for Codex-spawned Codex sessions.
 - Redesign Fleet as an operational command view with real readiness data, compact connection paths, clearer operator groups, and denser session cards.

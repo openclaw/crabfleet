@@ -6,11 +6,11 @@ import { useAppMutations } from "./app-mutations.js";
 import { useAppNavigation } from "./app-navigation.js";
 import { AppShell } from "./app-shell.jsx";
 import { ActionDialog, useActionDialog } from "./dialogs.jsx";
+import { handleAppEscape } from "./keyboard-shortcuts.js";
 import { useLinkedSession } from "./linked-session.js";
 import { LoginScreen } from "./login.jsx";
 import { isLoginScreenHidden } from "./login-state.js";
 import { parseSessionLink, restoreSessionReturnUrl } from "./routing.js";
-import { isTerminalKeyTarget } from "./session-state.js";
 import { SessionsDrawer } from "./session-workspace.jsx";
 import { useTerminalHubState } from "./terminal-state.js";
 import { sessionItems } from "./utils.js";
@@ -173,13 +173,10 @@ function App() {
 
 function CrabfleetApp(props) {
   useEffect(() => {
-    const onKeyDown = (event) => {
-      if (event.key !== "Escape" || event.isComposing || isTerminalKeyTarget(event)) return;
-      if (props.closeTopDrawer()) event.preventDefault();
-    };
+    const onKeyDown = (event) => handleAppEscape(event, props);
     document.addEventListener("keydown", onKeyDown);
     return () => document.removeEventListener("keydown", onKeyDown);
-  }, [props.drawers]);
+  }, [props.dialog, props.drawers]);
 
   return (
     <>

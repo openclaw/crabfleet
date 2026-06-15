@@ -70,6 +70,22 @@ export function interactiveStopDialog(session, id) {
   };
 }
 
+export function interactiveShareDialog(shareUrl) {
+  return {
+    kind: "share",
+    eyebrow: "Read-only access",
+    title: "Share link ready",
+    description: "Copy this read-only link to share the session.",
+    value: shareUrl,
+  };
+}
+
+export async function presentInteractiveShareLink(id, interactiveSessionAction, openActionDialog) {
+  const result = await interactiveSessionAction(id, "share_link");
+  if (result.shareUrl) openActionDialog(interactiveShareDialog(result.shareUrl));
+  return result;
+}
+
 export function useAppMutations({
   state,
   setState,
@@ -211,24 +227,7 @@ export function useAppMutations({
   }
 
   async function shareInteractiveSession(id) {
-    const result = await interactiveSessionAction(id, "share_link");
-    if (!result.shareUrl) return;
-    let copied = false;
-    try {
-      if (navigator.clipboard) {
-        await navigator.clipboard.writeText(result.shareUrl);
-        copied = true;
-      }
-    } catch {}
-    if (!copied) {
-      openActionDialog({
-        kind: "share",
-        eyebrow: "Read-only access",
-        title: "Share link ready",
-        description: "Clipboard access is unavailable. Copy this link manually.",
-        value: result.shareUrl,
-      });
-    }
+    return presentInteractiveShareLink(id, interactiveSessionAction, openActionDialog);
   }
 
   async function openRunDetails(id) {
