@@ -5,6 +5,22 @@ import { CopyCommand, Icon } from "./components.jsx";
 import { ActionDialog, Drawer, useActionDialog } from "./dialogs.jsx";
 import { FleetPage } from "./fleet.jsx";
 import {
+  appViewUrl,
+  initialAppView,
+  isGithubLoginCallback,
+  loginReturnKey,
+  parseSessionLink,
+  restoreSessionReturnUrl,
+  sessionRouteUrl,
+} from "./routing.js";
+import {
+  defaultSessionLayout,
+  loadSessionLayout,
+  moveSessionLayoutItem,
+  orderedSessionItems,
+  saveSessionLayout,
+} from "./session-layout.js";
+import {
   canDeleteInteractiveWorkspace,
   canMaintain,
   canOwn,
@@ -54,10 +70,8 @@ const defaultDeployment = {
   defaultProfile: "default",
   runtimeProfiles: [],
 };
-const loginReturnKey = "crabbox-login-return";
 const skipAutoGithubLoginKey = "crabbox-skip-auto-github-login";
 const githubAutoLoginReadyKey = "crabbox-github-auto-login-ready";
-const sessionLayoutStorageKey = "crabbox-session-layout-v1";
 const emptyState = {
   cards: [],
   interactiveSessions: [],
@@ -449,10 +463,7 @@ function App() {
     setAppViewState(next);
     closeAllDrawers();
     if (!history.pushState) return;
-    const url = new URL(location.href);
-    url.pathname = next === "board" ? "/app/board" : "/app/fleet";
-    url.search = "";
-    history.pushState(null, "", url);
+    history.pushState(null, "", appViewUrl(location.href, next));
   }
 
   function closeTopDrawer() {
@@ -486,18 +497,17 @@ function App() {
 
   function setSessionUrl(id, options = {}) {
     if (!history.replaceState) return;
-    if (id) {
-      const url = new URL(location.href);
-      url.pathname = `/sessions/${encodeURIComponent(id)}`;
-      url.search = "";
-      if (sharedToken && id === sharedSessionId) url.searchParams.set("token", sharedToken);
-      history.replaceState(null, "", url);
-      return;
-    }
-    const url = new URL(location.href);
-    url.pathname = options.grid ? "/sessions" : appView === "board" ? "/app/board" : "/app/fleet";
-    url.search = "";
-    history.replaceState(null, "", url);
+    history.replaceState(
+      null,
+      "",
+      sessionRouteUrl(location.href, {
+        id,
+        grid: options.grid,
+        appView,
+        sharedSessionId,
+        sharedToken,
+      }),
+    );
   }
 
   function setTheme(value) {
@@ -2634,109 +2644,6 @@ function WorkflowBox({ disabled, workflows, refreshWorkflow, preferred = preferr
       </div>
     </section>
   );
-}
-
-function orderedSessionItems(items, layout) {
-  const currentIds = new Set(items.map((item) => item.id));
-  if (!layout.manualOrder) return items;
-  const order = [
-    ...layout.order.filter((id) => currentIds.has(id)),
-    ...items.map((item) => item.id).filter((id) => !layout.order.includes(id)),
-  ];
-  const rank = new Map(order.map((id, index) => [id, index]));
-  return [...items].sort(
-    (left, right) =>
-      (rank.get(left.id) ?? Number.MAX_SAFE_INTEGER) -
-      (rank.get(right.id) ?? Number.MAX_SAFE_INTEGER),
-  );
-}
-
-function moveSessionLayoutItem(layout, items, sourceId, targetId) {
-  const ids = orderedSessionItems(items, layout).map((item) => item.id);
-  const sourceIndex = ids.indexOf(sourceId);
-  const targetIndex = ids.indexOf(targetId);
-  if (sourceIndex === -1 || targetIndex === -1) return layout;
-  ids.splice(sourceIndex, 1);
-  ids.splice(targetIndex, 0, sourceId);
-  return { ...layout, manualOrder: true, order: ids };
-}
-
-function defaultSessionLayout(edit = false) {
-  return { columns: "auto", edit, manualOrder: false, order: [], sizes: {} };
-}
-
-function loadSessionLayout() {
-  try {
-    return normalizeSessionLayout(
-      JSON.parse(localStorage.getItem(sessionLayoutStorageKey) || "null") || defaultSessionLayout(),
-    );
-  } catch {
-    return defaultSessionLayout();
-  }
-}
-
-function saveSessionLayout(layout) {
-  try {
-    localStorage.setItem(
-      sessionLayoutStorageKey,
-      JSON.stringify({
-        columns: layout.columns,
-        manualOrder: layout.manualOrder,
-        order: layout.order,
-        sizes: layout.sizes,
-      }),
-    );
-  } catch {}
-}
-
-function normalizeSessionLayout(value) {
-  return {
-    columns: ["auto", "1", "2", "3", "4", "5", "6", "7", "8", "9", "10"].includes(
-      String(value?.columns),
-    )
-      ? String(value.columns)
-      : "auto",
-    edit: false,
-    manualOrder: Boolean(value?.manualOrder),
-    order: Array.isArray(value?.order) ? value.order.map(String).slice(0, 200) : [],
-    sizes: typeof value?.sizes === "object" && value.sizes ? value.sizes : {},
-  };
-}
-
-function parseSessionLink() {
-  const match = location.pathname.match(/^\/(?:app\/)?sessions(?:\/([^/]+))?\/?$/);
-  return {
-    route: Boolean(match),
-    id: match?.[1] ? decodeURIComponent(match[1]) : null,
-    token: new URLSearchParams(location.search).get("token"),
-  };
-}
-
-function initialAppView() {
-  return location.pathname === "/app/board" || location.pathname === "/app/board/"
-    ? "board"
-    : "fleet";
-}
-
-function isGithubLoginCallback() {
-  return new URLSearchParams(location.search).get("login") === "github";
-}
-
-function restoreSessionReturnUrl() {
-  try {
-    const saved = sessionStorage.getItem(loginReturnKey);
-    if (!saved || !history.replaceState) return;
-    const url = new URL(saved, location.origin);
-    const isSessionUrl =
-      url.pathname === "/sessions" ||
-      url.pathname === "/sessions/" ||
-      url.pathname.startsWith("/sessions/") ||
-      url.pathname.startsWith("/app/sessions/");
-    if (url.origin !== location.origin || !isSessionUrl) return;
-    if (location.pathname !== "/app" && location.pathname !== "/app/") return;
-    sessionStorage.removeItem(loginReturnKey);
-    history.replaceState(null, "", `${url.pathname}${url.search}`);
-  } catch {}
 }
 
 function isTerminalKeyTarget(event) {
