@@ -1,19 +1,19 @@
 import { render } from "preact";
 import { useEffect, useMemo, useRef, useState } from "preact/hooks";
 import { AdminDrawer } from "./admin-drawer.jsx";
-import { api } from "./api.js";
 import { useAppData } from "./app-data.js";
 import { useAppMutations } from "./app-mutations.js";
 import { useAppNavigation } from "./app-navigation.js";
 import { AppShell } from "./app-shell.jsx";
 import { ActionDialog, useActionDialog } from "./dialogs.jsx";
+import { useLinkedSession } from "./linked-session.js";
 import { LoginScreen } from "./login.jsx";
 import { isLoginScreenHidden } from "./login-state.js";
 import { parseSessionLink, restoreSessionReturnUrl } from "./routing.js";
 import { isTerminalKeyTarget } from "./session-state.js";
 import { SessionsDrawer } from "./session-workspace.jsx";
-import { configureTerminalHub, disposeAllTerminals } from "./terminal.js";
-import { linkedInteractiveSessionPlaceholder, sessionItems } from "./utils.js";
+import { useTerminalHubState } from "./terminal-state.js";
+import { sessionItems } from "./utils.js";
 import { CardDrawer, InteractiveDrawer, RunDrawer } from "./work-drawers.jsx";
 
 function App() {
@@ -49,9 +49,8 @@ function App() {
     openSessionGrid,
     setSessionUrl,
   } = useAppNavigation({ initialSessionLink, sessionItemByIdRef });
-  const [initialSessionOpened, setInitialSessionOpened] = useState(false);
+  const linkedSessionOpenedRef = useRef(false);
   const { dialog, openActionDialog, closeActionDialog, confirmActionDialog } = useActionDialog();
-  const [terminalStatus, setTerminalStatus] = useState({});
   const {
     state,
     setState,
@@ -82,10 +81,11 @@ function App() {
       setSharedSessionId(null);
       setSharedToken(null);
       setFocusedSessionId(null);
-      setInitialSessionOpened(true);
+      linkedSessionOpenedRef.current = true;
       setSessionUrl(null);
     },
   });
+  const terminalStatus = useTerminalHubState({ sharedSessionId, sharedToken, stateRef });
   const mutations = useAppMutations({
     state,
     setState,
@@ -103,6 +103,19 @@ function App() {
     openSessionGrid,
   });
   const { findInteractiveSession, upsertInteractiveSession } = mutations;
+  useLinkedSession({
+    sharedSessionId,
+    sharedToken,
+    signedIn,
+    focusedSessionId,
+    interactiveSessions: state.interactiveSessions,
+    openedRef: linkedSessionOpenedRef,
+    findInteractiveSession,
+    upsertInteractiveSession,
+    loadSharedSession,
+    setFocusedSessionId,
+    openSessionGrid,
+  });
 
   const allSessionItems = useMemo(() => sessionItems(state), [state]);
   const sessionItemById = useMemo(
@@ -111,92 +124,10 @@ function App() {
   );
   sessionItemByIdRef.current = sessionItemById;
 
-  useEffect(() => () => disposeAllTerminals(), []);
-
   useEffect(() => {
     document.documentElement.dataset.appRuntime = "preact";
     document.body.classList.toggle("locked", !signedIn && !(sharedSessionId && sharedToken));
   }, [signedIn, sharedSessionId, sharedToken]);
-
-  useEffect(() => {
-    configureTerminalHub({
-      sharedSessionId,
-      sharedToken,
-      sessions: () => sessionItems(stateRef.current),
-      onStatus: (id, label) =>
-        setTerminalStatus((current) => {
-          if (current[id] === label) return current;
-          return { ...current, [id]: label };
-        }),
-    });
-  }, [sharedSessionId, sharedToken, state]);
-
-  useEffect(() => {
-    if (!sharedSessionId) return;
-    void openInitialSessionLink();
-  }, [sharedSessionId, signedIn, state.interactiveSessions]);
-
-  async function loadLinkedInteractiveSession(id) {
-    const result = await api(`/api/interactive-sessions/${encodeURIComponent(id)}`);
-    upsertInteractiveSession(result.session);
-    setInitialSessionOpened(true);
-    setFocusedSessionId(result.session.id);
-    openSessionGrid(result.session.id, { deepLink: true });
-  }
-
-  async function openInitialSessionLink() {
-    if (!sharedSessionId) return;
-    const existing = findInteractiveSession(sharedSessionId);
-    if (!existing || existing.routePlaceholder) {
-      if (
-        signedIn &&
-        (!initialSessionOpened || focusedSessionId === sharedSessionId) &&
-        existing?.status !== "unavailable"
-      ) {
-        try {
-          await loadLinkedInteractiveSession(sharedSessionId);
-        } catch (error) {
-          if (error.status !== 403 && error.status !== 404) throw error;
-          upsertInteractiveSession(
-            linkedInteractiveSessionPlaceholder(sharedSessionId, {
-              status: "unavailable",
-              lastEvent:
-                error.status === 404
-                  ? "Codex session was not found."
-                  : "You do not have access to this Codex session.",
-              sharedReadOnly: Boolean(sharedToken),
-            }),
-          );
-          setInitialSessionOpened(true);
-          setFocusedSessionId(sharedSessionId);
-          openSessionGrid(sharedSessionId);
-        }
-      } else if (
-        !signedIn &&
-        sharedToken &&
-        existing?.status !== "unavailable" &&
-        !document.body.classList.contains("locked")
-      ) {
-        await loadSharedSession();
-      } else if (!initialSessionOpened) {
-        if (!existing) {
-          upsertInteractiveSession(
-            linkedInteractiveSessionPlaceholder(sharedSessionId, {
-              sharedReadOnly: Boolean(sharedToken),
-            }),
-          );
-        }
-        setInitialSessionOpened(true);
-        setFocusedSessionId(sharedSessionId);
-        openSessionGrid(sharedSessionId);
-      }
-      return;
-    }
-    if (initialSessionOpened && focusedSessionId !== sharedSessionId) return;
-    setInitialSessionOpened(true);
-    setFocusedSessionId(sharedSessionId);
-    openSessionGrid(sharedSessionId);
-  }
 
   const props = {
     state,
