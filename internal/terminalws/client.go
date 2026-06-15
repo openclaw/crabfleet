@@ -19,17 +19,28 @@ const (
 	version       = 1
 	maxFrameBytes = 16 * 1024 * 1024
 
-	messageHello          = 1
-	messageWelcome        = 2
-	messageSubscribe      = 10
-	messageOutput         = 20
-	messageEvent          = 22
-	messageError          = 23
-	messageInput          = 30
-	messageControlRevoked = 53
-	messageAck            = 62
+	messageHello           = 1
+	messageWelcome         = 2
+	messageSubscribe       = 10
+	messageUnsubscribe     = 11
+	messageOutput          = 20
+	messageSnapshot        = 21
+	messageEvent           = 22
+	messageError           = 23
+	messageInput           = 30
+	messageKey             = 31
+	messageResize          = 32
+	messageStop            = 33
+	messageControlRequest  = 50
+	messageControlDecision = 51
+	messageControlGranted  = 52
+	messageControlRevoked  = 53
+	messagePing            = 60
+	messagePong            = 61
+	messageAck             = 62
 
 	subscribeOutput                 = 1 << 0
+	subscribeSnapshot               = 1 << 1
 	subscribeEvents                 = 1 << 2
 	subscribeOutputAcknowledgements = 1 << 3
 )
@@ -38,6 +49,11 @@ type Options struct {
 	Header http.Header
 	Cols   uint32
 	Rows   uint32
+}
+
+type Size struct {
+	Cols uint32
+	Rows uint32
 }
 
 type Client struct {
@@ -152,11 +168,22 @@ func (c *Client) SendInput(ctx context.Context, payload []byte) error {
 	})
 }
 
-func (c *Client) Attach(ctx context.Context, terminal io.ReadWriter) error {
+func (c *Client) Resize(ctx context.Context, size Size) error {
+	if size.Cols == 0 || size.Rows == 0 {
+		return nil
+	}
+	return c.write(ctx, frame{
+		messageType: messageResize,
+		sessionID:   c.sessionID,
+		payload:     resizePayload(size),
+	})
+}
+
+func (c *Client) Attach(ctx context.Context, terminal io.ReadWriter, resizes <-chan Size) error {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
-	errCh := make(chan error, 2)
+	errCh := make(chan error, 3)
 	go func() {
 		buffer := make([]byte, 32*1024)
 		for {
@@ -174,6 +201,23 @@ func (c *Client) Attach(ctx context.Context, terminal io.ReadWriter) error {
 					errCh <- err
 				}
 				return
+			}
+		}
+	}()
+	go func() {
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case size, ok := <-resizes:
+				if !ok {
+					resizes = nil
+					continue
+				}
+				if err := c.Resize(ctx, size); err != nil {
+					errCh <- err
+					return
+				}
 			}
 		}
 	}()
@@ -282,6 +326,13 @@ func subscribePayload(cols uint32, rows uint32) []byte {
 	)
 	binary.LittleEndian.PutUint32(payload[12:16], cols)
 	binary.LittleEndian.PutUint32(payload[16:20], rows)
+	return payload
+}
+
+func resizePayload(size Size) []byte {
+	payload := make([]byte, 8)
+	binary.LittleEndian.PutUint32(payload[0:4], size.Cols)
+	binary.LittleEndian.PutUint32(payload[4:8], size.Rows)
 	return payload
 }
 

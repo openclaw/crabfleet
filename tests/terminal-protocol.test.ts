@@ -1,6 +1,9 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { test } from "node:test";
 import {
+  TERMINAL_WS_MAGIC,
+  TERMINAL_WS_VERSION,
   TerminalMessageType,
   TerminalSubscribeFlags,
   decodeAckPayload,
@@ -13,6 +16,75 @@ import {
   encodeSubscribePayload,
   encodeTerminalFrame,
 } from "../src/terminal-protocol.ts";
+
+type TerminalProtocolFixture = {
+  magic: number;
+  version: number;
+  messages: typeof TerminalMessageType;
+  subscribeFlags: typeof TerminalSubscribeFlags;
+  vectors: {
+    outputFrame: string;
+    pingFrame: string;
+    subscribeLegacy: string;
+    subscribeSized: string;
+    resize: string;
+    ack: string;
+  };
+};
+
+const fixture = JSON.parse(
+  readFileSync(new URL("../protocol/terminal-v1.json", import.meta.url), "utf8"),
+) as TerminalProtocolFixture;
+const hex = (value: Uint8Array): string => Buffer.from(value).toString("hex");
+
+test("TypeScript terminal constants and encoders match the shared v1 protocol", () => {
+  assert.equal(TERMINAL_WS_MAGIC, fixture.magic);
+  assert.equal(TERMINAL_WS_VERSION, fixture.version);
+  assert.deepEqual(TerminalMessageType, fixture.messages);
+  assert.deepEqual(TerminalSubscribeFlags, fixture.subscribeFlags);
+  assert.equal(
+    hex(
+      encodeTerminalFrame({
+        type: TerminalMessageType.Output,
+        sessionId: "IS-123",
+        payload: new Uint8Array([0, 1, 2, 255]),
+      }),
+    ),
+    fixture.vectors.outputFrame,
+  );
+  assert.equal(
+    hex(encodeTerminalFrame({ type: TerminalMessageType.Ping })),
+    fixture.vectors.pingFrame,
+  );
+  assert.equal(
+    hex(
+      encodeSubscribePayload({
+        flags:
+          TerminalSubscribeFlags.Output |
+          TerminalSubscribeFlags.Events |
+          TerminalSubscribeFlags.OutputAcknowledgements,
+        snapshotMinIntervalMs: 100,
+        snapshotMaxIntervalMs: 500,
+      }),
+    ),
+    fixture.vectors.subscribeLegacy,
+  );
+  assert.equal(
+    hex(
+      encodeSubscribePayload({
+        flags:
+          TerminalSubscribeFlags.Output |
+          TerminalSubscribeFlags.Events |
+          TerminalSubscribeFlags.OutputAcknowledgements,
+        cols: 144,
+        rows: 41,
+      }),
+    ),
+    fixture.vectors.subscribeSized,
+  );
+  assert.equal(hex(encodeResizePayload(132, 43)), fixture.vectors.resize);
+  assert.equal(hex(encodeAckPayload(65_535)), fixture.vectors.ack);
+});
 
 test("terminal frames round-trip binary payloads and session ids", () => {
   const payload = new Uint8Array([0, 1, 2, 255]);

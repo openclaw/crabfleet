@@ -32,6 +32,26 @@ func TestSplitCommandKeepsQuotedValues(t *testing.T) {
 	}
 }
 
+func TestSessionPTYPublishesLatestLiveResize(t *testing.T) {
+	pty := sessionPTY{
+		cols:    120,
+		rows:    34,
+		resizes: make(chan fleetapi.TerminalSize, 1),
+	}
+	pty.resize(100, 40, false)
+	select {
+	case size := <-pty.resizes:
+		t.Fatalf("resize published before attach: %#v", size)
+	default:
+	}
+
+	pty.resize(132, 43, true)
+	pty.resize(144, 50, true)
+	if size := <-pty.resizes; size != (fleetapi.TerminalSize{Cols: 144, Rows: 50}) {
+		t.Fatalf("resize = %#v", size)
+	}
+}
+
 func TestSplitCommandPreservesBackslashesInSingleQuotes(t *testing.T) {
 	args, err := splitCommand(`new 'fix regex \d+ in parser'`)
 	if err != nil {
