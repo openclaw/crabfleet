@@ -5,6 +5,7 @@
 - Keep SSH terminal dimensions synchronized after attach and verify the TypeScript and Go multiplex clients against shared protocol vectors.
 - Remove the configurable PTY bridge so managed terminal upstreams are limited to built-in Sandbox, versioned runtime-adapter attach, and GitHub Actions relay behind the multiplex terminal protocol.
 - Remove generic create-only provisioning, the external Cloudflare runner, and the ClawFleet compatibility provider so managed workspaces use only built-in Sandbox or the versioned runtime adapter.
+- Extract SSH gateway authentication, key linking, and session creation; remove the old Crabbox SSH environment and fingerprint-header aliases plus the `stop` CLI alias.
 - Remove unsupported provider stop/recovery compatibility; historical provider rows remain readable while live lifecycle mutations are limited to Sandbox, runtime-v1, and GitHub Actions.
 - Centralize failed provisioning results and provider-error redaction across managed Sandbox, standalone Sandbox, and runtime-adapter lifecycle paths.
 - Extract OpenClaw nudge and stop validation, audit ordering, terminal delivery, and best-effort delivery records into a directly tested mutation service.
@@ -77,7 +78,7 @@
 - Bound Crabbox terminal output with negotiated acknowledgements on the multiplex terminal hub.
 - Enable the OpenClaw deployment's versioned Crabbox runtime adapter with a stable tenant namespace.
 - Add comprehensive documentation for durable GitHub Actions sessions, including registration, runner and viewer relay, work-state heartbeats, Codex steering, resumption, completion, cancellation, authentication, archives, and troubleshooting.
-- Name versioned provider-backed workspace lifecycle actions Delete across Fleet, the Go CLI, and SSH while retaining explicit Stop wording for legacy sessions and `stop` as a CLI compatibility alias; keep the provider stop wire action internal; and fail closed without adopting or deleting a pre-existing adapter workspace on an explicit ID conflict.
+- Name versioned provider-backed workspace lifecycle actions Delete across Fleet, the Go CLI, and SSH; keep the provider stop wire action internal; and fail closed without adopting or deleting a pre-existing adapter workspace on an explicit ID conflict.
 - Keep GitHub Actions sessions out of legacy workspace-stop reconciliation and let operators end their Crabfleet terminal session without claiming to cancel the underlying workflow run.
 - Add durable steerable GitHub Actions sessions with service registration, scoped runner URLs, work-state heartbeats, Fleet metadata, and a SessionControlDO PTY relay.
 - Add a tenant-namespaced versioned runtime lifecycle adapter with replayable idempotent create, monotonic workspace identities, CAS reconciliation, durable terminal finalization, confirmed provider release before failure/stop, presence-aware capability/expiry tracking, authenticated transient VNC redirects, and deployment-neutral configuration.

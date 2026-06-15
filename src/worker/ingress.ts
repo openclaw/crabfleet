@@ -39,9 +39,7 @@ export function usesIndependentServiceAuth(request: Request): boolean {
   if (pathname === "/api/terminal/ws") {
     const headers = request.headers;
     const hasAuthorization = Boolean(headers.get("authorization"));
-    const hasSshIdentity = Boolean(
-      headers.get("x-crabfleet-ssh-fingerprint") || headers.get("x-crabbox-ssh-fingerprint"),
-    );
+    const hasSshIdentity = Boolean(headers.get("x-crabfleet-ssh-fingerprint"));
     const hasAgentIdentity = Boolean(headers.get("x-crabfleet-session-id"));
     return hasAuthorization && (hasSshIdentity || hasAgentIdentity);
   }

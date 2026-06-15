@@ -48,6 +48,10 @@ test("trusted proxy sign-in cannot pretend that local logout will end the sessio
 
 test("split-origin links use the browser-visible proxy origin", async () => {
   const source = await readFile(new URL("../src/index.ts", import.meta.url), "utf8");
+  const sshGatewaySource = await readFile(
+    new URL("../src/worker/ssh-gateway.ts", import.meta.url),
+    "utf8",
+  );
   assert.match(source, /trustedProxyPublicOrigin\(env\) \?\? new URL\(request\.url\)\.origin/);
   assert.match(source, /shareUrl\(request, env, id, result\.shareToken\)/);
   assert.match(source, /externalRequestOrigin\(request, env\)/);
@@ -56,7 +60,7 @@ test("split-origin links use the browser-visible proxy origin", async () => {
     /browserVncUrl: \(sessionId\) => runtimeAdapterBrowserVncUrl\(browserAppOrigin\(env\), sessionId\)/,
   );
   assert.match(
-    source,
-    /new URL\(githubOAuthRedirectUri\(request\.url, env\.GITHUB_REDIRECT_URI\)\)\.origin/,
+    sshGatewaySource,
+    /githubOAuthRedirectUri\(request\.url, this\.env\.GITHUB_REDIRECT_URI\)/,
   );
 });

@@ -502,7 +502,7 @@ Response:
 ## SSH Gateway
 
 The Go gateway terminates raw SSH and calls Worker APIs with `Authorization: Bearer
-CRABBOX_SSH_GATEWAY_TOKEN`. These endpoints are not browser APIs.
+CRABFLEET_SSH_GATEWAY_TOKEN`. These endpoints are not browser APIs.
 
 - `POST /api/ssh/auth`: checks a public-key fingerprint. Unknown keys receive a short `/ssh/link/:code` GitHub OAuth URL only when the gateway is in explicit link mode, e.g. `ssh link@host`.
 - `GET /api/ssh/state`: returns the same board/session state for the linked SSH user.

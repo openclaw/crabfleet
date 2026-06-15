@@ -41,7 +41,7 @@ type cli struct {
 	New         newCmd         `cmd:"" help:"Create a repo-ready crabbox and attach."`
 	Attach      attachCmd      `cmd:"" help:"Attach to a crabbox terminal."`
 	Status      statusCmd      `cmd:"" help:"Show one crabbox lifecycle state."`
-	Delete      deleteCmd      `cmd:"" aliases:"stop" help:"End a crabbox session through its configured lifecycle."`
+	Delete      deleteCmd      `cmd:"" help:"End a crabbox session through its configured lifecycle."`
 	Doctor      doctorCmd      `cmd:"" help:"Check API, auth, and linked lifecycle access."`
 	Checkpoints checkpointsCmd `cmd:"" help:"List sandbox checkpoints."`
 	Checkpoint  checkpointCmd  `cmd:"" help:"Create a sandbox checkpoint."`

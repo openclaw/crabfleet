@@ -117,9 +117,9 @@ test("SSH link state canonicalizes before host-only OAuth cookies", async () => 
     ),
     null,
   );
-  const source = await readFile(new URL("../src/index.ts", import.meta.url), "utf8");
-  const linkStart = source.indexOf("async function sshLink(");
-  const linkEnd = source.indexOf("async function consumeSshLink", linkStart);
+  const source = await readFile(new URL("../src/worker/ssh-gateway.ts", import.meta.url), "utf8");
+  const linkStart = source.indexOf("async link(");
+  const linkEnd = source.indexOf("async authenticate(", linkStart);
   const linkSource = source.slice(linkStart, linkEnd);
   assert.match(linkSource, /githubOAuthCanonicalSshLinkUrl/);
   assert.ok(linkSource.indexOf("canonicalLinkUrl") < linkSource.indexOf("sshLinkCookie"));

@@ -127,7 +127,7 @@ func TestParseCreateAcceptsProfileOverride(t *testing.T) {
 	}
 }
 
-func TestDeleteCommandAndStopAliasUseWorkspaceStopAction(t *testing.T) {
+func TestDeleteCommandUsesWorkspaceStopAction(t *testing.T) {
 	var action string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost || r.URL.Path != "/api/ssh/interactive-sessions/IS-7/actions" {
@@ -159,23 +159,20 @@ func TestDeleteCommandAndStopAliasUseWorkspaceStopAction(t *testing.T) {
 		"login":       "operator",
 		"role":        "owner",
 	}}
-	for _, command := range []string{"delete IS-7", "stop IS-7"} {
-		action = ""
-		var output bytes.Buffer
-		if exit := runCommand(context.Background(), &output, permissions, client, command, sessionPTY{}); exit != 0 {
-			t.Fatalf("command=%q exit=%d output=%q", command, exit, output.String())
-		}
-		if action != "stop" {
-			t.Fatalf("command=%q action=%q, want stop", command, action)
-		}
-		if !strings.Contains(output.String(), "provider deletion was not confirmed") {
-			t.Fatalf("command=%q missing legacy cleanup warning: %q", command, output.String())
-		}
-		if got := output.String(); !strings.Contains(got, "session: IS-7\nstatus: stopping\n") {
-			t.Fatalf("command=%q output=%q", command, got)
-		}
+	var output bytes.Buffer
+	if exit := runCommand(context.Background(), &output, permissions, client, "delete IS-7", sessionPTY{}); exit != 0 {
+		t.Fatalf("exit=%d output=%q", exit, output.String())
 	}
-	for _, command := range []string{"delete", "delete IS-7 extra", "stop", "stop IS-7 extra"} {
+	if action != "stop" {
+		t.Fatalf("action=%q, want stop", action)
+	}
+	if !strings.Contains(output.String(), "provider deletion was not confirmed") {
+		t.Fatalf("missing legacy cleanup warning: %q", output.String())
+	}
+	if got := output.String(); !strings.Contains(got, "session: IS-7\nstatus: stopping\n") {
+		t.Fatalf("output=%q", got)
+	}
+	for _, command := range []string{"delete", "delete IS-7 extra"} {
 		action = ""
 		var output bytes.Buffer
 		if exit := runCommand(context.Background(), &output, permissions, client, command, sessionPTY{}); exit != 2 {
@@ -187,6 +184,16 @@ func TestDeleteCommandAndStopAliasUseWorkspaceStopAction(t *testing.T) {
 		if got := output.String(); got != "usage: delete SESSION_ID\n" {
 			t.Fatalf("command=%q output=%q", command, got)
 		}
+	}
+	var stopOutput bytes.Buffer
+	if exit := runCommand(context.Background(), &stopOutput, permissions, client, "stop IS-7", sessionPTY{}); exit != 2 {
+		t.Fatalf("stop alias exit=%d output=%q", exit, stopOutput.String())
+	}
+	if action != "" {
+		t.Fatalf("stop alias unexpectedly submitted action=%q", action)
+	}
+	if got := stopOutput.String(); !strings.HasPrefix(got, "unknown command: stop\n") {
+		t.Fatalf("stop alias output=%q", got)
 	}
 }
 

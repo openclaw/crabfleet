@@ -215,7 +215,7 @@ The Crabbox namespace cutover intentionally has no old-name compatibility. Exist
 - `CRABBOX_RUNTIME_ADAPTER_IDLE_SECONDS` – Optional requested workspace idle timeout, default `1800`
 - `CRABBOX_OPENCLAW_TOKEN` – Internal bearer token for OpenClaw service crabbox and GitHub Actions session registration
 - `CRABBOX_MULTICODEX_TOKEN` – Optional dedicated bearer token for MultiCodex room supervision
-- `CRABFLEET_SSH_GATEWAY_TOKEN` / `CRABBOX_SSH_GATEWAY_TOKEN` – Shared bearer token for the Go SSH gateway internal API
+- `CRABFLEET_SSH_GATEWAY_TOKEN` – Shared bearer token for the Go SSH gateway internal API
 - `CRABFLEET_LOCAL_SANDBOX_BACKUPS` – Optional Cloudflare Sandbox checkpoint mode override; defaults to R2 binding uploads, set `0` for SDK presigned R2 uploads
 - `CRABFLEET_LABEL` – Optional tenant label shown in the app, default `Crabfleet`
 - `CRABFLEET_CANONICAL_URL` – Optional tenant app/API origin, default `https://crabfleet.openclaw.ai`; requires HTTPS except literal loopback HTTP
@@ -299,7 +299,7 @@ wrangler d1 migrations apply DB --local
 
 ### SSH Gateway
 
-The Worker exposes an internal SSH onboarding API guarded by `CRABFLEET_SSH_GATEWAY_TOKEN` or `CRABBOX_SSH_GATEWAY_TOKEN`.
+The Worker exposes an internal SSH onboarding API guarded by `CRABFLEET_SSH_GATEWAY_TOKEN`.
 Run the Go gateway next to a host that can accept raw SSH:
 
 ```bash
@@ -343,8 +343,6 @@ go run ./cmd/crabfleet checkpoint <session-id>
 go run ./cmd/crabfleet restore <session-id> <checkpoint-id>
 go run ./cmd/crabfleet doctor
 ```
-
-`crabfleet stop <session-id>` remains a compatibility alias for `delete`.
 
 ### CLI Release
 

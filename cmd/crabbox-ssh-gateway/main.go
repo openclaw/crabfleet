@@ -60,10 +60,10 @@ func main() {
 	var token string
 	var hostKeyPath string
 	var ephemeralHostKey bool
-	flag.StringVar(&addr, "addr", env(":2222", "CRABFLEET_SSH_ADDR", "CRABBOX_SSH_ADDR"), "SSH listen address")
-	flag.StringVar(&apiURL, "api", env("http://127.0.0.1:8787", "CRABFLEET_API_URL", "CRABBOX_API_URL"), "Crabfleet Worker URL")
-	flag.StringVar(&token, "token", env("", "CRABFLEET_SSH_GATEWAY_TOKEN", "CRABBOX_SSH_GATEWAY_TOKEN"), "Worker SSH gateway token")
-	flag.StringVar(&hostKeyPath, "host-key", env("", "CRABFLEET_SSH_HOST_KEY", "CRABBOX_SSH_HOST_KEY"), "SSH host private key path")
+	flag.StringVar(&addr, "addr", env(":2222", "CRABFLEET_SSH_ADDR"), "SSH listen address")
+	flag.StringVar(&apiURL, "api", env("http://127.0.0.1:8787", "CRABFLEET_API_URL"), "Crabfleet Worker URL")
+	flag.StringVar(&token, "token", env("", "CRABFLEET_SSH_GATEWAY_TOKEN"), "Worker SSH gateway token")
+	flag.StringVar(&hostKeyPath, "host-key", env("", "CRABFLEET_SSH_HOST_KEY"), "SSH host private key path")
 	flag.BoolVar(&ephemeralHostKey, "ephemeral-host-key", false, "use a generated host key for local development only")
 	flag.Parse()
 
@@ -356,7 +356,7 @@ func runCommand(ctx context.Context, out io.ReadWriter, perms *ssh.Permissions, 
 		}
 		fmt.Fprintf(out, "session %s not found\n", fleettext.Safe(args[1]))
 		return 1
-	case "delete", "stop":
+	case "delete":
 		if len(args) != 2 {
 			fmt.Fprintln(out, "usage: delete SESSION_ID")
 			return 2
@@ -725,13 +725,13 @@ func loadHostKey(path string, allowEphemeral bool) (ssh.Signer, error) {
 		return ssh.ParsePrivateKey(data)
 	}
 	if !allowEphemeral {
-		return nil, errors.New("CRABBOX_SSH_HOST_KEY or --host-key is required")
+		return nil, errors.New("CRABFLEET_SSH_HOST_KEY or --host-key is required")
 	}
 	_, privateKey, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
 		return nil, err
 	}
-	log.Print("using ephemeral SSH host key; set CRABBOX_SSH_HOST_KEY for production")
+	log.Print("using ephemeral SSH host key; set CRABFLEET_SSH_HOST_KEY for production")
 	return ssh.NewSignerFromKey(privateKey)
 }
 

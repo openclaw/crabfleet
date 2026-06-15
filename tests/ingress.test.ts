@@ -143,6 +143,17 @@ test("terminal ingress requires authorization plus an SSH or agent identity", ()
     ),
     false,
   );
+  assert.equal(
+    usesIndependentServiceAuth(
+      new Request("https://backend.example/api/terminal/ws", {
+        headers: {
+          authorization: "Bearer terminal-token",
+          "x-crabbox-ssh-fingerprint": "legacy-key",
+        },
+      }),
+    ),
+    false,
+  );
 });
 
 test("disabled proxy mode leaves ordinary requests routable but rejects assertion headers", () => {

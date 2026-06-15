@@ -198,7 +198,7 @@ Proxy-only identity cannot link SSH keys. Use a separate OAuth-capable origin th
 
 ### Scoped Service Auth
 
-- SSH gateway: `CRABFLEET_SSH_GATEWAY_TOKEN` or `CRABBOX_SSH_GATEWAY_TOKEN`.
+- SSH gateway: `CRABFLEET_SSH_GATEWAY_TOKEN`.
 - OpenClaw service: `CRABBOX_OPENCLAW_TOKEN`.
 - Session agent: `CRABFLEET_AGENT_TOKEN` plus session ID.
 - Stateless provision hook: `CRABBOX_INTERACTIVE_PROVISION_TOKEN`.
