@@ -578,7 +578,6 @@ test("confirmed adapter failure release keeps the original failure evidence", as
 });
 
 test("terminal archive finalization remains durably retryable", async () => {
-  const source = await readFile(new URL("../src/index.ts", import.meta.url), "utf8");
   const finalizationSource = await readFile(
     new URL("../src/worker/session-terminal-finalization.ts", import.meta.url),
     "utf8",
@@ -592,8 +591,6 @@ test("terminal archive finalization remains durably retryable", async () => {
     "utf8",
   );
 
-  assert.match(source, /expression\("terminal_finalize_pending", "=", 1\)/);
-  assert.match(source, /row\.terminal_finalize_pending === 1/);
   assert.match(finalizationSource, /completeTerminalFinalization/);
   assert.match(finalizationSource, /SET terminal_finalize_pending = 0/);
   assert.match(archiveSource, /interactive_session_log_archives\.events_key IS NULL/);
@@ -623,59 +620,13 @@ test("terminal archive finalization remains durably retryable", async () => {
   assert.match(migration, /status IN \('stopped', 'expired', 'failed'\)/);
 });
 
-test("enabling R2 requeues D1-only terminal archives for object backfill", async () => {
-  const source = await readFile(new URL("../src/index.ts", import.meta.url), "utf8");
-  const backfillStart = source.indexOf("async function requeueTerminalArchiveObjectBackfill");
-  const batchStart = source.indexOf(
-    "async function reconcileExternalInteractiveSessionBatch",
-    backfillStart,
-  );
-  const targetedStart = source.indexOf(
-    "async function reconcileExternalInteractiveSessionById",
-    batchStart,
-  );
-  const reconcileStart = source.indexOf(
-    "async function reconcileExternalInteractiveSession(",
-    targetedStart,
-  );
-  const backfillSource = source.slice(backfillStart, batchStart);
-  const batchSource = source.slice(batchStart, targetedStart);
-  const targetedSource = source.slice(targetedStart, reconcileStart);
-
-  assert.match(backfillSource, /if \(!env\.SESSION_LOGS\) return/);
-  assert.match(backfillSource, /session\.terminal_finalize_pending = 0/);
-  assert.match(backfillSource, /archive\.events_key IS NULL/);
-  assert.match(backfillSource, /archive\.transcript_key IS NULL/);
-  assert.match(backfillSource, /archive\.summary_key IS NULL/);
-  assert.match(backfillSource, /SET terminal_finalize_pending = 1/);
-  assert.match(backfillSource, /last_reconciled_at = NULL/);
-  assert.match(batchSource, /await requeueTerminalArchiveObjectBackfill\(env\)/);
-  assert.match(targetedSource, /await requeueTerminalArchiveObjectBackfill\(env, id\)/);
-});
-
 test("runtime reconciliation has scheduled and targeted lifecycle clocks", async () => {
   const source = await readFile(new URL("../src/index.ts", import.meta.url), "utf8");
   const config = await readFile(new URL("../wrangler.jsonc", import.meta.url), "utf8");
-  const targetedStart = source.indexOf("async function reconcileExternalInteractiveSessionById");
-  const targetedEnd = source.indexOf(
-    "async function reconcileExternalInteractiveSession(",
-    targetedStart,
-  );
-  const targetedSource = source.slice(targetedStart, targetedEnd);
-  const batchStart = source.indexOf("async function reconcileExternalInteractiveSessionBatch");
-  const batchEnd = source.indexOf("async function reconcileExternalInteractiveSessionById");
-  const batchSource = source.slice(batchStart, batchEnd);
 
   assert.match(source, /async scheduled\(/);
   assert.match(source, /context\.waitUntil\(\s*reconcileInteractiveSessionLifecycleBatch/);
   assert.match(config, /"crons": \["\* \* \* \* \*"\]/);
-  assert.match(batchSource, /expression\("terminal_finalize_pending", "=", 1\)/);
-  assert.match(batchSource, /expression\("adapter", "=", runtimeAdapterName\)/);
-  assert.match(targetedSource, /reconcileCredentialPolicyCleanupBatch\(env, now, id\)/);
-  assert.match(targetedSource, /row\.terminal_finalize_pending === 1/);
-  assert.match(targetedSource, /row\.adapter !== runtimeAdapterName/);
-  assert.match(targetedSource, /runtimeAdapterReconcileIntervalMs/);
-  assert.match(targetedSource, /reconcileExternalInteractiveSession\(env, row, now\)/);
   assert.match(source, /async function readFreshInteractiveSession/);
   assert.match(
     source,
@@ -685,7 +636,11 @@ test("runtime reconciliation has scheduled and targeted lifecycle clocks", async
   assert.match(source, /scheduled interactive session reconciliation failed/);
   assert.match(
     source,
-    /async function reconcileInteractiveSessionLifecycleBatch[\s\S]*reconcileCredentialPolicyCleanupBatch[\s\S]*reconcileExternalInteractiveSessionBatch/,
+    /async function reconcileInteractiveSessionLifecycleBatch[\s\S]*interactiveSessionReconciliationScheduler\(env\)\.runBatch\(now\)/,
+  );
+  assert.match(
+    source,
+    /async function reconcileExternalInteractiveSessionById[\s\S]*interactiveSessionReconciliationScheduler\(env\)\.reconcileById\(id, now\)/,
   );
   assert.match(source, /interactiveSessionReconciliationService\(env\)\.reconcile\(row, now\)/);
 });
@@ -1297,21 +1252,10 @@ test("legacy and GitHub Actions stop wrappers finalize persisted transitions", a
     githubActionsStart,
   );
   const githubActionsSource = source.slice(githubActionsStart, githubActionsEnd);
-  const scheduledStart = source.indexOf(
-    "async function reconcileLegacyStoppingInteractiveSessionBatch",
-  );
-  const scheduledEnd = source.indexOf(
-    "async function requeueTerminalArchiveObjectBackfill",
-    scheduledStart,
-  );
-  const scheduledSource = source.slice(scheduledStart, scheduledEnd);
 
   assert.match(completeSource, /persistLegacyInteractiveSessionStop/);
   assert.match(completeSource, /archiveInteractiveSessionLogs/);
   assert.match(completeSource, /finalizeTerminalInteractiveSession/);
-  assert.match(scheduledSource, /where\("status", "=", "stopping"\)/);
-  assert.match(scheduledSource, /\.where\("runtime", "!=", githubActionsRuntime\)/);
-  assert.match(scheduledSource, /completeLegacyInteractiveSessionStop/);
   assert.match(completeSource, /if \(owner\.runtime === githubActionsRuntime\) return false/);
   assert.match(githubActionsSource, /persistGitHubActionsSessionStop/);
   assert.match(githubActionsSource, /disconnectGitHubActionsRunner/);

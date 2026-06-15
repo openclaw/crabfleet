@@ -298,6 +298,14 @@ import {
   recordInteractiveSessionReconciliationFailure,
   type InteractiveSessionReconciliationStore,
 } from "./worker/session-reconciliation";
+import {
+  InteractiveSessionReconciliationScheduler,
+  readInteractiveSessionReconciliationCandidates,
+  readInteractiveSessionReconciliationRow,
+  readLegacyStoppingInteractiveSessionCandidates,
+  requeueTerminalArchiveObjectBackfill,
+  type InteractiveSessionReconciliationSchedulerStore,
+} from "./worker/session-reconciliation-scheduler";
 import { finalizeTerminalInteractiveSession } from "./worker/session-terminal-finalization";
 import {
   InteractiveSessionMetadataService,
@@ -3175,130 +3183,57 @@ async function reconcileInteractiveSessionLifecycleBatch(
   env: RuntimeEnv,
   now: number,
 ): Promise<void> {
-  await cleanupAbandonedInteractiveSessionPreparations(env, now);
-  await reconcileCredentialPolicyCleanupBatch(env, now);
-  await reconcileLegacyStoppingInteractiveSessionBatch(env, now);
-  await reconcileExternalInteractiveSessionBatch(env, now);
+  await interactiveSessionReconciliationScheduler(env).runBatch(now);
 }
 
-async function reconcileLegacyStoppingInteractiveSessionBatch(
+function interactiveSessionReconciliationScheduler(
   env: RuntimeEnv,
-  now: number,
-  sessionId?: string,
-): Promise<void> {
-  let query = database(env)
-    .selectFrom("interactive_sessions")
-    .selectAll()
-    .where("status", "=", "stopping")
-    .where((expression) =>
-      expression.or([
-        expression("adapter", "is", null),
-        expression("adapter", "!=", runtimeAdapterName),
-      ]),
-    )
-    .where("runtime", "!=", githubActionsRuntime)
-    .where("credential_cleanup_terminal_status", "is", null)
-    .where(sql<boolean>`lease_id IS NULL OR lease_id NOT LIKE ${`${sandboxLeasePrefix}%`}`)
-    .orderBy("updated_at", "asc")
-    .limit(runtimeAdapterReconcileLimit);
-  if (sessionId) query = query.where("id", "=", sessionId);
-  const candidates = await query.execute();
-  await mapWithConcurrency(candidates, runtimeAdapterReconcileConcurrency, async (session) => {
-    await completeLegacyInteractiveSessionStop(
-      env,
-      {
-        id: session.id,
-        status: session.status,
-        runtime: session.runtime,
-        adapter: session.adapter,
-        leaseId: session.lease_id,
-        updatedAt: session.updated_at,
-      },
-      "system",
-      now,
-    ).catch((error) => {
-      console.error(`legacy interactive session stop recovery failed for ${session.id}`, error);
-    });
-  });
-}
-
-async function requeueTerminalArchiveObjectBackfill(
-  env: RuntimeEnv,
-  sessionId?: string,
-): Promise<void> {
-  if (!env.SESSION_LOGS) return;
-  const sessionFilter = sessionId ? sql`AND session.id = ${sessionId}` : sql``;
-  const limit = sessionId ? 1 : runtimeAdapterReconcileLimit * 2;
-  await sql`
-    UPDATE interactive_sessions
-    SET terminal_finalize_pending = 1,
-        last_reconciled_at = NULL
-    WHERE id IN (
-      SELECT session.id
-      FROM interactive_sessions AS session
-      JOIN interactive_session_log_archives AS archive
-        ON archive.session_id = session.id
-      WHERE session.status IN ('stopped', 'expired', 'failed')
-        AND session.terminal_finalize_pending = 0
-        AND (
-          archive.events_key IS NULL
-          OR archive.transcript_key IS NULL
-          OR archive.summary_key IS NULL
-        )
-        ${sessionFilter}
-      ORDER BY session.updated_at ASC, session.id ASC
-      LIMIT ${limit}
-    )
-  `.execute(database(env));
-}
-
-async function reconcileExternalInteractiveSessionBatch(
-  env: RuntimeEnv,
-  now: number,
-): Promise<void> {
-  await requeueTerminalArchiveObjectBackfill(env);
-  const providerConfigured = runtimeAdapterProviderConfigured(env);
-  const activeStatuses: InteractiveSessionStatus[] = [
-    "provisioning",
-    "pending_adapter",
-    "ready",
-    "attached",
-    "detached",
-    "stopping",
-  ];
-  const terminalStatuses: InteractiveSessionStatus[] = ["stopped", "expired", "failed"];
-  const rows = await database(env)
-    .selectFrom("interactive_sessions")
-    .selectAll()
-    .where((expression) =>
-      providerConfigured
-        ? expression.or([
-            expression.and([
-              expression("status", "in", terminalStatuses),
-              expression("terminal_finalize_pending", "=", 1),
-            ]),
-            expression.and([
-              expression("adapter", "=", runtimeAdapterName),
-              expression("status", "in", activeStatuses),
-            ]),
-          ])
-        : expression.and([
-            expression("status", "in", terminalStatuses),
-            expression("terminal_finalize_pending", "=", 1),
-          ]),
-    )
-    .orderBy("last_reconciled_at", "asc")
-    .limit(runtimeAdapterReconcileLimit * 2)
-    .execute();
-  const due = rows
-    .filter(
-      (row) =>
-        !row.last_reconciled_at ||
-        now - row.last_reconciled_at >= runtimeAdapterReconcileIntervalMs,
-    )
-    .slice(0, runtimeAdapterReconcileLimit);
-  await mapWithConcurrency(due, runtimeAdapterReconcileConcurrency, async (row) => {
-    await reconcileExternalInteractiveSession(env, row, now);
+): InteractiveSessionReconciliationScheduler {
+  const store: InteractiveSessionReconciliationSchedulerStore = {
+    cleanupAbandonedPreparations: (now) => cleanupAbandonedInteractiveSessionPreparations(env, now),
+    cleanupCredentialPolicies: (now, sessionId) =>
+      reconcileCredentialPolicyCleanupBatch(env, now, sessionId),
+    providerConfigured: () => runtimeAdapterProviderConfigured(env),
+    readLegacyStoppingCandidates: (sessionId) =>
+      readLegacyStoppingInteractiveSessionCandidates(env, {
+        adapterName: runtimeAdapterName,
+        sandboxLeasePrefix,
+        limit: runtimeAdapterReconcileLimit,
+        ...(sessionId ? { sessionId } : {}),
+      }),
+    completeLegacyStop: (session, now) =>
+      completeLegacyInteractiveSessionStop(
+        env,
+        {
+          id: session.id,
+          status: session.status,
+          runtime: session.runtime,
+          adapter: session.adapter,
+          leaseId: session.lease_id,
+          updatedAt: session.updated_at,
+        },
+        "system",
+        now,
+      ).then(() => undefined),
+    requeueTerminalArchiveBackfill: (sessionId) =>
+      requeueTerminalArchiveObjectBackfill(env, sessionId, runtimeAdapterReconcileLimit),
+    readBatchCandidates: (providerConfigured) =>
+      readInteractiveSessionReconciliationCandidates(
+        env,
+        runtimeAdapterName,
+        providerConfigured,
+        runtimeAdapterReconcileLimit,
+      ),
+    readSession: (sessionId) => readInteractiveSessionReconciliationRow(env, sessionId),
+    reconcile: (row, now) => reconcileExternalInteractiveSession(env, row, now),
+    report: (message, error) => console.error(message, error),
+  };
+  return new InteractiveSessionReconciliationScheduler(store, {
+    adapterName: runtimeAdapterName,
+    sandboxLeasePrefix,
+    intervalMs: runtimeAdapterReconcileIntervalMs,
+    limit: runtimeAdapterReconcileLimit,
+    concurrency: runtimeAdapterReconcileConcurrency,
   });
 }
 
@@ -3307,37 +3242,7 @@ async function reconcileExternalInteractiveSessionById(
   id: string,
   now = Date.now(),
 ): Promise<void> {
-  await reconcileCredentialPolicyCleanupBatch(env, now, id);
-  await reconcileLegacyStoppingInteractiveSessionBatch(env, now, id);
-  await requeueTerminalArchiveObjectBackfill(env, id);
-  const row = await database(env)
-    .selectFrom("interactive_sessions")
-    .selectAll()
-    .where("id", "=", id)
-    .executeTakeFirst();
-  if (!row) return;
-  const terminalFinalizationPending =
-    row.terminal_finalize_pending === 1 &&
-    (row.status === "stopped" || row.status === "expired" || row.status === "failed");
-  const providerConfigured = runtimeAdapterProviderConfigured(env);
-  const active = [
-    "provisioning",
-    "pending_adapter",
-    "ready",
-    "attached",
-    "detached",
-    "stopping",
-  ].includes(row.status);
-  if (
-    !terminalFinalizationPending &&
-    (row.adapter !== runtimeAdapterName || !providerConfigured || !active)
-  ) {
-    return;
-  }
-  if (row.last_reconciled_at && now - row.last_reconciled_at < runtimeAdapterReconcileIntervalMs) {
-    return;
-  }
-  await reconcileExternalInteractiveSession(env, row, now);
+  await interactiveSessionReconciliationScheduler(env).reconcileById(id, now);
 }
 
 async function reconcileExternalInteractiveSession(
