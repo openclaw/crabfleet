@@ -43,6 +43,10 @@ const logo = "__CRABBOX_LOGO__";
 const productName = "Crabfleet";
 const productDomain = "crabfleet.openclaw.ai";
 const sshHost = "crabd.sh";
+const configurableInteractiveRuntimes = [
+  { id: "container", label: "Cloudflare Sandbox" },
+  { id: "crabbox", label: "Crabbox" },
+];
 const defaultDeployment = {
   label: productName,
   canonicalUrl: `https://${productDomain}`,
@@ -50,6 +54,7 @@ const defaultDeployment = {
   sshHost,
   preferredRepo,
   defaultRuntime: "container",
+  interactiveRuntimes: configurableInteractiveRuntimes.map((runtime) => runtime.id),
   defaultProfile: "default",
   runtimeProfiles: [],
 };
@@ -1637,7 +1642,15 @@ function CardDrawer({ drawers, closeDrawer, createCard, state }) {
 
 function InteractiveDrawer({ drawers, closeDrawer, createInteractiveSession, state }) {
   const [busy, setBusy] = useState(false);
-  const defaultRuntime = state.deployment?.defaultRuntime || "container";
+  const configuredRuntimes = state.deployment?.interactiveRuntimes;
+  const runtimeOptions = configurableInteractiveRuntimes.filter(
+    (runtime) => !Array.isArray(configuredRuntimes) || configuredRuntimes.includes(runtime.id),
+  );
+  const defaultRuntime = runtimeOptions.some(
+    (runtime) => runtime.id === state.deployment?.defaultRuntime,
+  )
+    ? state.deployment.defaultRuntime
+    : runtimeOptions[0]?.id || "container";
   const defaultProfile = state.deployment?.defaultProfile || "default";
   const runtimeProfiles = state.deployment?.runtimeProfiles || [];
   const [runtime, setRuntime] = useState(defaultRuntime);
@@ -1668,17 +1681,24 @@ function InteractiveDrawer({ drawers, closeDrawer, createInteractiveSession, sta
           Branch
           <input name="branch" defaultValue="main" placeholder="main" />
         </label>
-        <label>
-          Runtime
-          <select
-            name="runtime"
-            value={runtime}
-            onChange={(event) => setRuntime(event.currentTarget.value)}
-          >
-            <option value="container">Cloudflare Sandbox</option>
-            <option value="crabbox">Crabbox</option>
-          </select>
-        </label>
+        {runtimeOptions.length > 1 ? (
+          <label>
+            Runtime
+            <select
+              name="runtime"
+              value={runtime}
+              onChange={(event) => setRuntime(event.currentTarget.value)}
+            >
+              {runtimeOptions.map((option) => (
+                <option key={option.id} value={option.id}>
+                  {option.label}
+                </option>
+              ))}
+            </select>
+          </label>
+        ) : (
+          <input type="hidden" name="runtime" value={defaultRuntime} />
+        )}
         {runtime === "crabbox" && runtimeProfiles.length > 0 ? (
           <label>
             Profile

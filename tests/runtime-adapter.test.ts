@@ -743,7 +743,10 @@ test("public auth deployment metadata excludes runtime routing", async () => {
 
   assert.match(source, /deployment: publicDeploymentConfig\(env\)/);
   assert.match(publicSource, /label, canonicalUrl, productUrl, sshHost/);
-  assert.doesNotMatch(publicSource, /preferredRepo|defaultRuntime|defaultProfile|RUNTIME_ADAPTER/);
+  assert.doesNotMatch(
+    publicSource,
+    /preferredRepo|defaultRuntime|interactiveRuntimes|defaultProfile|RUNTIME_ADAPTER/,
+  );
 });
 
 test("worker deployment installs the shared runtime adapter credential", async () => {

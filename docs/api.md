@@ -410,7 +410,7 @@ Fields:
 
 - `repo`: required, enabled repo.
 - `branch`: optional, default `main`.
-- `runtime`: optional `crabbox` or `container`; omission uses `CRABFLEET_DEFAULT_RUNTIME`, which defaults to `container`.
+- `runtime`: optional `crabbox` or `container`; the value must be enabled by `CRABFLEET_INTERACTIVE_RUNTIMES`. Omission uses `CRABFLEET_DEFAULT_RUNTIME`, which defaults to `container` when enabled or otherwise the only enabled runtime.
 - `profile`: optional opaque adapter profile, defaulted by `CRABFLEET_DEFAULT_PROFILE`. When `CRABFLEET_RUNTIME_PROFILES_JSON` is configured, the value must name a configured profile; its capability flags seed the requested adapter capabilities for Crabbox sessions.
 - `github_actions` is service-created through `/api/openclaw/action-sessions` and is not accepted by this endpoint.
 - `command`: optional, default `codex`.

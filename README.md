@@ -238,6 +238,7 @@ The Crabbox namespace cutover intentionally has no old-name compatibility. Exist
 - `CRABFLEET_SSH_HOST` – Optional SSH command host shown in the app, default `crabd.sh`
 - `CRABFLEET_PREFERRED_REPO` – Optional first/default enabled repo, default `openclaw/crabfleet`
 - `CRABFLEET_DEFAULT_RUNTIME` – Optional interactive runtime default, `container` or `crabbox`; defaults to `container`
+- `CRABFLEET_INTERACTIVE_RUNTIMES` – Optional comma-separated allowlist of interactive runtime choices, `container`, `crabbox`, or both; defaults to `container,crabbox`. A single choice hides the runtime selector and becomes the default unless `CRABFLEET_DEFAULT_RUNTIME` explicitly names it.
 - `CRABFLEET_DEFAULT_PROFILE` – Optional opaque runtime-adapter profile, default `default`
 - `CRABFLEET_RUNTIME_PROFILES_JSON` – Optional bounded JSON array of generic profile descriptors (`id`, `label`, optional `target`, optional boolean `capabilities`, and optional `codexSsh`) shown to authenticated users when creating Crabbox sessions; when configured, `CRABFLEET_DEFAULT_PROFILE` must name one entry. `codexSsh.aliasTemplate` may use `{providerResourceId}`, `{workspaceId}`, `{sessionId}`, and `{profile}`. Optional `codexSsh.setupCommand` is an argv-like JSON string array: its first item and static items are shell-safe tokens, while any later item may be one complete placeholder. Crabfleet shell-quotes every substituted argument.
 - `CRABFLEET_DEV_LOGIN_ENABLED` – Explicit local-only development identity login gate; disabled unless exactly `true`, and still restricted to literal localhost requests
@@ -248,6 +249,7 @@ teaching Crabfleet about either provider:
 
 ```dotenv
 CRABFLEET_DEFAULT_RUNTIME="crabbox"
+CRABFLEET_INTERACTIVE_RUNTIMES="crabbox"
 CRABFLEET_DEFAULT_PROFILE="linux-desktop"
 CRABFLEET_RUNTIME_PROFILES_JSON='[{"id":"linux-desktop","label":"Linux","target":"linux","capabilities":{"terminal":true,"desktop":true,"vnc":true},"codexSsh":{"aliasTemplate":"codex-{providerResourceId}","setupCommand":["fleet-connect","{providerResourceId}"]}},{"id":"macos-desktop","label":"macOS","target":"macos","capabilities":{"terminal":true,"desktop":true,"vnc":true}}]'
 CRABBOX_RUNTIME_ADAPTER_URL_TEMPLATE="https://controller.example/v1/adapters/{profile}/proxy"

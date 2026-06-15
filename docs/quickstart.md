@@ -80,7 +80,7 @@ Click New crabbox or use the CLI:
 crabfleet new --repo openclaw/crabfleet "fix the failing check"
 ```
 
-The CLI omits `runtime` unless `--runtime` is passed, so the deployment chooses via `CRABFLEET_DEFAULT_RUNTIME` (`container` when unset). The OpenClaw deployment supports built-in Cloudflare Sandbox sessions and versioned Crabbox workspaces.
+The CLI omits `runtime` unless `--runtime` is passed, so the deployment chooses via `CRABFLEET_DEFAULT_RUNTIME` (`container` when enabled, otherwise the only runtime enabled by `CRABFLEET_INTERACTIVE_RUNTIMES`). The OpenClaw deployment supports built-in Cloudflare Sandbox sessions and versioned Crabbox workspaces.
 
 End a session with `crabfleet delete <session-id>`. Versioned lifecycle adapters confirm runtime release; legacy create-only and ClawFleet sessions stop only in Crabfleet and may require separate provider cleanup. Crabfleet retains the final status and logs until you clean up the dead session record.
 
