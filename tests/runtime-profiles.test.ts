@@ -2,6 +2,11 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import { test } from "node:test";
 import {
+  clientDeploymentConfig,
+  deploymentConfig,
+  selectedRuntimeProfile,
+} from "../src/worker/deployment.ts";
+import {
   parseRuntimeProfiles,
   resolveRuntimeProfileCodexSsh,
   runtimeProfileByID,
@@ -80,7 +85,7 @@ test("runtime profile catalog fails closed on malformed or ambiguous input", () 
   assert.deepEqual(parseRuntimeProfiles(""), []);
 });
 
-test("runtime profiles resolve bounded manager-only Codex SSH handoff data", async () => {
+test("runtime profiles resolve bounded Codex SSH handoff data", () => {
   const [profile] = parseRuntimeProfiles(
     JSON.stringify([
       {
@@ -164,39 +169,36 @@ test("runtime profiles resolve bounded manager-only Codex SSH handoff data", asy
     },
   );
 
-  const source = await readFile(new URL("../src/index.ts", import.meta.url), "utf8");
-  const start = source.indexOf("function decorateInteractiveSession");
-  const end = source.indexOf("function canChangeInteractiveSessionMultiplayer", start);
-  const decoration = source.slice(start, end);
-  assert.match(decoration, /canManage && codexSshReady/);
-  assert.match(decoration, /codexSsh,/);
-  assert.match(
-    decoration,
-    /configuredRuntimeAdapterControlPlane\(env, session\.profile\) ===\s+session\[interactiveSessionAdapterControlPlane\]/,
-  );
-  const clientConfigStart = source.indexOf("function clientDeploymentConfig");
-  const clientConfigEnd = source.indexOf("function browserAppOrigin", clientConfigStart);
-  assert.match(source.slice(clientConfigStart, clientConfigEnd), /codexSsh: _serverOnly/);
+  const client = clientDeploymentConfig({
+    CRABFLEET_DEFAULT_PROFILE: "linux",
+    CRABFLEET_RUNTIME_PROFILES_JSON: JSON.stringify([
+      {
+        id: "linux",
+        label: "Linux",
+        codexSsh: {
+          aliasTemplate: "codex-{providerResourceId}",
+          setupCommand: ["fleet-connect", "{providerResourceId}"],
+        },
+      },
+    ]),
+  });
+  assert.equal(client.runtimeProfiles[0]?.codexSsh, undefined);
 });
 
-test("profile allowlisting and capability withdrawals stay enforced at provisioning", async () => {
-  const source = await readFile(new URL("../src/index.ts", import.meta.url), "utf8");
+test("profile allowlisting stays enforced before provisioning", async () => {
+  const source = await readFile(
+    new URL("../src/worker/provisioning/endpoints.ts", import.meta.url),
+    "utf8",
+  );
   const selectionStart = source.indexOf("const profile = clean(body.profile");
   assert.equal(selectionStart, -1);
-  const helperStart = source.indexOf("function selectedRuntimeProfile");
-  const helperEnd = source.indexOf("function publicDeploymentConfig", helperStart);
-  const helper = source.slice(helperStart, helperEnd);
-  assert.match(helper, /deployment\.runtimeProfiles\.length > 0 && !descriptor/);
-  assert.ok(source.indexOf("selectedRuntimeProfile(deploymentConfig(env), session.profile)") > 0);
-
-  const resultStart = source.indexOf("function runtimeAdapterProvisionResult");
-  const resultEnd = source.indexOf(
-    "async function reconcileStoppingRuntimeAdapterWorkspace",
-    resultStart,
-  );
-  const result = source.slice(resultStart, resultEnd);
-  assert.match(
-    result,
-    /session\.adapterRequestedCapabilities \?\?[\s\S]*session\.capabilities_json/,
+  const deployment = deploymentConfig({
+    CRABFLEET_DEFAULT_PROFILE: "linux",
+    CRABFLEET_RUNTIME_PROFILES_JSON: JSON.stringify([{ id: "linux", label: "Linux" }]),
+  });
+  assert.equal(selectedRuntimeProfile(deployment, "linux").descriptor?.id, "linux");
+  assert.throws(() => selectedRuntimeProfile(deployment, "unknown"), /profile is not configured/);
+  assert.ok(
+    source.indexOf("selectedRuntimeProfile(deploymentConfig(this.env), session.profile)") > 0,
   );
 });

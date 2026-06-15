@@ -13,7 +13,10 @@ const specV2Path = new URL("../docs/spec-v2.md", import.meta.url);
 const logoPath = new URL("../src/assets/crabbox-logo.png", import.meta.url);
 const ogImagePath = new URL("../src/assets/crabfleet-og.png", import.meta.url);
 const ghosttyWebPath = new URL("../node_modules/ghostty-web/dist/ghostty-web.js", import.meta.url);
-const ghosttyWasmPath = new URL("../node_modules/ghostty-web/dist/ghostty-vt.wasm", import.meta.url);
+const ghosttyWasmPath = new URL(
+  "../node_modules/ghostty-web/dist/ghostty-vt.wasm",
+  import.meta.url,
+);
 const ghosttyExternalPath = new URL(
   "../node_modules/ghostty-web/dist/__vite-browser-external-2447137e.js",
   import.meta.url,

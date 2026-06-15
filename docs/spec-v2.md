@@ -119,7 +119,7 @@ Per-session summary:
 - `policy.hasGithubToken`
 - `policy.openAIBaseUrlHost`
 
-`attachable` is true only for terminal-capable `ready`, `attached`, or `detached` sessions with current control and a resolvable Sandbox, configured bridge, valid WSS/literal-loopback WS URL, or configured Cloudflare runner route.
+`attachable` is true only for terminal-capable `ready`, `attached`, or `detached` sessions with current control and a resolvable Sandbox or valid WSS/literal-loopback WS provider URL.
 
 ## Security
 

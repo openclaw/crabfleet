@@ -49,8 +49,9 @@ type keyAuth struct {
 }
 
 type sessionPTY struct {
-	cols uint32
-	rows uint32
+	cols    uint32
+	rows    uint32
+	resizes chan fleetapi.TerminalSize
 }
 
 func main() {
@@ -59,10 +60,10 @@ func main() {
 	var token string
 	var hostKeyPath string
 	var ephemeralHostKey bool
-	flag.StringVar(&addr, "addr", env(":2222", "CRABFLEET_SSH_ADDR", "CRABBOX_SSH_ADDR"), "SSH listen address")
-	flag.StringVar(&apiURL, "api", env("http://127.0.0.1:8787", "CRABFLEET_API_URL", "CRABBOX_API_URL"), "Crabfleet Worker URL")
-	flag.StringVar(&token, "token", env("", "CRABFLEET_SSH_GATEWAY_TOKEN", "CRABBOX_SSH_GATEWAY_TOKEN"), "Worker SSH gateway token")
-	flag.StringVar(&hostKeyPath, "host-key", env("", "CRABFLEET_SSH_HOST_KEY", "CRABBOX_SSH_HOST_KEY"), "SSH host private key path")
+	flag.StringVar(&addr, "addr", env(":2222", "CRABFLEET_SSH_ADDR"), "SSH listen address")
+	flag.StringVar(&apiURL, "api", env("http://127.0.0.1:8787", "CRABFLEET_API_URL"), "Crabfleet Worker URL")
+	flag.StringVar(&token, "token", env("", "CRABFLEET_SSH_GATEWAY_TOKEN"), "Worker SSH gateway token")
+	flag.StringVar(&hostKeyPath, "host-key", env("", "CRABFLEET_SSH_HOST_KEY"), "SSH host private key path")
 	flag.BoolVar(&ephemeralHostKey, "ephemeral-host-key", false, "use a generated host key for local development only")
 	flag.Parse()
 
@@ -154,55 +155,99 @@ func handleConn(raw net.Conn, config *ssh.ServerConfig, client *apiClient) {
 
 func handleSession(channel ssh.Channel, requests <-chan *ssh.Request, perms *ssh.Permissions, client *apiClient) {
 	defer channel.Close()
-	pty := sessionPTY{cols: 120, rows: 34}
-	for req := range requests {
-		switch req.Type {
-		case "pty-req":
-			var payload struct {
-				Term   string
-				Cols   uint32
-				Rows   uint32
-				Width  uint32
-				Height uint32
-				Modes  string
+	pty := sessionPTY{
+		cols:    120,
+		rows:    34,
+		resizes: make(chan fleetapi.TerminalSize, 1),
+	}
+	exitCh := make(chan uint32, 1)
+	commandStarted := false
+	for {
+		select {
+		case req, ok := <-requests:
+			if !ok {
+				return
 			}
-			ssh.Unmarshal(req.Payload, &payload)
-			if payload.Cols > 0 {
-				pty.cols = payload.Cols
+			switch req.Type {
+			case "pty-req":
+				var payload struct {
+					Term   string
+					Cols   uint32
+					Rows   uint32
+					Width  uint32
+					Height uint32
+					Modes  string
+				}
+				ssh.Unmarshal(req.Payload, &payload)
+				pty.resize(payload.Cols, payload.Rows, commandStarted)
+				req.Reply(true, nil)
+			case "window-change":
+				var payload struct {
+					Cols   uint32
+					Rows   uint32
+					Width  uint32
+					Height uint32
+				}
+				ssh.Unmarshal(req.Payload, &payload)
+				pty.resize(payload.Cols, payload.Rows, commandStarted)
+			case "shell":
+				if commandStarted {
+					req.Reply(false, nil)
+					continue
+				}
+				commandStarted = true
+				req.Reply(true, nil)
+				go func(current sessionPTY) {
+					exitCh <- runCommand(context.Background(), channel, perms, client, "", current)
+				}(pty)
+			case "exec":
+				if commandStarted {
+					req.Reply(false, nil)
+					continue
+				}
+				var payload struct{ Command string }
+				ssh.Unmarshal(req.Payload, &payload)
+				commandStarted = true
+				req.Reply(true, nil)
+				go func(current sessionPTY, command string) {
+					exitCh <- runCommand(
+						context.Background(),
+						channel,
+						perms,
+						client,
+						command,
+						current,
+					)
+				}(pty, payload.Command)
+			default:
+				req.Reply(false, nil)
 			}
-			if payload.Rows > 0 {
-				pty.rows = payload.Rows
-			}
-			req.Reply(true, nil)
-		case "window-change":
-			var payload struct {
-				Cols   uint32
-				Rows   uint32
-				Width  uint32
-				Height uint32
-			}
-			ssh.Unmarshal(req.Payload, &payload)
-			if payload.Cols > 0 {
-				pty.cols = payload.Cols
-			}
-			if payload.Rows > 0 {
-				pty.rows = payload.Rows
-			}
-		case "shell":
-			req.Reply(true, nil)
-			exit := runCommand(context.Background(), channel, perms, client, "", pty)
+		case exit := <-exitCh:
 			replyExit(channel, exit)
 			return
-		case "exec":
-			var payload struct{ Command string }
-			ssh.Unmarshal(req.Payload, &payload)
-			req.Reply(true, nil)
-			exit := runCommand(context.Background(), channel, perms, client, payload.Command, pty)
-			replyExit(channel, exit)
-			return
-		default:
-			req.Reply(false, nil)
 		}
+	}
+}
+
+func (pty *sessionPTY) resize(cols uint32, rows uint32, notify bool) {
+	if cols > 0 {
+		pty.cols = cols
+	}
+	if rows > 0 {
+		pty.rows = rows
+	}
+	if !notify || pty.resizes == nil || pty.cols == 0 || pty.rows == 0 {
+		return
+	}
+	size := fleetapi.TerminalSize{Cols: pty.cols, Rows: pty.rows}
+	select {
+	case pty.resizes <- size:
+	default:
+		select {
+		case <-pty.resizes:
+		default:
+		}
+		pty.resizes <- size
 	}
 }
 
@@ -311,7 +356,7 @@ func runCommand(ctx context.Context, out io.ReadWriter, perms *ssh.Permissions, 
 		}
 		fmt.Fprintf(out, "session %s not found\n", fleettext.Safe(args[1]))
 		return 1
-	case "delete", "stop":
+	case "delete":
 		if len(args) != 2 {
 			fmt.Fprintln(out, "usage: delete SESSION_ID")
 			return 2
@@ -612,7 +657,7 @@ func attach(
 	id string,
 	pty sessionPTY,
 ) uint32 {
-	err := api.Attach(ctx, id, terminal, pty.cols, pty.rows)
+	err := api.Attach(ctx, id, terminal, pty.cols, pty.rows, pty.resizes)
 	if err != nil && !errors.Is(err, net.ErrClosed) && !strings.Contains(err.Error(), "closed") {
 		fmt.Fprintf(terminal, "\nattach closed: %v\n", err)
 		return 1
@@ -680,13 +725,13 @@ func loadHostKey(path string, allowEphemeral bool) (ssh.Signer, error) {
 		return ssh.ParsePrivateKey(data)
 	}
 	if !allowEphemeral {
-		return nil, errors.New("CRABBOX_SSH_HOST_KEY or --host-key is required")
+		return nil, errors.New("CRABFLEET_SSH_HOST_KEY or --host-key is required")
 	}
 	_, privateKey, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
 		return nil, err
 	}
-	log.Print("using ephemeral SSH host key; set CRABBOX_SSH_HOST_KEY for production")
+	log.Print("using ephemeral SSH host key; set CRABFLEET_SSH_HOST_KEY for production")
 	return ssh.NewSignerFromKey(privateKey)
 }
 

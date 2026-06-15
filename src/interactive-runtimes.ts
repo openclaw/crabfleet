@@ -1,9 +1,15 @@
 export type ConfigurableInteractiveRuntime = "container" | "crabbox";
 
-export const defaultInteractiveRuntimes: ConfigurableInteractiveRuntime[] = [
-  "container",
-  "crabbox",
-];
+export const configurableInteractiveRuntimeOptions = [
+  { id: "container", label: "Cloudflare Sandbox" },
+  { id: "crabbox", label: "Crabbox" },
+] as const satisfies ReadonlyArray<{
+  id: ConfigurableInteractiveRuntime;
+  label: string;
+}>;
+
+export const defaultInteractiveRuntimes: ConfigurableInteractiveRuntime[] =
+  configurableInteractiveRuntimeOptions.map(({ id }) => id);
 
 const configurableRuntimeSet = new Set<string>(defaultInteractiveRuntimes);
 

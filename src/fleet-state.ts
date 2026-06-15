@@ -1,3 +1,5 @@
+import { normalizedSecureWebSocketUrl } from "./url-security.ts";
+
 export type FleetStatus =
   | "provisioning"
   | "pending_adapter"
@@ -70,8 +72,6 @@ export type FleetStateOptions = {
   productUrl: string;
   registryAvailable?: boolean;
   sandboxAvailable?: boolean | undefined;
-  ptyBridgeUrl?: string | null | undefined;
-  cloudflareRunnerUrl?: string | null | undefined;
 };
 
 export type FleetSessionSummary = {
@@ -144,7 +144,7 @@ export type FleetState = {
   sessions: FleetSessionSummary[];
 };
 
-export type PtyRouteKind = "sandbox" | "bridge" | "attach" | "cloudflare";
+export type PtyRouteKind = "sandbox" | "attach";
 
 export type PtyRouteSession = {
   adapter?: string | null;
@@ -154,8 +154,6 @@ export type PtyRouteSession = {
 
 export type PtyRouteConfig = {
   sandboxAvailable?: boolean | undefined;
-  bridgeUrl?: string | null | undefined;
-  cloudflareRunnerUrl?: string | null | undefined;
 };
 
 const allStatuses: FleetStatus[] = [
@@ -232,10 +230,7 @@ export function buildFleetState(
 export function fleetSessionSummary(
   session: FleetSessionInput,
   policy: FleetSandboxPolicySummary | null,
-  options: Pick<
-    FleetStateOptions,
-    "sandboxAvailable" | "ptyBridgeUrl" | "cloudflareRunnerUrl"
-  > = {},
+  options: Pick<FleetStateOptions, "sandboxAvailable"> = {},
 ): FleetSessionSummary {
   const sandboxId = sandboxIdFromLeaseId(session.leaseId);
   const archived = Boolean(session.logArchive?.eventCount);
@@ -273,18 +268,13 @@ export function fleetSessionSummary(
           Boolean(
             ptyRouteKind(session, {
               sandboxAvailable: options.sandboxAvailable,
-              bridgeUrl: options.ptyBridgeUrl,
-              cloudflareRunnerUrl: options.cloudflareRunnerUrl,
             }),
           ))) &&
       ptyReadyStatuses.has(session.status),
     vnc:
       !inactiveStatuses.has(session.status) &&
-      Boolean(
-        session.vncUrl ||
-        (session.adapter === "runtime-v1" &&
-          (session.capabilities?.vnc || session.capabilities?.desktop)),
-      ),
+      session.adapter === "runtime-v1" &&
+      Boolean(session.capabilities?.vnc || session.capabilities?.desktop),
     archived,
     logEvents: session.logArchive?.eventCount ?? session.logs?.length ?? 0,
     leaseId: session.leaseId,
@@ -317,59 +307,10 @@ export function ptyRouteKind(
 ): PtyRouteKind | null {
   const leaseId = session.adapter === "runtime-v1" ? null : session.leaseId;
   if (config.sandboxAvailable && leaseId?.startsWith("sandbox:")) return "sandbox";
-  if (configuredBridgeWebSocketUrl(config.bridgeUrl)) return "bridge";
   if (safePtyWebSocketUrl(session.attachUrl)) return "attach";
-  if (leaseId?.startsWith("cloudflare:") && safePtyHttpUrl(config.cloudflareRunnerUrl ?? null)) {
-    return "cloudflare";
-  }
   return null;
 }
 
-function configuredBridgeWebSocketUrl(value: string | null | undefined): string | null {
-  const candidate = String(value ?? "")
-    .trim()
-    .replaceAll(/\{(?:id|leaseId|repo|branch|runtime)\}/g, "route-value");
-  if (!candidate) return null;
-  try {
-    const url = new URL(candidate);
-    if (url.protocol === "https:") url.protocol = "wss:";
-    if (url.protocol === "http:") url.protocol = "ws:";
-    return safePtyWebSocketUrl(url.toString());
-  } catch {
-    return null;
-  }
-}
-
 function safePtyWebSocketUrl(value: string | null | undefined): string | null {
-  return safePtyUrl(value, "wss:", "ws:");
-}
-
-function safePtyHttpUrl(value: string | null | undefined): string | null {
-  return safePtyUrl(value, "https:", "http:");
-}
-
-function safePtyUrl(
-  value: string | null | undefined,
-  secureProtocol: string,
-  loopbackProtocol: string,
-): string | null {
-  if (!value) return null;
-  try {
-    const url = new URL(value);
-    if (url.username || url.password) return null;
-    if (url.protocol === secureProtocol) return url.toString();
-    if (url.protocol !== loopbackProtocol || !isPtyLoopbackHostname(url.hostname)) return null;
-    return url.toString();
-  } catch {
-    return null;
-  }
-}
-
-function isPtyLoopbackHostname(hostname: string): boolean {
-  return (
-    hostname === "localhost" ||
-    hostname === "127.0.0.1" ||
-    hostname === "::1" ||
-    hostname === "[::1]"
-  );
+  return normalizedSecureWebSocketUrl(value);
 }

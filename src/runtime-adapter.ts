@@ -1,3 +1,5 @@
+import { exactSecureHttpUrl, exactSecureWebSocketUrl } from "./url-security.ts";
+
 export const runtimeAdapterVersion = "crabfleet/v1";
 export const runtimeAdapterName = "runtime-v1";
 export const runtimeAdapterDesktopMaxTtlMs = 15 * 60 * 1000;
@@ -146,17 +148,6 @@ const statusMap: Record<string, AdapterSessionStatus> = {
   error: "failed",
 };
 
-const createOnlyAdapterStatuses = new Set<AdapterSessionStatus>([
-  "provisioning",
-  "pending_adapter",
-  "ready",
-  "attached",
-  "detached",
-  "stopped",
-  "expired",
-  "failed",
-]);
-
 export function runtimeAdapterCollectionUrl(base: string): string {
   return joinAdapterUrl(base, "/v1/workspaces");
 }
@@ -296,22 +287,11 @@ export function shouldReplayRuntimeAdapterCreate(
   return createPending && (status === "provisioning" || status === "pending_adapter");
 }
 
-export function createOnlyAdapterStatus(value: unknown): AdapterSessionStatus | null {
-  return typeof value === "string" && createOnlyAdapterStatuses.has(value as AdapterSessionStatus)
-    ? (value as AdapterSessionStatus)
-    : null;
-}
-
-export function runtimeAdapterTerminalFailureStatus(
-  adapter: string | null,
-): "detached" | "expired" {
+export function terminalFailureStatusForAdapter(adapter: string | null): "detached" | "expired" {
   return adapter === runtimeAdapterName ? "detached" : "expired";
 }
 
-export function legacyLeaseIdForAdapter(
-  adapter: string | null,
-  leaseId: string | null,
-): string | null {
+export function workerOwnedLeaseId(adapter: string | null, leaseId: string | null): string | null {
   return adapter === runtimeAdapterName ? null : leaseId;
 }
 
@@ -660,47 +640,11 @@ export function currentAdapterDesktopConnection(
 }
 
 export function safeDesktopUrl(value: unknown): string | null {
-  const raw = exactUrlString(value);
-  if (!raw) return null;
-  try {
-    const url = new URL(raw);
-    if (url.username || url.password) return null;
-    if (url.protocol === "https:") return raw;
-    if (url.protocol !== "http:" || !isExactLiteralLoopbackUrl(raw, url)) return null;
-    return raw;
-  } catch {
-    return null;
-  }
+  return exactSecureHttpUrl(value);
 }
 
 export function safeWebSocketUrl(value: unknown): string | null {
-  const raw = exactUrlString(value);
-  if (!raw) return null;
-  try {
-    const url = new URL(raw);
-    if (url.username || url.password) return null;
-    if (url.protocol === "wss:") return raw;
-    if (url.protocol !== "ws:" || !isExactLiteralLoopbackUrl(raw, url)) return null;
-    return raw;
-  } catch {
-    return null;
-  }
-}
-
-function exactUrlString(value: unknown): string | null {
-  if (typeof value !== "string" || !value) return null;
-  for (let index = 0; index < value.length; index += 1) {
-    const code = value.charCodeAt(index);
-    if (code <= 0x20 || (code >= 0x7f && code <= 0x9f)) return null;
-  }
-  return value;
-}
-
-function isExactLiteralLoopbackUrl(raw: string, parsed: URL): boolean {
-  if (!isLiteralLoopbackHostname(parsed.hostname)) return false;
-  return /^[a-z][a-z0-9+.-]*:\/\/(?:localhost|127\.0\.0\.1|\[::1\])(?::[0-9]+)?(?:[/?#]|$)/iu.test(
-    raw,
-  );
+  return exactSecureWebSocketUrl(value);
 }
 
 function adapterStatus(value: unknown): AdapterSessionStatus | null {
@@ -934,13 +878,4 @@ function escapedConnectionRepresentations(connection: string): string[] {
     }
   }
   return [...representations].sort((left, right) => right.length - left.length);
-}
-
-function isLiteralLoopbackHostname(hostname: string): boolean {
-  return (
-    hostname === "localhost" ||
-    hostname === "127.0.0.1" ||
-    hostname === "::1" ||
-    hostname === "[::1]"
-  );
 }

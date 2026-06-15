@@ -159,7 +159,7 @@ func TestDeleteCommandUsesProviderStopAction(t *testing.T) {
 	}
 }
 
-func TestCLIUsesDeleteCanonicalNameWithStopAlias(t *testing.T) {
+func TestCLIUsesDeleteCanonicalNameWithoutStopAlias(t *testing.T) {
 	var app cli
 	parser, err := kong.New(&app, kong.Name("crabfleet"), kong.Vars{"version": version})
 	if err != nil {
@@ -171,16 +171,33 @@ func TestCLIUsesDeleteCanonicalNameWithStopAlias(t *testing.T) {
 	if app.Delete.ID != "IS-7" {
 		t.Fatalf("delete id = %q", app.Delete.ID)
 	}
-	var legacy cli
-	legacyParser, err := kong.New(&legacy, kong.Name("crabfleet"), kong.Vars{"version": version})
+	var rejected cli
+	rejectedParser, err := kong.New(&rejected, kong.Name("crabfleet"), kong.Vars{"version": version})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := legacyParser.Parse([]string{"stop", "IS-8"}); err != nil {
+	if _, err := rejectedParser.Parse([]string{"stop", "IS-8"}); err == nil {
+		t.Fatal("stop alias unexpectedly parsed")
+	}
+}
+
+func TestCLIUsesListCanonicalNameWithoutAlias(t *testing.T) {
+	var app cli
+	parser, err := kong.New(&app, kong.Name("crabfleet"), kong.Vars{"version": version})
+	if err != nil {
 		t.Fatal(err)
 	}
-	if legacy.Delete.ID != "IS-8" {
-		t.Fatalf("stop alias id = %q", legacy.Delete.ID)
+	if _, err := parser.Parse([]string{"list"}); err != nil {
+		t.Fatal(err)
+	}
+
+	var rejected cli
+	rejectedParser, err := kong.New(&rejected, kong.Name("crabfleet"), kong.Vars{"version": version})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := rejectedParser.Parse([]string{"ls"}); err == nil {
+		t.Fatal("list alias unexpectedly parsed")
 	}
 }
 

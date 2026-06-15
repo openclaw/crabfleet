@@ -3,10 +3,8 @@ import test from "node:test";
 
 import {
   credentialPolicyCleanupMatches,
-  credentialPolicyMigrationCleanupMatches,
   credentialPolicyRegistrationAccepted,
   credentialPolicySandboxIsExpected,
-  migratedCredentialPolicyRecord,
   type CredentialPolicyGenerationRecord,
   type CredentialPolicyGenerationTombstone,
 } from "../src/credential-policy-fence.ts";
@@ -124,136 +122,6 @@ test("delayed abandoned registration cannot replace a newer claim", () => {
   const abandoned = registration("generation-1", "claim-old", 300);
 
   assert.equal(credentialPolicyRegistrationAccepted(newer, undefined, abandoned, 200), false);
-});
-
-test("legacy policy migration resumes idempotently after a crash", () => {
-  const legacy: Policy = { sessionId: "IS-101", value: "legacy-secret" };
-  const promoted = migratedCredentialPolicyRecord(
-    registration("legacy:IS-101:sandbox", "legacy-claim", 200),
-    undefined,
-    undefined,
-    {
-      generation: "generation-repaired",
-      registrationClaim: "legacy-repair:first",
-      registrationExpiresAt: 300,
-      sessionId: "IS-101",
-    },
-    100,
-  );
-  assert.equal(promoted?.generation, "generation-repaired");
-  assert.equal(
-    migratedCredentialPolicyRecord(
-      registration("legacy:IS-101:sandbox", "legacy-newer", 400),
-      undefined,
-      undefined,
-      {
-        generation: "generation-repaired",
-        registrationClaim: "legacy-repair:stale",
-        registrationExpiresAt: 300,
-        sessionId: "IS-101",
-      },
-      100,
-    ),
-    undefined,
-  );
-  const first = migratedCredentialPolicyRecord(
-    undefined,
-    legacy,
-    undefined,
-    {
-      generation: "generation-repaired",
-      registrationClaim: "legacy-repair:first",
-      registrationExpiresAt: 300,
-      sessionId: "IS-101",
-    },
-    100,
-  );
-  assert.deepEqual(first, {
-    generation: "generation-repaired",
-    registrationClaim: "legacy-repair:first",
-    registrationExpiresAt: 300,
-    policy: legacy,
-  });
-
-  const retry = migratedCredentialPolicyRecord(
-    first,
-    undefined,
-    undefined,
-    {
-      generation: "generation-repaired",
-      registrationClaim: "legacy-repair:retry",
-      registrationExpiresAt: 400,
-      sessionId: "IS-101",
-    },
-    301,
-  );
-  assert.equal(retry?.registrationClaim, "legacy-repair:retry");
-  assert.equal(retry?.policy, legacy);
-  assert.equal(
-    migratedCredentialPolicyRecord(
-      retry,
-      undefined,
-      undefined,
-      {
-        generation: "generation-repaired",
-        registrationClaim: "legacy-repair:first",
-        registrationExpiresAt: 300,
-        sessionId: "IS-101",
-      },
-      200,
-    ),
-    undefined,
-  );
-});
-
-test("legacy migration honors identity, tombstones, and raced cleanup", () => {
-  const legacy: Policy = { sessionId: "IS-101", value: "legacy-secret" };
-  const migration = {
-    generation: "generation-repaired",
-    registrationClaim: "legacy-repair:claim",
-    registrationExpiresAt: 300,
-    sessionId: "IS-101",
-  };
-  assert.equal(
-    migratedCredentialPolicyRecord(
-      undefined,
-      { ...legacy, sessionId: "IS-102" },
-      undefined,
-      migration,
-      100,
-    ),
-    undefined,
-  );
-  assert.equal(
-    migratedCredentialPolicyRecord(
-      undefined,
-      legacy,
-      {
-        generation: migration.generation,
-        sessionId: migration.sessionId,
-        tombstonedAt: 99,
-      },
-      migration,
-      100,
-    ),
-    undefined,
-  );
-  assert.equal(
-    credentialPolicyMigrationCleanupMatches(
-      registration("legacy:IS-101:sandbox", "old-claim", 200),
-      migration.generation,
-      migration.sessionId,
-    ),
-    true,
-  );
-  assert.equal(
-    credentialPolicyMigrationCleanupMatches(
-      registration("generation-other", "other-claim", 200),
-      migration.generation,
-      migration.sessionId,
-    ),
-    false,
-  );
 });
 
 test("live lease refresh fences both current and expected sandbox policies", () => {

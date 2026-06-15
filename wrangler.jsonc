@@ -25,7 +25,6 @@
     "CLOUDFLARE_ACCOUNT_ID": "91b59577e757131d68d55a471fe32aca",
     "CRABFLEET_DEV_LOGIN_ENABLED": "false",
     "CRABBOX_COORDINATOR_ORIGIN": "https://crabbox.openclaw.ai",
-    "CRABBOX_INTERACTIVE_PROVISION_URL": "https://crabfleet.openclaw.ai/api/provision/interactive",
     "CRABBOX_RUNTIME_ADAPTER_NAMESPACE": "openclaw",
     "CRABBOX_RUNTIME_ADAPTER_URL": "https://crabbox.openclaw.ai",
     "GITHUB_REDIRECT_URI": "https://crabfleet.openclaw.ai/auth/github/callback",
@@ -83,17 +82,13 @@
       "new_sqlite_classes": ["SessionControlDO"],
     },
   ],
-  "workers_dev": true,
+  "workers_dev": false,
   "triggers": {
     "crons": ["* * * * *"],
   },
-  // The canonical app/API host and legacy OpenClaw aliases are Worker Custom
-  // Domains. The public crabfleet.ai product site uses wrangler.product.jsonc.
-  "routes": [
-    { "pattern": "crabfleet.openclaw.ai", "custom_domain": true },
-    { "pattern": "clawfleet.openclaw.ai", "custom_domain": true },
-    { "pattern": "crabyard.openclaw.ai", "custom_domain": true },
-  ],
+  // The canonical app/API host is a Worker Custom Domain. The public
+  // crabfleet.ai product site uses wrangler.product.jsonc.
+  "routes": [{ "pattern": "crabfleet.openclaw.ai", "custom_domain": true }],
   "observability": {
     "enabled": true,
   },

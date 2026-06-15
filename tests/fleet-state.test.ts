@@ -241,36 +241,20 @@ test("fleet attachability follows resolvable PTY routes", () => {
     true,
   );
   assert.equal(
-    summary(
-      { ...baseSession, leaseId: "cloudflare:workspace-1", attachUrl: null },
-      { cloudflareRunnerUrl: "https://runner.example" },
-    ),
-    true,
-  );
-  assert.equal(
-    summary(
-      { ...baseSession, leaseId: null, attachUrl: null },
-      { ptyBridgeUrl: "https://bridge.example/pty/{id}" },
-    ),
-    true,
-  );
-  assert.equal(
-    summary(
-      { ...baseSession, leaseId: null, attachUrl: null, canControl: false },
-      { ptyBridgeUrl: "https://bridge.example/pty/{id}" },
-    ),
+    summary({ ...baseSession, leaseId: null, attachUrl: "ws://127.1:9000/session" }),
     false,
   );
+  assert.equal(summary({ ...baseSession, leaseId: null, attachUrl: null }), false);
 });
 
-test("legacy sessions require an actual VNC URL", () => {
+test("non-adapter sessions never advertise legacy VNC URLs", () => {
   const fleet = buildFleetState(
     [
       {
         ...baseSession,
         runtime: "crabbox",
         adapter: null,
-        vncUrl: null,
+        vncUrl: "https://legacy.example/vnc",
         capabilities: { desktop: true, vnc: true },
       },
     ],

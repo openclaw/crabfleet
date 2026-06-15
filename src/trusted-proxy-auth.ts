@@ -1,3 +1,5 @@
+import { strictSecureHttpOrigin } from "./url-security.ts";
+
 export const trustedProxySecretHeader = "x-crabfleet-proxy-secret";
 const defaultTrustedUserHeader = "x-authenticated-user";
 const headerNamePattern = /^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/;
@@ -127,41 +129,11 @@ function trustedProxyConfig(env: TrustedProxyEnv): TrustedProxyConfig {
   ) {
     return { kind: "disabled" };
   }
-  const origin = strictHttpsOrigin(originValue);
-  const publicOrigin = publicOriginValue ? strictHttpsOrigin(publicOriginValue) : origin;
+  const origin = strictSecureHttpOrigin(originValue);
+  const publicOrigin = publicOriginValue ? strictSecureHttpOrigin(publicOriginValue) : origin;
   const userHeader = trustedUserHeader(env);
   if (!origin || !publicOrigin || !secret || !userHeader) return { kind: "invalid" };
   return { kind: "configured", origin, publicOrigin, secret, userHeader };
-}
-
-function strictHttpsOrigin(value: string | undefined): string | null {
-  if (!value || value !== value.trim()) return null;
-  try {
-    const url = new URL(value);
-    if (
-      url.username ||
-      url.password ||
-      url.pathname !== "/" ||
-      url.search ||
-      url.hash ||
-      (url.protocol !== "https:" &&
-        !(url.protocol === "http:" && isLiteralLoopbackHostname(url.hostname.toLowerCase())))
-    ) {
-      return null;
-    }
-    return url.origin;
-  } catch {
-    return null;
-  }
-}
-
-function isLiteralLoopbackHostname(hostname: string): boolean {
-  return (
-    hostname === "localhost" ||
-    hostname === "127.0.0.1" ||
-    hostname === "::1" ||
-    hostname === "[::1]"
-  );
 }
 
 function safeRequestOrigin(value: string): string | null {

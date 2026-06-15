@@ -76,7 +76,7 @@ export async function mountTerminal(session, mount, options = {}) {
           ? previous.canInput
             ? "Live PTY"
             : "Read-only PTY"
-          : "PTY bridge",
+          : "Connecting",
       );
       return;
     }
@@ -354,7 +354,7 @@ function subscribeTerminalHost(session, host, term) {
   sendTerminalFrame(
     session.id,
     TerminalMessageType.Subscribe,
-    encodeSubscribePayload({ flags, cols: term?.cols, rows: term?.rows }),
+    encodeSubscribePayload({ flags, cols: term?.cols ?? 0, rows: term?.rows ?? 0 }),
   );
   setTerminalStatus(session.id, "Connecting PTY");
 }
@@ -612,9 +612,9 @@ function isTerminalFinalError(message) {
     text.includes("session is expired") ||
     text.includes("session is failed") ||
     text.includes("upstream terminal error") ||
+    text.includes("terminal upstream") ||
     text.includes("terminal unavailable") ||
     text.includes("sandbox terminal") ||
-    text.includes("pty bridge") ||
     text.includes("not configured")
   );
 }
@@ -704,13 +704,13 @@ function updateMountedTerminal(host, text) {
 }
 
 function loadGhosttyModule() {
-  ghosttyModulePromise ||= import("/vendor/ghostty-web.js").then(async (module) => {
-    if (!module?.Ghostty) throw new Error("Ghostty module missing WASM loader");
-    return { ...module, ghostty: await module.Ghostty.load(ghosttyWasmPath) };
-  });
+  ghosttyModulePromise ||= import("/vendor/ghostty-web.js").then((module) =>
+    loadGhosttyRuntime(module, ghosttyWasmPath),
+  );
   return ghosttyModulePromise;
 }
 
 function setTerminalStatus(id, label) {
   terminalHubOptions.onStatus?.(id, label);
 }
+import { loadGhosttyRuntime } from "./ghostty-loader.js";

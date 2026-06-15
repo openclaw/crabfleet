@@ -1,6 +1,9 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { test } from "node:test";
 import {
+  TERMINAL_WS_MAGIC,
+  TERMINAL_WS_VERSION,
   TerminalMessageType,
   TerminalSubscribeFlags,
   decodeAckPayload,
@@ -13,6 +16,61 @@ import {
   encodeSubscribePayload,
   encodeTerminalFrame,
 } from "../src/terminal-protocol.ts";
+
+type TerminalProtocolFixture = {
+  magic: number;
+  version: number;
+  messages: typeof TerminalMessageType;
+  subscribeFlags: typeof TerminalSubscribeFlags;
+  vectors: {
+    outputFrame: string;
+    pingFrame: string;
+    subscribe: string;
+    resize: string;
+    ack: string;
+  };
+};
+
+const fixture = JSON.parse(
+  readFileSync(new URL("../protocol/terminal-v2.json", import.meta.url), "utf8"),
+) as TerminalProtocolFixture;
+const hex = (value: Uint8Array): string => Buffer.from(value).toString("hex");
+
+test("TypeScript terminal constants and encoders match the shared v2 protocol", () => {
+  assert.equal(TERMINAL_WS_MAGIC, fixture.magic);
+  assert.equal(TERMINAL_WS_VERSION, fixture.version);
+  assert.deepEqual(TerminalMessageType, fixture.messages);
+  assert.deepEqual(TerminalSubscribeFlags, fixture.subscribeFlags);
+  assert.equal(
+    hex(
+      encodeTerminalFrame({
+        type: TerminalMessageType.Output,
+        sessionId: "IS-123",
+        payload: new Uint8Array([0, 1, 2, 255]),
+      }),
+    ),
+    fixture.vectors.outputFrame,
+  );
+  assert.equal(
+    hex(encodeTerminalFrame({ type: TerminalMessageType.Ping })),
+    fixture.vectors.pingFrame,
+  );
+  assert.equal(
+    hex(
+      encodeSubscribePayload({
+        flags:
+          TerminalSubscribeFlags.Output |
+          TerminalSubscribeFlags.Events |
+          TerminalSubscribeFlags.OutputAcknowledgements,
+        cols: 144,
+        rows: 41,
+      }),
+    ),
+    fixture.vectors.subscribe,
+  );
+  assert.equal(hex(encodeResizePayload(132, 43)), fixture.vectors.resize);
+  assert.equal(hex(encodeAckPayload(65_535)), fixture.vectors.ack);
+});
 
 test("terminal frames round-trip binary payloads and session ids", () => {
   const payload = new Uint8Array([0, 1, 2, 255]);
@@ -30,14 +88,20 @@ test("terminal frames round-trip binary payloads and session ids", () => {
   });
 });
 
-test("terminal decoder rejects truncated and wrong-version frames", () => {
+test("terminal decoder rejects truncated, trailing, and wrong-version frames", () => {
   assert.equal(decodeTerminalFrame(new Uint8Array([0x43, 0x59])), null);
   const encoded = encodeTerminalFrame({ type: TerminalMessageType.Ping });
   encoded[2] = 99;
   assert.equal(decodeTerminalFrame(encoded), null);
+  assert.equal(
+    decodeTerminalFrame(
+      Uint8Array.from([...encodeTerminalFrame({ type: TerminalMessageType.Ping }), 0]),
+    ),
+    null,
+  );
 });
 
-test("terminal subscribe and resize payloads use stable little-endian fields", () => {
+test("terminal subscribe and resize payloads use one exact little-endian shape", () => {
   const subscribe = decodeSubscribePayload(
     encodeSubscribePayload({
       flags:
@@ -46,6 +110,8 @@ test("terminal subscribe and resize payloads use stable little-endian fields", (
         TerminalSubscribeFlags.OutputAcknowledgements,
       snapshotMinIntervalMs: 100,
       snapshotMaxIntervalMs: 500,
+      cols: 0,
+      rows: 0,
     }),
   );
   assert.deepEqual(subscribe, {
@@ -55,15 +121,19 @@ test("terminal subscribe and resize payloads use stable little-endian fields", (
       TerminalSubscribeFlags.OutputAcknowledgements,
     snapshotMinIntervalMs: 100,
     snapshotMaxIntervalMs: 500,
-    cols: null,
-    rows: null,
+    cols: 0,
+    rows: 0,
   });
 
   assert.deepEqual(decodeResizePayload(encodeResizePayload(132, 43)), { cols: 132, rows: 43 });
   assert.equal(decodeAckPayload(encodeAckPayload(65_535)), 65_535);
+  assert.equal(decodeSubscribePayload(new Uint8Array(12)), null);
+  assert.equal(decodeSubscribePayload(new Uint8Array(21)), null);
+  assert.equal(decodeResizePayload(new Uint8Array(9)), null);
+  assert.equal(decodeAckPayload(new Uint8Array(5)), null);
 });
 
-test("terminal subscribe payloads can carry initial PTY size", () => {
+test("terminal subscribe payloads carry initial PTY size", () => {
   assert.deepEqual(
     decodeSubscribePayload(
       encodeSubscribePayload({
@@ -83,9 +153,9 @@ test("terminal subscribe payloads can carry initial PTY size", () => {
 });
 
 test("json payloads fit inside regular terminal frames", () => {
-  const payload = encodeJsonPayload({ ok: true, version: 1 });
+  const payload = encodeJsonPayload({ ok: true, version: 2 });
   const decoded = decodeTerminalFrame(
     encodeTerminalFrame({ type: TerminalMessageType.Welcome, payload }),
   );
-  assert.equal(new TextDecoder().decode(decoded?.payload), '{"ok":true,"version":1}');
+  assert.equal(new TextDecoder().decode(decoded?.payload), '{"ok":true,"version":2}');
 });

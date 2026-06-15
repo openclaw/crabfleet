@@ -115,13 +115,13 @@ Interactive sessions are the live execution plane. Supported paths:
 
 - **Built-in Sandbox:** Worker provisions a Cloudflare Sandbox, prepares the repo, starts a Codex-capable shell, and proxies PTY traffic.
 - **Versioned runtime adapter:** Worker durably registers a tenant-namespaced workspace ID, creates and reconciles the provider workspace, proxies PTY access, mints transient desktop links, and confirms provider release before terminal state.
-- **Legacy provision hook:** create-only compatibility path. It can return terminal/VNC metadata but has no provider release lifecycle.
-- **ClawFleet compatibility:** create-only Crabbox integration retained for deployments still using it.
 - **GitHub Actions:** OpenClaw automation registers a logical work key; an Actions runner connects outbound to `SessionControlDO`, reports work state, and receives browser steering.
 
 Sessions can carry parent/root lineage, purpose, summary, share state, delegated control, multiplayer mode, archive metadata, and runtime-specific capability state.
 
 An optional `CRABFLEET_RUNTIME_PROFILES_JSON` allowlist exposes generic Crabbox profile labels and capability previews without teaching the Worker provider-specific semantics. The Worker validates the opaque profile ID. A fixed adapter maps it internally, or `CRABBOX_RUNTIME_ADAPTER_URL_TEMPLATE` selects a distinct outbound adapter by lowercase DNS-label profile; each adapter enforces its real provider capabilities.
+
+`CRABFLEET_INTERACTIVE_RUNTIMES` is the single manual-session runtime allowlist consumed by the API and browser create drawer. Deployments may expose built-in `container`, versioned-adapter `crabbox`, or both; a single enabled runtime becomes implicit in the UI.
 
 ## Versioned Adapter
 
@@ -154,10 +154,10 @@ Browser, CLI, agent, and SSH gateway clients use the multiplex `/api/terminal/ws
 - rechecks D1 authorization without waiting on provider I/O;
 - forwards input only for the current controller;
 - closes subscriptions after control or terminal capability is revoked;
-- appends dimensions only to known bridge/runner routes, never opaque signed adapter URLs;
+- forwards initial dimensions directly to Sandbox terminals and leaves opaque signed adapter URLs unchanged;
 - keeps runtime bearer credentials out of browser responses.
 
-Versioned adapter VNC uses the authenticated Worker route `/api/interactive-sessions/:id/vnc`, which mints a fresh provider desktop connection after authorization. Legacy sessions may expose a validated stored VNC URL.
+Versioned adapter VNC uses the authenticated Worker route `/api/interactive-sessions/:id/vnc`, which mints a fresh provider desktop connection after authorization.
 
 ## Sandbox Credentials
 

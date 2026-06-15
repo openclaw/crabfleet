@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
-import { readFile } from "node:fs/promises";
 import { test } from "node:test";
 import {
+  configurableInteractiveRuntimeOptions,
   defaultInteractiveRuntime,
   parseInteractiveRuntimes,
 } from "../src/interactive-runtimes.ts";
@@ -28,13 +28,9 @@ test("interactive runtime configuration fails closed", () => {
   assert.throws(() => defaultInteractiveRuntime("unknown", ["container", "crabbox"]));
 });
 
-test("interactive runtime allowlist controls both API and drawer", async () => {
-  const worker = await readFile(new URL("../src/index.ts", import.meta.url), "utf8");
-  const app = await readFile(new URL("../src/app/main.jsx", import.meta.url), "utf8");
-
-  assert.match(worker, /deployment\.interactiveRuntimes\.includes\(requestedRuntime/);
-  assert.match(worker, /runtime is not enabled for interactive sessions/);
-  assert.match(app, /state\.deployment\?\.interactiveRuntimes/);
-  assert.match(app, /runtimeOptions\.length > 1/);
-  assert.match(app, /type="hidden" name="runtime" value=\{defaultRuntime\}/);
+test("interactive runtime options provide one shared server and drawer catalog", () => {
+  assert.deepEqual(configurableInteractiveRuntimeOptions, [
+    { id: "container", label: "Cloudflare Sandbox" },
+    { id: "crabbox", label: "Crabbox" },
+  ]);
 });

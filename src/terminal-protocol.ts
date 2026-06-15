@@ -1,5 +1,5 @@
 export const TERMINAL_WS_MAGIC = 0x5943;
-export const TERMINAL_WS_VERSION = 1;
+export const TERMINAL_WS_VERSION = 2;
 
 export const TerminalMessageType = {
   Hello: 1,
@@ -86,7 +86,7 @@ export function decodeTerminalFrame(data: Uint8Array): TerminalFrame | null {
   offset += sessionIdLength;
   const payloadLength = view.getUint32(offset, true);
   offset += 4;
-  if (offset + payloadLength > data.byteLength) return null;
+  if (offset + payloadLength !== data.byteLength) return null;
   return {
     type,
     sessionId,
@@ -98,19 +98,16 @@ export function encodeSubscribePayload(params: {
   flags: number;
   snapshotMinIntervalMs?: number;
   snapshotMaxIntervalMs?: number;
-  cols?: number;
-  rows?: number;
+  cols: number;
+  rows: number;
 }): Uint8Array {
-  const hasSize = params.cols !== undefined && params.rows !== undefined;
-  const payload = new Uint8Array(hasSize ? 20 : 12);
+  const payload = new Uint8Array(20);
   const view = new DataView(payload.buffer);
   view.setUint32(0, params.flags >>> 0, true);
   view.setUint32(4, (params.snapshotMinIntervalMs ?? 0) >>> 0, true);
   view.setUint32(8, (params.snapshotMaxIntervalMs ?? 0) >>> 0, true);
-  if (hasSize) {
-    view.setUint32(12, params.cols ?? 0, true);
-    view.setUint32(16, params.rows ?? 0, true);
-  }
+  view.setUint32(12, params.cols >>> 0, true);
+  view.setUint32(16, params.rows >>> 0, true);
   return payload;
 }
 
@@ -118,17 +115,17 @@ export function decodeSubscribePayload(payload: Uint8Array): {
   flags: number;
   snapshotMinIntervalMs: number;
   snapshotMaxIntervalMs: number;
-  cols: number | null;
-  rows: number | null;
+  cols: number;
+  rows: number;
 } | null {
-  if (payload.byteLength < 12) return null;
+  if (payload.byteLength !== 20) return null;
   const view = new DataView(payload.buffer, payload.byteOffset, payload.byteLength);
   return {
     flags: view.getUint32(0, true),
     snapshotMinIntervalMs: view.getUint32(4, true),
     snapshotMaxIntervalMs: view.getUint32(8, true),
-    cols: payload.byteLength >= 20 ? view.getUint32(12, true) : null,
-    rows: payload.byteLength >= 20 ? view.getUint32(16, true) : null,
+    cols: view.getUint32(12, true),
+    rows: view.getUint32(16, true),
   };
 }
 
@@ -141,7 +138,7 @@ export function encodeResizePayload(cols: number, rows: number): Uint8Array {
 }
 
 export function decodeResizePayload(payload: Uint8Array): { cols: number; rows: number } | null {
-  if (payload.byteLength < 8) return null;
+  if (payload.byteLength !== 8) return null;
   const view = new DataView(payload.buffer, payload.byteOffset, payload.byteLength);
   return { cols: view.getUint32(0, true), rows: view.getUint32(4, true) };
 }
@@ -153,7 +150,7 @@ export function encodeAckPayload(bytes: number): Uint8Array {
 }
 
 export function decodeAckPayload(payload: Uint8Array): number | null {
-  if (payload.byteLength < 4) return null;
+  if (payload.byteLength !== 4) return null;
   return new DataView(payload.buffer, payload.byteOffset, payload.byteLength).getUint32(0, true);
 }
 

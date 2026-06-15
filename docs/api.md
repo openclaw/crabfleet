@@ -249,23 +249,20 @@ Public read-only endpoint for a generated session share link. Returns the shared
 
 ### POST /api/provision/interactive
 
-Provision hook used by `CRABBOX_INTERACTIVE_PROVISION_URL`. It accepts the same session request payload as the external adapter contract and returns normalized provision status.
+Provision hook for built-in Cloudflare Sandbox workspaces. It accepts the managed session request shape and returns normalized provision status.
 
 Auth:
 
-- If `CRABBOX_INTERACTIVE_PROVISION_TOKEN` is set, callers must send `Authorization: Bearer <token>`.
-- The token is required when `CRABBOX_RUNTIME_ADAPTER_URL`, `CRABBOX_RUNTIME_ADAPTER_URL_TEMPLATE`, `CRABBOX_RUNTIME_PROVISION_URL`, `CRABBOX_CLOUDFLARE_RUNNER_URL`, or `CRABBOX_CLAWFLEET_URL` is configured; backend-enabled deployments fail closed without it.
+- Callers must send `Authorization: Bearer <CRABBOX_INTERACTIVE_PROVISION_TOKEN>`.
+- Provision, PTY, and standalone stop fail closed when the token is absent, including after the Sandbox binding is removed.
 
 Backends:
 
 - Versioned lifecycle adapters are deliberately excluded from this stateless hook. Create those workspaces through `POST /api/interactive-sessions`, which durably records ownership before calling the adapter.
 - Direct built-in Sandbox calls without a managed interactive-session row acquire a durable standalone ownership fence before credential-policy registration. Standalone IDs cannot use the case-insensitive `IS-<number>` managed-session namespace. Retries with the same ID must match the original immutable request; abandoned claims and failed provisions enter the same generation-fenced cleanup path as managed sessions.
 - A request whose ID already belongs to a managed interactive session is rejected unless every immutable request field matches that row and the call wins an exact session-version ownership claim before allocating a Sandbox. Completion commits through the immutable lease, claim, agent-token, and status ownership fence while monotonically advancing the session version, so an intervening metadata edit does not discard the non-replayable result.
-- `CRABBOX_RUNTIME_PROVISION_URL`: forwards the session payload to a legacy create-only runtime adapter.
-- `CRABBOX_CLOUDFLARE_RUNNER_URL`: creates a Crabbox Cloudflare container sandbox and returns its lease reference.
-- `CRABBOX_CLAWFLEET_URL`: creates a ClawFleet OpenClaw instance and returns console/noVNC links.
-- ClawFleet handles `crabbox` sessions only; use `CRABBOX_RUNTIME_PROVISION_URL` or `CRABBOX_CLOUDFLARE_RUNNER_URL` for `container` sessions.
-- If neither backend is configured, returns `pending_adapter` with a message that the route is live.
+- Only `runtime=container` is accepted. Crabbox workspaces must use the versioned managed lifecycle.
+- Without the `SANDBOX` binding, the request fails instead of selecting another provider.
 
 For a successful direct built-in Sandbox provision, `attachUrl` is an absolute `wss://` URL under `/api/provision/interactive/:id/pty`, and `expiresAt` is bounded by `CRABBOX_STANDALONE_SANDBOX_TTL_SECONDS` (default four hours, maximum one day). Connect with the same `Authorization: Bearer <CRABBOX_INTERACTIVE_PROVISION_TOKEN>` header used for provisioning. The Worker validates the unexpired standalone owner and exact active credential-policy generation, strips the bearer before opening the Sandbox terminal, proxies the WebSocket while periodically revalidating that ownership, and closes both peers after stop, expiry, or policy revocation. It never routes the connection through `interactive_sessions`. `POST /api/provision/interactive/:id/stop` always requires that configured bearer, even if runtime backend bindings were removed after creation, and atomically moves the exact owner plus every matching policy into durable cleanup; expiry follows the same path from cron and PTY access, and cleanup terminates the Sandbox terminal execution session before deleting its owner row.
 
@@ -279,7 +276,7 @@ Crabfleet authenticates every adapter request with `Authorization: Bearer CRABBO
 - `DELETE /v1/workspaces/:id`: stop/release. Crabfleet enters `stopping` before calling the adapter and marks the session stopped only after `204`, `404`, or a valid exact-ID terminal response confirms release; malformed successful bodies remain `stopping`. Plain-text and malformed-JSON responses are read once and sanitized before their evidence is retained. An explicit stop whose ownership claim loses returns success only when the exact workspace is already stopping or terminal; otherwise it returns a lifecycle conflict.
 - `POST /v1/workspaces/:id/connections/desktop`: mint a current transient desktop URL. The request has no body. `expiresAt` is optional; when present it must be in the future and no more than 15 minutes away. Accepted HTTPS URLs are treated as opaque signed connection material and redirected byte-for-byte without URL normalization. After minting, Crabfleet re-reads the exact current session status, control grant, capabilities, and registered adapter identity before redirecting; a concurrent stop, revocation, capability withdrawal, or lifecycle replacement discards the URL and denies access.
 
-`CRABBOX_RUNTIME_ADAPTER_NAMESPACE` is required and must remain stable for the deployment. It prevents workspace and idempotency collisions when an adapter serves more than one Crabfleet tenant. The adapter workspace `id` is an immutable lifecycle route key and remains separate from an opaque `providerResourceId`; the provider identity is never interpreted as a legacy lease or sandbox ID. Create, inspect, and stop responses must echo the byte-exact requested DNS-safe `id`; whitespace normalization is not accepted. Responses use `status`, `id`, optional `providerResourceId`, `attachUrl`, `capabilities`, `expiresAt`, and `message`. Only a literal `null` clears a previously stored expiry; a malformed non-null timestamp invalidates the response. A terminal URL implies terminal capability only when the response omits a terminal capability; an explicit `terminal: false` wins. Supported status values include `provisioning`, `ready`, `stopping`, `stopped`, `expired`, and `failed`. Create-only legacy adapters cannot return `stopping`, because they do not own a later reconciliation lifecycle. Every session-bound provider DELETE is gated on the persisted create ambiguity marker being clear.
+`CRABBOX_RUNTIME_ADAPTER_NAMESPACE` is required and must remain stable for the deployment. It prevents workspace and idempotency collisions when an adapter serves more than one Crabfleet tenant. The adapter workspace `id` is an immutable lifecycle route key and remains separate from an opaque `providerResourceId`; the provider identity is never interpreted as a Sandbox lease ID. Create, inspect, and stop responses must echo the byte-exact requested DNS-safe `id`; whitespace normalization is not accepted. Responses use `status`, `id`, optional `providerResourceId`, `attachUrl`, `capabilities`, `expiresAt`, and `message`. Only a literal `null` clears a previously stored expiry; a malformed non-null timestamp invalidates the response. A terminal URL implies terminal capability only when the response omits a terminal capability; an explicit `terminal: false` wins. Supported status values include `provisioning`, `ready`, `stopping`, `stopped`, `expired`, and `failed`. Every session-bound provider DELETE is gated on the persisted create ambiguity marker being clear.
 
 Every create, inspect, delete, and desktop response body is consumed through one 64 KiB bounded stream reader before JSON or text parsing. Declared or chunked oversized bodies are cancelled and fail safely: ambiguous create remains reconcilable, delete remains pending, inspect retries later, and desktop access is denied.
 
@@ -295,7 +292,7 @@ The wire format is a compact binary frame:
 
 ```text
 u16 magic 0x5943
-u8 version 1
+u8 version 2
 u8 message_type
 u32 session_id_length
 utf8 session_id
@@ -305,7 +302,7 @@ payload bytes
 
 Supported client actions:
 
-- `Subscribe`: attach to a session with output/snapshot/event flags and optional initial cols/rows.
+- `Subscribe`: attach to a session with output/snapshot/event flags. Its payload is exactly five little-endian `u32` fields: flags, snapshot minimum interval, snapshot maximum interval, initial cols, and initial rows. Zero dimensions select server defaults.
 - `Unsubscribe`: detach one session without closing the hub.
 - `Input` / `Key`: send terminal bytes when control is granted.
 - `Resize`: forward terminal dimensions to the upstream PTY.
@@ -317,11 +314,10 @@ Server messages include `Welcome`, `Output`, `Event`, `Error`, `ControlRevoked`,
 
 Target resolution:
 
-- `CRABBOX_PTY_BRIDGE_URL`: explicit bridge WebSocket URL/template. Templates support `{id}`, `{leaseId}`, `{repo}`, `{branch}`, and `{runtime}`. Crabfleet appends `sessionId`, `leaseId`, `repo`, `branch`, `runtime`, and `command` query parameters.
+- Built-in Sandbox terminal: Crabfleet opens the session PTY through the `SANDBOX` binding and forwards the requested terminal dimensions.
 - Provider terminal connection: if the provision adapter returned a `wss://` URL, or literal loopback `ws://` URL, Crabfleet retains it server-side and proxies to it unchanged, including its path and signed query string.
-- `CRABBOX_CLOUDFLARE_RUNNER_URL`: for `cloudflare:<sandbox>` leases, Crabfleet proxies to `/v1/sandboxes/:sandbox/pty` on the runner.
 
-The hub appends terminal `cols` and `rows` only to configured bridge and Cloudflare runner endpoints, never to an adapter `attachUrl`. Crabfleet authenticates versioned-adapter terminal upgrades with `CRABBOX_RUNTIME_ADAPTER_TOKEN` only when the terminal shares the persisted and currently configured adapter origin; adapter URLs never carry reusable shell credentials. If `CRABBOX_PTY_BRIDGE_TOKEN` or `CRABBOX_CLOUDFLARE_RUNNER_TOKEN` is set, Crabfleet sends it as a bearer token only to the upstream bridge/runner. Clients never receive upstream credentials.
+Crabfleet never rewrites an adapter `attachUrl`. It authenticates versioned-adapter terminal upgrades with `CRABBOX_RUNTIME_ADAPTER_TOKEN` only when the terminal shares the persisted and currently configured adapter origin; adapter URLs never carry reusable shell credentials. Clients never receive upstream credentials.
 
 ### POST /api/interactive-sessions/:id/clipboard
 
@@ -329,7 +325,7 @@ Viewer+ with writable terminal control. Uploads a browser clipboard image/file b
 
 ### GET /api/interactive-sessions/:id/vnc
 
-Viewer+ with writable session control. For `runtime-v1`, Crabfleet authenticates the browser session, asks the adapter to mint a current desktop connection, validates its HTTPS URL and optional bounded expiry, and issues a no-store redirect. Versioned-adapter desktop URLs are never persisted in D1 or returned by fleet state. API and CLI session views expose an absolute canonical Crabfleet browser URL for this cookie-authenticated route; the SSH gateway does not mint or receive the underlying adapter URL. Legacy adapters retain their existing validated absolute VNC URL behavior for browser and CLI clients.
+Viewer+ with writable session control. For `runtime-v1`, Crabfleet authenticates the browser session, asks the adapter to mint a current desktop connection, validates its HTTPS URL and optional bounded expiry, and issues a no-store redirect. Versioned-adapter desktop URLs are never persisted in D1 or returned by fleet state. API and CLI session views expose an absolute canonical Crabfleet browser URL for this cookie-authenticated route; the SSH gateway does not mint or receive the underlying adapter URL. Built-in Sandbox sessions may expose their validated desktop URL while active.
 
 ### POST /api/openclaw/action-sessions
 
@@ -420,9 +416,9 @@ Fields:
 - `purpose`: optional short mission label.
 - `summary`: optional list/closeout summary.
 
-If `CRABBOX_RUNTIME_ADAPTER_URL` or `CRABBOX_RUNTIME_ADAPTER_URL_TEMPLATE` is configured, the Worker creates and reconciles the versioned adapter workspace and records its resolved lifecycle identity, status, capabilities, expiry, and terminal connection. Otherwise `CRABBOX_INTERACTIVE_PROVISION_URL` retains the legacy create-only behavior. Without an adapter the session is stored as `pending_adapter`.
+Container sessions use the built-in Sandbox when its binding is available. Otherwise, and for Crabbox sessions, `CRABBOX_RUNTIME_ADAPTER_URL` or `CRABBOX_RUNTIME_ADAPTER_URL_TEMPLATE` creates and reconciles the versioned adapter workspace and records its resolved lifecycle identity, status, capabilities, expiry, and terminal connection. Without either supported backend the session is stored as `pending_adapter`.
 
-Session responses include `ptyAvailable`, the authenticated Worker's authoritative answer for whether the current terminal capability, lifecycle state, and configured Sandbox/bridge/runner route can resolve a PTY connection. Every controllable session exposes only the Worker-owned `/api/terminal/ws` route in `attachUrl`; signed provider connections remain server-side even for owners and controllers.
+Session responses include `ptyAvailable`, the authenticated Worker's authoritative answer for whether the current terminal capability, lifecycle state, and configured Sandbox or adapter route can resolve a PTY connection. Every controllable session exposes only the Worker-owned `/api/terminal/ws` route in `attachUrl`; signed provider connections remain server-side even for owners and controllers.
 
 When the selected runtime profile configures `codexSsh`, a ready `runtime-v1` session response may include `codexSsh: { alias, setupCommand }` for session managers. The alias and optional command are resolved from bounded `{providerResourceId}`, `{workspaceId}`, `{sessionId}`, and `{profile}` placeholders. Alias components use a strict OpenSSH-safe character set. `codexSsh.setupCommand` is an argv-like array whose first and static items use a shell-safe character set and whose dynamic items must each be one complete placeholder; Crabfleet POSIX-shell-quotes every substituted argument so opaque provider identifiers remain data. Missing values, an unsafe resolved alias, or a current profile route that differs from the workspace's immutable registered adapter control plane suppresses the handoff. Shared links and delegated terminal-only controllers never receive it. The command is display/copy data only; Crabfleet never executes it.
 
@@ -492,7 +488,7 @@ Actions:
 - `revoke_control`: owner/maintainer, revoke active delegated control.
 - `enable_multiplayer`: session creator, prefix submitted terminal prompts with the actor.
 - `disable_multiplayer`: session creator, stop prefixing submitted terminal prompts with the actor.
-- `stop`: owner/maintainer, internal wire action behind user-facing Delete, Stop, or End. Versioned adapters release the provider workspace before marking stopped, and asynchronous releases remain `stopping` until reconciliation confirms completion. Legacy create-only and ClawFleet sessions stop only in Crabfleet because those integrations expose no release lifecycle. For GitHub Actions, End disconnects and finalizes only the Crabfleet terminal session; it does not call GitHub's workflow-cancellation API, so the workflow run may continue.
+- `stop`: owner/maintainer, internal wire action behind user-facing Delete or End. Versioned adapters release the provider workspace before marking stopped, and asynchronous releases remain `stopping` until reconciliation confirms completion. Built-in Sandbox sessions clean up their durable lease and credential policy. For GitHub Actions, End disconnects and finalizes only the Crabfleet terminal session; it does not call GitHub's workflow-cancellation API, so the workflow run may continue.
 
 Response:
 
@@ -506,7 +502,7 @@ Response:
 ## SSH Gateway
 
 The Go gateway terminates raw SSH and calls Worker APIs with `Authorization: Bearer
-CRABBOX_SSH_GATEWAY_TOKEN`. These endpoints are not browser APIs.
+CRABFLEET_SSH_GATEWAY_TOKEN`. These endpoints are not browser APIs.
 
 - `POST /api/ssh/auth`: checks a public-key fingerprint. Unknown keys receive a short `/ssh/link/:code` GitHub OAuth URL only when the gateway is in explicit link mode, e.g. `ssh link@host`.
 - `GET /api/ssh/state`: returns the same board/session state for the linked SSH user.
@@ -656,7 +652,7 @@ Root stop request:
 
 Root stop closes descendant admission before rolling back pending reservations
 and driving the remaining root tree terminal in bounded batches, including a
-legacy tree above the normal supervision limit. It returns only after the whole
+tree above the normal supervision limit. It returns only after the whole
 tree is quiescent; a failed request leaves admission closed and can be retried
 safely.
 

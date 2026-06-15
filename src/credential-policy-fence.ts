@@ -11,12 +11,14 @@ export type CredentialPolicyGenerationTombstone = {
   tombstonedAt: number;
 };
 
-export type CredentialPolicyLegacyMigration = {
-  generation: string;
-  registrationClaim: string;
-  registrationExpiresAt: number;
-  sessionId: string;
-};
+export function isCurrentCredentialPolicyGeneration(value: unknown): value is string {
+  return (
+    typeof value === "string" &&
+    value.startsWith("generation:") &&
+    value.length > "generation:".length &&
+    value.length <= 200
+  );
+}
 
 export function credentialPolicyRegistrationAccepted<T extends { sessionId: string }>(
   current: CredentialPolicyGenerationRecord<T> | undefined,
@@ -48,54 +50,6 @@ export function credentialPolicyCleanupMatches<T extends { sessionId: string }>(
 ): boolean {
   return Boolean(
     current && current.generation === generation && current.policy.sessionId === sessionId,
-  );
-}
-
-export function migratedCredentialPolicyRecord<T extends { sessionId: string }>(
-  current: CredentialPolicyGenerationRecord<T> | undefined,
-  legacy: T | undefined,
-  tombstone: CredentialPolicyGenerationTombstone | undefined,
-  migration: CredentialPolicyLegacyMigration,
-  now: number,
-): CredentialPolicyGenerationRecord<T> | undefined {
-  if (migration.registrationExpiresAt <= now || tombstone?.generation === migration.generation) {
-    return undefined;
-  }
-  const policy = current?.policy ?? legacy;
-  if (!policy || policy.sessionId !== migration.sessionId) return undefined;
-  const incoming = {
-    generation: migration.generation,
-    registrationClaim: migration.registrationClaim,
-    registrationExpiresAt: migration.registrationExpiresAt,
-    policy,
-  };
-  if (!current) return incoming;
-  if (
-    current.generation !== migration.generation &&
-    (!current.generation.startsWith("legacy:") ||
-      migration.registrationExpiresAt <= current.registrationExpiresAt)
-  ) {
-    return undefined;
-  }
-  if (
-    current.generation === migration.generation &&
-    !credentialPolicyRegistrationAccepted(current, tombstone, incoming, now)
-  ) {
-    return undefined;
-  }
-  return incoming;
-}
-
-export function credentialPolicyMigrationCleanupMatches<T extends { sessionId: string }>(
-  current: CredentialPolicyGenerationRecord<T> | undefined,
-  generation: string,
-  sessionId: string,
-): boolean {
-  return Boolean(
-    current &&
-    current.generation !== generation &&
-    current.generation.startsWith("legacy:") &&
-    current.policy.sessionId === sessionId,
   );
 }
 

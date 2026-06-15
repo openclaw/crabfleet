@@ -7,6 +7,9 @@ import {
   githubOAuthCanonicalSshLinkUrl,
   githubOAuthRedirectUri,
 } from "../src/oauth.ts";
+import { githubCallback, githubLogin } from "../src/worker/github-auth.ts";
+import { refreshGitHubUser, type Fetcher } from "../src/worker/github.ts";
+import type { RuntimeEnv } from "../src/worker/env.ts";
 
 test("githubOAuthRedirectUri uses configured callback when present", () => {
   assert.equal(
@@ -114,29 +117,88 @@ test("SSH link state canonicalizes before host-only OAuth cookies", async () => 
     ),
     null,
   );
-  const source = await readFile(new URL("../src/index.ts", import.meta.url), "utf8");
-  const linkStart = source.indexOf("async function sshLink(");
-  const linkEnd = source.indexOf("async function consumeSshLink", linkStart);
+  const source = await readFile(new URL("../src/worker/ssh-gateway.ts", import.meta.url), "utf8");
+  const linkStart = source.indexOf("async link(");
+  const linkEnd = source.indexOf("async authenticate(", linkStart);
   const linkSource = source.slice(linkStart, linkEnd);
   assert.match(linkSource, /githubOAuthCanonicalSshLinkUrl/);
   assert.ok(linkSource.indexOf("canonicalLinkUrl") < linkSource.indexOf("sshLinkCookie"));
 });
 
 test("OAuth initiation and token exchange share the authoritative callback", async () => {
-  const source = await readFile(new URL("../src/index.ts", import.meta.url), "utf8");
-  const loginStart = source.indexOf("async function githubLogin");
-  const callbackStart = source.indexOf("async function githubCallback", loginStart);
-  const loginSource = source.slice(loginStart, callbackStart);
-  const callbackEnd = source.indexOf("async function sshLink", callbackStart);
-  const callbackSource = source.slice(callbackStart, callbackEnd);
+  const env = {
+    GITHUB_CLIENT_ID: "client-id",
+    GITHUB_CLIENT_SECRET: "client-secret",
+    GITHUB_REDIRECT_URI: "https://fleet.example/auth/github/callback",
+  } as RuntimeEnv;
 
-  assert.match(loginSource, /githubOAuthRedirectUri\(url, env\.GITHUB_REDIRECT_URI\)/);
-  assert.match(loginSource, /githubOAuthCanonicalLoginUrl\(url, env\.GITHUB_REDIRECT_URI\)/);
-  assert.ok(loginSource.indexOf("canonicalLoginUrl") < loginSource.indexOf("crypto.randomUUID"));
-  assert.match(callbackSource, /githubOAuthCallbackRequestMatches/);
-  assert.ok(
-    callbackSource.indexOf("githubOAuthCallbackRequestMatches") <
-      callbackSource.indexOf('fetch("https://github.com/login/oauth/access_token"'),
+  const canonical = await githubLogin(new Request("https://alias.example/login/github"), env);
+  assert.equal(canonical.headers.get("location"), "https://fleet.example/login/github");
+
+  const login = await githubLogin(new Request("https://fleet.example/login/github"), env);
+  const authorizeUrl = new URL(login.headers.get("location") ?? "");
+  assert.equal(authorizeUrl.origin, "https://github.com");
+  assert.equal(
+    authorizeUrl.searchParams.get("redirect_uri"),
+    "https://fleet.example/auth/github/callback",
   );
-  assert.match(callbackSource, /redirect_uri: redirectUri/);
+  assert.match(login.headers.get("set-cookie") ?? "", /^crabbox_oauth_state=/);
+
+  let exchangeCalls = 0;
+  let exchangeBody: Record<string, unknown> | undefined;
+  const fetcher: Fetcher = async (_input, init) => {
+    exchangeCalls += 1;
+    exchangeBody = JSON.parse(String(init?.body)) as Record<string, unknown>;
+    return Response.json({ error: "denied" }, { status: 401 });
+  };
+  const rejected = await githubCallback(
+    new Request("https://alias.example/auth/github/callback?code=code&state=state", {
+      headers: { cookie: "crabbox_oauth_state=state" },
+    }),
+    env,
+    fetcher,
+  );
+  assert.equal(rejected.status, 400);
+  assert.equal(exchangeCalls, 0);
+
+  const callback = await githubCallback(
+    new Request("https://fleet.example/auth/github/callback?code=code&state=state", {
+      headers: { cookie: "crabbox_oauth_state=state" },
+    }),
+    env,
+    fetcher,
+  );
+  assert.equal(callback.status, 401);
+  assert.equal(exchangeCalls, 1);
+  assert.equal(exchangeBody?.redirect_uri, "https://fleet.example/auth/github/callback");
+});
+
+test("GitHub membership refresh builds one normalized organization identity", async () => {
+  const fetcher: Fetcher = async (input) => {
+    const url = new URL(String(input));
+    const payload = url.pathname.endsWith("/user/emails")
+      ? [{ email: "owner@example.com", primary: true, verified: true }]
+      : url.pathname.endsWith("/user/teams")
+        ? [
+            { slug: "core", organization: { login: "OpenClaw" } },
+            { slug: "other", organization: { login: "Elsewhere" } },
+          ]
+        : url.pathname.includes("/memberships/orgs/")
+          ? { state: "active" }
+          : { id: 42, login: "Owner", email: null, name: "Owner Name" };
+    return Response.json(payload);
+  };
+
+  assert.deepEqual(
+    await refreshGitHubUser({ GITHUB_ORG: "OpenClaw" } as RuntimeEnv, "token", fetcher),
+    {
+      subject: "github:42",
+      login: "Owner",
+      email: "owner@example.com",
+      name: "Owner Name",
+      role: "viewer",
+      allowed: false,
+      teams: ["@OpenClaw/core"],
+    },
+  );
 });
