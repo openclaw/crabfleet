@@ -1,6 +1,6 @@
 {
   "magic": 22851,
-  "version": 1,
+  "version": 2,
   "messages": {
     "Hello": 1,
     "Welcome": 2,
@@ -29,10 +29,9 @@
     "OutputAcknowledgements": 8
   },
   "vectors": {
-    "outputFrame": "435901140600000049532d31323304000000000102ff",
-    "pingFrame": "4359013c0000000000000000",
-    "subscribeLegacy": "0d00000064000000f4010000",
-    "subscribeSized": "0d00000000000000000000009000000029000000",
+    "outputFrame": "435902140600000049532d31323304000000000102ff",
+    "pingFrame": "4359023c0000000000000000",
+    "subscribe": "0d00000000000000000000009000000029000000",
     "resize": "840000002b000000",
     "ack": "ffff0000"
   }

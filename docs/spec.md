@@ -211,7 +211,7 @@ Scheduled reconciliation and foreground reads advance bounded lifecycle batches.
 
 ## Terminal And Control
 
-The browser, CLI, session agents, and SSH gateway use one multiplex WebSocket protocol at `/api/terminal/ws`. Frames support subscribe, unsubscribe, input, resize, stop, ping, output, events, errors, control revocation, acknowledgements, and pong.
+The browser, CLI, session agents, and SSH gateway use one multiplex WebSocket protocol at `/api/terminal/ws`. Wire version 2 is the only accepted version. Frames support subscribe, unsubscribe, input, resize, stop, ping, output, events, errors, control revocation, acknowledgements, and pong.
 
 Control rules:
 

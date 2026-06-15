@@ -354,7 +354,7 @@ function subscribeTerminalHost(session, host, term) {
   sendTerminalFrame(
     session.id,
     TerminalMessageType.Subscribe,
-    encodeSubscribePayload({ flags, cols: term?.cols, rows: term?.rows }),
+    encodeSubscribePayload({ flags, cols: term?.cols ?? 0, rows: term?.rows ?? 0 }),
   );
   setTerminalStatus(session.id, "Connecting PTY");
 }

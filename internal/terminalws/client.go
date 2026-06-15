@@ -16,7 +16,7 @@ import (
 
 const (
 	magic         = 0x5943
-	version       = 1
+	version       = 2
 	maxFrameBytes = 16 * 1024 * 1024
 
 	messageHello           = 1

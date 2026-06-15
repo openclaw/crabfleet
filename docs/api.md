@@ -292,7 +292,7 @@ The wire format is a compact binary frame:
 
 ```text
 u16 magic 0x5943
-u8 version 1
+u8 version 2
 u8 message_type
 u32 session_id_length
 utf8 session_id
@@ -302,7 +302,7 @@ payload bytes
 
 Supported client actions:
 
-- `Subscribe`: attach to a session with output/snapshot/event flags and optional initial cols/rows.
+- `Subscribe`: attach to a session with output/snapshot/event flags. Its payload is exactly five little-endian `u32` fields: flags, snapshot minimum interval, snapshot maximum interval, initial cols, and initial rows. Zero dimensions select server defaults.
 - `Unsubscribe`: detach one session without closing the hub.
 - `Input` / `Key`: send terminal bytes when control is granted.
 - `Resize`: forward terminal dimensions to the upstream PTY.

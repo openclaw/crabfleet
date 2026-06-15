@@ -23,14 +23,14 @@ type protocolFixture struct {
 	Vectors        struct {
 		OutputFrame    string `json:"outputFrame"`
 		PingFrame      string `json:"pingFrame"`
-		SubscribeSized string `json:"subscribeSized"`
+		Subscribe      string `json:"subscribe"`
 		Resize         string `json:"resize"`
 		Ack            string `json:"ack"`
 	} `json:"vectors"`
 }
 
-func TestGoTerminalConstantsAndEncodersMatchSharedV1Protocol(t *testing.T) {
-	data, err := os.ReadFile("../../protocol/terminal-v1.json")
+func TestGoTerminalConstantsAndEncodersMatchSharedV2Protocol(t *testing.T) {
+	data, err := os.ReadFile("../../protocol/terminal-v2.json")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -85,7 +85,7 @@ func TestGoTerminalConstantsAndEncodersMatchSharedV1Protocol(t *testing.T) {
 	if got := hex.EncodeToString(encodeFrame(frame{messageType: messagePing})); got != fixture.Vectors.PingFrame {
 		t.Fatalf("ping frame = %q", got)
 	}
-	if got := hex.EncodeToString(subscribePayload(144, 41)); got != fixture.Vectors.SubscribeSized {
+	if got := hex.EncodeToString(subscribePayload(144, 41)); got != fixture.Vectors.Subscribe {
 		t.Fatalf("subscribe payload = %q", got)
 	}
 	if got := hex.EncodeToString(resizePayload(Size{Cols: 132, Rows: 43})); got != fixture.Vectors.Resize {

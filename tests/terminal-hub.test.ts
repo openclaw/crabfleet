@@ -178,7 +178,13 @@ test("terminal hub routes multiplex frames and explicit output acknowledgements"
 
   assert.equal(upgraded, true);
   assert.equal(server.accepted, true);
-  assert.equal(frame(server.sent[0]!).type, TerminalMessageType.Welcome);
+  const welcome = frame(server.sent[0]!);
+  assert.equal(welcome.type, TerminalMessageType.Welcome);
+  assert.deepEqual(decodeJsonPayload(welcome.payload), {
+    ok: true,
+    version: 2,
+    multiplex: true,
+  });
 
   server.emit("message", {
     data: encodeTerminalFrame({
@@ -245,7 +251,19 @@ test("terminal hub immediately acknowledges upstream output when the client opts
   const client = socket();
   const server = socket();
   const upstream = socket();
-  const hub = new TerminalHub(dependencies(client, server, upstream));
+  let openedSize: { cols: number; rows: number } | null = null;
+  const hub = new TerminalHub(
+    dependencies(client, server, upstream, {
+      async openUpstream(_request, _user, _session, cols, rows) {
+        openedSize = { cols, rows };
+        return {
+          socket: upstream,
+          outputAcknowledgements: true,
+          async markConnected() {},
+        };
+      },
+    }),
+  );
 
   await hub.open(
     new Request("https://fleet.example/api/terminal/ws", {
@@ -257,11 +275,12 @@ test("terminal hub immediately acknowledges upstream output when the client opts
     data: encodeTerminalFrame({
       type: TerminalMessageType.Subscribe,
       sessionId: session.id,
-      payload: encodeSubscribePayload({ flags: 0 }),
+      payload: encodeSubscribePayload({ flags: 0, cols: 0, rows: 0 }),
     }),
   });
   await flushQueues();
   await flushQueues();
+  assert.deepEqual(openedSize, { cols: 120, rows: 34 });
 
   upstream.emit("message", { data: "abc" });
   await flushQueues();

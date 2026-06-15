@@ -1,4 +1,5 @@
 import {
+  TERMINAL_WS_VERSION,
   TerminalMessageType,
   TerminalSubscribeFlags,
   decodeAckPayload,
@@ -108,7 +109,7 @@ export class TerminalHub {
     server.accept();
     sendTerminalJson(server, TerminalMessageType.Welcome, "", {
       ok: true,
-      version: 1,
+      version: TERMINAL_WS_VERSION,
       multiplex: true,
     });
 
@@ -142,7 +143,7 @@ export class TerminalHub {
           if (frame.type === TerminalMessageType.Hello) {
             sendTerminalJson(server, TerminalMessageType.Welcome, "", {
               ok: true,
-              version: 1,
+              version: TERMINAL_WS_VERSION,
               multiplex: true,
             });
             return;
@@ -529,9 +530,9 @@ export function parseTerminalControlMessage(data: string): Record<string, unknow
   }
 }
 
-function terminalDimension(value: number | null, fallback: number): number {
-  if (!Number.isFinite(value ?? Number.NaN)) return fallback;
-  return Math.min(300, Math.max(10, Math.trunc(value as number)));
+function terminalDimension(value: number, fallback: number): number {
+  if (!Number.isFinite(value) || value <= 0) return fallback;
+  return Math.min(300, Math.max(10, Math.trunc(value)));
 }
 
 function terminalCloseMessage(code: number, reason: string): string {
