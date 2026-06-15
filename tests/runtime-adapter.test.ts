@@ -1330,7 +1330,7 @@ test("create-only adapters reject stopping responses before persistence", async 
   assert.match(forwardedSource, /if \(!status\) return failedProvision/);
 });
 
-test("legacy and GitHub Actions stops use durable terminal transitions", async () => {
+test("legacy and GitHub Actions stop wrappers finalize persisted transitions", async () => {
   const source = await readFile(new URL("../src/index.ts", import.meta.url), "utf8");
   const completeStart = source.indexOf("async function completeLegacyInteractiveSessionStop");
   const completeEnd = source.indexOf("async function stopGitHubActionsSession", completeStart);
@@ -1350,22 +1350,17 @@ test("legacy and GitHub Actions stops use durable terminal transitions", async (
   );
   const scheduledSource = source.slice(scheduledStart, scheduledEnd);
 
-  assert.match(completeSource, /env\.DB\.batch/);
-  assert.match(completeSource, /interactive workspace stop requested/);
-  assert.match(completeSource, /interactive workspace stopped/);
-  assert.match(completeSource, /status: "stopped"/);
-  assert.match(completeSource, /terminal_finalize_pending: 1/);
-  assert.match(completeSource, /AND status = \$\{owner\.status\}/);
-  assert.match(completeSource, /AND updated_at = \$\{owner\.updatedAt\}/);
+  assert.match(completeSource, /persistLegacyInteractiveSessionStop/);
+  assert.match(completeSource, /archiveInteractiveSessionLogs/);
   assert.match(completeSource, /finalizeTerminalInteractiveSession/);
-  assert.doesNotMatch(completeSource, /status: "stopping"/);
   assert.match(scheduledSource, /where\("status", "=", "stopping"\)/);
   assert.match(scheduledSource, /\.where\("runtime", "!=", githubActionsRuntime\)/);
   assert.match(scheduledSource, /completeLegacyInteractiveSessionStop/);
   assert.match(completeSource, /if \(owner\.runtime === githubActionsRuntime\) return false/);
-  assert.match(githubActionsSource, /work_state: ""/);
-  assert.match(githubActionsSource, /work_phase: "session_ended"/);
-  assert.match(githubActionsSource, /workflow run not canceled/);
+  assert.match(githubActionsSource, /persistGitHubActionsSessionStop/);
+  assert.match(githubActionsSource, /disconnectGitHubActionsRunner/);
+  assert.match(githubActionsSource, /archiveInteractiveSessionLogs/);
+  assert.match(githubActionsSource, /finalizeTerminalInteractiveSession/);
 });
 
 test("legacy expiry enters the shared retryable terminal finalizer", async () => {

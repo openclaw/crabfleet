@@ -8,6 +8,7 @@ import {
   type InteractiveSessionTable,
 } from "./database.ts";
 import type { RuntimeEnv } from "./env.ts";
+import type { InteractiveRuntime, InteractiveSessionStatus } from "./models.ts";
 import type {
   InteractiveProvisionPersistence,
   InteractiveProvisionPersistenceInput,
@@ -30,6 +31,15 @@ export type InteractiveSessionReplayReservation = {
 };
 
 export type InteractiveSessionReservationValues = Insertable<InteractiveSessionTable>;
+
+export type LegacyInteractiveSessionStopOwner = {
+  id: string;
+  status: InteractiveSessionStatus;
+  runtime: InteractiveRuntime;
+  adapter: string | null;
+  leaseId: string | null;
+  updatedAt: number;
+};
 
 export type InteractiveSessionReservationBuildInput = {
   id: string;
@@ -318,6 +328,159 @@ export async function persistInteractiveSessionEventMutation(
     }),
   );
   return results.at(-1)?.results.some((row) => row.updated_at === revision) ?? false;
+}
+
+export async function persistLegacyInteractiveSessionStop(
+  env: RuntimeEnv,
+  owner: LegacyInteractiveSessionStopOwner,
+  actorName: string,
+  runtimeAdapterName: string,
+  sandboxLeasePrefix: string,
+  now: number,
+): Promise<boolean> {
+  const db = database(env);
+  const revision = Math.max(now, owner.updatedAt + 1);
+  const eventActor = clean(actorName, 120) || "system";
+  const expectedOwner = sql<boolean>`
+    id = ${owner.id}
+    AND status = ${owner.status}
+    AND runtime = ${owner.runtime}
+    AND updated_at = ${owner.updatedAt}
+    AND adapter IS ${owner.adapter}
+    AND lease_id IS ${owner.leaseId}
+    AND (adapter IS NULL OR adapter != ${runtimeAdapterName})
+    AND (lease_id IS NULL OR lease_id NOT LIKE ${`${sandboxLeasePrefix}%`})
+    AND credential_cleanup_terminal_status IS NULL
+  `;
+  const requestedMessage = "interactive workspace stop requested";
+  const finalMessage = "interactive workspace stopped";
+  const requestedEvent = sql`
+    INSERT INTO interactive_session_events (session_id, actor, message, created_at)
+    SELECT ${owner.id}, ${eventActor}, ${requestedMessage}, ${now}
+    FROM interactive_sessions
+    WHERE ${expectedOwner}
+  `;
+  const stoppedEvent = sql`
+    INSERT INTO interactive_session_events (session_id, actor, message, created_at)
+    SELECT ${owner.id}, ${eventActor}, ${finalMessage}, ${now}
+    FROM interactive_sessions
+    WHERE ${expectedOwner}
+  `;
+  const stop = db
+    .updateTable("interactive_sessions")
+    .set({
+      status: "stopped",
+      stopped_at: sql<number>`COALESCE(stopped_at, ${now})`,
+      reconcile_error: null,
+      terminal_status: null,
+      adapter_create_pending: 0,
+      terminal_finalize_pending: 1,
+      agent_token_hash: null,
+      attach_url: null,
+      vnc_url: null,
+      controller: null,
+      control_requested_by: null,
+      control_requested_at: null,
+      control_granted_at: null,
+      control_expires_at: null,
+      updated_at: revision,
+      last_event: finalMessage,
+    })
+    .where(expectedOwner)
+    .returning("updated_at");
+  const results = await env.DB.batch<{ updated_at: number }>(
+    [requestedEvent, stoppedEvent, stop].map((query) => {
+      const compiled = query.compile(db);
+      return env.DB.prepare(compiled.sql).bind(...compiled.parameters);
+    }),
+  );
+  return results.at(-1)?.results.some((row) => row.updated_at === revision) ?? false;
+}
+
+export async function persistGitHubActionsSessionStop(
+  env: RuntimeEnv,
+  session: Pick<InteractiveSession, "id" | "status" | "updatedAt">,
+  actorName: string,
+  githubActionsRuntime: string,
+  now: number,
+): Promise<boolean> {
+  const revision = Math.max(now, session.updatedAt + 1);
+  const message = "GitHub Actions terminal session ended from Crabfleet; workflow run not canceled";
+  const db = database(env);
+  const expectedOwner = sql<boolean>`
+    id = ${session.id}
+    AND runtime = ${githubActionsRuntime}
+    AND status = ${session.status}
+    AND updated_at = ${session.updatedAt}
+  `;
+  const event = sql`
+    INSERT INTO interactive_session_events (session_id, actor, message, created_at)
+    SELECT ${session.id}, ${clean(actorName, 120) || "system"}, ${message}, ${now}
+    FROM interactive_sessions
+    WHERE ${expectedOwner}
+  `;
+  const update = db
+    .updateTable("interactive_sessions")
+    .set({
+      status: "stopped",
+      stopped_at: now,
+      reconcile_error: null,
+      terminal_status: null,
+      terminal_failure_reason: null,
+      terminal_finalize_pending: 1,
+      agent_token_hash: null,
+      attach_url: null,
+      vnc_url: null,
+      controller: null,
+      control_requested_by: null,
+      control_requested_at: null,
+      control_granted_at: null,
+      control_expires_at: null,
+      work_state: "",
+      work_phase: "session_ended",
+      completion_reason: "Crabfleet terminal session ended; workflow run not canceled",
+      last_event: message,
+      updated_at: revision,
+    })
+    .where(expectedOwner)
+    .returning("updated_at");
+  const results = await env.DB.batch<{ updated_at: number }>(
+    [event, update].map((query) => {
+      const compiled = query.compile(db);
+      return env.DB.prepare(compiled.sql).bind(...compiled.parameters);
+    }),
+  );
+  return results.at(-1)?.results.some((row) => row.updated_at === revision) ?? false;
+}
+
+export async function readInteractiveSessionTerminalCleanupIntent(
+  env: RuntimeEnv,
+  sessionId: string,
+): Promise<boolean> {
+  const row = await database(env)
+    .selectFrom("interactive_sessions")
+    .select("credential_cleanup_terminal_status")
+    .where("id", "=", sessionId)
+    .where("status", "=", "stopping")
+    .executeTakeFirst();
+  return Boolean(row?.credential_cleanup_terminal_status);
+}
+
+export async function readRuntimeAdapterCreatePending(
+  env: RuntimeEnv,
+  sessionId: string,
+  runtimeAdapterName: string,
+  adapterWorkspaceId: string,
+): Promise<boolean> {
+  const row = await database(env)
+    .selectFrom("interactive_sessions")
+    .select("adapter_create_pending")
+    .where("id", "=", sessionId)
+    .where("adapter", "=", runtimeAdapterName)
+    .where("adapter_workspace_id", "=", adapterWorkspaceId)
+    .where("status", "=", "stopping")
+    .executeTakeFirst();
+  return row?.adapter_create_pending === 1;
 }
 
 export async function insertInteractiveSessionReservation(

@@ -154,7 +154,6 @@ import {
 } from "./worker/database";
 import {
   deadInteractiveSessionStatuses,
-  type InteractiveRuntime,
   type InteractiveSessionStatus,
   type Role,
   type RunStatus,
@@ -271,14 +270,19 @@ import {
   countInteractiveSessionEvents,
   insertInteractiveSessionReservation,
   markInteractiveSessionPendingAdapter,
+  persistGitHubActionsSessionStop,
   persistInteractiveSessionEventMutation,
   persistInteractiveSessionProvisionResult,
+  persistLegacyInteractiveSessionStop,
+  readInteractiveSessionTerminalCleanupIntent,
   readInteractiveSessionEventRows,
   readInteractiveSessionLogArchives,
   readInteractiveSessionLogs,
   readInteractiveSessionRecord as readInteractiveSession,
   readInteractiveSessionRecords,
   readSharedInteractiveSessionRow,
+  readRuntimeAdapterCreatePending,
+  type LegacyInteractiveSessionStopOwner,
 } from "./worker/session-repository";
 import {
   InteractiveSessionAttachService,
@@ -4381,15 +4385,6 @@ function interactiveSessionMetadataService(
   return new InteractiveSessionMetadataService(store);
 }
 
-type LegacyInteractiveSessionStopOwner = {
-  id: string;
-  status: InteractiveSessionStatus;
-  runtime: InteractiveRuntime;
-  adapter: string | null;
-  leaseId: string | null;
-  updatedAt: number;
-};
-
 async function completeLegacyInteractiveSessionStop(
   env: RuntimeEnv,
   owner: LegacyInteractiveSessionStopOwner,
@@ -4397,63 +4392,14 @@ async function completeLegacyInteractiveSessionStop(
   now: number,
 ): Promise<boolean> {
   if (owner.runtime === githubActionsRuntime) return false;
-  const db = database(env);
-  const revision = Math.max(now, owner.updatedAt + 1);
-  const actorName = clean(eventActor, 120) || "system";
-  const expectedOwner = sql<boolean>`
-    id = ${owner.id}
-    AND status = ${owner.status}
-    AND runtime = ${owner.runtime}
-    AND updated_at = ${owner.updatedAt}
-    AND adapter IS ${owner.adapter}
-    AND lease_id IS ${owner.leaseId}
-    AND (adapter IS NULL OR adapter != ${runtimeAdapterName})
-    AND (lease_id IS NULL OR lease_id NOT LIKE ${`${sandboxLeasePrefix}%`})
-    AND credential_cleanup_terminal_status IS NULL
-  `;
-  const requestedMessage = "interactive workspace stop requested";
-  const finalMessage = "interactive workspace stopped";
-  const requestedEvent = sql`
-    INSERT INTO interactive_session_events (session_id, actor, message, created_at)
-    SELECT ${owner.id}, ${actorName}, ${requestedMessage}, ${now}
-    FROM interactive_sessions
-    WHERE ${expectedOwner}
-  `;
-  const stoppedEvent = sql`
-    INSERT INTO interactive_session_events (session_id, actor, message, created_at)
-    SELECT ${owner.id}, ${actorName}, ${finalMessage}, ${now}
-    FROM interactive_sessions
-    WHERE ${expectedOwner}
-  `;
-  const stop = db
-    .updateTable("interactive_sessions")
-    .set({
-      status: "stopped",
-      stopped_at: sql<number>`COALESCE(stopped_at, ${now})`,
-      reconcile_error: null,
-      terminal_status: null,
-      adapter_create_pending: 0,
-      terminal_finalize_pending: 1,
-      agent_token_hash: null,
-      attach_url: null,
-      vnc_url: null,
-      controller: null,
-      control_requested_by: null,
-      control_requested_at: null,
-      control_granted_at: null,
-      control_expires_at: null,
-      updated_at: revision,
-      last_event: finalMessage,
-    })
-    .where(expectedOwner)
-    .returning("updated_at");
-  const results = await env.DB.batch<{ updated_at: number }>(
-    [requestedEvent, stoppedEvent, stop].map((query) => {
-      const compiled = query.compile(db);
-      return env.DB.prepare(compiled.sql).bind(...compiled.parameters);
-    }),
+  const stopped = await persistLegacyInteractiveSessionStop(
+    env,
+    owner,
+    eventActor,
+    runtimeAdapterName,
+    sandboxLeasePrefix,
+    now,
   );
-  const stopped = results.at(-1)?.results.some((row) => row.updated_at === revision) ?? false;
   if (stopped) {
     await archiveInteractiveSessionLogs(env, owner.id, now).catch(() => undefined);
     await finalizeTerminalInteractiveSession(env, owner.id, "stopped", now).catch(() => undefined);
@@ -4467,53 +4413,13 @@ async function stopGitHubActionsSession(
   eventActor: string,
   now: number,
 ): Promise<boolean> {
-  const revision = Math.max(now, session.updatedAt + 1);
-  const message = "GitHub Actions terminal session ended from Crabfleet; workflow run not canceled";
-  const db = database(env);
-  const expectedOwner = sql<boolean>`
-    id = ${session.id}
-    AND runtime = ${githubActionsRuntime}
-    AND status = ${session.status}
-    AND updated_at = ${session.updatedAt}
-  `;
-  const event = sql`
-    INSERT INTO interactive_session_events (session_id, actor, message, created_at)
-    SELECT ${session.id}, ${clean(eventActor, 120) || "system"}, ${message}, ${now}
-    FROM interactive_sessions
-    WHERE ${expectedOwner}
-  `;
-  const update = db
-    .updateTable("interactive_sessions")
-    .set({
-      status: "stopped",
-      stopped_at: now,
-      reconcile_error: null,
-      terminal_status: null,
-      terminal_failure_reason: null,
-      terminal_finalize_pending: 1,
-      agent_token_hash: null,
-      attach_url: null,
-      vnc_url: null,
-      controller: null,
-      control_requested_by: null,
-      control_requested_at: null,
-      control_granted_at: null,
-      control_expires_at: null,
-      work_state: "",
-      work_phase: "session_ended",
-      completion_reason: "Crabfleet terminal session ended; workflow run not canceled",
-      last_event: message,
-      updated_at: revision,
-    })
-    .where(expectedOwner)
-    .returning("updated_at");
-  const results = await env.DB.batch<{ updated_at: number }>(
-    [event, update].map((query) => {
-      const compiled = query.compile(db);
-      return env.DB.prepare(compiled.sql).bind(...compiled.parameters);
-    }),
+  const stopped = await persistGitHubActionsSessionStop(
+    env,
+    session,
+    eventActor,
+    githubActionsRuntime,
+    now,
   );
-  const stopped = results.at(-1)?.results.some((row) => row.updated_at === revision) ?? false;
   if (!stopped) return false;
   await disconnectGitHubActionsRunner(env, session.id).catch(() => undefined);
   await archiveInteractiveSessionLogs(env, session.id, now).catch(() => undefined);
@@ -4559,17 +4465,8 @@ function interactiveSessionRuntimeAdapterStopService(env: RuntimeEnv): RuntimeAd
         reconcileError,
         actorName,
       ),
-    readCreatePending: async (sessionId, adapterWorkspaceId) => {
-      const lifecycle = await database(env)
-        .selectFrom("interactive_sessions")
-        .select("adapter_create_pending")
-        .where("id", "=", sessionId)
-        .where("adapter", "=", runtimeAdapterName)
-        .where("adapter_workspace_id", "=", adapterWorkspaceId)
-        .where("status", "=", "stopping")
-        .executeTakeFirst();
-      return lifecycle?.adapter_create_pending === 1;
-    },
+    readCreatePending: (sessionId, adapterWorkspaceId) =>
+      readRuntimeAdapterCreatePending(env, sessionId, runtimeAdapterName, adapterWorkspaceId),
     confirmRelease: (sessionId, adapterWorkspaceId, now, message) =>
       recordConfirmedRuntimeAdapterRelease(env, sessionId, adapterWorkspaceId, now, message),
     now: Date.now,
@@ -4584,15 +4481,8 @@ function interactiveSessionStopService(env: RuntimeEnv, user: User): Interactive
       stageTerminalCredentialPolicyCleanupById(env, sessionId, status, message, now),
     reconcileCleanup: (sessionId, now) =>
       reconcileCredentialPolicyCleanupBatch(env, now, sessionId),
-    readTerminalCleanupIntent: async (sessionId) => {
-      const row = await database(env)
-        .selectFrom("interactive_sessions")
-        .select("credential_cleanup_terminal_status")
-        .where("id", "=", sessionId)
-        .where("status", "=", "stopping")
-        .executeTakeFirst();
-      return Boolean(row?.credential_cleanup_terminal_status);
-    },
+    readTerminalCleanupIntent: (sessionId) =>
+      readInteractiveSessionTerminalCleanupIntent(env, sessionId),
     recordEvent: (sessionId, message, now) =>
       appendInteractiveSessionEvent(env, sessionId, user, message, now),
     readSession: (sessionId) => readInteractiveSession(env, sessionId),
