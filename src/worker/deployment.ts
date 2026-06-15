@@ -94,6 +94,10 @@ export function browserAppOrigin(env: DeploymentEnv): string {
   return trustedProxyPublicOrigin(env) ?? deploymentConfig(env).canonicalUrl;
 }
 
+export function browserSessionUrl(env: DeploymentEnv, sessionId: string): string {
+  return `${browserAppOrigin(env)}/app/sessions/${encodeURIComponent(sessionId)}`;
+}
+
 function clean(value: unknown, maximum: number): string {
   return String(value ?? "")
     .trim()

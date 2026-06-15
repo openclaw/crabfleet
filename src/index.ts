@@ -43,7 +43,6 @@ import {
   notifyGitHubActionsViewers,
   parseGitHubActionsWorkState,
   replaceGitHubActionsRunner,
-  githubActionsCapabilities,
 } from "./github-actions-runtime";
 import { githubRequestCanUseRepoCredential, matchesAnyHost } from "./sandbox-security";
 import { githubOAuthCanonicalSshLinkUrl, githubOAuthRedirectUri } from "./oauth";
@@ -128,6 +127,7 @@ import {
 } from "./credential-policy-fence";
 import {
   browserAppOrigin,
+  browserSessionUrl,
   clientDeploymentConfig,
   defaultPreferredRepo,
   deploymentConfig,
@@ -197,6 +197,11 @@ import {
 } from "./worker/session-agent-auth";
 import { githubCallback, githubLogin, sshLinkCookie } from "./worker/github-auth";
 import { GitHubApiError, githubFetch, githubHeaders, refreshGitHubUser } from "./worker/github";
+import {
+  GitHubActionsSessionRegistrationService,
+  type GitHubActionsSessionRegistrationInput,
+  type GitHubActionsSessionRegistrationStore,
+} from "./worker/github-actions-session-registration";
 import {
   containerCapabilities,
   crabboxCapabilities,
@@ -2711,7 +2716,7 @@ function openClawDecoratedCrabboxResponse(
 ): { session: InteractiveSession; browserUrl: string } {
   return {
     session,
-    browserUrl: `${browserAppOrigin(env)}/app/sessions/${encodeURIComponent(session.id)}`,
+    browserUrl: browserSessionUrl(env, session.id),
   };
 }
 
@@ -2725,173 +2730,50 @@ async function openClawRegisterActionSession(
   browserUrl: string;
 }> {
   requireOpenClawAutomationService(request, env);
-  const body = await readJson<{
-    workKey?: string;
-    workKind?: string;
-    repo?: string;
-    branch?: string;
-    sourceUrl?: string;
-    runUrl?: string;
-    purpose?: string;
-    summary?: string;
-  }>(request);
-  const workKey = actionWorkIdentifier(body.workKey, "workKey", 300);
-  const workKind = actionWorkIdentifier(body.workKind, "workKind", 80);
-  const repo = normalizeRepo(body.repo);
-  if (!repo) throw badRequest("repo is required");
-  await requireRepo(env, repo);
-  const branch = clean(body.branch, 120) || "main";
-  const sourceUrl = optionalHttpUrl(body.sourceUrl, "sourceUrl");
-  const runUrl = optionalHttpUrl(body.runUrl, "runUrl");
+  const body = await readJson<GitHubActionsSessionRegistrationInput>(request);
   const serviceUser = openClawServiceUser();
-  const agentToken = newAgentToken();
-  const agentTokenHash = await sha256(agentToken);
-  const now = Date.now();
   const db = database(env);
-  let existing = await db
-    .selectFrom("interactive_sessions")
-    .selectAll()
-    .where("work_key", "=", workKey)
-    .executeTakeFirst();
-  const purpose =
-    clean(body.purpose, 500) ||
-    existing?.purpose ||
-    `${workKind.replaceAll("_", " ")} in ${repo}@${branch}`;
-  const summary = clean(body.summary, 500) || existing?.summary || purpose;
-
-  if (!existing) {
-    for (let attempt = 0; attempt < 3; attempt += 1) {
-      const id = await nextInteractiveSessionId(env);
-      try {
-        await db
-          .insertInto("interactive_sessions")
-          .values({
-            id,
-            parent_session_id: null,
-            root_session_id: id,
-            repo,
-            branch,
-            runtime: githubActionsRuntime,
-            adapter: null,
-            profile: "github-actions",
-            adapter_workspace_id: null,
-            adapter_control_plane: null,
-            provider_resource_id: null,
-            capabilities_json: JSON.stringify(githubActionsCapabilities),
-            expires_at: null,
-            last_reconciled_at: null,
-            reconcile_error: null,
-            terminal_status: null,
-            adapter_ttl_seconds: null,
-            adapter_idle_timeout_seconds: null,
-            adapter_requested_capabilities_json: null,
-            adapter_create_payload_json: null,
-            adapter_create_pending: 0,
-            command: "codex",
-            prompt: purpose,
-            purpose,
-            summary,
-            owner: `github-actions:${id}`,
-            created_by: "service:openclaw",
-            status: "ready",
-            lease_id: null,
-            attach_url: null,
-            vnc_url: null,
-            last_event: "GitHub Actions work registered",
-            created_at: now,
-            updated_at: now,
-            last_seen_at: now,
-            stopped_at: null,
-            share_mode: "private",
-            share_token_hash: null,
-            share_token_preview: null,
-            control_requested_by: null,
-            control_requested_at: null,
-            controller: null,
-            control_granted_at: null,
-            control_expires_at: null,
-            multiplayer_mode: 0,
-            agent_token_hash: agentTokenHash,
-            work_key: workKey,
-            work_kind: workKind,
-            work_state: "registered",
-            work_phase: "waiting_for_runner",
-            source_url: sourceUrl,
-            github_run_url: runUrl,
-            codex_thread_id: null,
-            codex_turn_id: null,
-            last_heartbeat_at: null,
-            completion_reason: null,
-          })
-          .execute();
-        existing = await db
-          .selectFrom("interactive_sessions")
-          .selectAll()
-          .where("id", "=", id)
-          .executeTakeFirst();
-        break;
-      } catch (error) {
-        if (!isConstraintError(error)) throw error;
-        existing = await db
-          .selectFrom("interactive_sessions")
-          .selectAll()
-          .where("work_key", "=", workKey)
-          .executeTakeFirst();
-        if (existing) break;
-        if (attempt === 2) throw error;
-      }
-    }
-  }
-
-  if (!existing) throw new Error("failed to register GitHub Actions session");
-  if (existing.runtime !== githubActionsRuntime) {
-    throw badRequest("workKey is already registered to a different runtime");
-  }
-  const resumed = existing.work_state !== "registered" || existing.status !== "ready";
-  await db
-    .updateTable("interactive_sessions")
-    .set({
-      repo,
-      branch,
-      purpose,
-      summary,
-      prompt: purpose,
-      status: "ready",
-      lease_id: null,
-      stopped_at: null,
-      terminal_status: null,
-      terminal_failure_reason: null,
-      terminal_finalize_pending: 0,
-      credential_cleanup_terminal_status: null,
-      updated_at: now,
-      last_seen_at: now,
-      last_event: resumed ? "GitHub Actions work resumed" : "GitHub Actions work registered",
-      agent_token_hash: agentTokenHash,
-      work_kind: workKind,
-      work_state: "registered",
-      work_phase: "waiting_for_runner",
-      source_url: body.sourceUrl === undefined ? existing.source_url : sourceUrl,
-      github_run_url: body.runUrl === undefined ? existing.github_run_url : runUrl,
-      last_heartbeat_at: null,
-      completion_reason: null,
-    })
-    .where("id", "=", existing.id)
-    .execute();
-  await disconnectGitHubActionsRunner(env, existing.id).catch(() => undefined);
-  const message = resumed ? "GitHub Actions work resumed" : "GitHub Actions work registered";
-  await appendInteractiveSessionEvent(env, existing.id, serviceUser, message, now);
-  await audit(
-    env,
-    serviceUser,
-    `openclaw action session ${resumed ? "resumed" : "registered"} ${existing.id} work=${workKey}`,
-    now,
-  );
-  const session = (await readInteractiveSession(env, existing.id)) as InteractiveSession;
+  const store: GitHubActionsSessionRegistrationStore = {
+    now: () => Date.now(),
+    newAgentToken,
+    hashToken: sha256,
+    requireRepo: (repo) => requireRepo(env, repo),
+    readByWorkKey: async (workKey) =>
+      (await db
+        .selectFrom("interactive_sessions")
+        .selectAll()
+        .where("work_key", "=", workKey)
+        .executeTakeFirst()) ?? null,
+    nextSessionId: () => nextInteractiveSessionId(env),
+    insertSession: async (values) => {
+      await db.insertInto("interactive_sessions").values(values).execute();
+    },
+    readById: async (id) =>
+      (await db
+        .selectFrom("interactive_sessions")
+        .selectAll()
+        .where("id", "=", id)
+        .executeTakeFirst()) ?? null,
+    updateSession: async (id, values) => {
+      await db.updateTable("interactive_sessions").set(values).where("id", "=", id).execute();
+    },
+    isConstraintError,
+    disconnectRunner: (id) => disconnectGitHubActionsRunner(env, id),
+    appendEvent: (id, message, now) =>
+      appendInteractiveSessionEvent(env, id, serviceUser, message, now),
+    audit: (message, now) => audit(env, serviceUser, message, now),
+    readSession: (id) => readInteractiveSession(env, id),
+  };
+  const result = await new GitHubActionsSessionRegistrationService(store).register(body);
   return {
-    session: decorateInteractiveSession(session, serviceUser, env),
-    agentToken,
-    runnerPtyUrl: buildGitHubActionsRunnerPtyUrl(appCanonicalOrigin, existing.id, agentToken),
-    browserUrl: `${browserAppOrigin(env)}/app/sessions/${encodeURIComponent(existing.id)}`,
+    session: decorateInteractiveSession(result.session, serviceUser, env),
+    agentToken: result.agentToken,
+    runnerPtyUrl: buildGitHubActionsRunnerPtyUrl(
+      appCanonicalOrigin,
+      result.session.id,
+      result.agentToken,
+    ),
+    browserUrl: browserSessionUrl(env, result.session.id),
   };
 }
 
@@ -2969,29 +2851,6 @@ async function ensureOpenClawServiceBranch(
     return;
   }
   throw new GitHubApiError(response.status);
-}
-
-function actionWorkIdentifier(value: unknown, name: string, max: number): string {
-  const identifier = String(value ?? "").trim();
-  if (!identifier) throw badRequest(`${name} is required`);
-  if (identifier.length > max) throw badRequest(`${name} exceeds ${max} characters`);
-  if (!/^[A-Za-z0-9][A-Za-z0-9_.:/@+#=-]*$/.test(identifier)) {
-    throw badRequest(`${name} contains unsupported characters`);
-  }
-  return identifier;
-}
-
-function optionalHttpUrl(value: unknown, name: string): string | null {
-  const raw = String(value ?? "").trim();
-  if (!raw) return null;
-  if (raw.length > 1000) throw badRequest(`${name} exceeds 1000 characters`);
-  try {
-    const url = new URL(raw);
-    if (url.protocol !== "https:" && url.protocol !== "http:") throw new Error();
-    return url.toString();
-  } catch {
-    throw badRequest(`${name} must be an http(s) URL`);
-  }
 }
 
 async function requireSshGatewayUser(request: Request, env: RuntimeEnv): Promise<User> {

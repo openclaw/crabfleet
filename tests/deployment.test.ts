@@ -3,6 +3,7 @@ import { test } from "node:test";
 
 import {
   browserAppOrigin,
+  browserSessionUrl,
   clientDeploymentConfig,
   deploymentConfig,
   publicDeploymentConfig,
@@ -88,6 +89,10 @@ test("public and client deployment views exclude server-only routing data", () =
     sshHost: "crabd.sh",
   });
   assert.equal(browserAppOrigin(env), "https://fleet.example");
+  assert.equal(
+    browserSessionUrl(env, "IS/with spaces"),
+    "https://fleet.example/app/sessions/IS%2Fwith%20spaces",
+  );
 
   const client = clientDeploymentConfig(env);
   assert.equal(client.preferredRepo, "openclaw/crabfleet");

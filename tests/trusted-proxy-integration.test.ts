@@ -43,10 +43,6 @@ test("split-origin links use the browser-visible proxy origin", async () => {
   );
   assert.match(
     source,
-    /browserUrl: `\$\{browserAppOrigin\(env\)\}\/app\/sessions\/\$\{encodeURIComponent\(existing\.id\)\}`/,
-  );
-  assert.match(
-    source,
     /new URL\(githubOAuthRedirectUri\(request\.url, env\.GITHUB_REDIRECT_URI\)\)\.origin/,
   );
 });
