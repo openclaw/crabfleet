@@ -67,6 +67,12 @@ root-stop, transcript, embed-ticket, and controller composition.
 `src/worker/github-actions-application.ts` owns agent authentication, action
 session registration, work-state updates, runner relay, and disconnects.
 
+`src/worker/worker-application.ts` is the request-scoped composition root. It
+constructs the four applications once, memoizes shared repositories and
+services, assembles route dependencies, and owns Fleet/state projection.
+`src/index.ts` retains platform exports, static assets, ingress/auth routing,
+API dispatch order, and response error translation.
+
 ## Persistence
 
 ### D1
