@@ -70,7 +70,6 @@ import {
   redactedAdapterResponseMessage,
   runtimeAdapterCreatePayload,
   runtimeAdapterCollectionUrl,
-  runtimeAdapterControlPlaneIdentity,
   runtimeAdapterBrowserVncUrl,
   runtimeAdapterDesktopUrl,
   runtimeAdapterName,
@@ -92,7 +91,6 @@ import { preferredEnabledRepo } from "./repo-selection";
 import { sandboxGitAuthorEmail } from "./git-identity";
 import { sizedTerminalTargetUrl } from "./terminal-target";
 import { cachedBooleanGrant } from "./terminal-authorization";
-import { readBoundedResponseText } from "./bounded-response";
 import {
   openClawGitHubRepoParts,
   openClawRoomMaxSessions,
@@ -344,6 +342,11 @@ import {
   runtimeAdapterConfigurationPresent,
   runtimeAdapterToken,
 } from "./worker/runtime-adapter-preflight";
+import {
+  interactiveTerminalFetch,
+  readRuntimeAdapterResponseBody,
+  runtimeAdapterFetch,
+} from "./worker/runtime-adapter-transport";
 import {
   interactivePtyRouteKind,
   interactiveTerminalHeaders,
@@ -10333,71 +10336,6 @@ async function stopRuntimeAdapterWorkspaceForSession(
     controlPlane,
     adapterWorkspaceId,
   );
-}
-
-async function runtimeAdapterFetch(
-  env: RuntimeEnv,
-  url: string,
-  init: RequestInit,
-): Promise<Response> {
-  const token = runtimeAdapterToken(env);
-  if (!token) throw new Error("runtime adapter token is not configured");
-  const safeTarget = safeDesktopUrl(url);
-  if (!safeTarget) throw new Error("runtime adapter URL must use HTTPS or loopback HTTP");
-  const target = new URL(safeTarget);
-  const headers = new Headers(init.headers);
-  headers.set("authorization", `Bearer ${token}`);
-  headers.set("accept", "application/json");
-  if (init.body) headers.set("content-type", "application/json");
-  const fetcher = runtimeAdapterFetcher(env, target);
-  const response = await fetcher.fetch(target, {
-    ...init,
-    headers,
-    redirect: "manual",
-    signal: AbortSignal.timeout(10_000),
-  });
-  if (response.status >= 300 && response.status < 400) {
-    throw new Error("runtime adapter redirect refused");
-  }
-  return response;
-}
-
-function runtimeAdapterFetcher(env: RuntimeEnv, target: URL): Fetcher | typeof globalThis {
-  const coordinator =
-    runtimeAdapterControlPlaneIdentity(env.CRABBOX_COORDINATOR_ORIGIN) ??
-    runtimeAdapterControlPlaneIdentity(env.CRABBOX_RUNTIME_ADAPTER_URL);
-  if (!env.CRABBOX_COORDINATOR || !coordinator) return globalThis;
-  const normalizedTarget = new URL(target);
-  if (normalizedTarget.protocol === "wss:") normalizedTarget.protocol = "https:";
-  if (normalizedTarget.protocol === "ws:") normalizedTarget.protocol = "http:";
-  return new URL(coordinator).origin === normalizedTarget.origin
-    ? env.CRABBOX_COORDINATOR
-    : globalThis;
-}
-
-async function interactiveTerminalFetch(
-  env: RuntimeEnv,
-  session: Pick<InteractiveSession, "adapter">,
-  url: string,
-  headers: Headers,
-): Promise<Response> {
-  const target = new URL(url);
-  const fetchTarget = new URL(target);
-  if (fetchTarget.protocol === "wss:") fetchTarget.protocol = "https:";
-  if (fetchTarget.protocol === "ws:") fetchTarget.protocol = "http:";
-  const fetcher =
-    session.adapter === runtimeAdapterName ? runtimeAdapterFetcher(env, target) : globalThis;
-  return fetcher.fetch(fetchTarget, { headers });
-}
-
-async function readRuntimeAdapterResponseBody(response: Response): Promise<unknown> {
-  const body = await readBoundedResponseText(response);
-  if (!body) return null;
-  try {
-    return JSON.parse(body);
-  } catch {
-    return { message: body };
-  }
 }
 
 function runtimeAdapterProviderConfigured(env: RuntimeEnv): boolean {

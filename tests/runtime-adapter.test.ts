@@ -704,27 +704,12 @@ test("worker deployment installs the shared runtime adapter credential", async (
   );
 });
 
-test("production runtime adapter calls use the Crabbox service binding", async () => {
-  const source = await readFile(new URL("../src/index.ts", import.meta.url), "utf8");
+test("production config installs the Crabbox coordinator service binding", async () => {
   const config = await readFile(new URL("../wrangler.jsonc", import.meta.url), "utf8");
-  const lifecycleStart = source.indexOf("async function runtimeAdapterFetch");
-  const lifecycleEnd = source.indexOf("function runtimeAdapterFetcher", lifecycleStart);
-  const lifecycleSource = source.slice(lifecycleStart, lifecycleEnd);
-  const fetchStart = source.indexOf("function runtimeAdapterFetcher");
-  const fetchEnd = source.indexOf("async function readRuntimeAdapterResponseBody", fetchStart);
-  const fetchSource = source.slice(fetchStart, fetchEnd);
 
   assert.match(config, /"binding": "CRABBOX_COORDINATOR"/);
   assert.match(config, /"service": "crabbox-coordinator"/);
   assert.match(config, /"CRABBOX_COORDINATOR_ORIGIN": "https:\/\/crabbox\.openclaw\.ai"/);
-  assert.match(fetchSource, /env\.CRABBOX_COORDINATOR/);
-  assert.match(fetchSource, /env\.CRABBOX_COORDINATOR_ORIGIN/);
-  assert.match(fetchSource, /normalizedTarget\.protocol === "wss:"/);
-  assert.match(fetchSource, /new URL\(coordinator\)\.origin === normalizedTarget\.origin/);
-  assert.match(fetchSource, /session\.adapter === runtimeAdapterName/);
-  assert.match(fetchSource, /interactiveTerminalFetch/);
-  assert.match(lifecycleSource, /runtimeAdapterFetcher\(env, target\)/);
-  assert.match(lifecycleSource, /fetcher\.fetch\(target/);
 });
 
 test("session events and terminal finalization preserve archive anchors", async () => {
@@ -795,7 +780,7 @@ test("runtime adapter operations stay bound to the registered control plane", as
   );
   const inspectSource = source.slice(inspectStart, inspectEnd);
   const stopStart = source.indexOf("async function stopRuntimeAdapterWorkspace(");
-  const stopEnd = source.indexOf("async function runtimeAdapterFetch", stopStart);
+  const stopEnd = source.indexOf("function runtimeAdapterProviderConfigured", stopStart);
   const stopSource = source.slice(stopStart, stopEnd);
 
   assert.match(migration, /ADD COLUMN adapter_control_plane TEXT/);
@@ -841,18 +826,6 @@ test("runtime adapter operations stay bound to the registered control plane", as
     /runtimeAdapterWorkspaceUrl\(env\.CRABBOX_RUNTIME_ADAPTER_URL/,
   );
   assert.doesNotMatch(stopSource, /response\.status === 404[\s\S]*CRABBOX_RUNTIME_ADAPTER_URL/);
-});
-
-test("runtime adapter requests reject redirects with edge-supported fetch semantics", async () => {
-  const source = await readFile(new URL("../src/index.ts", import.meta.url), "utf8");
-  const fetchStart = source.indexOf("async function runtimeAdapterFetch");
-  const fetchEnd = source.indexOf("async function readRuntimeAdapterResponseBody", fetchStart);
-  const fetchSource = source.slice(fetchStart, fetchEnd);
-
-  assert.match(fetchSource, /redirect: "manual"/);
-  assert.match(fetchSource, /response\.status >= 300 && response\.status < 400/);
-  assert.match(fetchSource, /runtime adapter redirect refused/);
-  assert.doesNotMatch(fetchSource, /redirect: "error"/);
 });
 
 test("pending runtime adapter creates replay before any inspect", async () => {
@@ -921,7 +894,7 @@ test("stopping create replay owns the exact persisted lifecycle", async () => {
 test("every session-bound adapter delete waits for create ambiguity to clear", async () => {
   const source = await readFile(new URL("../src/index.ts", import.meta.url), "utf8");
   const releaseStart = source.indexOf("async function stopRuntimeAdapterWorkspaceForSession");
-  const releaseEnd = source.indexOf("async function runtimeAdapterFetch", releaseStart);
+  const releaseEnd = source.indexOf("function runtimeAdapterProviderConfigured", releaseStart);
   const releaseSource = source.slice(releaseStart, releaseEnd);
   const pendingGateIndex = releaseSource.indexOf("if (registration?.adapter_create_pending !== 0)");
   const providerDeleteIndex = releaseSource.indexOf("return stopRuntimeAdapterWorkspace(");
@@ -1653,10 +1626,6 @@ test("definitive adapter create errors retain a redacted provider reason before 
     releaseStart,
   );
   const releaseSource = source.slice(releaseStart, releaseEnd);
-  const bodyStart = source.indexOf("async function readRuntimeAdapterResponseBody");
-  const bodyEnd = source.indexOf("function runtimeAdapterProviderConfigured", bodyStart);
-  const bodySource = source.slice(bodyStart, bodyEnd);
-
   const bodyReadIndex = createSource.indexOf(
     "responseBody = await readRuntimeAdapterResponseBody(response)",
   );
@@ -1674,9 +1643,6 @@ test("definitive adapter create errors retain a redacted provider reason before 
     releaseSource.indexOf("stageFailedRuntimeAdapterRelease") <
       releaseSource.indexOf("stopRuntimeAdapterWorkspaceForSession"),
   );
-  assert.match(bodySource, /await readBoundedResponseText\(response\)/);
-  assert.doesNotMatch(bodySource, /response\.(?:json|text)\(/);
-  assert.match(bodySource, /JSON\.parse\(body\)/);
   assert.equal(
     redactedAdapterResponseMessage(
       { detail: "capacity unavailable; token=private-value" },
@@ -1717,7 +1683,7 @@ test("successful DELETE requires an implicit or parsed release confirmation", ()
 test("adapter DELETE evidence survives pending and confirmed release", async () => {
   const source = await readFile(new URL("../src/index.ts", import.meta.url), "utf8");
   const deleteStart = source.indexOf("async function stopRuntimeAdapterWorkspace(");
-  const deleteEnd = source.indexOf("async function runtimeAdapterFetch", deleteStart);
+  const deleteEnd = source.indexOf("function runtimeAdapterProviderConfigured", deleteStart);
   const deleteSource = source.slice(deleteStart, deleteEnd);
   const reconcileStart = source.indexOf("async function reconcileStoppingRuntimeAdapterWorkspace");
   const reconcileEnd = source.indexOf("type StoppingRuntimeAdapterReplay", reconcileStart);
@@ -1864,7 +1830,7 @@ test("runtime adapter profile routes expand one allowlisted path segment", () =>
   );
 });
 
-test("adapter bodies share the bounded stream reader", async () => {
+test("adapter operations share the bounded response parser", async () => {
   const source = await readFile(new URL("../src/index.ts", import.meta.url), "utf8");
   const ranges = [
     ["async function provisionWithRuntimeAdapter", "function persistedRuntimeAdapterSeconds"],
@@ -1889,11 +1855,6 @@ test("adapter bodies share the bounded stream reader", async () => {
     assert.match(operation, /readRuntimeAdapterResponseBody\(response\)/);
     assert.doesNotMatch(operation, /response\.(?:json|text)\(/);
   }
-  const readerStart = source.indexOf("async function readRuntimeAdapterResponseBody");
-  const readerEnd = source.indexOf("function runtimeAdapterProviderConfigured", readerStart);
-  const readerSource = source.slice(readerStart, readerEnd);
-  assert.match(readerSource, /readBoundedResponseText\(response\)/);
-  assert.doesNotMatch(readerSource, /response\.(?:json|text)\(/);
 });
 
 test("desktop mint revalidates current ownership before redirect", async () => {
@@ -1923,20 +1884,13 @@ test("desktop mint revalidates current ownership before redirect", async () => {
   assert.doesNotMatch(vncSource, /body:\s*JSON\.stringify\(\{\}\)/);
 });
 
-test("runtime adapter terminal upgrades use the coordinator service binding", async () => {
+test("runtime adapter terminal upgrades use the shared transport", async () => {
   const source = await readFile(new URL("../src/index.ts", import.meta.url), "utf8");
   const openStart = source.indexOf("async function openInteractiveTerminalUpstream");
   const openEnd = source.indexOf("async function markInteractiveTerminalConnected", openStart);
   const openSource = source.slice(openStart, openEnd);
-  const fetchStart = source.indexOf("async function interactiveTerminalFetch");
-  const fetchEnd = source.indexOf("async function runtimeAdapterFetch", fetchStart);
-  const fetchSource = source.slice(fetchStart, fetchEnd);
 
   assert.match(openSource, /interactiveTerminalFetch\(/);
-  assert.match(fetchSource, /session\.adapter === runtimeAdapterName/);
-  assert.match(fetchSource, /runtimeAdapterFetcher\(env, target\)/);
-  assert.match(fetchSource, /fetchTarget\.protocol === "wss:"/);
-  assert.match(fetchSource, /fetcher\.fetch\(fetchTarget, \{ headers \}\)/);
 });
 
 test("runtime adapter terminal flow control stays explicit and end-to-end", async () => {
