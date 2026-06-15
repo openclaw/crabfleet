@@ -10,6 +10,7 @@ import {
   persistGitHubActionsSessionStop,
   persistInteractiveSessionEventMutation,
   persistInteractiveSessionProvisionResult,
+  readAgentSessionCredential,
   readInteractiveSessionEventRows,
   readInteractiveSessionLogArchives,
   readInteractiveSessionLogs,
@@ -147,6 +148,29 @@ test("visible session reads exclude preparation reservations and stay bounded", 
     ["IS-2"],
   );
   assert.equal(calls, 2);
+});
+
+test("agent credential reads require visible sessions and preserve token hashes", async () => {
+  const row = sessionRow({
+    id: "IS-2",
+    preparation_pending: 0,
+    agent_token_hash: "agent-hash",
+  });
+  let query = 0;
+  const env = runtimeEnv((sql, parameters, kind) => {
+    assert.equal(kind, "all");
+    assert.match(sql, /from "interactive_sessions"/i);
+    assert.match(sql, /"preparation_pending" =/i);
+    assert.deepEqual(parameters, [query === 0 ? "IS-2" : "IS-3", 0]);
+    query += 1;
+    return query === 1 ? { results: [row] } : { results: [] };
+  });
+
+  const credential = await readAgentSessionCredential(env, "IS-2");
+  assert.equal(credential?.session.id, "IS-2");
+  assert.deepEqual(credential?.session.logs, []);
+  assert.equal(credential?.tokenHash, "agent-hash");
+  assert.equal(await readAgentSessionCredential(env, "IS-3"), null);
 });
 
 test("shared session reads require visible link-read rows", async () => {

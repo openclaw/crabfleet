@@ -18,6 +18,7 @@
 - Extract superseded runtime-adapter stop recovery and confirmed-release CAS persistence into a directly tested release service and repository.
 - Move interactive-session normalization, reservation retries, provisioning, recovery, audit, and durable result assembly into the creation service.
 - Move GitHub Actions registration, work-state, and runner-connection persistence into one repository with shared service composition.
+- Move OpenClaw stop eligibility, agent credential reads, session ID allocation, and audit persistence out of the Worker entry point into their owning repositories.
 - Centralize failed provisioning results and provider-error redaction across managed Sandbox, standalone Sandbox, and runtime-adapter lifecycle paths.
 - Extract OpenClaw nudge and stop validation, audit ordering, terminal delivery, and best-effort delivery records into a directly tested mutation service.
 - Extract OpenClaw crabbox normalization, replay handling, branch preparation, timeout policy, and creation audit into a directly tested service.

@@ -8,6 +8,7 @@ import {
   type InteractiveSessionTable,
 } from "./database.ts";
 import type { RuntimeEnv } from "./env.ts";
+import type { AgentSessionCredential } from "./session-agent-auth.ts";
 import type {
   InteractiveProvisionPersistence,
   InteractiveProvisionPersistenceInput,
@@ -202,6 +203,24 @@ export async function readInteractiveSessionRecord(
     readInteractiveSessionLogArchives(env, [id]),
   ]);
   return interactiveSession(row, logs.get(id) ?? [], archives.get(id) ?? null);
+}
+
+export async function readAgentSessionCredential(
+  env: RuntimeEnv,
+  id: string,
+): Promise<AgentSessionCredential | null> {
+  const row = await database(env)
+    .selectFrom("interactive_sessions")
+    .selectAll()
+    .where("id", "=", id)
+    .where("preparation_pending", "=", 0)
+    .executeTakeFirst();
+  return row
+    ? {
+        session: interactiveSession(row, []),
+        tokenHash: row.agent_token_hash,
+      }
+    : null;
 }
 
 export async function readInteractiveSessionLogs(

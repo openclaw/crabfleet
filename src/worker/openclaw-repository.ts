@@ -83,6 +83,24 @@ export async function readOpenClawRootCompletion(
   };
 }
 
+export async function canReconcileOpenClawStoppingSession(
+  env: RuntimeEnv,
+  sessionId: string,
+  sandboxLeasePrefix: string,
+): Promise<boolean> {
+  const owner = await database(env)
+    .selectFrom("interactive_sessions")
+    .select(["adapter", "lease_id", "credential_cleanup_terminal_status"])
+    .where("id", "=", sessionId)
+    .executeTakeFirst();
+  return Boolean(
+    owner &&
+    owner.adapter === null &&
+    (owner.credential_cleanup_terminal_status !== null ||
+      owner.lease_id?.startsWith(sandboxLeasePrefix)),
+  );
+}
+
 export async function closeOpenClawRootAdmission(
   env: RuntimeEnv,
   rootSessionId: string,

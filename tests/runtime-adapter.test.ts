@@ -701,7 +701,6 @@ test("runtime adapter control-plane registration is canonical and durable", asyn
 });
 
 test("stateless Sandbox provision hook acquires durable standalone ownership", async () => {
-  const source = await readFile(new URL("../src/index.ts", import.meta.url), "utf8");
   const cleanupServiceSource = await readFile(
     new URL("../src/worker/sandbox-credential-policy-cleanup-service.ts", import.meta.url),
     "utf8",
@@ -843,11 +842,6 @@ test("stateless Sandbox provision hook acquires durable standalone ownership", a
     /policy\?\.expiresAt !== undefined && policy\.expiresAt <= now/,
   );
   assert.match(registrationServiceSource, /standaloneSandboxPolicyExpiresAt/);
-  assert.match(
-    source,
-    /selectFrom\("standalone_sandbox_provisions"\)[\s\S]*failed to allocate an unreserved interactive session id/,
-  );
-  assert.match(source, /id = \$\{id\} COLLATE NOCASE/);
   assert.match(expiryMigration, /UPDATE id_sequences/);
   assert.match(expiryMigration, /MAX\(CAST\(substr\(lower\(id\), 4\) AS INTEGER\)\)/);
 });

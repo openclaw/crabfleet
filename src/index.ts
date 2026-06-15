@@ -1,4 +1,4 @@
-import { sql, type UpdateObject } from "kysely";
+import type { UpdateObject } from "kysely";
 import { ContainerProxy, Sandbox as CloudflareSandboxBase } from "@cloudflare/sandbox";
 import { buildFleetState, type FleetState } from "./fleet-state";
 import { buildGitHubActionsRunnerPtyUrl, githubActionsRuntime } from "./github-actions-runtime";
@@ -19,7 +19,6 @@ import {
   runtimeAdapterName,
   runtimeAdapterReplayRequest,
 } from "./runtime-adapter";
-import { allocateInteractiveSessionIdSql, formatInteractiveSessionId } from "./session-id";
 import { openClawRoomMaxSessions } from "./openclaw-service";
 import { trustedProxyPublicOrigin, type TrustedProxyAuthResult } from "./trusted-proxy-auth";
 import {
@@ -31,7 +30,7 @@ import {
 } from "./worker/deployment";
 import { mapWithConcurrency } from "./worker/concurrency";
 import type { RuntimeEnv } from "./worker/env";
-import { database, type Database, type InteractiveSessionRow } from "./worker/database";
+import type { Database, InteractiveSessionRow } from "./worker/database";
 import type { User } from "./worker/models";
 import {
   badRequest,
@@ -58,6 +57,7 @@ import {
   tokenLogin,
 } from "./worker/auth";
 import { sha256 } from "./worker/crypto";
+import { AuditRepository } from "./worker/audit-repository";
 import {
   AgentSessionAuthenticator,
   agentSessionId,
@@ -123,6 +123,7 @@ import {
 import { readOpenClawRequestSession } from "./worker/openclaw-request";
 import {
   activateInteractiveSessionReservation,
+  canReconcileOpenClawStoppingSession,
   closeOpenClawRootAdmission,
   openClawRoomReservationPosition,
   openClawRootAdmissionOpen,
@@ -163,6 +164,7 @@ import {
   persistGitHubActionsSessionStop,
   persistInteractiveSessionEventMutation,
   persistInteractiveSessionProvisionResult,
+  readAgentSessionCredential,
   readInteractiveSessionTerminalCleanupIntent,
   readInteractiveSessionEventRows,
   readInteractiveSessionLogArchives,
@@ -172,6 +174,7 @@ import {
   readSharedInteractiveSessionRow,
   readRuntimeAdapterCreatePending,
 } from "./worker/session-repository";
+import { nextInteractiveSessionId } from "./worker/session-id-repository";
 import {
   InteractiveSessionAttachService,
   type InteractiveSessionAttachStore,
@@ -810,19 +813,8 @@ function openClawRootStopService(
       supervision.rollbackReservation(sessionId, createdAt),
     stopSession: (session) =>
       mutateInteractiveSession(request, env, serviceUser, session.id, "stop").then(() => undefined),
-    canReconcileStoppingSession: async (sessionId) => {
-      const owner = await database(env)
-        .selectFrom("interactive_sessions")
-        .select(["adapter", "lease_id", "credential_cleanup_terminal_status"])
-        .where("id", "=", sessionId)
-        .executeTakeFirst();
-      return Boolean(
-        owner &&
-        owner.adapter === null &&
-        (owner.credential_cleanup_terminal_status !== null ||
-          owner.lease_id?.startsWith(sandboxLeasePrefix)),
-      );
-    },
+    canReconcileStoppingSession: (sessionId) =>
+      canReconcileOpenClawStoppingSession(env, sessionId, sandboxLeasePrefix),
     reconcileSession: (session, now) =>
       reconcileExternalInteractiveSessionById(env, session.id, now),
     readRootCompletion: (rootSessionId) => readOpenClawRootCompletion(env, rootSessionId),
@@ -1026,20 +1018,7 @@ async function ensureOpenClawServiceBranch(
 
 function agentSessionAuthentication(env: RuntimeEnv): AgentSessionAuthenticator {
   const store: AgentSessionAuthenticationStore = {
-    readCredential: async (id) => {
-      const row = await database(env)
-        .selectFrom("interactive_sessions")
-        .selectAll()
-        .where("id", "=", id)
-        .where("preparation_pending", "=", 0)
-        .executeTakeFirst();
-      return row
-        ? {
-            session: interactiveSession(row, []),
-            tokenHash: row.agent_token_hash,
-          }
-        : null;
-    },
+    readCredential: (id) => readAgentSessionCredential(env, id),
     hashToken: sha256,
   };
   return new AgentSessionAuthenticator(store);
@@ -1888,27 +1867,8 @@ async function sandboxSessionWithGitHubToken(
   return githubToken ? { ...session, githubToken } : session;
 }
 
-async function nextInteractiveSessionId(env: RuntimeEnv): Promise<string> {
-  const db = database(env);
-  for (let attempt = 0; attempt < 100; attempt += 1) {
-    const result = await sql.raw<{ next_id: number }>(allocateInteractiveSessionIdSql).execute(db);
-    const id = formatInteractiveSessionId(Number(result.rows[0]?.next_id));
-    if (!id) throw new Error("failed to allocate interactive session id");
-    const standalone = await db
-      .selectFrom("standalone_sandbox_provisions")
-      .select("id")
-      .where(sql<boolean>`id = ${id} COLLATE NOCASE`)
-      .executeTakeFirst();
-    if (!standalone) return id;
-  }
-  throw new Error("failed to allocate an unreserved interactive session id");
-}
-
 async function audit(env: RuntimeEnv, user: User, message: string, now: number): Promise<void> {
-  await database(env)
-    .insertInto("audit_events")
-    .values({ actor: actor(user), message, created_at: now })
-    .execute();
+  await new AuditRepository(env).record(actor(user), message, now);
 }
 
 function decorateInteractiveSession(

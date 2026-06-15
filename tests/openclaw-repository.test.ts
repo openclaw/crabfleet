@@ -4,6 +4,7 @@ import test from "node:test";
 import type { RuntimeEnv } from "../src/worker/env.ts";
 import {
   activateInteractiveSessionReservation,
+  canReconcileOpenClawStoppingSession,
   closeOpenClawRootAdmission,
   openClawRoomReservationPosition,
   openClawRootAdmissionOpen,
@@ -156,6 +157,43 @@ test("OpenClaw cleanup reads prioritize reservations and report terminal complet
     total: 3,
     remaining: 1,
   });
+});
+
+test("OpenClaw stopping reconciliation requires built-in ownership evidence", async () => {
+  const rows = [
+    {
+      adapter: null,
+      lease_id: null,
+      credential_cleanup_terminal_status: "stopped",
+    },
+    {
+      adapter: null,
+      lease_id: "sandbox:lease-2",
+      credential_cleanup_terminal_status: null,
+    },
+    {
+      adapter: "runtime-v1",
+      lease_id: "sandbox:lease-3",
+      credential_cleanup_terminal_status: "stopped",
+    },
+    {
+      adapter: null,
+      lease_id: "external:lease-4",
+      credential_cleanup_terminal_status: null,
+    },
+  ];
+  let query = 0;
+  const env = runtimeEnv((sql, parameters, kind) => {
+    assert.equal(kind, "all");
+    assert.match(sql, /select "adapter", "lease_id", "credential_cleanup_terminal_status"/i);
+    assert.deepEqual(parameters, [`IS-${query + 1}`]);
+    return { results: [rows[query++]] };
+  });
+
+  assert.equal(await canReconcileOpenClawStoppingSession(env, "IS-1", "sandbox:"), true);
+  assert.equal(await canReconcileOpenClawStoppingSession(env, "IS-2", "sandbox:"), true);
+  assert.equal(await canReconcileOpenClawStoppingSession(env, "IS-3", "sandbox:"), false);
+  assert.equal(await canReconcileOpenClawStoppingSession(env, "IS-4", "sandbox:"), false);
 });
 
 test("OpenClaw admission and lineage persistence preserve explicit preparation states", async () => {
