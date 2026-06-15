@@ -1,5 +1,7 @@
 # Changelog
 
+## Unreleased
+
 ## 0.2.0 - 2026-06-15
 
 - Add session-scoped OpenClaw terminal embed tickets, deployment-configured interactive runtime choices, explicit Ghostty WASM delivery, and shared embedded PTY readiness without restoring provider or protocol compatibility paths.
