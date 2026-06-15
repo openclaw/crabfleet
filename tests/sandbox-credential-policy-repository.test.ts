@@ -3,6 +3,7 @@ import test from "node:test";
 
 import {
   activeSandboxCredentialPolicyGeneration,
+  currentSandboxCredentialPolicyGeneration,
   recordSandboxCredentialPolicyRefs,
   sandboxCredentialPolicyRegistrationQueries,
   sandboxLookupIds,
@@ -68,7 +69,7 @@ function runtimeEnv(
 }
 
 const registration: SandboxCredentialPolicyRegistration = {
-  generation: "generation-1",
+  generation: "generation:test-1",
   claim: "registration-1",
   lookupIds: ["sandbox-1"],
 };
@@ -97,6 +98,23 @@ test("credential-policy lookup identity includes the Sandbox durable object id e
   assert.deepEqual(sandboxLookupIds(runtimeEnv(undefined, undefined, "sandbox-1"), "sandbox-1"), [
     "sandbox-1",
   ]);
+});
+
+test("credential-policy generations reuse exactly one current identity", () => {
+  assert.equal(currentSandboxCredentialPolicyGeneration([]), null);
+  assert.equal(
+    currentSandboxCredentialPolicyGeneration(["generation:test-1"]),
+    "generation:test-1",
+  );
+  assert.equal(currentSandboxCredentialPolicyGeneration(["legacy:test-1"]), null);
+  assert.equal(
+    currentSandboxCredentialPolicyGeneration(["generation:test-1", "legacy:test-1"]),
+    null,
+  );
+  assert.equal(
+    currentSandboxCredentialPolicyGeneration(["generation:test-1", "generation:test-2"]),
+    null,
+  );
 });
 
 test("credential-policy registration SQL proves every supported ownership fence", () => {
@@ -142,22 +160,28 @@ test("active credential-policy generation requires every exact lookup row", asyn
     {
       lookup_id: "sandbox-1",
       state: "active",
-      registration_generation: "generation-1",
+      registration_generation: "generation:test-1",
       registration_claim: null,
     },
     {
       lookup_id: "do-1",
       state: "active",
-      registration_generation: "generation-1",
+      registration_generation: "generation:test-1",
       registration_claim: null,
     },
   ];
   const env = runtimeEnv(() => ({ results: rows }), undefined, "do-1");
   assert.equal(
     await activeSandboxCredentialPolicyGeneration(env, "IS-42", "sandbox-1"),
-    "generation-1",
+    "generation:test-1",
   );
 
+  rows[0] = { ...rows[0]!, registration_generation: "legacy:test-1" };
+  rows[1] = { ...rows[1]!, registration_generation: "legacy:test-1" };
+  assert.equal(await activeSandboxCredentialPolicyGeneration(env, "IS-42", "sandbox-1"), null);
+
+  rows[0] = { ...rows[0]!, registration_generation: "generation:test-1" };
+  rows[1] = { ...rows[1]!, registration_generation: "generation:test-1" };
   rows[1] = { ...rows[1]!, registration_claim: "stale" };
   assert.equal(await activeSandboxCredentialPolicyGeneration(env, "IS-42", "sandbox-1"), null);
 });
@@ -167,13 +191,13 @@ test("recording active policy refs promotes then upserts every lookup under one 
     {
       lookup_id: "sandbox-1",
       state: "active",
-      registration_generation: "generation-1",
+      registration_generation: "generation:test-1",
       registration_claim: null,
     },
     {
       lookup_id: "do-1",
       state: "active",
-      registration_generation: "generation-1",
+      registration_generation: "generation:test-1",
       registration_claim: null,
     },
   ];
@@ -194,7 +218,7 @@ test("recording active policy refs promotes then upserts every lookup under one 
       "IS-42",
       "sandbox-1",
       "active",
-      "generation-1",
+      "generation:test-1",
       {
         leaseId: "sandbox:sandbox-1:terminal-1:autostart-v4",
         sandboxId: "sandbox-1",
@@ -211,5 +235,5 @@ test("recording active policy refs promotes then upserts every lookup under one 
   const parameters = batch.flatMap((statement) => statement.parameters);
   assert.ok(parameters.includes("sandbox-1"));
   assert.ok(parameters.includes("do-1"));
-  assert.ok(parameters.includes("generation-1"));
+  assert.ok(parameters.includes("generation:test-1"));
 });

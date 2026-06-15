@@ -11,10 +11,7 @@ import {
   standaloneSandboxPolicyExpiresAt,
   type SandboxCredentialPolicyOwnershipFence,
 } from "./sandbox-credential-policy-repository.ts";
-import {
-  repairLegacySandboxCredentialPolicy,
-  sandboxCredentialPolicyExists,
-} from "./sandbox-credential-policy-cleanup-service.ts";
+import { sandboxCredentialPolicyExists } from "./sandbox-credential-policy-cleanup-service.ts";
 import {
   sandboxLeaseInfo,
   sandboxLeasePrefix,
@@ -22,10 +19,9 @@ import {
 } from "./sandbox-lease.ts";
 import type { SandboxRuntimeSession } from "./sandbox-runtime.ts";
 import { sandboxControlStub } from "./session-control-do.ts";
-import {
-  credentialPolicyLegacyGenerationPrefix,
-  type SandboxCredentialPolicy,
-  type StoredSandboxCredentialPolicy,
+import type {
+  SandboxCredentialPolicy,
+  StoredSandboxCredentialPolicy,
 } from "./session-control-policy.ts";
 import type { InteractiveSession } from "./session-model.ts";
 
@@ -143,12 +139,7 @@ export async function ensureSandboxCredentialPolicy(
   }
   const ownership: SandboxCurrentLeaseFence = { leaseId, sandboxId };
   const hasFreshUserToken = Boolean("githubToken" in session && session.githubToken);
-  let generation = await existingSandboxCredentialPolicyGeneration(env, session.id, sandboxId);
-  if (generation?.startsWith(credentialPolicyLegacyGenerationPrefix)) {
-    await repairLegacySandboxCredentialPolicy(env, session.id, sandboxId);
-    if (!hasFreshUserToken) return;
-    generation = await existingSandboxCredentialPolicyGeneration(env, session.id, sandboxId);
-  }
+  const generation = await existingSandboxCredentialPolicyGeneration(env, session.id, sandboxId);
   if (
     !hasFreshUserToken &&
     generation &&

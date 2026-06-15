@@ -2,10 +2,7 @@ import type { DirectoryBackup } from "@cloudflare/sandbox";
 import { DurableObject } from "cloudflare:workers";
 
 import {
-  credentialPolicyCleanupMatches,
-  credentialPolicyMigrationCleanupMatches,
   credentialPolicyRegistrationAccepted,
-  migratedCredentialPolicyRecord,
   type CredentialPolicyGenerationTombstone,
 } from "../credential-policy-fence.ts";
 import type { FleetSandboxPolicySummary } from "../fleet-state.ts";
@@ -19,15 +16,13 @@ import type { RuntimeEnv } from "./env.ts";
 import { json } from "./http.ts";
 import {
   dedupeSandboxPolicies,
-  legacySandboxCredentialPolicy,
   redactSandboxPolicy,
+  sandboxCredentialPolicyCleanupDeletesStored,
   sandboxCredentialPolicyFromStorage,
   storedSandboxCredentialPolicy,
   validCredentialPolicyTombstone,
-  validSandboxCredentialPolicyLegacyMigration,
   validSandboxCredentialPolicyRegistration,
   type SandboxCredentialPolicy,
-  type SandboxCredentialPolicyLegacyMigration,
   type StoredSandboxCredentialPolicy,
 } from "./session-control-policy.ts";
 
@@ -85,16 +80,12 @@ export class SessionControlDO extends DurableObject<RuntimeEnv> {
         }
         const outcome = await this.ctx.storage.transaction(async (transaction) => {
           const [stored, tombstone] = await Promise.all([
-            transaction.get<StoredSandboxCredentialPolicy | SandboxCredentialPolicy>(
-              sandboxPolicyKey(registration.policy.sandboxId),
-            ),
+            transaction.get<unknown>(sandboxPolicyKey(registration.policy.sandboxId)),
             transaction.get<CredentialPolicyGenerationTombstone>(
               sandboxPolicyTombstoneKey(registration.policy.sandboxId, registration.generation),
             ),
           ]);
           const current = storedSandboxCredentialPolicy(stored);
-          const legacy = legacySandboxCredentialPolicy(stored);
-          if (legacy && legacy.sessionId !== registration.policy.sessionId) return "conflict";
           if (!credentialPolicyRegistrationAccepted(current, tombstone, registration, Date.now())) {
             return tombstone ? "tombstoned" : "conflict";
           }
@@ -107,67 +98,8 @@ export class SessionControlDO extends DurableObject<RuntimeEnv> {
         return json({ ok: true });
       }
 
-      if (request.method === "POST" && url.pathname === "/api/session-control/migrate-legacy") {
-        const migration = (await request.json()) as SandboxCredentialPolicyLegacyMigration;
-        if (!validSandboxCredentialPolicyLegacyMigration(migration)) {
-          return json({ error: "invalid legacy credential policy migration" }, { status: 400 });
-        }
-        const outcome = await this.ctx.storage.transaction(async (transaction) => {
-          const records = await Promise.all(
-            migration.sandboxIds.map(async (sandboxId) => ({
-              sandboxId,
-              stored: await transaction.get<
-                StoredSandboxCredentialPolicy | SandboxCredentialPolicy
-              >(sandboxPolicyKey(sandboxId)),
-              tombstone: await transaction.get<CredentialPolicyGenerationTombstone>(
-                sandboxPolicyTombstoneKey(sandboxId, migration.generation),
-              ),
-            })),
-          );
-          const sourcePolicy = records
-            .map(
-              ({ stored }) =>
-                storedSandboxCredentialPolicy(stored)?.policy ??
-                legacySandboxCredentialPolicy(stored),
-            )
-            .find((policy) => policy?.sessionId === migration.sessionId);
-          if (!sourcePolicy) return "conflict";
-          const migratedRecords: Array<{
-            sandboxId: string;
-            policy: StoredSandboxCredentialPolicy;
-          }> = [];
-          for (const record of records) {
-            const current = storedSandboxCredentialPolicy(record.stored);
-            const legacy =
-              legacySandboxCredentialPolicy(record.stored) ??
-              (!current ? { ...sourcePolicy, sandboxId: record.sandboxId } : undefined);
-            const migrated = migratedCredentialPolicyRecord(
-              current,
-              legacy,
-              record.tombstone,
-              migration,
-              Date.now(),
-            );
-            if (!migrated || migrated.policy.sandboxId !== record.sandboxId) {
-              return record.tombstone ? "tombstoned" : "conflict";
-            }
-            migratedRecords.push({ sandboxId: record.sandboxId, policy: migrated });
-          }
-          for (const record of migratedRecords) {
-            await transaction.put(sandboxPolicyKey(record.sandboxId), record.policy);
-          }
-          return "stored";
-        });
-        if (outcome !== "stored") {
-          return json({ error: `legacy credential policy migration ${outcome}` }, { status: 409 });
-        }
-        return json({ ok: true });
-      }
-
       if (request.method === "GET" && url.pathname === "/api/session-control/policies") {
-        const entries = await this.ctx.storage.list<
-          StoredSandboxCredentialPolicy | SandboxCredentialPolicy
-        >({
+        const entries = await this.ctx.storage.list<unknown>({
           prefix: "sandbox:",
         });
         const policies = dedupeSandboxPolicies(
@@ -182,19 +114,10 @@ export class SessionControlDO extends DurableObject<RuntimeEnv> {
       if (request.method === "GET" && egressMatch) {
         const sandboxId = decodeURIComponent(egressMatch[1] ?? "");
         const key = sandboxPolicyKey(sandboxId);
-        const stored = await this.ctx.storage.get<
-          StoredSandboxCredentialPolicy | SandboxCredentialPolicy
-        >(key);
+        const stored = await this.ctx.storage.get<unknown>(key);
         const current = storedSandboxCredentialPolicy(stored);
-        const legacy = legacySandboxCredentialPolicy(stored);
         const policy = sandboxCredentialPolicyFromStorage(stored);
         if (!current || !policy) {
-          if (legacy) {
-            return json(
-              { error: "legacy credential policy migration required", sessionId: legacy.sessionId },
-              { status: 409 },
-            );
-          }
           return json({ error: "not found" }, { status: 404 });
         }
         return json(policy, {
@@ -211,23 +134,17 @@ export class SessionControlDO extends DurableObject<RuntimeEnv> {
         }
         await this.ctx.storage.transaction(async (transaction) => {
           const key = sandboxPolicyKey(sandboxId);
-          const stored = await transaction.get<
-            StoredSandboxCredentialPolicy | SandboxCredentialPolicy
-          >(key);
-          const current = storedSandboxCredentialPolicy(stored);
-          const legacy = legacySandboxCredentialPolicy(stored);
+          const stored = await transaction.get<unknown>(key);
           await transaction.put(
             sandboxPolicyTombstoneKey(sandboxId, tombstone.generation),
             tombstone,
           );
           if (
-            credentialPolicyCleanupMatches(current, tombstone.generation, tombstone.sessionId) ||
-            credentialPolicyMigrationCleanupMatches(
-              current,
+            sandboxCredentialPolicyCleanupDeletesStored(
+              stored,
               tombstone.generation,
               tombstone.sessionId,
-            ) ||
-            legacy?.sessionId === tombstone.sessionId
+            )
           ) {
             await transaction.delete(key);
           }

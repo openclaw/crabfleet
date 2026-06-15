@@ -1,9 +1,8 @@
 import { sql, type RawBuilder } from "kysely";
 
+import { isCurrentCredentialPolicyGeneration } from "../credential-policy-fence.ts";
 import { runtimeAdapterName } from "../runtime-adapter.ts";
 import {
-  credentialPolicyLegacyGenerationPrefix,
-  credentialPolicyLegacyRepairClaimPrefix,
   type SandboxCredentialPolicy,
   type SandboxCredentialPolicyRegistration,
 } from "./session-control-policy.ts";
@@ -17,6 +16,10 @@ import {
 } from "./sandbox-lease.ts";
 
 const credentialPolicyRegistrationClaimMs = 60_000;
+
+function newSandboxCredentialPolicyGeneration(): string {
+  return `generation:${crypto.randomUUID()}`;
+}
 
 export type SandboxManagedOwnershipFence = SandboxCurrentLeaseFence | SandboxLeaseRefreshFence;
 
@@ -81,7 +84,7 @@ export async function activeSandboxCredentialPolicyGeneration(
   const expected = sandboxLookupIds(env, sandboxId);
   const generation = rows[0]?.registration_generation;
   if (
-    !generation ||
+    !isCurrentCredentialPolicyGeneration(generation) ||
     !expected.every((lookupId) =>
       rows.some(
         (row) =>
@@ -307,8 +310,16 @@ export async function sandboxCredentialPolicyGeneration(
 ): Promise<string> {
   return (
     (await existingSandboxCredentialPolicyGeneration(env, sessionId, sandboxId)) ??
-    `generation:${crypto.randomUUID()}`
+    newSandboxCredentialPolicyGeneration()
   );
+}
+
+export function currentSandboxCredentialPolicyGeneration(
+  generations: readonly string[],
+): string | null {
+  const unique = [...new Set(generations)];
+  if (unique.length !== 1) return null;
+  return isCurrentCredentialPolicyGeneration(unique[0]) ? unique[0] : null;
 }
 
 export async function existingSandboxCredentialPolicyGeneration(
@@ -319,11 +330,13 @@ export async function existingSandboxCredentialPolicyGeneration(
   const existing = await database(env)
     .selectFrom("interactive_session_credential_policies")
     .select("registration_generation")
+    .distinct()
     .where("session_id", "=", sessionId)
     .where("sandbox_id", "=", sandboxId)
-    .orderBy("lookup_id", "asc")
-    .executeTakeFirst();
-  return existing?.registration_generation ?? null;
+    .execute();
+  return currentSandboxCredentialPolicyGeneration(
+    existing.map((row) => row.registration_generation),
+  );
 }
 
 export async function queueSandboxCredentialPolicyCleanup(
@@ -494,11 +507,11 @@ export async function beginSandboxCredentialPolicyRegistration(
     .where("session_id", "=", sessionId)
     .where("sandbox_id", "=", sandboxId)
     .execute();
-  if (existing.length > 1) {
-    throw new Error("sandbox credential policy generations are inconsistent");
-  }
+  const existingGeneration = currentSandboxCredentialPolicyGeneration(
+    existing.map((row) => row.registration_generation),
+  );
   const registration = {
-    generation: existing[0]?.registration_generation ?? `generation:${crypto.randomUUID()}`,
+    generation: existingGeneration ?? newSandboxCredentialPolicyGeneration(),
     claim: `registration:${crypto.randomUUID()}`,
     lookupIds,
   };
@@ -546,79 +559,6 @@ export async function beginSandboxCredentialPolicyRegistration(
       "sandbox credential policy registration claim was not acquired",
     );
     throw new Error("sandbox credential policy registration is unavailable");
-  }
-  return registration;
-}
-
-export async function beginLegacySandboxCredentialPolicyRepair(
-  env: RuntimeEnv,
-  sessionId: string,
-  sandboxId: string,
-  ownershipFence: SandboxCurrentLeaseFence,
-): Promise<SandboxCredentialPolicyRegistration> {
-  const db = database(env);
-  const lookupIds = sandboxLookupIds(env, sandboxId);
-  const existing = await db
-    .selectFrom("interactive_session_credential_policies")
-    .select(["registration_generation", "registration_claim"])
-    .where("session_id", "=", sessionId)
-    .where("sandbox_id", "=", sandboxId)
-    .execute();
-  const generations = [...new Set(existing.map((row) => row.registration_generation))];
-  const existingGeneration = generations[0];
-  if (!existingGeneration || generations.length !== 1) {
-    throw new Error("legacy sandbox credential policy generations are inconsistent");
-  }
-  const resuming = existing.some((row) =>
-    row.registration_claim?.startsWith(credentialPolicyLegacyRepairClaimPrefix),
-  );
-  if (!existingGeneration.startsWith(credentialPolicyLegacyGenerationPrefix) && !resuming) {
-    throw new Error("legacy sandbox credential policy repair is not pending");
-  }
-  const registration: SandboxCredentialPolicyRegistration = {
-    generation: existingGeneration.startsWith(credentialPolicyLegacyGenerationPrefix)
-      ? `generation:${crypto.randomUUID()}`
-      : existingGeneration,
-    claim: `${credentialPolicyLegacyRepairClaimPrefix}${crypto.randomUUID()}`,
-    lookupIds,
-  };
-  const now = Date.now();
-  const registrationExpiresAt = now + credentialPolicyRegistrationClaimMs;
-  await executeBatch(
-    env,
-    sandboxCredentialPolicyRegistrationQueries(
-      sessionId,
-      sandboxId,
-      registration,
-      registrationExpiresAt,
-      now,
-      ownershipFence,
-    ),
-  );
-  const claimed = await db
-    .selectFrom("interactive_session_credential_policies")
-    .select([
-      "lookup_id",
-      "state",
-      "registration_generation",
-      "registration_claim",
-      "registration_claim_expires_at",
-    ])
-    .where("session_id", "=", sessionId)
-    .where("sandbox_id", "=", sandboxId)
-    .where("lookup_id", "in", lookupIds)
-    .execute();
-  if (
-    claimed.length !== lookupIds.length ||
-    claimed.some(
-      (row) =>
-        row.state !== "registering" ||
-        row.registration_generation !== registration.generation ||
-        row.registration_claim !== registration.claim ||
-        row.registration_claim_expires_at !== registrationExpiresAt,
-    )
-  ) {
-    throw new Error("legacy sandbox credential policy repair claim was not acquired");
   }
   return registration;
 }

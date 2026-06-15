@@ -17,7 +17,7 @@ function scanRow(values: Partial<CredentialPolicyScanRow> = {}): CredentialPolic
     sandbox_id: "sandbox-1",
     lookup_id: "sandbox-1",
     policy_state: "active",
-    registration_generation: "generation-1",
+    registration_generation: "generation:test-1",
     registration_claim: null,
     registration_claim_expires_at: null,
     policy_updated_at: now,
@@ -189,6 +189,13 @@ test("credential-policy scan cleans terminal, orphaned, adapter, and expired own
 });
 
 test("credential-policy scan cleans abandoned and stale registrations", () => {
+  assert.equal(
+    credentialPolicyScanRequiresCleanup(
+      scanRow({ registration_generation: "legacy:IS-42:sandbox-1" }),
+      now,
+    ),
+    true,
+  );
   assert.equal(
     credentialPolicyScanRequiresCleanup(
       scanRow({

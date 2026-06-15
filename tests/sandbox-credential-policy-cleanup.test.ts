@@ -159,7 +159,7 @@ test("terminal cleanup atomically stages the session and credential-policy refs"
   const env = runtimeEnv(
     (sql) => {
       if (/select .*registration_generation/i.test(sql)) {
-        return [{ registration_generation: "generation-1" }];
+        return [{ registration_generation: "generation:test-1" }];
       }
       if (/select .*credential_cleanup_terminal_status/i.test(sql)) {
         return [
@@ -207,7 +207,7 @@ test("terminal cleanup atomically stages the session and credential-policy refs"
   assert.match(sql, /update "interactive_session_credential_policies"/i);
   assert.match(sql, /not exists/i);
   assert.ok(parameters.includes("failed"));
-  assert.ok(parameters.includes("generation-1"));
+  assert.ok(parameters.includes("generation:test-1"));
   assert.ok(parameters.includes("sandbox-1"));
   assert.ok(parameters.includes(leaseId));
 });

@@ -487,7 +487,7 @@ test("standalone Sandbox activation fences owner and complete policy generation"
             {
               lookup_id: claim.lease.sandboxId,
               state: "active",
-              registration_generation: "generation-1",
+              registration_generation: "generation:test-1",
               registration_claim: null,
             },
           ],
@@ -525,7 +525,7 @@ test("standalone Sandbox activation fences owner and complete policy generation"
   assert.match(sql, /registration_generation/);
   const parameters = statements.flatMap((statement) => statement.parameters);
   assert.ok(parameters.includes(claim.fence.claim));
-  assert.ok(parameters.includes("generation-1"));
+  assert.ok(parameters.includes("generation:test-1"));
   assert.ok(parameters.includes(expectedLeaseId));
   assert.ok(parameters.includes(201));
 });

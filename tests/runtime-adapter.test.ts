@@ -912,9 +912,9 @@ test("Sandbox credential egress proves the durable generation and owner", async 
   const egressSource = controlSource.slice(egressStart, egressEnd);
 
   assert.match(readSource, /x-crabfleet-policy-generation/);
-  assert.match(readSource, /response\.status === 409/);
-  assert.match(readSource, /repairLegacySandboxCredentialPolicyBatch/);
-  assert.match(readSource, /response = await stub\.fetch\(policyUrl\)/);
+  assert.match(readSource, /const response = await stub\.fetch\(policyUrl\)/);
+  assert.doesNotMatch(readSource, /response\.status === 409/);
+  assert.doesNotMatch(readSource, /repairLegacySandboxCredentialPolicy/);
   assert.match(readSource, /sandboxCredentialPolicyHasDurableOwner/);
   assert.match(readSource, /interactive_session_credential_policies/);
   assert.match(readSource, /activeSandboxCredentialPolicyGeneration/);
@@ -923,75 +923,38 @@ test("Sandbox credential egress proves the durable generation and owner", async 
   assert.match(controlSource, /const current = storedSandboxCredentialPolicy\(stored\)/);
   assert.match(controlSource, /if \(!current \|\| !policy\)/);
   assert.doesNotMatch(egressSource, /storage\.delete/);
-  assert.match(egressSource, /legacy credential policy migration required/);
-  assert.match(egressSource, /status: 409/);
-  assert.match(controlSource, /return current\.policy/);
-  assert.doesNotMatch(
-    controlSource,
-    /storedSandboxCredentialPolicy\(value\)\?\.policy \?\? legacySandboxCredentialPolicy/,
-  );
+  assert.match(egressSource, /return json\(\{ error: "not found" \}, \{ status: 404 \}\)/);
+  assert.match(egressSource, /return json\(policy/);
 });
 
-test("cron generation-wraps migrated legacy policies under exact live ownership", async () => {
-  const cleanupServiceSource = await readFile(
-    new URL("../src/worker/sandbox-credential-policy-cleanup-service.ts", import.meta.url),
-    "utf8",
-  );
-  const policyRepositorySource = await readFile(
-    new URL("../src/worker/sandbox-credential-policy-repository.ts", import.meta.url),
-    "utf8",
-  );
-  const batchStart = cleanupServiceSource.indexOf(
-    "async function reconcileSandboxCredentialPolicyCleanupBatch",
-  );
-  const batchEnd = cleanupServiceSource.indexOf(
-    "async function reconcileCredentialPolicyCleanup(",
-    batchStart,
-  );
-  const batchSource = cleanupServiceSource.slice(batchStart, batchEnd);
-  const beginStart = policyRepositorySource.indexOf(
-    "async function beginLegacySandboxCredentialPolicyRepair",
-  );
-  const renewStart = policyRepositorySource.indexOf(
-    "async function renewSandboxCredentialPolicyRegistration",
-    beginStart,
-  );
-  const legacyRepairStart = cleanupServiceSource.indexOf(
-    "async function repairLegacySandboxCredentialPolicy",
-  );
-  const legacyRepairEnd = cleanupServiceSource.indexOf(
-    "async function unregisterSandboxCredentialPolicyLookup",
-    legacyRepairStart,
-  );
-  const repairSource = `${policyRepositorySource.slice(
-    beginStart,
-    renewStart,
-  )}\n${cleanupServiceSource.slice(legacyRepairStart, legacyRepairEnd)}`;
-  const controlSource = (
+test("credential policy control surface has no legacy migration protocol", async () => {
+  const source = (
     await Promise.all([
+      readFile(new URL("../src/credential-policy-fence.ts", import.meta.url), "utf8"),
+      readFile(
+        new URL("../src/worker/sandbox-credential-policy-cleanup-service.ts", import.meta.url),
+        "utf8",
+      ),
+      readFile(
+        new URL("../src/worker/sandbox-credential-policy-registration-service.ts", import.meta.url),
+        "utf8",
+      ),
+      readFile(
+        new URL("../src/worker/sandbox-credential-policy-repository.ts", import.meta.url),
+        "utf8",
+      ),
+      readFile(new URL("../src/worker/sandbox-outbound-service.ts", import.meta.url), "utf8"),
       readFile(new URL("../src/worker/session-control-do.ts", import.meta.url), "utf8"),
       readFile(new URL("../src/worker/session-control-policy.ts", import.meta.url), "utf8"),
     ])
   ).join("\n");
 
-  assert.ok(
-    batchSource.indexOf("repairLegacyPolicyBatch") <
-      batchSource.indexOf("scanCredentialPolicyCleanupPage"),
-  );
-  assert.match(repairSource, /credentialPolicyLegacyGenerationPrefix/);
-  assert.match(repairSource, /credentialPolicyLegacyRepairClaimPrefix/);
-  assert.match(repairSource, /sandboxCredentialPolicyRegistrationQueries/);
-  assert.match(repairSource, /const ownership: SandboxCurrentLeaseFence/);
-  assert.match(repairSource, /renewSandboxCredentialPolicyRegistration/);
-  assert.match(repairSource, /\/api\/session-control\/migrate-legacy/);
-  assert.match(repairSource, /sandboxIds: registration\.lookupIds/);
-  assert.match(repairSource, /finishSandboxCredentialPolicyRegistration/);
-  assert.match(repairSource, /registration_claim_expires_at", "<=", now/);
-  assert.match(controlSource, /migratedCredentialPolicyRecord/);
-  assert.match(controlSource, /const sourcePolicy = records/);
-  assert.match(controlSource, /migratedRecords/);
-  assert.match(controlSource, /credentialPolicyMigrationCleanupMatches/);
-  assert.match(controlSource, /this\.ctx\.storage\.transaction/);
+  assert.doesNotMatch(source, /migrate-legacy/);
+  assert.doesNotMatch(source, /LegacySandboxCredentialPolicy/);
+  assert.doesNotMatch(source, /legacy credential policy/);
+  assert.doesNotMatch(source, /credentialPolicyLegacy/);
+  assert.doesNotMatch(source, /migratedCredentialPolicyRecord/);
+  assert.doesNotMatch(source, /credentialPolicyMigrationCleanupMatches/);
 });
 
 test("active credential-policy generations recover after a post-DO crash", async () => {
@@ -1066,8 +1029,8 @@ test("Sandbox credential registration always proves exact durable ownership", as
   assert.match(ownerSource, /sandbox_refresh_claim = \$\{ownershipFence\.claim\}/);
   assert.match(ownerSource, /AND \$\{sandboxId\} = \$\{ownershipFence\.sandboxId\}/);
   assert.match(ensureSource, /sandboxCurrentLeaseFence|SandboxCurrentLeaseFence/);
-  assert.match(ensureSource, /credentialPolicyLegacyGenerationPrefix/);
-  assert.match(ensureSource, /repairLegacySandboxCredentialPolicy/);
+  assert.match(ensureSource, /existingSandboxCredentialPolicyGeneration/);
+  assert.match(ensureSource, /sandboxCredentialPolicyExists/);
   assert.match(
     ensureSource,
     /registerSandboxCredentialPolicy\(env, session, sandboxId, ownership\)/,

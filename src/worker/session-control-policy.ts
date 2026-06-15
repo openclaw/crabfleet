@@ -1,12 +1,10 @@
-import type {
-  CredentialPolicyGenerationRecord,
-  CredentialPolicyGenerationTombstone,
-  CredentialPolicyLegacyMigration,
+import {
+  credentialPolicyCleanupMatches,
+  isCurrentCredentialPolicyGeneration,
+  type CredentialPolicyGenerationRecord,
+  type CredentialPolicyGenerationTombstone,
 } from "../credential-policy-fence.ts";
 import type { FleetSandboxPolicySummary } from "../fleet-state.ts";
-
-export const credentialPolicyLegacyGenerationPrefix = "legacy:";
-export const credentialPolicyLegacyRepairClaimPrefix = "legacy-repair:";
 
 export type SandboxCredentialPolicy = {
   allowedHosts: string[];
@@ -25,10 +23,6 @@ export type SandboxCredentialPolicy = {
 export type StoredSandboxCredentialPolicy =
   CredentialPolicyGenerationRecord<SandboxCredentialPolicy>;
 
-export type SandboxCredentialPolicyLegacyMigration = CredentialPolicyLegacyMigration & {
-  sandboxIds: string[];
-};
-
 export type SandboxCredentialPolicyRegistration = {
   generation: string;
   claim: string;
@@ -36,28 +30,23 @@ export type SandboxCredentialPolicyRegistration = {
 };
 
 export function storedSandboxCredentialPolicy(
-  value: StoredSandboxCredentialPolicy | SandboxCredentialPolicy | undefined,
+  value: unknown,
 ): StoredSandboxCredentialPolicy | undefined {
+  if (!value || typeof value !== "object") return undefined;
+  const record = value as Partial<StoredSandboxCredentialPolicy>;
   if (
-    value &&
-    "policy" in value &&
-    typeof value.generation === "string" &&
-    typeof value.registrationClaim === "string" &&
-    typeof value.registrationExpiresAt === "number"
+    record.policy &&
+    isCurrentCredentialPolicyGeneration(record.generation) &&
+    typeof record.registrationClaim === "string" &&
+    typeof record.registrationExpiresAt === "number"
   ) {
-    return value;
+    return record as StoredSandboxCredentialPolicy;
   }
   return undefined;
 }
 
-export function legacySandboxCredentialPolicy(
-  value: StoredSandboxCredentialPolicy | SandboxCredentialPolicy | undefined,
-): SandboxCredentialPolicy | undefined {
-  return value && !("policy" in value) ? value : undefined;
-}
-
 export function sandboxCredentialPolicyFromStorage(
-  value: StoredSandboxCredentialPolicy | SandboxCredentialPolicy | undefined,
+  value: unknown,
 ): SandboxCredentialPolicy | undefined {
   const current = storedSandboxCredentialPolicy(value);
   if (!current) return undefined;
@@ -70,14 +59,22 @@ export function sandboxCredentialPolicyFromStorage(
   return current.policy;
 }
 
+export function sandboxCredentialPolicyCleanupDeletesStored(
+  value: unknown,
+  generation: string,
+  sessionId: string,
+): boolean {
+  if (value === undefined) return false;
+  const current = storedSandboxCredentialPolicy(value);
+  return !current || credentialPolicyCleanupMatches(current, generation, sessionId);
+}
+
 export function validSandboxCredentialPolicyRegistration(
   value: StoredSandboxCredentialPolicy,
 ): boolean {
   return Boolean(
     value &&
-    typeof value.generation === "string" &&
-    value.generation.length > 0 &&
-    value.generation.length <= 200 &&
+    isCurrentCredentialPolicyGeneration(value.generation) &&
     typeof value.registrationClaim === "string" &&
     value.registrationClaim.length > 0 &&
     value.registrationClaim.length <= 200 &&
@@ -87,33 +84,6 @@ export function validSandboxCredentialPolicyRegistration(
     typeof value.policy.sessionId === "string" &&
     (value.policy.expiresAt === undefined ||
       (Number.isFinite(value.policy.expiresAt) && value.policy.expiresAt > Date.now())),
-  );
-}
-
-export function validSandboxCredentialPolicyLegacyMigration(
-  value: SandboxCredentialPolicyLegacyMigration,
-): boolean {
-  return Boolean(
-    value &&
-    typeof value.generation === "string" &&
-    value.generation.length > 0 &&
-    value.generation.length <= 200 &&
-    !value.generation.startsWith(credentialPolicyLegacyGenerationPrefix) &&
-    typeof value.registrationClaim === "string" &&
-    value.registrationClaim.startsWith(credentialPolicyLegacyRepairClaimPrefix) &&
-    value.registrationClaim.length <= 200 &&
-    Number.isFinite(value.registrationExpiresAt) &&
-    Array.isArray(value.sandboxIds) &&
-    value.sandboxIds.length > 0 &&
-    value.sandboxIds.length <= 8 &&
-    new Set(value.sandboxIds).size === value.sandboxIds.length &&
-    value.sandboxIds.every(
-      (sandboxId) =>
-        typeof sandboxId === "string" && sandboxId.length > 0 && sandboxId.length <= 200,
-    ) &&
-    typeof value.sessionId === "string" &&
-    value.sessionId.length > 0 &&
-    value.sessionId.length <= 200,
   );
 }
 

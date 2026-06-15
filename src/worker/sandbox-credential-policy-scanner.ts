@@ -1,6 +1,9 @@
 import { sql, type Kysely } from "kysely";
 
-import { credentialPolicySandboxIsExpected } from "../credential-policy-fence.ts";
+import {
+  credentialPolicySandboxIsExpected,
+  isCurrentCredentialPolicyGeneration,
+} from "../credential-policy-fence.ts";
 import { runtimeAdapterName } from "../runtime-adapter.ts";
 import { database, executeBatch, type Database } from "./database.ts";
 import type { RuntimeEnv } from "./env.ts";
@@ -311,6 +314,7 @@ async function repairActiveSandboxCredentialPolicyRegistration(
 ): Promise<boolean> {
   if (
     row.policy_state !== "registering" ||
+    !isCurrentCredentialPolicyGeneration(row.registration_generation) ||
     (row.registration_claim !== null &&
       (row.registration_claim_expires_at ?? Number.NEGATIVE_INFINITY) > now)
   ) {
@@ -384,6 +388,7 @@ export function credentialPolicyScanRequiresCleanup(
   row: CredentialPolicyScanRow,
   now: number,
 ): boolean {
+  if (!isCurrentCredentialPolicyGeneration(row.registration_generation)) return true;
   const registrationAbandoned =
     row.policy_state === "registering" &&
     (row.registration_claim === null ||
@@ -422,7 +427,6 @@ export function credentialPolicyScanRequiresCleanup(
       row.session_status === "attached" ||
       row.session_status === "detached")
   ) {
-    // Migrated live sessions can predate agent tokens; the durable lease/refresh fence owns policy.
     return false;
   }
   if (registrationAbandoned) return true;

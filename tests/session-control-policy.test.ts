@@ -2,14 +2,12 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
-  credentialPolicyLegacyRepairClaimPrefix,
   dedupeSandboxPolicies,
-  legacySandboxCredentialPolicy,
   redactSandboxPolicy,
+  sandboxCredentialPolicyCleanupDeletesStored,
   sandboxCredentialPolicyFromStorage,
   storedSandboxCredentialPolicy,
   validCredentialPolicyTombstone,
-  validSandboxCredentialPolicyLegacyMigration,
   validSandboxCredentialPolicyRegistration,
   type SandboxCredentialPolicy,
   type StoredSandboxCredentialPolicy,
@@ -32,7 +30,7 @@ function registration(
   values: Partial<StoredSandboxCredentialPolicy> = {},
 ): StoredSandboxCredentialPolicy {
   return {
-    generation: "generation-1",
+    generation: "generation:test-1",
     registrationClaim: "claim-1",
     registrationExpiresAt: Date.now() + 60_000,
     policy,
@@ -43,6 +41,10 @@ function registration(
 test("session-control policy registration validates bounded generation shape", () => {
   assert.equal(validSandboxCredentialPolicyRegistration(registration()), true);
   assert.equal(validSandboxCredentialPolicyRegistration(registration({ generation: "" })), false);
+  assert.equal(
+    validSandboxCredentialPolicyRegistration(registration({ generation: "legacy:test-1" })),
+    false,
+  );
   assert.equal(
     validSandboxCredentialPolicyRegistration(registration({ registrationExpiresAt: Number.NaN })),
     false,
@@ -58,12 +60,14 @@ test("session-control policy registration validates bounded generation shape", (
 test("session-control storage exposes only current unexpired policy records", () => {
   const current = registration();
   assert.equal(storedSandboxCredentialPolicy(current), current);
-  assert.equal(legacySandboxCredentialPolicy(current), undefined);
   assert.equal(sandboxCredentialPolicyFromStorage(current), policy);
 
   assert.equal(storedSandboxCredentialPolicy(policy), undefined);
-  assert.equal(legacySandboxCredentialPolicy(policy), policy);
   assert.equal(sandboxCredentialPolicyFromStorage(policy), undefined);
+  assert.equal(
+    storedSandboxCredentialPolicy(registration({ generation: "legacy:test-1" })),
+    undefined,
+  );
   assert.equal(
     sandboxCredentialPolicyFromStorage(
       registration({ policy: { ...policy, expiresAt: Date.now() - 1 } }),
@@ -72,29 +76,30 @@ test("session-control storage exposes only current unexpired policy records", ()
   );
 });
 
-test("legacy migration and tombstones validate exact bounded identities", () => {
-  const migration = {
-    generation: "generation-2",
-    registrationClaim: `${credentialPolicyLegacyRepairClaimPrefix}claim-2`,
-    registrationExpiresAt: Date.now() + 60_000,
-    sandboxIds: ["sandbox-1", "sandbox-2"],
-    sessionId: "IS-42",
-  };
-  assert.equal(validSandboxCredentialPolicyLegacyMigration(migration), true);
+test("credential cleanup purges unreadable storage without crossing current generations", () => {
   assert.equal(
-    validSandboxCredentialPolicyLegacyMigration({
-      ...migration,
-      generation: "legacy:generation-2",
-    }),
+    sandboxCredentialPolicyCleanupDeletesStored(undefined, "generation:test-1", "IS-42"),
     false,
   );
   assert.equal(
-    validSandboxCredentialPolicyLegacyMigration({
-      ...migration,
-      sandboxIds: ["sandbox-1", "sandbox-1"],
-    }),
+    sandboxCredentialPolicyCleanupDeletesStored(policy, "generation:test-1", "IS-42"),
+    true,
+  );
+  assert.equal(
+    sandboxCredentialPolicyCleanupDeletesStored(registration(), "generation:test-1", "IS-42"),
+    true,
+  );
+  assert.equal(
+    sandboxCredentialPolicyCleanupDeletesStored(registration(), "generation:test-2", "IS-42"),
     false,
   );
+  assert.equal(
+    sandboxCredentialPolicyCleanupDeletesStored(registration(), "generation:test-1", "IS-43"),
+    false,
+  );
+});
+
+test("generation tombstones validate exact bounded identities", () => {
   assert.equal(
     validCredentialPolicyTombstone({
       generation: "generation-2",
