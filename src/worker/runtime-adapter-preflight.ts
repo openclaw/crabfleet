@@ -38,3 +38,22 @@ export function runtimeAdapterToken(env: RuntimeEnv): string {
     .trim()
     .slice(0, 4000);
 }
+
+export function requireRegisteredRuntimeAdapterControlPlane(
+  env: RuntimeEnv,
+  profile: string,
+  registeredControlPlane: string | null | undefined,
+): string {
+  if (!registeredControlPlane) {
+    throw new Error("runtime adapter control-plane registration is missing");
+  }
+  const configuredControlPlane = configuredRuntimeAdapterControlPlane(env, profile);
+  if (!configuredControlPlane) {
+    throw new Error("runtime adapter control plane is unavailable");
+  }
+  if (configuredControlPlane !== registeredControlPlane) {
+    throw new Error("runtime adapter control plane differs from workspace registration");
+  }
+  if (!runtimeAdapterToken(env)) throw new Error("runtime adapter token is not configured");
+  return registeredControlPlane;
+}

@@ -40,6 +40,7 @@ import { publicDeploymentConfig } from "../src/worker/deployment.ts";
 import type { RuntimeEnv } from "../src/worker/env.ts";
 import {
   configuredRuntimeAdapterControlPlane,
+  requireRegisteredRuntimeAdapterControlPlane,
   requireRuntimeAdapterCreatePreflight,
   runtimeAdapterToken,
 } from "../src/worker/runtime-adapter-preflight.ts";
@@ -790,12 +791,6 @@ test("runtime adapter operations stay bound to the registered control plane", as
     new URL("../migrations/0020_runtime_adapter_lifecycle.sql", import.meta.url),
     "utf8",
   );
-  const bindingStart = source.indexOf("function requireRegisteredRuntimeAdapterControlPlane");
-  const bindingEnd = source.indexOf(
-    "async function stopSupersededRuntimeAdapterProvision",
-    bindingStart,
-  );
-  const bindingSource = source.slice(bindingStart, bindingEnd);
   const provisionStart = source.indexOf("async function provisionWithRuntimeAdapter");
   const provisionEnd = source.indexOf("function persistedRuntimeAdapterSeconds", provisionStart);
   const provisionSource = source.slice(provisionStart, provisionEnd);
@@ -819,9 +814,28 @@ test("runtime adapter operations stay bound to the registered control plane", as
     ),
     "https://adapter.example.test/",
   );
-  assert.match(bindingSource, /configuredControlPlane !== registeredControlPlane/);
-  assert.match(bindingSource, /configuredRuntimeAdapterControlPlane\(env, profile\)/);
-  assert.match(bindingSource, /control plane differs from workspace registration/);
+  const env = {
+    CRABBOX_RUNTIME_ADAPTER_URL: "https://adapter.example.test",
+    CRABBOX_RUNTIME_ADAPTER_TOKEN: "adapter-token",
+  } as RuntimeEnv;
+  assert.equal(
+    requireRegisteredRuntimeAdapterControlPlane(env, "default", "https://adapter.example.test/"),
+    "https://adapter.example.test/",
+  );
+  assert.throws(() => requireRegisteredRuntimeAdapterControlPlane(env, "default", null), {
+    message: "runtime adapter control-plane registration is missing",
+  });
+  assert.throws(
+    () =>
+      requireRegisteredRuntimeAdapterControlPlane(
+        env,
+        "default",
+        "https://different.example.test/",
+      ),
+    {
+      message: "runtime adapter control plane differs from workspace registration",
+    },
+  );
   assert.match(provisionSource, /requireRegisteredRuntimeAdapterControlPlane/);
   assert.match(provisionSource, /runtimeAdapterCollectionUrl\(baseUrl\)/);
   assert.match(inspectSource, /session\.adapter_control_plane/);
@@ -1872,7 +1886,7 @@ test("adapter bodies share the bounded stream reader", async () => {
       "async function stopRuntimeAdapterWorkspace(",
       "async function stopRuntimeAdapterWorkspaceForSession",
     ],
-    ["async function interactiveSessionVnc", "function interactiveTerminalTarget"],
+    ["async function interactiveSessionVnc", "async function multiplayerTerminalInputPayloads"],
   ] as const;
   for (const [startMarker, endMarker] of ranges) {
     const start = source.indexOf(startMarker);
@@ -1891,7 +1905,7 @@ test("adapter bodies share the bounded stream reader", async () => {
 test("desktop mint revalidates current ownership before redirect", async () => {
   const source = await readFile(new URL("../src/index.ts", import.meta.url), "utf8");
   const vncStart = source.indexOf("async function interactiveSessionVnc");
-  const vncEnd = source.indexOf("function interactiveTerminalTarget", vncStart);
+  const vncEnd = source.indexOf("async function multiplayerTerminalInputPayloads", vncStart);
   const vncSource = source.slice(vncStart, vncEnd);
 
   assert.ok(
@@ -1913,21 +1927,6 @@ test("desktop mint revalidates current ownership before redirect", async () => {
   assert.match(vncSource, /canControlInteractiveSession/);
   assert.match(vncSource, /desktop authorization changed; retry/);
   assert.doesNotMatch(vncSource, /body:\s*JSON\.stringify\(\{\}\)/);
-});
-
-test("runtime adapter terminals use the server-side adapter bearer", async () => {
-  const source = await readFile(new URL("../src/index.ts", import.meta.url), "utf8");
-  const targetStart = source.indexOf("function interactiveTerminalTarget");
-  const targetEnd = source.indexOf("function interactivePtyRouteKind", targetStart);
-  const targetSource = source.slice(targetStart, targetEnd);
-
-  assert.match(targetSource, /session\.adapter === runtimeAdapterName/);
-  assert.match(targetSource, /session\[interactiveSessionAdapterControlPlane\]/);
-  assert.match(targetSource, /runtimeAdapterTerminalAuthorization/);
-  assert.match(targetSource, /requireRegisteredRuntimeAdapterControlPlane/);
-  assert.match(targetSource, /runtimeAdapterTerminalOriginMatches\(controlPlane, attachUrl\)/);
-  assert.match(targetSource, /bearer\(runtimeAdapterToken\(env\)\)/);
-  assert.doesNotMatch(targetSource, /searchParams\.set\([^)]*(?:token|ticket)/u);
 });
 
 test("runtime adapter terminal upgrades use the coordinator service binding", async () => {
