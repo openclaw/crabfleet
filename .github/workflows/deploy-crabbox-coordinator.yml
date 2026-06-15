@@ -62,7 +62,7 @@ jobs:
           token="$(
             node -e '
               const { createHmac } = require("node:crypto");
-              const root = process.env.CRABBOX_OPENCLAW_TOKEN;
+              const root = process.env.CRABBOX_OPENCLAW_TOKEN?.trim();
               if (!root) process.exit(1);
               process.stdout.write(
                 createHmac("sha256", root)
