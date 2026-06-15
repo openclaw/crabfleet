@@ -75,11 +75,7 @@ import { allocateInteractiveSessionIdSql, formatInteractiveSessionId } from "./s
 import { preferredEnabledRepo } from "./repo-selection";
 import { sandboxGitAuthorEmail } from "./git-identity";
 import { cachedBooleanGrant } from "./terminal-authorization";
-import {
-  openClawGitHubRepoParts,
-  openClawRoomMaxSessions,
-  openClawServiceAuthorized,
-} from "./openclaw-service";
+import { openClawGitHubRepoParts, openClawRoomMaxSessions } from "./openclaw-service";
 import {
   sanitizeTrustedProxyRequest,
   trustedProxyPublicOrigin,
@@ -165,7 +161,6 @@ import { githubCallback, githubLogin, sshLinkCookie } from "./worker/github-auth
 import { GitHubApiError, githubFetch, githubHeaders, refreshGitHubUser } from "./worker/github";
 import {
   GitHubActionsSessionRegistrationService,
-  type GitHubActionsSessionRegistrationInput,
   type GitHubActionsSessionRegistrationStore,
 } from "./worker/github-actions-session-registration";
 import {
@@ -190,6 +185,7 @@ import {
 } from "./worker/session-model";
 import { normalizeRepo } from "./worker/repositories";
 import { handlePublicAuthRoute, handleSessionAuthRoute } from "./worker/routes/auth";
+import { handleOpenClawRoute } from "./worker/routes/openclaw";
 import {
   isCurrentSandboxLease,
   newSandboxLease,
@@ -222,19 +218,13 @@ import {
   type OpenClawSupervisionStore,
 } from "./worker/openclaw-supervision";
 import { OpenClawRootStopService, type OpenClawRootStopStore } from "./worker/openclaw-root-stop";
-import {
-  buildOpenClawTranscript,
-  openClawSessionSummary,
-  openClawTranscriptEventWindow,
-  openClawVisibleRoomSessions,
-} from "./worker/openclaw-queries";
 import { OpenClawMutationService, type OpenClawMutationStore } from "./worker/openclaw-mutations";
 import {
   OpenClawCreateService,
   openClawServiceBranch,
   type OpenClawCreateStore,
-  type OpenClawCreateInput,
 } from "./worker/openclaw-create";
+import { OpenClawController, type OpenClawControllerStore } from "./worker/openclaw-controller";
 import {
   InteractiveSessionLineageService,
   type InteractiveSessionLineageStore,
@@ -1704,87 +1694,12 @@ async function api(
     );
   }
 
-  if (request.method === "POST" && url.pathname === "/api/openclaw/action-sessions") {
-    return json(await openClawRegisterActionSession(request, env), { status: 201 });
-  }
-
-  if (request.method === "POST" && url.pathname === "/api/openclaw/crabboxes") {
-    return json(await openClawCreateCrabbox(request, env), { status: 201 });
-  }
-
-  const openClawSessionRootMatch = url.pathname.match(/^\/api\/openclaw\/session-roots\/([^/]+)$/);
-  if (request.method === "GET" && openClawSessionRootMatch) {
-    return json(
-      await openClawReadSessionRoot(
-        request,
-        env,
-        decodeURIComponent(openClawSessionRootMatch[1] ?? ""),
-      ),
-    );
-  }
-
-  const openClawSessionRootActionMatch = url.pathname.match(
-    /^\/api\/openclaw\/session-roots\/([^/]+)\/actions$/,
-  );
-  if (request.method === "POST" && openClawSessionRootActionMatch) {
-    return json(
-      await openClawMutateSessionRoot(
-        request,
-        env,
-        decodeURIComponent(openClawSessionRootActionMatch[1] ?? ""),
-      ),
-    );
-  }
-
-  const openClawCrabboxTranscriptMatch = url.pathname.match(
-    /^\/api\/openclaw\/crabboxes\/([^/]+)\/transcript$/,
-  );
-  if (request.method === "GET" && openClawCrabboxTranscriptMatch) {
-    return json(
-      await openClawReadCrabboxTranscript(
-        request,
-        env,
-        decodeURIComponent(openClawCrabboxTranscriptMatch[1] ?? ""),
-      ),
-    );
-  }
-
-  const openClawCrabboxMessageMatch = url.pathname.match(
-    /^\/api\/openclaw\/crabboxes\/([^/]+)\/message$/,
-  );
-  if (request.method === "POST" && openClawCrabboxMessageMatch) {
-    return json(
-      await openClawMessageCrabbox(
-        request,
-        env,
-        decodeURIComponent(openClawCrabboxMessageMatch[1] ?? ""),
-      ),
-    );
-  }
-
-  const openClawCrabboxActionMatch = url.pathname.match(
-    /^\/api\/openclaw\/crabboxes\/([^/]+)\/actions$/,
-  );
-  if (request.method === "POST" && openClawCrabboxActionMatch) {
-    return json(
-      await openClawMutateCrabbox(
-        request,
-        env,
-        decodeURIComponent(openClawCrabboxActionMatch[1] ?? ""),
-      ),
-    );
-  }
-
-  const openClawCrabboxReadMatch = url.pathname.match(/^\/api\/openclaw\/crabboxes\/([^/]+)$/);
-  if (request.method === "GET" && openClawCrabboxReadMatch) {
-    return json(
-      await openClawReadCrabbox(
-        request,
-        env,
-        decodeURIComponent(openClawCrabboxReadMatch[1] ?? ""),
-      ),
-    );
-  }
+  const openClawResponse = await handleOpenClawRoute(request, url, {
+    controller: openClawController(env),
+    automationTokens: [env.CRABBOX_OPENCLAW_TOKEN],
+    roomTokens: [env.CRABBOX_OPENCLAW_TOKEN, env.CRABBOX_MULTICODEX_TOKEN],
+  });
+  if (openClawResponse) return openClawResponse;
 
   const sharedSessionMatch = url.pathname.match(/^\/api\/shared-sessions\/([^/]+)$/);
   if (request.method === "GET" && sharedSessionMatch) {
@@ -2347,149 +2262,6 @@ async function agentCreateInteractiveSession(
   return result;
 }
 
-async function openClawCreateCrabbox(
-  request: Request,
-  env: RuntimeEnv,
-): Promise<{ session: InteractiveSession; browserUrl: string }> {
-  requireOpenClawRoomService(request, env);
-  const body = await readJson<OpenClawCreateInput>(request);
-  const serviceUser = openClawServiceUser();
-  const session = await openClawCreateService(env, serviceUser).create(body);
-  return openClawDecoratedCrabboxResponse(env, session);
-}
-
-async function openClawReadSessionRoot(
-  request: Request,
-  env: RuntimeEnv,
-  rootSessionId: string,
-): Promise<{
-  rootSessionId: string;
-  crabboxes: Array<{ session: InteractiveSession; browserUrl: string }>;
-}> {
-  requireOpenClawRoomService(request, env);
-  const root = clean(rootSessionId, 120);
-  if (!root) throw badRequest("root session id is required");
-  const rootSession = await readOpenClawRoomRoot(env, root);
-  const room = await readOpenClawRoomSessions(env, root, openClawRoomMaxSessions);
-  const sessions = openClawVisibleRoomSessions(root, rootSession, room);
-  const serviceUser = openClawServiceUser();
-  return {
-    rootSessionId: root,
-    crabboxes: sessions.map((session) => openClawCrabboxSummaryResponse(env, serviceUser, session)),
-  };
-}
-
-async function openClawMutateSessionRoot(
-  request: Request,
-  env: RuntimeEnv,
-  rootSessionId: string,
-): Promise<{
-  rootSessionId: string;
-  admissionClosed: true;
-  crabboxes: Array<{ session: InteractiveSession; browserUrl: string }>;
-}> {
-  requireOpenClawRoomService(request, env);
-  const body = await readJson<{ action?: string }>(request);
-  if (body.action !== "stop") throw badRequest("only stop is supported");
-  const root = clean(rootSessionId, 120);
-  if (!root) throw badRequest("root session id is required");
-  const serviceUser = openClawServiceUser();
-  const result = await openClawRootStopService(request, env, serviceUser).stop(root);
-  return {
-    rootSessionId: result.rootSessionId,
-    admissionClosed: true,
-    crabboxes: result.sessions.map((session) =>
-      openClawCrabboxSummaryResponse(env, serviceUser, session),
-    ),
-  };
-}
-
-async function openClawReadCrabbox(
-  request: Request,
-  env: RuntimeEnv,
-  id: string,
-): Promise<{ session: InteractiveSession; browserUrl: string }> {
-  requireOpenClawRoomService(request, env);
-  const session = await openClawRootScopedCrabbox(request, env, id);
-  return openClawCrabboxSummaryResponse(env, openClawServiceUser(), session);
-}
-
-async function openClawReadCrabboxTranscript(
-  request: Request,
-  env: RuntimeEnv,
-  id: string,
-): Promise<{
-  session: InteractiveSession;
-  browserUrl: string;
-  transcript: string;
-  eventCount: number;
-  truncated: boolean;
-}> {
-  requireOpenClawRoomService(request, env);
-  const session = await openClawRootScopedCrabbox(request, env, id);
-  const [eventWindow, eventCount] = await Promise.all([
-    readInteractiveSessionEventRows(env, id, {
-      limit: openClawTranscriptEventWindow,
-      newest: true,
-    }),
-    countInteractiveSessionEvents(env, id),
-  ]);
-  const transcript = buildOpenClawTranscript(eventWindow, eventCount, (events) =>
-    sessionLogTranscript(session, events),
-  );
-  const response = openClawCrabboxSummaryResponse(env, openClawServiceUser(), session);
-  return {
-    ...response,
-    ...transcript,
-  };
-}
-
-async function openClawMessageCrabbox(
-  request: Request,
-  env: RuntimeEnv,
-  id: string,
-): Promise<{ delivered: true; session: InteractiveSession; browserUrl: string }> {
-  requireOpenClawRoomService(request, env);
-  const body = await readJson<{ rootSessionId?: string; message?: string; enter?: boolean }>(
-    request,
-  );
-  const session = await openClawRootScopedCrabbox(request, env, id, body.rootSessionId);
-  const serviceUser = openClawServiceUser();
-  await openClawMutationService(request, env, serviceUser).sendMessage(session, body);
-  return {
-    delivered: true,
-    ...openClawCrabboxSummaryResponse(env, serviceUser, session),
-  };
-}
-
-async function openClawMutateCrabbox(
-  request: Request,
-  env: RuntimeEnv,
-  id: string,
-): Promise<{ session: InteractiveSession; browserUrl: string }> {
-  requireOpenClawRoomService(request, env);
-  const body = await readJson<{ rootSessionId?: string; action?: string }>(request);
-  await openClawRootScopedCrabbox(request, env, id, body.rootSessionId);
-  if (body.action !== "stop") throw badRequest("only stop is supported");
-  const serviceUser = openClawServiceUser();
-  const session = await openClawMutationService(request, env, serviceUser).stopSession(id);
-  return openClawCrabboxSummaryResponse(env, serviceUser, session);
-}
-
-async function openClawRootScopedCrabbox(
-  request: Request,
-  env: RuntimeEnv,
-  id: string,
-  bodyRootSessionId?: string,
-): Promise<InteractiveSession> {
-  const rootSessionId = clean(
-    bodyRootSessionId ?? request.headers.get("x-crabfleet-root-session-id"),
-    120,
-  );
-  if (!rootSessionId) throw badRequest("root session id is required");
-  return openClawSupervision(env).requireRootScopedSession(id, rootSessionId);
-}
-
 async function cleanupAbandonedInteractiveSessionPreparations(
   env: RuntimeEnv,
   now: number,
@@ -2608,48 +2380,41 @@ function openClawCreateService(env: RuntimeEnv, serviceUser: User): OpenClawCrea
   return new OpenClawCreateService(store);
 }
 
-function openClawCrabboxResponse(
-  env: RuntimeEnv,
-  serviceUser: User,
-  session: InteractiveSession,
-): { session: InteractiveSession; browserUrl: string } {
-  return openClawDecoratedCrabboxResponse(
-    env,
-    decorateInteractiveSession(session, serviceUser, env),
-  );
-}
-
-function openClawCrabboxSummaryResponse(
-  env: RuntimeEnv,
-  serviceUser: User,
-  session: InteractiveSession,
-): { session: InteractiveSession; browserUrl: string } {
-  const response = openClawCrabboxResponse(env, serviceUser, session);
-  return { ...response, session: openClawSessionSummary(response.session) };
-}
-
-function openClawDecoratedCrabboxResponse(
-  env: RuntimeEnv,
-  session: InteractiveSession,
-): { session: InteractiveSession; browserUrl: string } {
-  return {
-    session,
-    browserUrl: browserSessionUrl(env, session.id),
-  };
-}
-
-async function openClawRegisterActionSession(
-  request: Request,
-  env: RuntimeEnv,
-): Promise<{
-  session: InteractiveSession;
-  agentToken: string;
-  runnerPtyUrl: string;
-  browserUrl: string;
-}> {
-  requireOpenClawAutomationService(request, env);
-  const body = await readJson<GitHubActionsSessionRegistrationInput>(request);
+function openClawController(env: RuntimeEnv): OpenClawController {
   const serviceUser = openClawServiceUser();
+  const store: OpenClawControllerStore = {
+    createCrabbox: (input) => openClawCreateService(env, serviceUser).create(input),
+    readRoomRoot: (rootSessionId) => readOpenClawRoomRoot(env, rootSessionId),
+    readRoomSessions: (rootSessionId) =>
+      readOpenClawRoomSessions(env, rootSessionId, openClawRoomMaxSessions),
+    stopSessionRoot: (request, rootSessionId) =>
+      openClawRootStopService(request, env, serviceUser).stop(rootSessionId),
+    requireRootScopedSession: (sessionId, rootSessionId) =>
+      openClawSupervision(env).requireRootScopedSession(sessionId, rootSessionId),
+    readTranscriptEvents: (sessionId, maximumEvents) =>
+      readInteractiveSessionEventRows(env, sessionId, {
+        limit: maximumEvents,
+        newest: true,
+      }),
+    countTranscriptEvents: (sessionId) => countInteractiveSessionEvents(env, sessionId),
+    sendMessage: (request, session, input) =>
+      openClawMutationService(request, env, serviceUser).sendMessage(session, input),
+    stopSession: (request, sessionId) =>
+      openClawMutationService(request, env, serviceUser).stopSession(sessionId),
+    registerActionSession: (input) =>
+      openClawActionSessionRegistrationService(env, serviceUser).register(input),
+    decorateSession: (session) => decorateInteractiveSession(session, serviceUser, env),
+    browserUrl: (sessionId) => browserSessionUrl(env, sessionId),
+    runnerPtyUrl: (sessionId, agentToken) =>
+      buildGitHubActionsRunnerPtyUrl(appCanonicalOrigin, sessionId, agentToken),
+  };
+  return new OpenClawController(store);
+}
+
+function openClawActionSessionRegistrationService(
+  env: RuntimeEnv,
+  serviceUser: User,
+): GitHubActionsSessionRegistrationService {
   const db = database(env);
   const store: GitHubActionsSessionRegistrationStore = {
     now: () => Date.now(),
@@ -2682,17 +2447,7 @@ async function openClawRegisterActionSession(
     audit: (message, now) => audit(env, serviceUser, message, now),
     readSession: (id) => readInteractiveSession(env, id),
   };
-  const result = await new GitHubActionsSessionRegistrationService(store).register(body);
-  return {
-    session: decorateInteractiveSession(result.session, serviceUser, env),
-    agentToken: result.agentToken,
-    runnerPtyUrl: buildGitHubActionsRunnerPtyUrl(
-      appCanonicalOrigin,
-      result.session.id,
-      result.agentToken,
-    ),
-    browserUrl: browserSessionUrl(env, result.session.id),
-  };
+  return new GitHubActionsSessionRegistrationService(store);
 }
 
 function openClawServiceUser(): User {
@@ -2705,26 +2460,6 @@ function openClawServiceUser(): User {
     allowed: true,
     teams: [],
   };
-}
-
-function requireOpenClawAutomationService(request: Request, env: RuntimeEnv): void {
-  requireOpenClawServiceToken(request, [env.CRABBOX_OPENCLAW_TOKEN]);
-}
-
-function requireOpenClawRoomService(request: Request, env: RuntimeEnv): void {
-  requireOpenClawServiceToken(request, [env.CRABBOX_OPENCLAW_TOKEN, env.CRABBOX_MULTICODEX_TOKEN]);
-}
-
-function requireOpenClawServiceToken(
-  request: Request,
-  tokens: Array<string | null | undefined>,
-): void {
-  if (!tokens.some(Boolean)) {
-    throw serviceUnavailable("OpenClaw service token is not configured");
-  }
-  if (!openClawServiceAuthorized(request.headers.get("authorization"), tokens)) {
-    throw unauthorized();
-  }
 }
 
 async function ensureOpenClawServiceBranch(
