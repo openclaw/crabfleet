@@ -68,7 +68,6 @@ import {
 import {
   adapterFailureReleaseState,
   adapterWorkspaceIdMatches,
-  clearedAdapterCapabilities,
   createOnlyAdapterStatus,
   definitiveRuntimeAdapterCreateFailure,
   effectiveAdapterCapabilities,
@@ -292,6 +291,13 @@ import { presentInteractiveSession } from "./worker/session-presentation";
 import { archiveInteractiveSessionLogs, sessionLogTranscript } from "./worker/session-log-archive";
 import { appendInteractiveSessionEventRecord } from "./worker/session-events";
 import { createInteractiveSessionCleanupService } from "./worker/session-cleanup";
+import {
+  claimInteractiveSessionReconciliation,
+  InteractiveSessionReconciliationService,
+  persistInteractiveSessionReconciliation,
+  recordInteractiveSessionReconciliationFailure,
+  type InteractiveSessionReconciliationStore,
+} from "./worker/session-reconciliation";
 import { finalizeTerminalInteractiveSession } from "./worker/session-terminal-finalization";
 import {
   InteractiveSessionMetadataService,
@@ -3339,219 +3345,45 @@ async function reconcileExternalInteractiveSession(
   row: InteractiveSessionRow,
   now: number,
 ): Promise<void> {
-  const terminalFinalizationStatus: "stopped" | "expired" | "failed" | null =
-    row.terminal_finalize_pending === 1 &&
-    (row.status === "stopped" || row.status === "expired" || row.status === "failed")
-      ? row.status
-      : null;
-  if (
-    !terminalFinalizationStatus &&
-    (row.adapter !== runtimeAdapterName || !row.adapter_workspace_id)
-  ) {
-    return;
-  }
-  const claimAt = Math.max(now, Date.now(), (row.last_reconciled_at ?? 0) + 1);
-  let claim = database(env)
-    .updateTable("interactive_sessions")
-    .set({ last_reconciled_at: claimAt })
-    .where("id", "=", row.id)
-    .where("status", "=", row.status)
-    .where("updated_at", "=", row.updated_at);
-  claim = row.last_reconciled_at
-    ? claim.where("last_reconciled_at", "=", row.last_reconciled_at)
-    : claim.where("last_reconciled_at", "is", null);
-  const claimed = await claim.executeTakeFirst();
-  if ((claimed.numUpdatedRows ?? 0n) === 0n) return;
+  await interactiveSessionReconciliationService(env).reconcile(row, now);
+}
 
-  try {
-    if (terminalFinalizationStatus) {
-      await finalizeTerminalInteractiveSession(
+function interactiveSessionReconciliationService(
+  env: RuntimeEnv,
+): InteractiveSessionReconciliationService {
+  const store: InteractiveSessionReconciliationStore = {
+    now: Date.now,
+    claim: (row, claimAt) => claimInteractiveSessionReconciliation(env, row, claimAt),
+    inspect: (row, claimAt) => inspectRuntimeAdapterWorkspace(env, row, claimAt),
+    persist: (row, inspection, transition, claimAt) =>
+      persistInteractiveSessionReconciliation(
         env,
-        row.id,
-        terminalFinalizationStatus,
-        row.stopped_at ?? now,
-      );
-      return;
-    }
-    if (row.adapter !== runtimeAdapterName || !row.adapter_workspace_id) return;
-    const inspected = await inspectRuntimeAdapterWorkspace(env, row, claimAt);
-    const completedAt = Math.max(Date.now(), claimAt);
-    const completionVersion = Math.max(completedAt, row.updated_at + 1);
-    const requestedTerminalStatus =
-      inspected.terminalStatus === undefined ? row.terminal_status : inspected.terminalStatus;
-    const status = reconciledInteractiveStatus(
-      row.status,
-      inspected.status,
-      requestedTerminalStatus,
-    );
-    const inactive = ["stopping", "stopped", "expired", "failed"].includes(status);
-    const terminalStatus = ["stopped", "expired", "failed"].includes(status)
-      ? null
-      : requestedTerminalStatus;
-    const terminal = inactive
-      ? null
-      : inspected.attachUrlPresent
-        ? inspected.attachUrl
-        : row.attach_url;
-    const capabilities = inspected.capabilities
-      ? JSON.stringify(inspected.capabilities)
-      : inspected.capabilitiesPresent
-        ? JSON.stringify(clearedAdapterCapabilities)
-        : row.capabilities_json;
-    const expiresAt = inspected.expiresAtPresent ? (inspected.expiresAt ?? null) : row.expires_at;
-    const createPending =
-      inspected.createPending === undefined
-        ? row.adapter_create_pending
-        : inspected.createPending
-          ? 1
-          : 0;
-    const stateChanged =
-      status !== row.status ||
-      terminal !== row.attach_url ||
-      capabilities !== row.capabilities_json ||
-      (inspected.providerResourceId ?? row.provider_resource_id) !== row.provider_resource_id ||
-      expiresAt !== row.expires_at ||
-      terminalStatus !== row.terminal_status ||
-      createPending !== row.adapter_create_pending ||
-      (inspected.reconcileError ?? null) !== row.reconcile_error;
-    const messageChanged = inspected.message !== row.last_event;
-    const expectedOwner = sql<boolean>`
-      id = ${row.id}
-      AND adapter = ${runtimeAdapterName}
-      AND status = ${row.status}
-      AND updated_at = ${row.updated_at}
-      AND last_reconciled_at = ${claimAt}
-    `;
-    const db = database(env);
-    const update = db
-      .updateTable("interactive_sessions")
-      .set({
-        status,
-        lease_id: null,
-        provider_resource_id: inspected.providerResourceId ?? row.provider_resource_id,
-        attach_url: terminal,
-        // Connection-bearing desktop URLs are never persisted.
-        vnc_url: null,
-        capabilities_json: capabilities,
-        expires_at: expiresAt,
-        last_reconciled_at: completedAt,
-        reconcile_error: inspected.reconcileError ?? null,
-        terminal_status: terminalStatus,
-        adapter_create_pending: createPending,
-        terminal_finalize_pending: ["stopped", "expired", "failed"].includes(status)
-          ? 1
-          : row.terminal_finalize_pending,
-        ...(inactive
-          ? {
-              agent_token_hash: null,
-              controller: null,
-              control_requested_by: null,
-              control_requested_at: null,
-              control_granted_at: null,
-              control_expires_at: null,
-            }
-          : {}),
-        stopped_at: ["stopped", "expired", "failed"].includes(status)
-          ? (row.stopped_at ?? completedAt)
-          : row.stopped_at,
-        ...(stateChanged || messageChanged
-          ? { updated_at: completionVersion, last_event: inspected.message }
-          : {}),
-      })
-      .where(expectedOwner)
-      .returning("updated_at");
-    const queries: CompilableQuery[] = [];
-    if (stateChanged || messageChanged) {
-      queries.push(sql`
-        INSERT INTO interactive_session_events (session_id, actor, message, created_at)
-        SELECT ${row.id}, 'system', ${clean(inspected.message, 1000)}, ${completedAt}
-        FROM interactive_sessions
-        WHERE ${expectedOwner}
-      `);
-    }
-    queries.push(update);
-    const results = await env.DB.batch<{ updated_at: number }>(
-      queries.map((query) => {
-        const compiled = query.compile(db);
-        return env.DB.prepare(compiled.sql).bind(...compiled.parameters);
-      }),
-    );
-    if (!results.at(-1)?.results.length) {
-      const current = await readInteractiveSession(env, row.id);
-      if (current && ["stopped", "expired", "failed"].includes(current.status)) {
-        await finalizeTerminalInteractiveSession(
-          env,
-          current.id,
-          current.status as "stopped" | "expired" | "failed",
-          current.stoppedAt ?? now,
-        ).catch(() => undefined);
-        return;
-      }
-      const currentAdapterProvision = Boolean(
-        current &&
-        current.adapter === runtimeAdapterName &&
-        current.adapterWorkspaceId === inspected.adapterWorkspaceId &&
-        ["provisioning", "pending_adapter", "ready", "attached", "detached"].includes(
-          current.status,
-        ),
-      );
-      if (!currentAdapterProvision && inspected.adapterWorkspaceId) {
-        await stopSupersededRuntimeAdapterProvision(
-          env,
-          row.id,
-          inspected.adapterWorkspaceId,
-          inspected.createPending === true,
-          Date.now(),
-        );
-      }
-      return;
-    }
-    if (stateChanged || messageChanged) {
-      await archiveInteractiveSessionLogs(env, row.id, completedAt).catch(() => undefined);
-    }
-    if (
-      status !== row.status &&
-      (status === "stopped" || status === "expired" || status === "failed")
-    ) {
-      await finalizeTerminalInteractiveSession(
+        row,
+        inspection,
+        transition,
+        claimAt,
+        runtimeAdapterName,
+      ),
+    readSession: (sessionId) => readInteractiveSession(env, sessionId),
+    stopSuperseded: (sessionId, adapterWorkspaceId, createPending, now) =>
+      stopSupersededRuntimeAdapterProvision(env, sessionId, adapterWorkspaceId, createPending, now),
+    archive: (sessionId, now) => archiveInteractiveSessionLogs(env, sessionId, now),
+    finalize: (sessionId, status, now) =>
+      finalizeTerminalInteractiveSession(env, sessionId, status, now),
+    recordFailure: (row, claimAt, failedAt, error) =>
+      recordInteractiveSessionReconciliationFailure(
         env,
-        row.id,
-        status,
-        row.stopped_at ?? completedAt,
-      ).catch(() => undefined);
-    }
-  } catch (error) {
-    const failedAt = Math.max(Date.now(), claimAt);
-    await database(env)
-      .updateTable("interactive_sessions")
-      .set({
-        last_reconciled_at: failedAt,
-        reconcile_error: safeProviderError(
+        row,
+        claimAt,
+        failedAt,
+        safeProviderError(
           error,
           [row.adapter_workspace_id, row.provider_resource_id],
           [row.attach_url],
         ),
-        updated_at: Math.max(failedAt, row.updated_at + 1),
-      })
-      .where("id", "=", row.id)
-      .where("status", "=", row.status)
-      .where("updated_at", "=", row.updated_at)
-      .where("last_reconciled_at", "=", claimAt)
-      .execute();
-  }
-}
-
-function reconciledInteractiveStatus(
-  current: InteractiveSessionStatus,
-  next: InteractiveSessionStatus,
-  terminalStatus: "failed" | null,
-): InteractiveSessionStatus {
-  if (current === "stopping") {
-    if (["stopped", "expired", "failed"].includes(next)) return terminalStatus ?? next;
-    return "stopping";
-  }
-  if ((current === "attached" || current === "detached") && next === "ready") return current;
-  return next;
+      ),
+  };
+  return new InteractiveSessionReconciliationService(store, runtimeAdapterName);
 }
 
 async function mapWithConcurrency<T>(

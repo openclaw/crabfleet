@@ -508,9 +508,6 @@ test("runtime adapter lifecycle cannot escape durable session ownership", async 
   const stopStart = source.indexOf("async function stopSupersededRuntimeAdapterProvision");
   const stopEnd = source.indexOf("async function resolveInteractiveSessionLineage", stopStart);
   const stopSource = source.slice(stopStart, stopEnd);
-  const reconcileStart = source.indexOf("async function reconcileExternalInteractiveSession(");
-  const reconcileEnd = source.indexOf("function reconciledInteractiveStatus", reconcileStart);
-  const reconcileSource = source.slice(reconcileStart, reconcileEnd);
   const releaseStart = source.indexOf("async function releaseFailedRuntimeAdapterProvision");
   const releaseEnd = source.indexOf("function runtimeAdapterProvisionResult", releaseStart);
   const releaseSource = source.slice(releaseStart, releaseEnd);
@@ -542,8 +539,6 @@ test("runtime adapter lifecycle cannot escape durable session ownership", async 
   assert.match(releaseSource, /pendingMessage/);
   assert.match(releaseSource, /terminal_status: "failed"/);
   assert.match(releaseSource, /adapter_create_pending: 0/);
-  assert.match(reconcileSource, /current\.stoppedAt \?\? now/);
-  assert.match(reconcileSource, /finalizeTerminalInteractiveSession/);
   assert.match(source, /AND NOT EXISTS \(/);
   assert.match(
     finalizationSource,
@@ -670,9 +665,6 @@ test("runtime reconciliation has scheduled and targeted lifecycle clocks", async
   const batchStart = source.indexOf("async function reconcileExternalInteractiveSessionBatch");
   const batchEnd = source.indexOf("async function reconcileExternalInteractiveSessionById");
   const batchSource = source.slice(batchStart, batchEnd);
-  const reconcileStart = source.indexOf("async function reconcileExternalInteractiveSession(");
-  const reconcileEnd = source.indexOf("function reconciledInteractiveStatus", reconcileStart);
-  const reconcileSource = source.slice(reconcileStart, reconcileEnd);
 
   assert.match(source, /async scheduled\(/);
   assert.match(source, /context\.waitUntil\(\s*reconcileInteractiveSessionLifecycleBatch/);
@@ -684,10 +676,6 @@ test("runtime reconciliation has scheduled and targeted lifecycle clocks", async
   assert.match(targetedSource, /row\.adapter !== runtimeAdapterName/);
   assert.match(targetedSource, /runtimeAdapterReconcileIntervalMs/);
   assert.match(targetedSource, /reconcileExternalInteractiveSession\(env, row, now\)/);
-  assert.ok(
-    reconcileSource.indexOf("if (terminalFinalizationStatus)") <
-      reconcileSource.indexOf("inspectRuntimeAdapterWorkspace"),
-  );
   assert.match(source, /async function readFreshInteractiveSession/);
   assert.match(
     source,
@@ -699,19 +687,7 @@ test("runtime reconciliation has scheduled and targeted lifecycle clocks", async
     source,
     /async function reconcileInteractiveSessionLifecycleBatch[\s\S]*reconcileCredentialPolicyCleanupBatch[\s\S]*reconcileExternalInteractiveSessionBatch/,
   );
-  assert.match(reconcileSource, /const claimAt = Math\.max/);
-  assert.match(reconcileSource, /where\("updated_at", "=", row\.updated_at\)/);
-  assert.match(reconcileSource, /const completedAt = Math\.max\(Date\.now\(\), claimAt\)/);
-  assert.match(
-    reconcileSource,
-    /const completionVersion = Math\.max\(completedAt, row\.updated_at \+ 1\)/,
-  );
-  assert.match(reconcileSource, /last_reconciled_at: completedAt/);
-  assert.match(reconcileSource, /updated_at: completionVersion/);
-  assert.match(reconcileSource, /INSERT INTO interactive_session_events/);
-  assert.match(reconcileSource, /env\.DB\.batch/);
-  assert.match(reconcileSource, /reconcile_error: safeProviderError/);
-  assert.doesNotMatch(reconcileSource, /updated_at: now/);
+  assert.match(source, /interactiveSessionReconciliationService\(env\)\.reconcile\(row, now\)/);
 });
 
 test("recurring terminal authorization never awaits provider reconciliation", async () => {
