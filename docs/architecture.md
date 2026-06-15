@@ -57,6 +57,11 @@ owner for runtime reconciliation, adapter workspace release, and managed or
 standalone provisioning. It lazily shares one lifecycle graph per Worker
 request or scheduled event.
 
+`src/worker/interactive-session-application.ts` owns interactive-session
+creation, reads, presentation, metadata, attach, stop, cleanup, transcripts,
+and runtime release coordination. Route adapters and OpenClaw services use the
+same request-scoped application instead of rebuilding session service graphs.
+
 ## Persistence
 
 ### D1
