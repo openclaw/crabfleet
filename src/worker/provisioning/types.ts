@@ -1,5 +1,6 @@
-import type { InteractiveSessionStatus } from "./models.ts";
-import type { RuntimeCapabilities } from "./session-model.ts";
+import type { InteractiveSessionStatus } from "../models.ts";
+import type { SandboxCurrentLeaseFence, SandboxLease } from "../sandbox-lease.ts";
+import type { RuntimeCapabilities } from "../session-model.ts";
 
 export type InteractiveProvisionResult = {
   status: InteractiveSessionStatus;
@@ -40,23 +41,30 @@ export type InteractiveProvisionPersistenceInput = {
 
 export type InteractiveProvisionRuntime = "container" | "crabbox";
 
-export type ManagedInteractiveProvisionBackend = "sandbox" | "runtime-adapter";
+export type InteractiveProvisionRequest = {
+  id: string;
+  adapterWorkspaceId?: string | null;
+  adapterControlPlane?: string | null;
+  adapterTtlSeconds?: number | null;
+  adapterIdleTimeoutSeconds?: number | null;
+  adapterRequestedCapabilities?: RuntimeCapabilities | null;
+  adapterCreatePayloadJson?: string | null;
+  parentSessionId: string | null;
+  rootSessionId: string | null;
+  repo: string;
+  branch: string;
+  runtime: InteractiveProvisionRuntime;
+  profile: string;
+  command: string;
+  prompt: string;
+  purpose: string;
+  summary: string;
+  owner: string;
+  createdBy: string;
+  githubToken?: string;
+};
 
-export function managedInteractiveProvisionBackend(
-  runtime: InteractiveProvisionRuntime,
-  availability: {
-    sandbox: boolean;
-    runtimeAdapter: boolean;
-  },
-): ManagedInteractiveProvisionBackend | null {
-  if (runtime === "container" && availability.sandbox) return "sandbox";
-  if (availability.runtimeAdapter) return "runtime-adapter";
-  return null;
-}
-
-export function standaloneInteractiveProvisionSupported(
-  runtime: InteractiveProvisionRuntime,
-  sandboxAvailable: boolean,
-): boolean {
-  return runtime === "container" && sandboxAvailable;
-}
+export type SandboxProvisionOwnership = {
+  lease: SandboxLease;
+  ownership: SandboxCurrentLeaseFence;
+};

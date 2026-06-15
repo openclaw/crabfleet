@@ -13,7 +13,7 @@ import type {
   InteractiveProvisionPersistence,
   InteractiveProvisionPersistenceInput,
   InteractiveProvisionResult,
-} from "./session-provisioning.ts";
+} from "./provisioning/types.ts";
 import {
   interactiveSession,
   interactiveSessionLogArchive,

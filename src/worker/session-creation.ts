@@ -3,7 +3,7 @@ import type {
   InteractiveProvisionPersistence,
   InteractiveProvisionPersistenceInput,
   InteractiveProvisionResult,
-} from "./session-provisioning.ts";
+} from "./provisioning/types.ts";
 
 export type InteractiveSessionCreationReservation = {
   id: string;

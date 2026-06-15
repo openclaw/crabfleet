@@ -4,7 +4,7 @@ import { clearedAdapterCapabilities } from "../runtime-adapter.ts";
 import { database, type CompilableQuery, type InteractiveSessionRow } from "./database.ts";
 import type { RuntimeEnv } from "./env.ts";
 import type { InteractiveSessionStatus } from "./models.ts";
-import type { InteractiveProvisionResult } from "./session-provisioning.ts";
+import type { InteractiveProvisionResult } from "./provisioning/types.ts";
 import type { InteractiveSession } from "./session-model.ts";
 
 export type RuntimeAdapterReconciliationTransition = {

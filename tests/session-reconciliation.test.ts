@@ -13,7 +13,7 @@ import {
   runtimeAdapterReconciliationTransition,
   type InteractiveSessionReconciliationStore,
 } from "../src/worker/session-reconciliation.ts";
-import type { InteractiveProvisionResult } from "../src/worker/session-provisioning.ts";
+import type { InteractiveProvisionResult } from "../src/worker/provisioning/types.ts";
 import { interactiveSession } from "../src/worker/session-model.ts";
 import { sessionRow } from "./helpers/session-row.ts";
 

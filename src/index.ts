@@ -316,11 +316,11 @@ import {
   type RuntimeAdapterWorkspaceStopResult,
 } from "./worker/session-runtime-adapter-stop";
 import { sharedInteractiveSession } from "./worker/session-sharing";
-import {
-  managedInteractiveProvisionBackend,
-  standaloneInteractiveProvisionSupported,
-  type InteractiveProvisionResult,
-} from "./worker/session-provisioning";
+import { InteractiveProvisioningService } from "./worker/provisioning/service";
+import type {
+  InteractiveProvisionRequest,
+  InteractiveProvisionResult,
+} from "./worker/provisioning/types";
 import {
   interactiveCommand,
   interactiveSessionPurpose,
@@ -519,29 +519,6 @@ type SandboxTerminalCleanupOwnership = {
 type SandboxCredentialPolicyOwnershipFence =
   | SandboxManagedOwnershipFence
   | StandaloneSandboxProvisionFence;
-
-type InteractiveProvisionRequest = {
-  id: string;
-  adapterWorkspaceId?: string | null;
-  adapterControlPlane?: string | null;
-  adapterTtlSeconds?: number | null;
-  adapterIdleTimeoutSeconds?: number | null;
-  adapterRequestedCapabilities?: RuntimeCapabilities | null;
-  adapterCreatePayloadJson?: string | null;
-  parentSessionId: string | null;
-  rootSessionId: string | null;
-  repo: string;
-  branch: string;
-  runtime: "crabbox" | "container";
-  profile: string;
-  command: string;
-  prompt: string;
-  purpose: string;
-  summary: string;
-  owner: string;
-  createdBy: string;
-  githubToken?: string;
-};
 
 type SandboxCredentialPolicy = {
   allowedHosts: string[];
@@ -3309,8 +3286,7 @@ async function createInteractiveSessionFromInput(
         },
         options.afterReserve,
         () =>
-          provisionInteractiveSession(
-            env,
+          interactiveProvisioningService(env).provisionManaged(
             {
               id,
               ...(adapterWorkspaceId ? { adapterWorkspaceId } : {}),
@@ -6555,35 +6531,15 @@ async function readInteractiveSessionMultiplayerMode(
   }
 }
 
-async function provisionInteractiveSession(
-  env: RuntimeEnv,
-  session: InteractiveProvisionRequest,
-  agentToken?: string,
-  sandboxProvision?: {
-    lease: SandboxLease;
-    ownership: SandboxCurrentLeaseFence;
-  },
-): Promise<InteractiveProvisionResult | null> {
-  const backend = managedInteractiveProvisionBackend(session.runtime, {
-    sandbox: Boolean(env.SANDBOX),
-    runtimeAdapter: runtimeAdapterConfigurationPresent(env),
+function interactiveProvisioningService(env: RuntimeEnv): InteractiveProvisioningService {
+  return new InteractiveProvisioningService({
+    sandboxAvailable: Boolean(env.SANDBOX),
+    runtimeAdapterAvailable: runtimeAdapterConfigurationPresent(env),
+    provisionSandbox: (session, agentToken, sandbox) =>
+      provisionWithSandbox(env, session, agentToken, sandbox.lease, sandbox.ownership),
+    provisionRuntimeAdapter: (session, agentToken) =>
+      provisionWithRuntimeAdapter(env, session, agentToken),
   });
-  if (backend === "sandbox") {
-    if (!sandboxProvision) {
-      return failedProvision("Cloudflare Sandbox durable ownership is missing");
-    }
-    return provisionWithSandbox(
-      env,
-      session,
-      agentToken,
-      sandboxProvision.lease,
-      sandboxProvision.ownership,
-    );
-  }
-  if (backend === "runtime-adapter") {
-    return provisionWithRuntimeAdapter(env, session, agentToken);
-  }
-  return null;
 }
 
 async function provisionInteractiveEndpoint(
@@ -6640,7 +6596,7 @@ async function provisionInteractiveEndpoint(
     }
     return provisionManagedSandboxEndpoint(env, payload, managed);
   }
-  if (standaloneInteractiveProvisionSupported(payload.runtime, Boolean(env.SANDBOX))) {
+  if (interactiveProvisioningService(env).supportsStandalone(payload.runtime)) {
     if (managedInteractiveSessionId(payload.id)) {
       return failedProvision(
         "interactive provision failed: standalone provision id uses the managed session namespace",
