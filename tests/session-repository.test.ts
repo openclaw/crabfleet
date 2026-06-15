@@ -7,7 +7,7 @@ import {
   countInteractiveSessionEvents,
   insertInteractiveSessionReservation,
   markInteractiveSessionPendingAdapter,
-  persistInteractiveSessionMetadataMutation,
+  persistInteractiveSessionEventMutation,
   persistInteractiveSessionProvisionResult,
   readInteractiveSessionEventRows,
   readInteractiveSessionLogArchives,
@@ -322,9 +322,9 @@ test("session event counts normalize missing and persisted values", async () => 
   );
 });
 
-test("session metadata mutations persist events before fenced snapshot-invalidating updates", async () => {
+test("session event mutations persist events before fenced snapshot-invalidating updates", async () => {
   let batch: PreparedStatement[] = [];
-  const updated = await persistInteractiveSessionMetadataMutation(
+  const updated = await persistInteractiveSessionEventMutation(
     runtimeEnv(
       () => {
         throw new Error("metadata mutation must execute as one batch");
@@ -364,9 +364,9 @@ test("session metadata mutations persist events before fenced snapshot-invalidat
   assert.ok(batch[1]?.parameters.includes(100));
 });
 
-test("session metadata mutations report lost revision ownership", async () => {
+test("session event mutations report lost revision ownership", async () => {
   assert.equal(
-    await persistInteractiveSessionMetadataMutation(
+    await persistInteractiveSessionEventMutation(
       runtimeEnv(
         () => {
           throw new Error("metadata mutation must execute as one batch");

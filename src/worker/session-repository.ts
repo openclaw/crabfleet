@@ -276,7 +276,7 @@ export async function countInteractiveSessionEvents(env: RuntimeEnv, id: string)
   return Number(row?.count ?? 0);
 }
 
-export async function persistInteractiveSessionMetadataMutation(
+export async function persistInteractiveSessionEventMutation(
   env: RuntimeEnv,
   session: { id: string; status: string; updatedAt: number },
   actorName: string,

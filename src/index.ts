@@ -271,7 +271,7 @@ import {
   countInteractiveSessionEvents,
   insertInteractiveSessionReservation,
   markInteractiveSessionPendingAdapter,
-  persistInteractiveSessionMetadataMutation,
+  persistInteractiveSessionEventMutation,
   persistInteractiveSessionProvisionResult,
   readInteractiveSessionEventRows,
   readInteractiveSessionLogArchives,
@@ -280,6 +280,10 @@ import {
   readInteractiveSessionRecords,
   readSharedInteractiveSessionRow,
 } from "./worker/session-repository";
+import {
+  InteractiveSessionAttachService,
+  type InteractiveSessionAttachStore,
+} from "./worker/session-attach";
 import {
   InteractiveSessionMetadataService,
   isInteractiveSessionMetadataAction,
@@ -4318,7 +4322,7 @@ async function deleteFinalizedInteractiveSession(
   return !current;
 }
 
-async function mutateInteractiveSessionMetadataAtomically(
+async function mutateInteractiveSessionWithEventAtomically(
   env: RuntimeEnv,
   session: Pick<InteractiveSession, "id" | "status" | "updatedAt">,
   user: User,
@@ -4327,18 +4331,31 @@ async function mutateInteractiveSessionMetadataAtomically(
   now = Date.now(),
 ): Promise<void> {
   if (
-    !(await persistInteractiveSessionMetadataMutation(
-      env,
-      session,
-      actor(user),
-      message,
-      values,
-      now,
-    ))
+    !(await persistInteractiveSessionEventMutation(env, session, actor(user), message, values, now))
   ) {
     throw conflict("interactive session lifecycle changed; retry metadata update");
   }
   await archiveInteractiveSessionLogs(env, session.id, now).catch(() => undefined);
+}
+
+function interactiveSessionAttachService(env: RuntimeEnv): InteractiveSessionAttachService {
+  const store: InteractiveSessionAttachStore = {
+    persist: (session, actorName, transition, now) =>
+      persistInteractiveSessionEventMutation(
+        env,
+        session,
+        actorName,
+        transition.message,
+        {
+          status: transition.status,
+          last_seen_at: transition.lastSeenAt,
+        },
+        now,
+      ),
+    archive: (sessionId, now) => archiveInteractiveSessionLogs(env, sessionId, now),
+    readSession: (sessionId) => readInteractiveSession(env, sessionId),
+  };
+  return new InteractiveSessionAttachService(store);
 }
 
 function interactiveSessionMetadataService(
@@ -4347,7 +4364,7 @@ function interactiveSessionMetadataService(
 ): InteractiveSessionMetadataService {
   const store: InteractiveSessionMetadataStore = {
     persist: (session, actorName, message, values, now) =>
-      persistInteractiveSessionMetadataMutation(env, session, actorName, message, values, now),
+      persistInteractiveSessionEventMutation(env, session, actorName, message, values, now),
     archive: (sessionId, now) => archiveInteractiveSessionLogs(env, sessionId, now),
     audit: (message, now) => audit(env, user, message, now),
     readSession: (sessionId) => readInteractiveSession(env, sessionId),
@@ -4506,50 +4523,24 @@ async function mutateInteractiveSession(
   if (!session) throw notFound("interactive session not found");
   const now = Date.now();
   const userActor = actor(user);
-  const canManage = canManageInteractiveSession(user, session);
   if (action === "attach") {
-    if (!session.capabilities.terminal) {
-      throw badRequest("session does not advertise terminal access");
-    }
-    if (!canControlInteractiveSession(user, session, now, canGrantDelegatedControl(env, session))) {
-      throw forbidden("terminal control has not been granted");
-    }
-    if (["stopping", "expired", "failed", "stopped"].includes(session.status)) {
-      throw badRequest(`session is ${session.status}`);
-    }
-    const nextStatus =
-      session.status === "ready" || session.status === "detached" ? "attached" : session.status;
-    const message =
-      session.status === "pending_adapter"
-        ? "attach requested; runtime adapter pending"
-        : session.status === "provisioning"
-          ? "attach requested; workspace provisioning"
-          : "interactive terminal attached";
-    const attached = await database(env)
-      .updateTable("interactive_sessions")
-      .set({
-        status: nextStatus,
-        last_seen_at: now,
-        updated_at: sql<number>`MAX(updated_at + 1, ${now})`,
-        last_event: message,
-      })
-      .where("id", "=", id)
-      .where("status", "=", session.status)
-      .where("updated_at", "=", session.updatedAt)
-      .executeTakeFirst();
-    if ((attached.numUpdatedRows ?? 0n) === 0n) {
-      throw conflict("interactive session lifecycle changed; retry attach");
-    }
-    await appendInteractiveSessionEvent(env, id, user, message, now);
-    return {
-      session: decorateInteractiveSession(
-        (await readInteractiveSession(env, id)) as InteractiveSession,
+    const attached = await interactiveSessionAttachService(env).attach({
+      session,
+      actor: userActor,
+      canControl: canControlInteractiveSession(
         user,
-        env,
+        session,
+        now,
+        canGrantDelegatedControl(env, session),
       ),
+      now,
+    });
+    return {
+      session: decorateInteractiveSession(attached, user, env),
     };
   }
 
+  const canManage = canManageInteractiveSession(user, session);
   if (isInteractiveSessionMetadataAction(action)) {
     const delegatedControlAvailable = canGrantDelegatedControl(env, session);
     const result = await interactiveSessionMetadataService(env, user).mutate({
@@ -12623,7 +12614,7 @@ async function updateInteractiveSessionSummary(
   const summary = clean(body.summary, 500);
   if (!purpose && !summary) throw badRequest("summary or purpose is required");
   const now = Date.now();
-  await mutateInteractiveSessionMetadataAtomically(
+  await mutateInteractiveSessionWithEventAtomically(
     env,
     session,
     user,

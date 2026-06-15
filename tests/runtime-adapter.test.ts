@@ -837,7 +837,9 @@ test("summary events invalidate terminal cleanup snapshots", async () => {
   const summaryStart = source.indexOf("async function updateInteractiveSessionSummary");
   const summaryEnd = source.indexOf("async function updateGitHubActionsWorkState", summaryStart);
   const summarySource = source.slice(summaryStart, summaryEnd);
-  const metadataStart = source.indexOf("async function mutateInteractiveSessionMetadataAtomically");
+  const metadataStart = source.indexOf(
+    "async function mutateInteractiveSessionWithEventAtomically",
+  );
   const metadataEnd = source.indexOf("async function mutateInteractiveSession(", metadataStart);
   const metadataSource = source.slice(metadataStart, metadataEnd);
 
@@ -846,8 +848,8 @@ test("summary events invalidate terminal cleanup snapshots", async () => {
   assert.match(cleanupSource, /event_count = \$\{archive\?\.event_count/);
   assert.match(cleanupSource, /archived_at = \$\{archive\?\.archived_at/);
   assert.match(cleanupSource, /count\(\*\)/);
-  assert.match(summarySource, /mutateInteractiveSessionMetadataAtomically/);
-  assert.match(metadataSource, /persistInteractiveSessionMetadataMutation/);
+  assert.match(summarySource, /mutateInteractiveSessionWithEventAtomically/);
+  assert.match(metadataSource, /persistInteractiveSessionEventMutation/);
   assert.match(metadataSource, /archiveInteractiveSessionLogs/);
 });
 
