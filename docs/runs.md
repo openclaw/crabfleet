@@ -82,7 +82,7 @@ Attach opens a fullscreen Ghostty WASM grid. Current behavior:
 - Shows one or more Codex session tiles.
 - Includes standalone interactive Codex CLI sessions created from New session.
 - Uses the local `ghostty-web` bundle served by the Worker.
-- Streams live PTY bytes through the multiplex `/api/terminal/ws` hub when a Sandbox, bridge, or versioned adapter terminal is available.
+- Streams live PTY bytes through the multiplex `/api/terminal/ws` hub when a Sandbox or versioned adapter terminal is available.
 - Replays D1 event logs into the terminal surface while a live PTY is unavailable.
 - Falls back to a text terminal if Ghostty cannot initialize.
 - Copies terminal selection, pastes clipboard text when the viewer has writable control, and uploads clipboard images/files for Cloudflare Sandbox sessions.
@@ -100,7 +100,7 @@ Deployments can expose an allowlisted set of generic Crabbox profiles. The creat
 
 Interactive sessions also store `parentSessionId`, `rootSessionId`, `createdBy`, `purpose`, and `summary`. Built-in Sandbox sessions export `CRABFLEET_SESSION_ID`, `CRABFLEET_PARENT_SESSION_ID`, `CRABFLEET_ROOT_SESSION_ID`, `CRABFLEET_AGENT_TOKEN`, and `CRABFLEET_API_URL`; the Go CLI uses those values to list sibling/child sessions, create children, send PTY messages, fetch transcripts, and update summaries without an SSH key.
 
-Adapter capability arrays are authoritative: omitting `terminal`, `pty`, or `ssh` withdraws terminal access. A valid WSS (or literal-loopback WS) terminal URL implies terminal access only when capabilities are omitted entirely or an object omits all terminal-related keys. `ptyAvailable` additionally requires a ready lifecycle state and a resolvable configured Sandbox, bridge, or direct WebSocket route.
+Adapter capability arrays are authoritative: omitting `terminal`, `pty`, or `ssh` withdraws terminal access. A valid WSS (or literal-loopback WS) terminal URL implies terminal access only when capabilities are omitted entirely or an object omits all terminal-related keys. `ptyAvailable` additionally requires a ready lifecycle state and a resolvable configured Sandbox or direct adapter WebSocket route.
 
 Session events are mirrored into the `SESSION_LOGS` R2 binding when configured. Crabfleet writes NDJSON, Markdown transcript, and summary objects under `orgs/openclaw/interactive-sessions/<id>/`, while D1 keeps the compact event list and archive keys for the app, CLI, and SSH gateway. If the binding is enabled after D1-only terminal archives were finalized, cron and targeted reconciliation requeue their null-key snapshots and backfill the objects before cleanup. Cleanup transactionally removes the finalized D1 session, events, and archive pointers before best-effort R2 deletion, so a partial object-delete failure is an unreferenced leak rather than a dangling archive reference. Stops for local legacy sessions atomically commit the request event, stopped event, terminal state, and finalization marker; cron and targeted access repair older `stopping` rows left by interrupted deployments.
 
@@ -110,18 +110,12 @@ Managed session creation first uses the built-in Sandbox when `runtime=container
 
 Crabfleet also ships a built-in Sandbox provision hook at `/api/provision/interactive`. Every provision, PTY, and stop request requires `CRABBOX_INTERACTIVE_PROVISION_TOKEN`. Direct standalone Sandboxes reject the reserved `IS-<number>` namespace, expire after the bounded `CRABBOX_STANDALONE_SANDBOX_TTL_SECONDS`, and stop through `/api/provision/interactive/:id/stop`. The hook accepts only `runtime=container`; external workspaces are deliberately created through the managed versioned lifecycle instead.
 
-Optional bridge configuration:
-
-- `CRABBOX_PTY_BRIDGE_URL`: optional explicit PTY bridge WebSocket URL/template. Templates support `{id}`, `{leaseId}`, `{repo}`, `{branch}`, and `{runtime}`.
-- `CRABBOX_PTY_BRIDGE_TOKEN`: optional bearer token sent only from Crabfleet to the bridge.
-
-Bridge PTY contract:
+Terminal contract:
 
 - Crabfleet accepts browser, CLI, agent, and SSH gateway WebSockets on `/api/terminal/ws` and multiplexes one or more subscribed sessions.
-- Crabfleet connects upstream to the configured bridge with `Upgrade: websocket`.
 - Browser-to-Crabfleet messages use binary terminal frames for subscribe, input, resize, and stop.
-- Runner-to-browser output is wrapped in terminal output frames with session IDs.
-- The bridge receives `x-crabbox-session`, `x-crabbox-repo`, and `x-crabbox-runtime` headers plus session query parameters.
+- Upstream output is wrapped in terminal output frames with session IDs.
+- Crabfleet resolves each subscription to the built-in Sandbox, a versioned adapter terminal, or the GitHub Actions relay.
 
 GitHub Actions PTY contract:
 

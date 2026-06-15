@@ -1,6 +1,5 @@
 import { ptyRouteKind, type PtyRouteKind } from "../fleet-state.ts";
 import {
-  legacyLeaseIdForAdapter,
   runtimeAdapterName,
   runtimeAdapterTerminalOriginMatches,
   safeWebSocketUrl,
@@ -23,15 +22,6 @@ export function interactiveTerminalTarget(
   session: InteractiveSession,
   routeKind = interactivePtyRouteKind(env, session),
 ): InteractiveTerminalTarget | null {
-  if (routeKind === "bridge" && env.CRABBOX_PTY_BRIDGE_URL) {
-    const url = interactiveBridgeUrl(env.CRABBOX_PTY_BRIDGE_URL, session);
-    if (!url) return null;
-    return {
-      url,
-      authorization: bearer(env.CRABBOX_PTY_BRIDGE_TOKEN),
-    };
-  }
-
   const attachUrl = routeKind === "attach" ? safeWebSocketUrl(session.attachUrl) : null;
   if (attachUrl) {
     if (session.adapter === runtimeAdapterName) {
@@ -77,36 +67,7 @@ export function interactivePtyRouteKind(
 ): PtyRouteKind | null {
   return ptyRouteKind(session, {
     sandboxAvailable: Boolean(env.SANDBOX),
-    bridgeUrl: env.CRABBOX_PTY_BRIDGE_URL,
   });
-}
-
-export function interactiveBridgeUrl(base: string, session: InteractiveSession): string {
-  const leaseId = legacyLeaseIdForAdapter(session.adapter, session.leaseId) ?? "";
-  const replacements: Record<string, string> = {
-    id: session.id,
-    leaseId,
-    repo: session.repo,
-    branch: session.branch,
-    runtime: session.runtime,
-  };
-  let url = base;
-  for (const [key, value] of Object.entries(replacements)) {
-    url = url.replaceAll(`{${key}}`, encodeURIComponent(value));
-  }
-  return safeWebSocketUrl(addQuery(httpToWebSocketUrl(url), terminalQuery(session))) ?? "";
-}
-
-export function terminalQuery(session: InteractiveSession): Record<string, string> {
-  return {
-    sessionId: session.id,
-    leaseId: legacyLeaseIdForAdapter(session.adapter, session.leaseId) ?? "",
-    repo: session.repo,
-    branch: session.branch,
-    runtime: session.runtime,
-    profile: session.profile,
-    command: session.command,
-  };
 }
 
 export function interactiveTerminalHeaders(
@@ -121,27 +82,4 @@ export function interactiveTerminalHeaders(
   });
   if (authorization) headers.set("authorization", authorization);
   return headers;
-}
-
-function addQuery(rawUrl: string, params: Record<string, string>): string {
-  try {
-    const url = new URL(rawUrl);
-    for (const [key, value] of Object.entries(params)) {
-      if (value) url.searchParams.set(key, value);
-    }
-    return url.toString();
-  } catch {
-    return "";
-  }
-}
-
-function httpToWebSocketUrl(rawUrl: string): string {
-  try {
-    const url = new URL(rawUrl);
-    if (url.protocol === "http:") url.protocol = "ws:";
-    if (url.protocol === "https:") url.protocol = "wss:";
-    return url.toString();
-  } catch {
-    return "";
-  }
 }

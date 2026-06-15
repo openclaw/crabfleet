@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Remove the configurable PTY bridge so managed terminal upstreams are limited to built-in Sandbox, versioned runtime-adapter attach, and GitHub Actions relay behind the multiplex terminal protocol.
 - Remove generic create-only provisioning, the external Cloudflare runner, and the ClawFleet compatibility provider so managed workspaces use only built-in Sandbox or the versioned runtime adapter.
 - Extract OpenClaw nudge and stop validation, audit ordering, terminal delivery, and best-effort delivery records into a directly tested mutation service.
 - Extract OpenClaw crabbox normalization, replay handling, branch preparation, timeout policy, and creation audit into a directly tested service.
@@ -37,7 +38,7 @@
 - Extract GitHub Actions session validation, idempotent registration, token rotation, resume reset, runner replacement, and evidence ordering.
 - Extract GitHub Actions work-state projection, heartbeat persistence, event suppression, terminal mapping, runner disconnect, and reread.
 - Extract GitHub Actions runner-connect validation, lifecycle projection, heartbeat persistence, and durable connection evidence.
-- Extract interactive terminal route selection, bridge expansion, signed attach preservation, adapter authorization, query projection, and headers.
+- Extract interactive terminal route selection, signed attach preservation, adapter authorization, and headers.
 - Extract terminal WebSocket relay queues, output acknowledgements, message normalization, authorization polling, and peer close handling.
 - Extract runtime-adapter lifecycle and terminal transport, coordinator binding selection, redirect refusal, and bounded response parsing.
 - Centralize OpenClaw room visibility, log-free summaries, and bounded transcript sentinel/truncation policy behind direct query tests.
@@ -87,7 +88,7 @@
 - Reject stale same-generation credential-policy registrations, preflight and atomically stage failed managed Sandbox claims, require the provision bearer for standalone stop after backend removal, and backfill D1-only terminal archives when R2 is enabled later.
 - Proactively generation-wrap migrated legacy Sandbox credential policies under a live durable lease before cleanup, preserve live pre-token sessions, and use crash-safe cron retries that retain unattended session credentials.
 - Bound every runtime-adapter response stream, revalidate desktop authorization after minting, make legacy local stops atomic with scheduled crash recovery, and redact credentials before opaque provider identifiers.
-- Recover active credential policies after a post-registration crash, redact provider identities from structured adapter errors, and propagate terminal dimensions through configured bridge PTY routes without rewriting opaque adapter URLs.
+- Recover active credential policies after a post-registration crash and redact provider identities from structured adapter errors.
 - Support an optional authoritative `GITHUB_REDIRECT_URI` deployment binding with strict HTTPS callback validation, canonical-origin login handoff, and callback host/path enforcement while retaining safe request-origin defaults.
 - Replace native browser confirms and prompts with accessible Crabfleet dialogs for session cleanup, shutdown, and share-link fallback.
 - Sharpen the app visual system with flatter controls, tighter surfaces, and restrained overlay elevation.

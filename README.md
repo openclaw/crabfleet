@@ -213,8 +213,6 @@ The Crabbox namespace cutover intentionally has no old-name compatibility. Exist
 - `CRABBOX_RUNTIME_ADAPTER_NAMESPACE` – Required stable tenant namespace when the versioned adapter is enabled; a DNS-safe label of at most 32 characters used in every workspace ID and idempotency key
 - `CRABBOX_RUNTIME_ADAPTER_TTL_SECONDS` – Optional requested workspace TTL, default `14400`
 - `CRABBOX_RUNTIME_ADAPTER_IDLE_SECONDS` – Optional requested workspace idle timeout, default `1800`
-- `CRABBOX_PTY_BRIDGE_URL` – Optional WebSocket PTY bridge URL/template for live Ghostty attach; requires WSS except literal loopback WS and supports `{id}`, `{leaseId}`, `{repo}`, `{branch}`, and `{runtime}`
-- `CRABBOX_PTY_BRIDGE_TOKEN` – Optional bearer token sent from Crabfleet to the PTY bridge
 - `CRABBOX_OPENCLAW_TOKEN` – Internal bearer token for OpenClaw service crabbox and GitHub Actions session registration
 - `CRABBOX_MULTICODEX_TOKEN` – Optional dedicated bearer token for MultiCodex room supervision
 - `CRABFLEET_SSH_GATEWAY_TOKEN` / `CRABBOX_SSH_GATEWAY_TOKEN` – Shared bearer token for the Go SSH gateway internal API

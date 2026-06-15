@@ -227,7 +227,7 @@ export class InteractiveSessionMetadataService {
 
   private requireDelegatedControl(policy: InteractiveSessionMetadataPolicy): void {
     if (!policy.delegatedControlAvailable) {
-      throw badRequest("delegated terminal control requires a revocable PTY bridge");
+      throw badRequest("delegated terminal control requires a revocable live terminal");
     }
   }
 

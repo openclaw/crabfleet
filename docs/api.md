@@ -314,10 +314,10 @@ Server messages include `Welcome`, `Output`, `Event`, `Error`, `ControlRevoked`,
 
 Target resolution:
 
-- `CRABBOX_PTY_BRIDGE_URL`: explicit bridge WebSocket URL/template. Templates support `{id}`, `{leaseId}`, `{repo}`, `{branch}`, and `{runtime}`. Crabfleet appends `sessionId`, `leaseId`, `repo`, `branch`, `runtime`, and `command` query parameters.
+- Built-in Sandbox terminal: Crabfleet opens the session PTY through the `SANDBOX` binding and forwards the requested terminal dimensions.
 - Provider terminal connection: if the provision adapter returned a `wss://` URL, or literal loopback `ws://` URL, Crabfleet retains it server-side and proxies to it unchanged, including its path and signed query string.
 
-The hub appends terminal `cols` and `rows` only to configured bridge endpoints, never to an adapter `attachUrl`. Crabfleet authenticates versioned-adapter terminal upgrades with `CRABBOX_RUNTIME_ADAPTER_TOKEN` only when the terminal shares the persisted and currently configured adapter origin; adapter URLs never carry reusable shell credentials. If `CRABBOX_PTY_BRIDGE_TOKEN` is set, Crabfleet sends it only to the upstream bridge. Clients never receive upstream credentials.
+Crabfleet never rewrites an adapter `attachUrl`. It authenticates versioned-adapter terminal upgrades with `CRABBOX_RUNTIME_ADAPTER_TOKEN` only when the terminal shares the persisted and currently configured adapter origin; adapter URLs never carry reusable shell credentials. Clients never receive upstream credentials.
 
 ### POST /api/interactive-sessions/:id/clipboard
 
@@ -418,7 +418,7 @@ Fields:
 
 Container sessions use the built-in Sandbox when its binding is available. Otherwise, and for Crabbox sessions, `CRABBOX_RUNTIME_ADAPTER_URL` or `CRABBOX_RUNTIME_ADAPTER_URL_TEMPLATE` creates and reconciles the versioned adapter workspace and records its resolved lifecycle identity, status, capabilities, expiry, and terminal connection. Without either supported backend the session is stored as `pending_adapter`.
 
-Session responses include `ptyAvailable`, the authenticated Worker's authoritative answer for whether the current terminal capability, lifecycle state, and configured Sandbox, bridge, or adapter route can resolve a PTY connection. Every controllable session exposes only the Worker-owned `/api/terminal/ws` route in `attachUrl`; signed provider connections remain server-side even for owners and controllers.
+Session responses include `ptyAvailable`, the authenticated Worker's authoritative answer for whether the current terminal capability, lifecycle state, and configured Sandbox or adapter route can resolve a PTY connection. Every controllable session exposes only the Worker-owned `/api/terminal/ws` route in `attachUrl`; signed provider connections remain server-side even for owners and controllers.
 
 When the selected runtime profile configures `codexSsh`, a ready `runtime-v1` session response may include `codexSsh: { alias, setupCommand }` for session managers. The alias and optional command are resolved from bounded `{providerResourceId}`, `{workspaceId}`, `{sessionId}`, and `{profile}` placeholders. Alias components use a strict OpenSSH-safe character set. `codexSsh.setupCommand` is an argv-like array whose first and static items use a shell-safe character set and whose dynamic items must each be one complete placeholder; Crabfleet POSIX-shell-quotes every substituted argument so opaque provider identifiers remain data. Missing values, an unsafe resolved alias, or a current profile route that differs from the workspace's immutable registered adapter control plane suppresses the handoff. Shared links and delegated terminal-only controllers never receive it. The command is display/copy data only; Crabfleet never executes it.
 

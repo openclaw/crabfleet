@@ -244,20 +244,7 @@ test("fleet attachability follows resolvable PTY routes", () => {
     summary({ ...baseSession, leaseId: null, attachUrl: "ws://127.1:9000/session" }),
     false,
   );
-  assert.equal(
-    summary(
-      { ...baseSession, leaseId: null, attachUrl: null },
-      { ptyBridgeUrl: "https://bridge.example/pty/{id}" },
-    ),
-    true,
-  );
-  assert.equal(
-    summary(
-      { ...baseSession, leaseId: null, attachUrl: null, canControl: false },
-      { ptyBridgeUrl: "https://bridge.example/pty/{id}" },
-    ),
-    false,
-  );
+  assert.equal(summary({ ...baseSession, leaseId: null, attachUrl: null }), false);
 });
 
 test("legacy sessions require an actual VNC URL", () => {

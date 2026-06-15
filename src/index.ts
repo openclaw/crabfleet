@@ -82,7 +82,6 @@ import {
 import { allocateInteractiveSessionIdSql, formatInteractiveSessionId } from "./session-id";
 import { preferredEnabledRepo } from "./repo-selection";
 import { sandboxGitAuthorEmail } from "./git-identity";
-import { sizedTerminalTargetUrl } from "./terminal-target";
 import { cachedBooleanGrant } from "./terminal-authorization";
 import {
   openClawGitHubRepoParts,
@@ -3172,7 +3171,6 @@ async function readFleetState(
     generatedAt: Date.now(),
     registryAvailable: policyResult.available,
     sandboxAvailable: Boolean(env.SANDBOX),
-    ptyBridgeUrl: env.CRABBOX_PTY_BRIDGE_URL,
   });
 }
 
@@ -5814,16 +5812,16 @@ async function openInteractiveTerminalUpstream(
   }
 
   const target = interactiveTerminalTarget(env, session, routeKind);
-  if (!target) throw serviceUnavailable("PTY bridge is not configured for this session");
+  if (!target) throw serviceUnavailable("terminal upstream is not configured for this session");
   const upstreamResponse = await interactiveTerminalFetch(
     env,
     session,
-    sizedTerminalTargetUrl(target.url, routeKind, cols, rows),
+    target.url,
     interactiveTerminalHeaders(session, target.authorization),
   );
   const upstream = upstreamResponse.webSocket;
   if (!upstream || upstreamResponse.status !== 101) {
-    throw serviceUnavailable(`PTY bridge HTTP ${upstreamResponse.status}`);
+    throw serviceUnavailable(`terminal upstream HTTP ${upstreamResponse.status}`);
   }
   upstream.accept();
   return {

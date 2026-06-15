@@ -75,7 +75,7 @@ export async function mountTerminal(session, mount, options = {}) {
           ? previous.canInput
             ? "Live PTY"
             : "Read-only PTY"
-          : "PTY bridge",
+          : "Connecting",
       );
       return;
     }
@@ -610,9 +610,9 @@ function isTerminalFinalError(message) {
     text.includes("session is expired") ||
     text.includes("session is failed") ||
     text.includes("upstream terminal error") ||
+    text.includes("terminal upstream") ||
     text.includes("terminal unavailable") ||
     text.includes("sandbox terminal") ||
-    text.includes("pty bridge") ||
     text.includes("not configured")
   );
 }

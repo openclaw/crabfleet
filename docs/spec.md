@@ -198,7 +198,7 @@ Terminal attachability requires:
 
 - active lifecycle status;
 - current `terminal` capability;
-- a resolvable built-in Sandbox, bridge, or provider terminal;
+- a resolvable built-in Sandbox or provider terminal;
 - current viewer authorization and control state.
 
 `ptyAvailable` is the Worker-authoritative result. Raw provider terminal credentials are never returned to clients.
@@ -275,7 +275,7 @@ D1 is the source of truth for current app state.
 - Sandbox credential-policy registry;
 - checkpoint registry.
 
-The Worker owns the general multiplex terminal hub and connects each subscription to its Sandbox, bridge, or adapter backend. There is no `BoardDO` or `RunDO`. Board and Fleet state use D1 plus REST polling. The browser refreshes general state every 15 seconds; terminal bytes use WebSockets.
+The Worker owns the general multiplex terminal hub and connects each subscription to its Sandbox, adapter, or GitHub Actions backend. There is no `BoardDO` or `RunDO`. Board and Fleet state use D1 plus REST polling. The browser refreshes general state every 15 seconds; terminal bytes use WebSockets.
 
 ### R2
 

@@ -130,7 +130,7 @@ The Worker will:
 - Store a run attempt with selection reason and capabilities.
 - Move the card to Running and append events.
 
-Click Attach to open the Ghostty WASM session grid. The grid immediately shows D1 event replay and switches to live PTY output through the terminal hub when the session has a sandbox or bridge.
+Click Attach to open the Ghostty WASM session grid. The grid immediately shows D1 event replay and switches to live PTY output through the terminal hub when the session has a Sandbox or provider terminal.
 
 The card attempt itself is scheduling/control evidence. It does not launch an autonomous Codex process; live work appears as a Fleet interactive session.
 

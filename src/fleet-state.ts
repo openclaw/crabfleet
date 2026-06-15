@@ -72,7 +72,6 @@ export type FleetStateOptions = {
   productUrl: string;
   registryAvailable?: boolean;
   sandboxAvailable?: boolean | undefined;
-  ptyBridgeUrl?: string | null | undefined;
 };
 
 export type FleetSessionSummary = {
@@ -145,7 +144,7 @@ export type FleetState = {
   sessions: FleetSessionSummary[];
 };
 
-export type PtyRouteKind = "sandbox" | "bridge" | "attach";
+export type PtyRouteKind = "sandbox" | "attach";
 
 export type PtyRouteSession = {
   adapter?: string | null;
@@ -155,7 +154,6 @@ export type PtyRouteSession = {
 
 export type PtyRouteConfig = {
   sandboxAvailable?: boolean | undefined;
-  bridgeUrl?: string | null | undefined;
 };
 
 const allStatuses: FleetStatus[] = [
@@ -232,7 +230,7 @@ export function buildFleetState(
 export function fleetSessionSummary(
   session: FleetSessionInput,
   policy: FleetSandboxPolicySummary | null,
-  options: Pick<FleetStateOptions, "sandboxAvailable" | "ptyBridgeUrl"> = {},
+  options: Pick<FleetStateOptions, "sandboxAvailable"> = {},
 ): FleetSessionSummary {
   const sandboxId = sandboxIdFromLeaseId(session.leaseId);
   const archived = Boolean(session.logArchive?.eventCount);
@@ -270,7 +268,6 @@ export function fleetSessionSummary(
           Boolean(
             ptyRouteKind(session, {
               sandboxAvailable: options.sandboxAvailable,
-              bridgeUrl: options.ptyBridgeUrl,
             }),
           ))) &&
       ptyReadyStatuses.has(session.status),
@@ -313,24 +310,8 @@ export function ptyRouteKind(
 ): PtyRouteKind | null {
   const leaseId = session.adapter === "runtime-v1" ? null : session.leaseId;
   if (config.sandboxAvailable && leaseId?.startsWith("sandbox:")) return "sandbox";
-  if (configuredBridgeWebSocketUrl(config.bridgeUrl)) return "bridge";
   if (safePtyWebSocketUrl(session.attachUrl)) return "attach";
   return null;
-}
-
-function configuredBridgeWebSocketUrl(value: string | null | undefined): string | null {
-  const candidate = String(value ?? "")
-    .trim()
-    .replaceAll(/\{(?:id|leaseId|repo|branch|runtime)\}/g, "route-value");
-  if (!candidate) return null;
-  try {
-    const url = new URL(candidate);
-    if (url.protocol === "https:") url.protocol = "wss:";
-    if (url.protocol === "http:") url.protocol = "ws:";
-    return safePtyWebSocketUrl(url.toString());
-  } catch {
-    return null;
-  }
 }
 
 function safePtyWebSocketUrl(value: string | null | undefined): string | null {

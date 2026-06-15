@@ -3,12 +3,10 @@ import test from "node:test";
 
 import type { RuntimeEnv } from "../src/worker/env.ts";
 import {
-  interactiveBridgeUrl,
   interactivePtyRouteKind,
   interactiveTerminalHeaders,
   interactiveTerminalTarget,
   runtimeAdapterTerminalAuthorization,
-  terminalQuery,
 } from "../src/worker/session-terminal-route.ts";
 import { interactiveSession } from "../src/worker/session-model.ts";
 import { sessionRow } from "./helpers/session-row.ts";
@@ -34,30 +32,11 @@ test("terminal route selection follows managed backend priority", () => {
     attach_url: "wss://attach.example/pty",
   });
   assert.equal(interactivePtyRouteKind({ SANDBOX: {} } as RuntimeEnv, routed), "sandbox");
-  assert.equal(
-    interactivePtyRouteKind(
-      { CRABBOX_PTY_BRIDGE_URL: "https://bridge.example/{id}" } as RuntimeEnv,
-      routed,
-    ),
-    "bridge",
-  );
   assert.equal(interactivePtyRouteKind({} as RuntimeEnv, routed), "attach");
-});
-
-test("bridge targets expand templates, append session context, and use bridge auth", () => {
-  const current = session({ lease_id: "bridge:lease/1" });
-  const env = {
-    CRABBOX_PTY_BRIDGE_URL: "https://bridge.example/pty/{id}/{leaseId}?existing=opaque&repo={repo}",
-    CRABBOX_PTY_BRIDGE_TOKEN: "bridge-token",
-  } as RuntimeEnv;
-  const target = interactiveTerminalTarget(env, current, "bridge");
-
   assert.equal(
-    target?.url,
-    "wss://bridge.example/pty/IS-route/bridge%3Alease%2F1?existing=opaque&repo=openclaw%2Fcrabfleet&sessionId=IS-route&leaseId=bridge%3Alease%2F1&branch=feature%2Fterminal+route&runtime=crabbox&profile=default&command=codex+--yolo",
+    interactivePtyRouteKind({} as RuntimeEnv, session({ lease_id: null, attach_url: null })),
+    null,
   );
-  assert.equal(target?.authorization, "Bearer bridge-token");
-  assert.equal(interactiveBridgeUrl("not a url", current), "");
 });
 
 test("signed attach targets remain opaque and adapter auth is origin-bound", () => {
@@ -109,16 +88,6 @@ test("signed attach targets remain opaque and adapter auth is origin-bound", () 
 
 test("terminal headers carry canonical session context", () => {
   const current = session({ lease_id: "sandbox:owned" });
-  assert.deepEqual(terminalQuery(current), {
-    sessionId: "IS-route",
-    leaseId: "sandbox:owned",
-    repo: "openclaw/crabfleet",
-    branch: "feature/terminal route",
-    runtime: "crabbox",
-    profile: "default",
-    command: "codex --yolo",
-  });
-
   const headers = interactiveTerminalHeaders(current, "Bearer upstream");
   assert.equal(headers.get("upgrade"), "websocket");
   assert.equal(headers.get("x-crabbox-session"), "IS-route");

@@ -152,7 +152,7 @@ Browser, CLI, agent, and SSH gateway clients use the multiplex `/api/terminal/ws
 - rechecks D1 authorization without waiting on provider I/O;
 - forwards input only for the current controller;
 - closes subscriptions after control or terminal capability is revoked;
-- appends dimensions only to configured bridge routes, never opaque signed adapter URLs;
+- forwards initial dimensions directly to Sandbox terminals and leaves opaque signed adapter URLs unchanged;
 - keeps runtime bearer credentials out of browser responses.
 
 Versioned adapter VNC uses the authenticated Worker route `/api/interactive-sessions/:id/vnc`, which mints a fresh provider desktop connection after authorization.
