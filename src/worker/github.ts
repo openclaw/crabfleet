@@ -65,6 +65,80 @@ export async function githubFetchPages<T>(
   return rows;
 }
 
+export async function fetchGithubRepoNodeId(
+  repo: string,
+  token: string,
+  fetcher: Fetcher = fetch,
+): Promise<string> {
+  const response = await fetcher(`https://api.github.com/repos/${repo}`, {
+    headers: {
+      ...githubHeaders(),
+      authorization: `Bearer ${token}`,
+    },
+  });
+  if (!response.ok) {
+    throw new Error(`GitHub repository metadata lookup failed for ${repo}`);
+  }
+  const body = (await response.json()) as { node_id?: unknown };
+  if (typeof body.node_id !== "string" || !body.node_id) {
+    throw new Error(`GitHub repository metadata lookup did not include node_id for ${repo}`);
+  }
+  return body.node_id;
+}
+
+export async function githubNodeBelongsToRepo(
+  nodeId: string,
+  repo: string,
+  token: string,
+  fetcher: Fetcher = fetch,
+): Promise<boolean> {
+  const [owner, name] = repo.toLowerCase().split("/");
+  if (!owner || !name) return false;
+  const response = await fetcher("https://api.github.com/graphql", {
+    method: "POST",
+    body: JSON.stringify({
+      query: `query($id: ID!) {
+        node(id: $id) {
+          __typename
+          ... on Repository {
+            owner { login }
+            name
+          }
+          ... on RepositoryNode {
+            repository { owner { login } name }
+          }
+        }
+      }`,
+      variables: { id: nodeId },
+    }),
+    headers: {
+      ...githubHeaders(),
+      authorization: `Bearer ${token}`,
+      "content-type": "application/json",
+    },
+  });
+  if (!response.ok) return false;
+  const body = (await response.json().catch(() => null)) as {
+    data?: {
+      node?: {
+        name?: unknown;
+        owner?: { login?: unknown };
+        repository?: { name?: unknown; owner?: { login?: unknown } };
+      };
+    };
+    errors?: unknown;
+  } | null;
+  if (!body || body.errors) return false;
+  const node = body.data?.node;
+  const repository = node?.repository ?? node;
+  return (
+    typeof repository?.owner?.login === "string" &&
+    typeof repository.name === "string" &&
+    repository.owner.login.toLowerCase() === owner &&
+    repository.name.toLowerCase() === name
+  );
+}
+
 export async function refreshGitHubUser(
   env: RuntimeEnv,
   token: string,

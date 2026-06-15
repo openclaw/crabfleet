@@ -4,6 +4,7 @@ import { runtimeAdapterName } from "../runtime-adapter.ts";
 import {
   credentialPolicyLegacyGenerationPrefix,
   credentialPolicyLegacyRepairClaimPrefix,
+  type SandboxCredentialPolicy,
   type SandboxCredentialPolicyRegistration,
 } from "./session-control-policy.ts";
 import { database, executeBatch, type CompilableQuery } from "./database.ts";
@@ -100,6 +101,78 @@ export async function activeSandboxCredentialPolicyGeneration(
     return null;
   }
   return generation;
+}
+
+export async function sandboxCredentialPolicyHasDurableOwner(
+  env: RuntimeEnv,
+  lookupId: string,
+  generation: string,
+  policy: SandboxCredentialPolicy,
+  now: number,
+): Promise<boolean> {
+  if (
+    !generation ||
+    policy.sandboxId !== lookupId ||
+    typeof policy.sessionId !== "string" ||
+    !policy.sessionId ||
+    !Array.isArray(policy.allowedHosts) ||
+    typeof policy.githubRepo !== "string" ||
+    typeof policy.owner !== "string" ||
+    (policy.expiresAt !== undefined &&
+      (!Number.isFinite(policy.expiresAt) || policy.expiresAt <= now))
+  ) {
+    return false;
+  }
+  const db = database(env);
+  const refs = await db
+    .selectFrom("interactive_session_credential_policies")
+    .select("sandbox_id")
+    .where("session_id", "=", policy.sessionId)
+    .where("lookup_id", "=", lookupId)
+    .where("state", "=", "active")
+    .where("registration_generation", "=", generation)
+    .where("registration_claim", "is", null)
+    .execute();
+  if (refs.length !== 1) return false;
+  const canonicalSandboxId = refs[0]?.sandbox_id;
+  if (
+    !canonicalSandboxId ||
+    (await activeSandboxCredentialPolicyGeneration(env, policy.sessionId, canonicalSandboxId)) !==
+      generation
+  ) {
+    return false;
+  }
+  const standalone = await db
+    .selectFrom("standalone_sandbox_provisions")
+    .select(["state", "ownership_claim", "ownership_claim_expires_at", "expires_at"])
+    .where("id", "=", policy.sessionId)
+    .where("sandbox_id", "=", canonicalSandboxId)
+    .executeTakeFirst();
+  if (standalone) {
+    const ownerActive =
+      standalone.state === "active" ||
+      (standalone.state === "provisioning" &&
+        Boolean(standalone.ownership_claim) &&
+        (standalone.ownership_claim_expires_at ?? 0) > now);
+    return Boolean(
+      ownerActive &&
+      policy.expiresAt !== undefined &&
+      policy.expiresAt === standalone.expires_at &&
+      policy.expiresAt > now,
+    );
+  }
+  const owner = await sql<{ expected: number }>`
+    SELECT CASE
+      WHEN ${sandboxCredentialPolicyCleanupAuthorizedCondition(
+        policy.sessionId,
+        canonicalSandboxId,
+        now,
+      )}
+      THEN 0
+      ELSE 1
+    END AS expected
+  `.execute(db);
+  return owner.rows[0]?.expected === 1;
 }
 
 export function sandboxCredentialPolicyRefQueries(

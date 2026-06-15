@@ -14,7 +14,6 @@ import {
 } from "./terminal-multiplayer";
 import { buildFleetState, type FleetState } from "./fleet-state";
 import { buildGitHubActionsRunnerPtyUrl, githubActionsRuntime } from "./github-actions-runtime";
-import { githubRequestCanUseRepoCredential, matchesAnyHost } from "./sandbox-security";
 import { githubOAuthCanonicalSshLinkUrl, githubOAuthRedirectUri } from "./oauth";
 import {
   APP_HTML,
@@ -109,7 +108,13 @@ import {
   type AgentSessionAuthenticationStore,
 } from "./worker/session-agent-auth";
 import { githubCallback, githubLogin, sshLinkCookie } from "./worker/github-auth";
-import { GitHubApiError, githubFetch, githubHeaders, refreshGitHubUser } from "./worker/github";
+import {
+  fetchGithubRepoNodeId,
+  GitHubApiError,
+  githubFetch,
+  githubHeaders,
+  refreshGitHubUser,
+} from "./worker/github";
 import {
   GitHubActionsSessionRegistrationService,
   type GitHubActionsSessionRegistrationStore,
@@ -305,7 +310,6 @@ import {
   queueSandboxCredentialPolicyCleanup,
   recordSandboxCredentialPolicyRefs,
   renewSandboxCredentialPolicyRegistration,
-  sandboxCredentialPolicyCleanupAuthorizedCondition,
   standaloneSandboxPolicyExpiresAt,
   type SandboxCredentialPolicyOwnershipFence,
 } from "./worker/sandbox-credential-policy-repository";
@@ -313,7 +317,6 @@ import { stageTerminalCredentialPolicyCleanupById } from "./worker/sandbox-crede
 import {
   reconcileSandboxCredentialPolicyCleanupBatch as reconcileCredentialPolicyCleanupBatch,
   repairLegacySandboxCredentialPolicy,
-  repairLegacySandboxCredentialPolicyBatch,
   sandboxCredentialPolicyExists,
 } from "./worker/sandbox-credential-policy-cleanup-service";
 import { credentialPolicyProvisioningStaleMs } from "./worker/sandbox-credential-policy-scanner";
@@ -368,25 +371,18 @@ import {
   type StoredSandboxCredentialPolicy,
 } from "./worker/session-control-policy";
 import {
+  defaultSandboxEgressHosts,
+  sandboxPlaceholderGitHubToken,
+  sandboxPlaceholderOpenAIKey,
+} from "./worker/sandbox-outbound";
+import { sandboxOutbound } from "./worker/sandbox-outbound-service";
+import {
   bridgeWebSockets,
   terminalOutputAcknowledgements,
 } from "./worker/terminal-websocket-bridge";
 
-const sandboxPlaceholderOpenAIKey = "crabfleet-worker-injected";
-const sandboxPlaceholderGitHubToken = "crabfleet-worker-injected";
-
-type SandboxOutboundContext = {
-  containerId: string;
-};
-
-type SandboxOutboundHandler = (
-  request: Request,
-  env: RuntimeEnv,
-  context: SandboxOutboundContext,
-) => Promise<Response> | Response;
-
 type SandboxClassWithOutbound = {
-  outbound?: SandboxOutboundHandler;
+  outbound?: typeof sandboxOutbound;
 };
 
 export class Sandbox extends CloudflareSandboxBase<RuntimeEnv> {
@@ -566,225 +562,6 @@ const runtimeAdapterReconcileConcurrency = 3;
 const runtimeAdapterReconcileForegroundBudgetMs = 750;
 const openClawPreparationTimeoutMs = 60_000;
 const interactiveSessionPreparationStaleMs = 5 * 60_000;
-const defaultSandboxEgressHosts = [
-  "api.github.com",
-  "api.openai.com",
-  "codeload.github.com",
-  "github.com",
-  "objects.githubusercontent.com",
-  "raw.githubusercontent.com",
-  "uploads.github.com",
-  "registry.npmjs.org",
-  "registry.yarnpkg.com",
-  "*.githubusercontent.com",
-  "*.npmjs.org",
-  "*.nodejs.org",
-  "*.openai.com",
-  "*.yarnpkg.com",
-];
-
-function withAuthorization(request: Request, authorization?: string): Request {
-  const next = new Request(request);
-  if (authorization) {
-    next.headers.set("authorization", authorization);
-  } else {
-    next.headers.delete("authorization");
-  }
-  return next;
-}
-
-function githubBasicAuth(token: string): string {
-  return `Basic ${btoa(`x-access-token:${token}`)}`;
-}
-
-function isGitHubHost(host: string): boolean {
-  return (
-    host === "api.github.com" ||
-    host === "github.com" ||
-    host === "codeload.github.com" ||
-    host === "raw.githubusercontent.com" ||
-    host === "uploads.github.com"
-  );
-}
-
-function withoutSandboxPlaceholderAuthorization(request: Request): Request {
-  const authorization = request.headers.get("authorization");
-  if (
-    authorization !== `Bearer ${sandboxPlaceholderGitHubToken}` &&
-    authorization !== `token ${sandboxPlaceholderGitHubToken}` &&
-    authorization !== githubBasicAuth(sandboxPlaceholderGitHubToken)
-  ) {
-    return request;
-  }
-  return withAuthorization(request, undefined);
-}
-
-async function sandboxCredentialPolicy(
-  env: RuntimeEnv,
-  sandboxId: string,
-): Promise<SandboxCredentialPolicy | null> {
-  const stub = sandboxControlStub(env);
-  if (!stub) return null;
-  const policyUrl = `https://crabfleet.internal/api/session-control/egress/${encodeURIComponent(sandboxId)}`;
-  let response = await stub.fetch(policyUrl);
-  if (response.status === 409) {
-    const legacy = (await response.json().catch(() => null)) as { sessionId?: unknown } | null;
-    const legacySessionId = clean(legacy?.sessionId, 120);
-    if (legacySessionId) {
-      await repairLegacySandboxCredentialPolicyBatch(env, Date.now(), legacySessionId);
-      response = await stub.fetch(policyUrl);
-    }
-  }
-  if (!response.ok) return null;
-  const generation = response.headers.get("x-crabfleet-policy-generation");
-  const policy = (await response.json().catch(() => null)) as SandboxCredentialPolicy | null;
-  if (
-    !generation ||
-    !policy ||
-    !(await sandboxCredentialPolicyHasDurableOwner(env, sandboxId, generation, policy, Date.now()))
-  ) {
-    return null;
-  }
-  return policy;
-}
-
-async function sandboxCredentialPolicyHasDurableOwner(
-  env: RuntimeEnv,
-  lookupId: string,
-  generation: string,
-  policy: SandboxCredentialPolicy,
-  now: number,
-): Promise<boolean> {
-  if (
-    !generation ||
-    policy.sandboxId !== lookupId ||
-    typeof policy.sessionId !== "string" ||
-    !policy.sessionId ||
-    !Array.isArray(policy.allowedHosts) ||
-    typeof policy.githubRepo !== "string" ||
-    typeof policy.owner !== "string" ||
-    (policy.expiresAt !== undefined &&
-      (!Number.isFinite(policy.expiresAt) || policy.expiresAt <= now))
-  ) {
-    return false;
-  }
-  const db = database(env);
-  const refs = await db
-    .selectFrom("interactive_session_credential_policies")
-    .select("sandbox_id")
-    .where("session_id", "=", policy.sessionId)
-    .where("lookup_id", "=", lookupId)
-    .where("state", "=", "active")
-    .where("registration_generation", "=", generation)
-    .where("registration_claim", "is", null)
-    .execute();
-  if (refs.length !== 1) return false;
-  const canonicalSandboxId = refs[0]?.sandbox_id;
-  if (
-    !canonicalSandboxId ||
-    (await activeSandboxCredentialPolicyGeneration(env, policy.sessionId, canonicalSandboxId)) !==
-      generation
-  ) {
-    return false;
-  }
-  const standalone = await db
-    .selectFrom("standalone_sandbox_provisions")
-    .select(["state", "ownership_claim", "ownership_claim_expires_at", "expires_at"])
-    .where("id", "=", policy.sessionId)
-    .where("sandbox_id", "=", canonicalSandboxId)
-    .executeTakeFirst();
-  if (standalone) {
-    const ownerActive =
-      standalone.state === "active" ||
-      (standalone.state === "provisioning" &&
-        Boolean(standalone.ownership_claim) &&
-        (standalone.ownership_claim_expires_at ?? 0) > now);
-    return Boolean(
-      ownerActive &&
-      policy.expiresAt !== undefined &&
-      policy.expiresAt === standalone.expires_at &&
-      policy.expiresAt > now,
-    );
-  }
-  const owner = await sql<{ expected: number }>`
-    SELECT CASE
-      WHEN ${sandboxCredentialPolicyCleanupAuthorizedCondition(
-        policy.sessionId,
-        canonicalSandboxId,
-        now,
-      )}
-      THEN 0
-      ELSE 1
-    END AS expected
-  `.execute(db);
-  return owner.rows[0]?.expected === 1;
-}
-
-async function sandboxOutbound(
-  request: Request,
-  env: RuntimeEnv,
-  context: SandboxOutboundContext,
-): Promise<Response> {
-  const url = new URL(request.url);
-  const host = url.hostname.toLowerCase();
-  const policy = await sandboxCredentialPolicy(env, context.containerId);
-  if (policy?.expiresAt !== undefined && policy.expiresAt <= Date.now()) {
-    return new Response("Crabfleet standalone Sandbox credentials expired.\n", { status: 403 });
-  }
-  const openAIHost = policy?.openAIBaseUrl
-    ? new URL(policy.openAIBaseUrl).hostname.toLowerCase()
-    : "api.openai.com";
-  const allowedHosts = [
-    ...defaultSandboxEgressHosts,
-    ...(policy?.openAIBaseUrl ? [openAIHost] : []),
-    ...(policy?.allowedHosts ?? []),
-  ];
-  if (!matchesAnyHost(host, allowedHosts)) {
-    return new Response(`Crabfleet blocked sandbox outbound access to ${host}.\n`, {
-      status: 403,
-    });
-  }
-
-  if (policy && openAIRequestMatchesPolicy(url, policy)) {
-    const authorization = env.OPENAI_API_KEY ? `Bearer ${env.OPENAI_API_KEY}` : undefined;
-    const next = withAuthorization(request, authorization);
-    if (policy.openAIOrgId) next.headers.set("openai-organization", policy.openAIOrgId);
-    return fetch(next);
-  }
-
-  const githubToken = policy?.githubTokenCiphertext
-    ? await openSecret(env, policy.githubTokenCiphertext)
-    : env.GITHUB_TOKEN;
-  if (
-    githubToken &&
-    policy &&
-    (await githubRequestCanUseRepoCredential(request, url, policy.githubRepo, {
-      nodeBelongsToRepo: (nodeId) =>
-        githubNodeBelongsToRepo(nodeId, policy.githubRepo, githubToken),
-      ...(policy.githubRepoNodeId ? { repoNodeId: policy.githubRepoNodeId } : {}),
-    }))
-  ) {
-    const authorization =
-      host === "api.github.com" || host === "uploads.github.com"
-        ? `Bearer ${githubToken}`
-        : githubBasicAuth(githubToken);
-    return fetch(withAuthorization(request, authorization));
-  }
-
-  if (isGitHubHost(host)) {
-    return fetch(withoutSandboxPlaceholderAuthorization(request));
-  }
-
-  return fetch(request);
-}
-
-function openAIRequestMatchesPolicy(url: URL, policy: SandboxCredentialPolicy): boolean {
-  const baseUrl = new URL(policy.openAIBaseUrl ?? "https://api.openai.com");
-  if (url.origin !== baseUrl.origin) return false;
-  if (baseUrl.pathname === "/" || baseUrl.pathname === "") return true;
-  const basePath = baseUrl.pathname.endsWith("/") ? baseUrl.pathname : `${baseUrl.pathname}/`;
-  return url.pathname === baseUrl.pathname || url.pathname.startsWith(basePath);
-}
 
 export default {
   async fetch(request: Request, env: RuntimeEnv, context: ExecutionContext): Promise<Response> {
@@ -4141,79 +3918,6 @@ async function ensureSandboxCredentialPolicy(
     return;
   }
   await registerSandboxCredentialPolicy(env, session, sandboxId, ownership);
-}
-
-async function fetchGithubRepoNodeId(repo: string, token: string): Promise<string> {
-  const response = await fetch(`https://api.github.com/repos/${repo}`, {
-    headers: {
-      accept: "application/vnd.github+json",
-      authorization: `Bearer ${token}`,
-      "user-agent": "crabfleet",
-      "x-github-api-version": "2022-11-28",
-    },
-  });
-  if (!response.ok) {
-    throw new Error(`GitHub repository metadata lookup failed for ${repo}`);
-  }
-  const body = (await response.json()) as { node_id?: unknown };
-  if (typeof body.node_id !== "string" || !body.node_id) {
-    throw new Error(`GitHub repository metadata lookup did not include node_id for ${repo}`);
-  }
-  return body.node_id;
-}
-
-async function githubNodeBelongsToRepo(
-  nodeId: string,
-  repo: string,
-  token: string,
-): Promise<boolean> {
-  const [owner, name] = repo.toLowerCase().split("/");
-  if (!owner || !name) return false;
-  const response = await fetch("https://api.github.com/graphql", {
-    method: "POST",
-    body: JSON.stringify({
-      query: `query($id: ID!) {
-        node(id: $id) {
-          __typename
-          ... on Repository {
-            owner { login }
-            name
-          }
-          ... on RepositoryNode {
-            repository { owner { login } name }
-          }
-        }
-      }`,
-      variables: { id: nodeId },
-    }),
-    headers: {
-      accept: "application/vnd.github+json",
-      authorization: `Bearer ${token}`,
-      "content-type": "application/json",
-      "user-agent": "crabfleet",
-      "x-github-api-version": "2022-11-28",
-    },
-  });
-  if (!response.ok) return false;
-  const body = (await response.json().catch(() => null)) as {
-    data?: {
-      node?: {
-        name?: unknown;
-        owner?: { login?: unknown };
-        repository?: { name?: unknown; owner?: { login?: unknown } };
-      };
-    };
-    errors?: unknown;
-  } | null;
-  if (!body || body.errors) return false;
-  const node = body.data?.node;
-  const repository = node?.repository ?? node;
-  return (
-    typeof repository?.owner?.login === "string" &&
-    typeof repository.name === "string" &&
-    repository.owner.login.toLowerCase() === owner &&
-    repository.name.toLowerCase() === name
-  );
 }
 
 async function ensureCurrentSandboxLease(

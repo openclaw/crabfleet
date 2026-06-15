@@ -753,6 +753,10 @@ test("stateless Sandbox provision hook acquires durable standalone ownership", a
     new URL("../src/worker/sandbox-credential-policy-repository.ts", import.meta.url),
     "utf8",
   );
+  const sandboxOutboundSource = await readFile(
+    new URL("../src/worker/sandbox-outbound.ts", import.meta.url),
+    "utf8",
+  );
   const migration = await readFile(
     new URL("../migrations/0022_credential_policy_cleanup.sql", import.meta.url),
     "utf8",
@@ -858,7 +862,10 @@ test("stateless Sandbox provision hook acquires durable standalone ownership", a
   assert.match(stopSource, /status: remaining \? "stopping" : "stopped"/);
   assert.match(source, /CRABBOX_STANDALONE_SANDBOX_TTL_SECONDS/);
   assert.match(source, /stopStandaloneSandboxProvision/);
-  assert.match(source, /policy\?\.expiresAt !== undefined && policy\.expiresAt <= Date\.now\(\)/);
+  assert.match(
+    sandboxOutboundSource,
+    /policy\?\.expiresAt !== undefined && policy\.expiresAt <= now/,
+  );
   assert.match(source, /standaloneSandboxPolicyExpiresAt/);
   assert.match(
     source,
@@ -870,10 +877,15 @@ test("stateless Sandbox provision hook acquires durable standalone ownership", a
 });
 
 test("Sandbox credential egress proves the durable generation and owner", async () => {
-  const source = await readFile(new URL("../src/index.ts", import.meta.url), "utf8");
-  const readStart = source.indexOf("async function sandboxCredentialPolicy(");
-  const readEnd = source.indexOf("async function sandboxOutbound", readStart);
-  const readSource = source.slice(readStart, readEnd);
+  const [outboundSource, outboundServiceSource, policyRepositorySource] = await Promise.all([
+    readFile(new URL("../src/worker/sandbox-outbound.ts", import.meta.url), "utf8"),
+    readFile(new URL("../src/worker/sandbox-outbound-service.ts", import.meta.url), "utf8"),
+    readFile(
+      new URL("../src/worker/sandbox-credential-policy-repository.ts", import.meta.url),
+      "utf8",
+    ),
+  ]);
+  const readSource = `${outboundSource}\n${outboundServiceSource}\n${policyRepositorySource}`;
   const controlSource = (
     await Promise.all([
       readFile(new URL("../src/worker/session-control-do.ts", import.meta.url), "utf8"),
