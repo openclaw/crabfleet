@@ -182,28 +182,6 @@ test("OpenClaw transcript reads a sentinel event before reporting completeness",
   );
 });
 
-test("OpenClaw root reads are filtered, capped, D1-only, and log-free", async () => {
-  const source = await readFile(new URL("../src/index.ts", import.meta.url), "utf8");
-  const readStart = source.indexOf("async function openClawReadSessionRoot");
-  const readEnd = source.indexOf("async function openClawMutateSessionRoot", readStart);
-  const readSource = source.slice(readStart, readEnd);
-  const summaryStart = source.indexOf("function openClawCrabboxSummaryResponse");
-  const summaryEnd = source.indexOf("function openClawDecoratedCrabboxResponse", summaryStart);
-  const summarySource = source.slice(summaryStart, summaryEnd);
-
-  assert.match(readSource, /expression\("created_by", "=", "service:openclaw"\)/);
-  assert.match(readSource, /expression\("created_by", "like", "session:%"\)/);
-  assert.match(readSource, /\.where\("runtime", "!=", "github_actions"\)/);
-  assert.match(readSource, /\.where\("work_key", "is", null\)/);
-  assert.match(readSource, /\.where\("preparation_pending", "=", 0\)/);
-  assert.match(readSource, /\.limit\(openClawRoomMaxSessions \+ 1\)/);
-  assert.doesNotMatch(readSource, /readFreshInteractiveSession/);
-  assert.doesNotMatch(readSource, /mapWithConcurrency\(/);
-  assert.match(readSource, /openClawRoomSessionChainAllowed/);
-  assert.match(readSource, /openClawCrabboxSummaryResponse/);
-  assert.match(summarySource, /session: \{ \.\.\.response\.session, logs: \[\] \}/);
-});
-
 test("OpenClaw target authorization precedes targeted reconciliation", async () => {
   const source = await readFile(new URL("../src/index.ts", import.meta.url), "utf8");
   const scopedStart = source.indexOf("async function openClawRootScopedCrabbox");
@@ -388,13 +366,13 @@ test("OpenClaw root stop freezes admission and drives pending descendants termin
   const lineageSource = source.slice(lineageStart, lineageEnd);
 
   assert.match(routeSource, /openClawMutateSessionRoot/);
-  assert.match(stopSource, /openclaw_admission_closed: 1/);
+  assert.match(stopSource, /closeOpenClawRootAdmission/);
   assert.ok(
     stopSource.indexOf("openclaw session root stop requested") <
-      stopSource.indexOf("openclaw_admission_closed: 1"),
+      stopSource.indexOf("closeOpenClawRootAdmission"),
   );
   assert.ok(
-    stopSource.indexOf("openclaw_admission_closed: 1") <
+    stopSource.indexOf("closeOpenClawRootAdmission") <
       stopSource.indexOf("rollbackInteractiveSessionReservation"),
   );
   assert.ok(

@@ -227,6 +227,15 @@ import {
   openClawRequestId,
   readOpenClawRequestSession,
 } from "./worker/openclaw-request";
+import {
+  closeOpenClawRootAdmission,
+  openClawRootAdmissionOpen,
+  readOpenClawLineageSession,
+  readOpenClawRoomRoot,
+  readOpenClawRoomSessions,
+  readOpenClawRootCompletion,
+  readOpenClawRootRows,
+} from "./worker/openclaw-repository";
 
 const defaultInteractiveCommand = "codex --yolo";
 
@@ -2466,45 +2475,20 @@ async function openClawReadSessionRoot(
   requireOpenClawRoomService(request, env);
   const root = clean(rootSessionId, 120);
   if (!root) throw badRequest("root session id is required");
-  const db = database(env);
-  const rootRow = await db
-    .selectFrom("interactive_sessions")
-    .selectAll()
-    .where("id", "=", root)
-    .where("preparation_pending", "=", 0)
-    .executeTakeFirst();
-  const rootSession = rootRow ? interactiveSession(rootRow, []) : null;
+  const rootSession = await readOpenClawRoomRoot(env, root);
   if (!rootSession || !openClawRoomRootAllowed(rootSession)) {
     throw notFound("session root not found");
   }
-  const rows = await db
-    .selectFrom("interactive_sessions")
-    .selectAll()
-    .where((expression) =>
-      expression.or([expression("root_session_id", "=", root), expression("id", "=", root)]),
-    )
-    .where((expression) =>
-      expression.or([
-        expression("created_by", "=", "service:openclaw"),
-        expression("created_by", "like", "session:%"),
-      ]),
-    )
-    .where("runtime", "!=", "github_actions")
-    .where("work_key", "is", null)
-    .where("preparation_pending", "=", 0)
-    .orderBy("created_at", "asc")
-    .limit(openClawRoomMaxSessions + 1)
-    .execute();
-  if (!rows.length) throw notFound("session root not found");
-  if (rows.length > openClawRoomMaxSessions) {
+  const room = await readOpenClawRoomSessions(env, root, openClawRoomMaxSessions);
+  if (!room.sessions.length) throw notFound("session root not found");
+  if (room.overflow) {
     throw serviceUnavailable("session root exceeds the supervision limit");
   }
   const serviceUser = openClawServiceUser();
-  const sessions = rows.map((row) => interactiveSession(row, []));
   return {
     rootSessionId: root,
-    crabboxes: sessions
-      .filter((session) => openClawRoomSessionChainAllowed(sessions, session.id, root))
+    crabboxes: room.sessions
+      .filter((session) => openClawRoomSessionChainAllowed(room.sessions, session.id, root))
       .map((session) => openClawCrabboxSummaryResponse(env, serviceUser, session)),
   };
 }
@@ -2529,11 +2513,7 @@ async function openClawMutateSessionRoot(
   }
   const serviceUser = openClawServiceUser();
   await audit(env, serviceUser, `openclaw session root stop requested ${root}`, Date.now());
-  await database(env)
-    .updateTable("interactive_sessions")
-    .set({ openclaw_admission_closed: 1 })
-    .where("id", "=", root)
-    .execute();
+  await closeOpenClawRootAdmission(env, root);
   const deadline = Date.now() + 60_000;
   let terminalReads = 0;
   let pollDelayMs = 250;
@@ -2541,7 +2521,7 @@ async function openClawMutateSessionRoot(
   const lifecycleAttempts = new Map<string, number>();
   const nextLifecycleAttemptAt = new Map<string, number>();
   while (Date.now() < deadline) {
-    let rows = await readOpenClawRootRows(env, root);
+    let rows = await readOpenClawRootRows(env, root, openClawRoomMaxSessions);
     const pending = rows.filter((row) => row.preparation_pending !== 0).slice(0, 4);
     await mapWithConcurrency(pending, 4, async (row) => {
       await runOpenClawRootOperationBeforeDeadline(deadline, () =>
@@ -2549,7 +2529,7 @@ async function openClawMutateSessionRoot(
       );
     });
     if (Date.now() >= deadline) break;
-    rows = await readOpenClawRootRows(env, root);
+    rows = await readOpenClawRootRows(env, root, openClawRoomMaxSessions);
     const sessions = rows.map((row) => interactiveSession(row, []));
     const now = Date.now();
     const actionable = sessions
@@ -2577,7 +2557,7 @@ async function openClawMutateSessionRoot(
       );
     });
     if (Date.now() >= deadline) break;
-    rows = await readOpenClawRootRows(env, root);
+    rows = await readOpenClawRootRows(env, root, openClawRoomMaxSessions);
     const completion = await readOpenClawRootCompletion(env, root);
     const complete = completion.remaining === 0;
     terminalReads = complete ? terminalReads + 1 : 0;
@@ -2619,65 +2599,6 @@ async function runOpenClawRootOperationBeforeDeadline(
         resolve();
       });
   });
-}
-
-async function readOpenClawRootRows(
-  env: RuntimeEnv,
-  rootSessionId: string,
-): Promise<InteractiveSessionRow[]> {
-  return database(env)
-    .selectFrom("interactive_sessions")
-    .selectAll()
-    .where((expression) =>
-      expression.or([
-        expression("root_session_id", "=", rootSessionId),
-        expression("id", "=", rootSessionId),
-      ]),
-    )
-    .where((expression) =>
-      expression.or([
-        expression("created_by", "=", "service:openclaw"),
-        expression("created_by", "like", "session:%"),
-      ]),
-    )
-    .where("runtime", "!=", "github_actions")
-    .where("work_key", "is", null)
-    .orderBy(
-      sql<number>`CASE
-        WHEN preparation_pending != 0 THEN 0
-        WHEN status NOT IN ('stopped', 'expired', 'failed') THEN 1
-        ELSE 2
-      END`,
-      "asc",
-    )
-    .orderBy("created_at", "asc")
-    .limit(openClawRoomMaxSessions)
-    .execute();
-}
-
-async function readOpenClawRootCompletion(
-  env: RuntimeEnv,
-  rootSessionId: string,
-): Promise<{ total: number; remaining: number }> {
-  const result = await sql<{ total: number; remaining: number }>`
-    SELECT
-      count(*) AS total,
-      sum(
-        CASE
-          WHEN preparation_pending != 0 OR status NOT IN ('stopped', 'expired', 'failed') THEN 1
-          ELSE 0
-        END
-      ) AS remaining
-    FROM interactive_sessions
-    WHERE (root_session_id = ${rootSessionId} OR id = ${rootSessionId})
-      AND (created_by = 'service:openclaw' OR created_by LIKE 'session:%')
-      AND runtime != 'github_actions'
-      AND work_key IS NULL
-  `.execute(database(env));
-  return {
-    total: Number(result.rows[0]?.total ?? 0),
-    remaining: Number(result.rows[0]?.remaining ?? 0),
-  };
 }
 
 async function openClawReadCrabbox(
@@ -2907,15 +2828,6 @@ async function enforceOpenClawRoomSessionLimitAfterInsert(
   throw tooManyRequests("session root reached the supervision limit");
 }
 
-async function openClawRootAdmissionOpen(env: RuntimeEnv, rootSessionId: string): Promise<boolean> {
-  const row = await database(env)
-    .selectFrom("interactive_sessions")
-    .select("openclaw_admission_closed")
-    .where("id", "=", rootSessionId)
-    .executeTakeFirst();
-  return row?.openclaw_admission_closed === 0;
-}
-
 async function openClawRoomReservationLineageAllowed(
   env: RuntimeEnv,
   insertedSessionId: string,
@@ -2937,20 +2849,6 @@ async function openClawRoomReservationLineageAllowed(
     current = parent;
   }
   return openClawRoomSessionChainAllowed([...chain.values()], session.id, rootSessionId);
-}
-
-async function readOpenClawLineageSession(
-  env: RuntimeEnv,
-  id: string,
-  preparationPending: 0 | 1,
-): Promise<InteractiveSession | null> {
-  const row = await database(env)
-    .selectFrom("interactive_sessions")
-    .selectAll()
-    .where("id", "=", id)
-    .where("preparation_pending", "=", preparationPending)
-    .executeTakeFirst();
-  return row ? interactiveSession(row, []) : null;
 }
 
 async function rollbackInteractiveSessionReservation(

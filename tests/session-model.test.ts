@@ -1,10 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import type {
-  InteractiveSessionLogArchiveTable,
-  InteractiveSessionRow,
-} from "../src/worker/database.ts";
+import type { InteractiveSessionLogArchiveTable } from "../src/worker/database.ts";
 import {
   crabboxCapabilities,
   interactiveSession,
@@ -13,78 +10,7 @@ import {
   interactiveSessionLogArchive,
   runtimeCapabilities,
 } from "../src/worker/session-model.ts";
-
-function sessionRow(values: Partial<InteractiveSessionRow> = {}): InteractiveSessionRow {
-  return {
-    id: "IS-42",
-    parent_session_id: null,
-    root_session_id: null,
-    repo: "openclaw/crabfleet",
-    branch: "main",
-    runtime: "container",
-    adapter: null,
-    profile: "cloudflare-sandbox",
-    adapter_workspace_id: null,
-    adapter_control_plane: "https://adapter.example",
-    provider_resource_id: null,
-    capabilities_json: "{}",
-    expires_at: null,
-    last_reconciled_at: null,
-    reconcile_error: null,
-    terminal_status: null,
-    terminal_failure_reason: null,
-    adapter_ttl_seconds: null,
-    adapter_idle_timeout_seconds: null,
-    adapter_requested_capabilities_json: null,
-    adapter_create_payload_json: null,
-    adapter_create_pending: 0,
-    preparation_pending: 0,
-    openclaw_request_id: null,
-    openclaw_request_hash: null,
-    openclaw_admission_closed: 0,
-    terminal_finalize_pending: 0,
-    credential_cleanup_terminal_status: null,
-    sandbox_refresh_sandbox_id: null,
-    sandbox_refresh_claim: null,
-    sandbox_refresh_claim_expires_at: null,
-    command: "codex",
-    prompt: "Fix the issue",
-    purpose: "Fix the issue",
-    summary: "Working",
-    owner: "owner",
-    created_by: "github:42",
-    status: "ready",
-    lease_id: "lease-1",
-    attach_url: "wss://terminal.example",
-    vnc_url: null,
-    last_event: "ready",
-    created_at: 1,
-    updated_at: 2,
-    last_seen_at: 3,
-    stopped_at: null,
-    share_mode: "private",
-    share_token_hash: null,
-    share_token_preview: null,
-    control_requested_by: null,
-    control_requested_at: null,
-    controller: null,
-    control_granted_at: null,
-    control_expires_at: null,
-    multiplayer_mode: 1,
-    agent_token_hash: null,
-    work_key: null,
-    work_kind: null,
-    work_state: "",
-    work_phase: "",
-    source_url: null,
-    github_run_url: null,
-    codex_thread_id: null,
-    codex_turn_id: null,
-    last_heartbeat_at: null,
-    completion_reason: null,
-    ...values,
-  };
-}
+import { sessionRow } from "./helpers/session-row.ts";
 
 test("runtime capabilities use runtime defaults and honor explicit booleans only", () => {
   assert.deepEqual(runtimeCapabilities("crabbox", "{"), crabboxCapabilities);
