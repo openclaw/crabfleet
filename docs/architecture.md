@@ -62,6 +62,11 @@ creation, reads, presentation, metadata, attach, stop, cleanup, transcripts,
 and runtime release coordination. Route adapters and OpenClaw services use the
 same request-scoped application instead of rebuilding session service graphs.
 
+`src/worker/openclaw-application.ts` owns room supervision, create, mutation,
+root-stop, transcript, embed-ticket, and controller composition.
+`src/worker/github-actions-application.ts` owns agent authentication, action
+session registration, work-state updates, runner relay, and disconnects.
+
 ## Persistence
 
 ### D1

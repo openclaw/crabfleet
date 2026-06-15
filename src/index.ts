@@ -1,6 +1,5 @@
 import { ContainerProxy, Sandbox as CloudflareSandboxBase } from "@cloudflare/sandbox";
 import { buildFleetState, type FleetState } from "./fleet-state";
-import { buildGitHubActionsRunnerPtyUrl } from "./github-actions-runtime";
 import {
   APP_HTML,
   LOGO_PNG_BASE64,
@@ -10,29 +9,16 @@ import {
   SPEC_V2_HTML,
   SPEC_V2_MARKDOWN,
 } from "./generated";
-import { appCanonicalOrigin } from "./canonical-host";
-import { runtimeAdapterName } from "./runtime-adapter";
-import { createOpenClawEmbedTicket, openClawRoomMaxSessions } from "./openclaw-service";
 import type { TrustedProxyAuthResult } from "./trusted-proxy-auth";
 import {
   browserAppOrigin,
-  browserSessionEmbedUrl,
-  browserSessionUrl,
   clientDeploymentConfig,
   deploymentConfig,
   publicDeploymentConfig,
 } from "./worker/deployment";
 import type { RuntimeEnv } from "./worker/env";
 import type { User } from "./worker/models";
-import {
-  badRequest,
-  json,
-  readJson,
-  securityHeaders,
-  serviceUnavailable,
-  text,
-  wantsMarkdown,
-} from "./worker/http";
+import { json, readJson, securityHeaders, text, wantsMarkdown } from "./worker/http";
 import { enforceWorkerIngressAuth, prepareWorkerIngress } from "./worker/ingress";
 import {
   actor,
@@ -47,27 +33,8 @@ import {
 } from "./worker/auth";
 import { sha256 } from "./worker/crypto";
 import { AuditRepository } from "./worker/audit-repository";
-import {
-  AgentSessionAuthenticator,
-  agentSessionId,
-  type AgentSessionAuthenticationStore,
-} from "./worker/session-agent-auth";
 import { githubCallback, githubLogin } from "./worker/github-auth";
 import { githubHeaders } from "./worker/github";
-import {
-  GitHubActionsSessionRegistrationService,
-  type GitHubActionsSessionRegistrationStore,
-} from "./worker/github-actions-session-registration";
-import {
-  GitHubActionsRunnerConnectionService,
-  type GitHubActionsRunnerConnectionStore,
-} from "./worker/github-actions-runner-connection";
-import { GitHubActionsRepository } from "./worker/github-actions-repository";
-import {
-  GitHubActionsWorkStateService,
-  type GitHubActionsWorkStateInput,
-  type GitHubActionsWorkStateStore,
-} from "./worker/github-actions-session-work-state";
 import type { InteractiveSession } from "./worker/session-model";
 import { CardLifecycleService, type CardCreateInput } from "./worker/card-lifecycle-service";
 import { CardRepository } from "./worker/card-repository";
@@ -99,52 +66,16 @@ import {
   handleServiceSessionRoute,
   type ServiceSessionRouteDependencies,
 } from "./worker/routes/service-sessions";
-import { sandboxLeasePrefix } from "./worker/sandbox-lease";
-import { readOpenClawRequestSession } from "./worker/openclaw-request";
-import {
-  activateInteractiveSessionReservation,
-  canReconcileOpenClawStoppingSession,
-  closeOpenClawRootAdmission,
-  openClawRoomReservationPosition,
-  openClawRootAdmissionOpen,
-  readOpenClawLineageSession,
-  readOpenClawRoomRoot,
-  readOpenClawRoomSessions,
-  readOpenClawRootCompletion,
-  readOpenClawRootRows,
-  removeInteractiveSessionReservation,
-} from "./worker/openclaw-repository";
-import {
-  OpenClawSupervisionService,
-  type OpenClawSupervisionStore,
-} from "./worker/openclaw-supervision";
-import { OpenClawRootStopService, type OpenClawRootStopStore } from "./worker/openclaw-root-stop";
-import { OpenClawMutationService, type OpenClawMutationStore } from "./worker/openclaw-mutations";
-import { OpenClawCreateService, type OpenClawCreateStore } from "./worker/openclaw-create";
-import { OpenClawBranchService } from "./worker/openclaw-branch";
-import { OpenClawController, type OpenClawControllerStore } from "./worker/openclaw-controller";
-import {
-  countInteractiveSessionEvents,
-  readAgentSessionCredential,
-  readInteractiveSessionEventRows,
-  readInteractiveSessionRecord as readInteractiveSession,
-  readInteractiveSessionShareCredential,
-} from "./worker/session-repository";
-import { nextInteractiveSessionId } from "./worker/session-id-repository";
-import {
-  isOpenClawEmbedSessionToken,
-  openClawEmbedTicketSecret,
-} from "./worker/openclaw-embed-access";
-import { appendInteractiveSessionEventRecord } from "./worker/session-events";
+import { readInteractiveSessionShareCredential } from "./worker/session-repository";
+import { isOpenClawEmbedSessionToken } from "./worker/openclaw-embed-access";
 import {
   SharedSessionService,
   type SharedSessionServiceStore,
 } from "./worker/shared-session-service";
-import { newAgentToken } from "./worker/session-reservation-context";
 import { SshGateway } from "./worker/ssh-gateway";
 import { interactiveTerminalRouteAvailable } from "./worker/session-terminal-route";
 import { terminalAssetResponse } from "./worker/terminal-assets";
-import { githubActionsRelayStub, readSandboxFleetPolicies } from "./worker/session-control-do";
+import { readSandboxFleetPolicies } from "./worker/session-control-do";
 import { defaultSandboxEgressHosts, sandboxPlaceholderOpenAIKey } from "./worker/sandbox-outbound";
 import { sandboxOutbound } from "./worker/sandbox-outbound-service";
 import { createInteractiveDesktopService } from "./worker/interactive-desktop-service";
@@ -155,9 +86,18 @@ import {
   runtimeAdapterReconcileIntervalMs,
 } from "./worker/runtime-application";
 import { InteractiveSessionApplication } from "./worker/interactive-session-application";
+import { GitHubActionsApplication } from "./worker/github-actions-application";
+import { OpenClawApplication } from "./worker/openclaw-application";
 
 type SandboxClassWithOutbound = {
   outbound?: typeof sandboxOutbound;
+};
+
+type WorkerApplication = {
+  runtime: RuntimeApplication;
+  sessions: InteractiveSessionApplication;
+  githubActions: GitHubActionsApplication;
+  openClaw: OpenClawApplication;
 };
 
 export class Sandbox extends CloudflareSandboxBase<RuntimeEnv> {
@@ -179,8 +119,6 @@ export class Sandbox extends CloudflareSandboxBase<RuntimeEnv> {
 
 export { ContainerProxy };
 export { SessionControlDO } from "./worker/session-control-do";
-
-const openClawPreparationTimeoutMs = 60_000;
 
 export default {
   async fetch(request: Request, env: RuntimeEnv, context: ExecutionContext): Promise<Response> {
@@ -247,12 +185,16 @@ export default {
         return text(SPEC_HTML, "text/html; charset=utf-8", { vary: "Accept" });
       }
 
-      const { runtime, sessions } = workerApplication(env);
+      const application = workerApplication(env);
       const authResponse = await handlePublicAuthRoute(request, url, trustedProxy, {
         githubLogin: (authRequest) => githubLogin(authRequest, env),
         githubCallback: (authRequest) => githubCallback(authRequest, env),
         sshLink: (authRequest, code, requestAuth) =>
-          sshGateway(env, runtime, sessions).link(authRequest, code, requestAuth),
+          sshGateway(env, application.runtime, application.sessions).link(
+            authRequest,
+            code,
+            requestAuth,
+          ),
         tokenLogin: (authRequest) => tokenLogin(authRequest, env),
         devIdentityLogin: (authRequest) => devIdentityLogin(authRequest, env),
         logout: (authRequest) => logout(authRequest, env),
@@ -265,7 +207,7 @@ export default {
       if (authResponse) return authResponse;
 
       if (url.pathname.startsWith("/api/")) {
-        return await api(request, env, context, trustedProxy, runtime, sessions);
+        return await api(request, env, context, trustedProxy, application);
       }
 
       if (
@@ -309,10 +251,10 @@ async function api(
   env: RuntimeEnv,
   context: ExecutionContext,
   requestAuth: TrustedProxyAuthResult,
-  runtime: RuntimeApplication,
-  sessions: InteractiveSessionApplication,
+  application: WorkerApplication,
 ): Promise<Response> {
   const url = new URL(request.url);
+  const { runtime } = application;
 
   const provisioningResponse = await handleProvisioningRoute(
     request,
@@ -324,12 +266,12 @@ async function api(
   const serviceSessionResponse = await handleServiceSessionRoute(
     request,
     url,
-    serviceSessionRouteDependencies(env, runtime, sessions),
+    serviceSessionRouteDependencies(env, application),
   );
   if (serviceSessionResponse) return serviceSessionResponse;
 
   const openClawResponse = await handleOpenClawRoute(request, url, {
-    controller: openClawController(env, runtime, sessions),
+    controller: application.openClaw.controller(),
     automationTokens: [env.CRABBOX_OPENCLAW_TOKEN],
     roomTokens: [env.CRABBOX_OPENCLAW_TOKEN, env.CRABBOX_MULTICODEX_TOKEN],
   });
@@ -338,7 +280,7 @@ async function api(
   const sessionIngressResponse = await handleSessionIngressRoute(
     request,
     url,
-    sessionIngressRouteDependencies(env, requestAuth, runtime, sessions),
+    sessionIngressRouteDependencies(env, requestAuth, application),
   );
   if (sessionIngressResponse) return sessionIngressResponse;
 
@@ -354,7 +296,7 @@ async function api(
     request,
     url,
     user,
-    controlPlaneRouteDependencies(env, context, runtime, sessions),
+    controlPlaneRouteDependencies(env, context, application),
   );
   if (controlPlaneResponse) return controlPlaneResponse;
 
@@ -362,7 +304,7 @@ async function api(
     request,
     url,
     user,
-    browserSessionRouteDependencies(env, runtime, sessions),
+    browserSessionRouteDependencies(env, application),
   );
   if (browserSessionResponse) return browserSessionResponse;
 
@@ -372,10 +314,10 @@ async function api(
 function controlPlaneRouteDependencies(
   env: RuntimeEnv,
   context: ExecutionContext,
-  runtime: RuntimeApplication,
-  sessions: InteractiveSessionApplication,
+  application: WorkerApplication,
 ): ControlPlaneRouteDependencies {
   const admin = adminService(env);
+  const { runtime, sessions } = application;
   return {
     readState: (request, user) => readState(request, env, user, runtime, sessions, context),
     readFleet: (user) => readFleetState(env, user, runtime, sessions, undefined, context),
@@ -417,16 +359,16 @@ function provisioningRouteDependencies(runtime: RuntimeApplication): Provisionin
 function sessionIngressRouteDependencies(
   env: RuntimeEnv,
   requestAuth: TrustedProxyAuthResult,
-  runtime: RuntimeApplication,
-  sessions: InteractiveSessionApplication,
+  application: WorkerApplication,
 ): SessionIngressRouteDependencies {
   const sharedSessions = sharedSessionService(env);
+  const { runtime, sessions } = application;
   return {
     readSharedSession: (sessionId, token) => sharedSessions.read(sessionId, token),
     openTerminal: async (request) =>
       interactiveTerminalService(env, runtime, sessions).open(
         request,
-        await terminalHubUser(request, env, requestAuth, runtime, sessions),
+        await terminalHubUser(request, env, requestAuth, application),
       ),
   };
 }
@@ -444,9 +386,9 @@ function sharedSessionService(env: RuntimeEnv): SharedSessionService {
 
 function browserSessionRouteDependencies(
   env: RuntimeEnv,
-  runtime: RuntimeApplication,
-  sessions: InteractiveSessionApplication,
+  application: WorkerApplication,
 ): BrowserSessionRouteDependencies {
+  const { runtime, sessions } = application;
   const creation = new BrowserSessionCreationService({
     readGitHubToken: (request, user) => sessionGitHubToken(request, env, user.subject),
     createSession: (user, input, githubToken) =>
@@ -484,25 +426,27 @@ function browserSessionRouteDependencies(
 
 function serviceSessionRouteDependencies(
   env: RuntimeEnv,
-  runtime: RuntimeApplication,
-  sessions: InteractiveSessionApplication,
+  application: WorkerApplication,
 ): ServiceSessionRouteDependencies {
+  const { runtime, sessions, githubActions } = application;
   return {
     sshAuth: (request) => sshGateway(env, runtime, sessions).authenticate(request),
     sshState: (request) => sshGateway(env, runtime, sessions).state(request),
-    agentState: (request) => agentState(request, env, runtime, sessions),
+    agentState: (request) => agentState(request, env, application),
     createSshSession: (request) => sshGateway(env, runtime, sessions).createSession(request),
-    createAgentSession: (request) => agentCreateInteractiveSession(request, env, sessions),
-    updateAgentWorkState: (request, sessionId) =>
-      updateGitHubActionsWorkState(request, env, sessionId, sessions),
-    openAgentRunnerPty: (request, sessionId) => githubActionsRunnerPty(request, env, sessionId),
+    createAgentSession: (request) =>
+      agentCreateInteractiveSession(request, env, sessions, githubActions),
+    updateAgentWorkState: async (request, sessionId) => {
+      const result = await githubActions.updateWorkState(request, sessionId);
+      return { session: sessions.present(result.session, result.user) };
+    },
+    openAgentRunnerPty: (request, sessionId) => githubActions.openRunnerPty(request, sessionId),
     requireSshViewer: async (request) => {
       const user = await sshGateway(env, runtime, sessions).requireUser(request);
       requireRole(user, "viewer");
       return user;
     },
-    requireAgentUser: async (request) =>
-      (await agentSessionAuthentication(env).require(request)).user,
+    requireAgentUser: async (request) => (await githubActions.authenticate(request)).user,
     readFreshSession: (sessionId) => sessions.readFresh(sessionId),
     presentSession: (session, user) => sessions.present(session, user),
     mutateSession: (request, user, sessionId, action) =>
@@ -523,14 +467,14 @@ async function terminalHubUser(
   request: Request,
   env: RuntimeEnv,
   requestAuth: TrustedProxyAuthResult,
-  runtime: RuntimeApplication,
-  sessions: InteractiveSessionApplication,
+  application: WorkerApplication,
 ): Promise<User | null> {
+  const { runtime, sessions, githubActions } = application;
   if (sshGateway(env, runtime, sessions).isRequest(request)) {
     return sshGateway(env, runtime, sessions).requireUser(request);
   }
-  if (agentSessionId(request)) {
-    return (await agentSessionAuthentication(env).require(request)).user;
+  if (githubActions.isAgentRequest(request)) {
+    return (await githubActions.authenticate(request)).user;
   }
   return optionalUser(request, env, requestAuth);
 }
@@ -614,10 +558,10 @@ function sshGateway(
 async function agentState(
   request: Request,
   env: RuntimeEnv,
-  runtime: RuntimeApplication,
-  sessions: InteractiveSessionApplication,
+  application: WorkerApplication,
 ): Promise<Record<string, unknown>> {
-  const { session, user } = await agentSessionAuthentication(env).require(request);
+  const { runtime, sessions, githubActions } = application;
+  const { session, user } = await githubActions.authenticate(request);
   const state = await readState(request, env, user, runtime, sessions);
   return { ...state, agent: { sessionId: session.id, rootSessionId: session.rootSessionId } };
 }
@@ -626,8 +570,9 @@ async function agentCreateInteractiveSession(
   request: Request,
   env: RuntimeEnv,
   sessions: InteractiveSessionApplication,
+  githubActions: GitHubActionsApplication,
 ): Promise<{ session: InteractiveSession }> {
-  const { session: parent, user } = await agentSessionAuthentication(env).require(request);
+  const { session: parent, user } = await githubActions.authenticate(request);
   const body = await readJson<{
     repo?: string;
     branch?: string;
@@ -656,253 +601,36 @@ async function agentCreateInteractiveSession(
   return result;
 }
 
-function workerApplication(env: RuntimeEnv): {
-  runtime: RuntimeApplication;
-  sessions: InteractiveSessionApplication;
-} {
+function workerApplication(env: RuntimeEnv): WorkerApplication {
   let sessions: InteractiveSessionApplication;
+  let openClaw: OpenClawApplication;
+  const githubActions = new GitHubActionsApplication(env, {
+    audit: (user, message, now) => audit(env, user, message, now),
+  });
   const runtime = new RuntimeApplication(env, {
     rollbackReservation: (sessionId, createdAt) =>
-      openClawSupervision(env, sessions).rollbackReservation(sessionId, createdAt),
+      openClaw.supervision().rollbackReservation(sessionId, createdAt),
   });
   sessions = new InteractiveSessionApplication(env, runtime, {
     audit: (user, message, now) => audit(env, user, message, now),
-    disconnectGitHubActionsRunner: (sessionId) => disconnectGitHubActionsRunner(env, sessionId),
-    supervision: () => openClawSupervision(env, sessions),
+    disconnectGitHubActionsRunner: (sessionId) => githubActions.disconnectRunner(sessionId),
+    supervision: () => openClaw.supervision(),
   });
-  return { runtime, sessions };
-}
-
-function openClawSupervision(
-  env: RuntimeEnv,
-  sessions: InteractiveSessionApplication,
-): OpenClawSupervisionService {
-  const store: OpenClawSupervisionStore = {
-    readSession: (id) => readInteractiveSession(env, id),
-    refreshSession: (id) => sessions.readFresh(id),
-    readLineageSession: (id, preparationPending) =>
-      readOpenClawLineageSession(env, id, preparationPending),
-    rootAdmissionOpen: (rootSessionId) => openClawRootAdmissionOpen(env, rootSessionId),
-    roomReservationPosition: (rootSessionId, insertedSessionId, insertedAt) =>
-      openClawRoomReservationPosition(env, rootSessionId, insertedSessionId, insertedAt),
-    removeReservation: (insertedSessionId, insertedAt) =>
-      removeInteractiveSessionReservation(env, insertedSessionId, insertedAt),
-    activateReservation: (insertedSessionId, insertedAt, adapterWorkspaceId) =>
-      activateInteractiveSessionReservation(
-        env,
-        insertedSessionId,
-        insertedAt,
-        adapterWorkspaceId,
-        runtimeAdapterName,
-      ),
-  };
-  return new OpenClawSupervisionService(store);
-}
-
-function openClawRootStopService(
-  request: Request,
-  env: RuntimeEnv,
-  serviceUser: User,
-  runtime: RuntimeApplication,
-  sessions: InteractiveSessionApplication,
-): OpenClawRootStopService {
-  const supervision = openClawSupervision(env, sessions);
-  const store: OpenClawRootStopStore = {
-    readRootSession: (rootSessionId) => readInteractiveSession(env, rootSessionId),
-    recordStopRequested: (rootSessionId, now) =>
-      audit(env, serviceUser, `openclaw session root stop requested ${rootSessionId}`, now),
-    closeAdmission: (rootSessionId) => closeOpenClawRootAdmission(env, rootSessionId),
-    readRootRows: (rootSessionId, maximumSessions) =>
-      readOpenClawRootRows(env, rootSessionId, maximumSessions),
-    rollbackReservation: (sessionId, createdAt) =>
-      supervision.rollbackReservation(sessionId, createdAt),
-    stopSession: (session) =>
-      sessions.mutate(request, serviceUser, session.id, "stop").then(() => undefined),
-    canReconcileStoppingSession: (sessionId) =>
-      canReconcileOpenClawStoppingSession(env, sessionId, sandboxLeasePrefix),
-    reconcileSession: (session, now) => runtime.reconcileById(session.id, now),
-    readRootCompletion: (rootSessionId) => readOpenClawRootCompletion(env, rootSessionId),
-    recordStopped: (rootSessionId, now) =>
-      audit(env, serviceUser, `openclaw session root stopped ${rootSessionId}`, now),
-  };
-  return new OpenClawRootStopService(store, runtimeAdapterName);
-}
-
-function openClawMutationService(
-  request: Request,
-  env: RuntimeEnv,
-  serviceUser: User,
-  runtime: RuntimeApplication,
-  sessions: InteractiveSessionApplication,
-): OpenClawMutationService {
-  const store: OpenClawMutationStore = {
-    now: () => Date.now(),
-    recordEvent: (sessionId, message, now) =>
-      appendInteractiveSessionEvent(env, sessionId, serviceUser, message, now),
-    audit: (message, now) => audit(env, serviceUser, message, now),
-    openTerminal: async (session) => {
+  openClaw = new OpenClawApplication(env, runtime, sessions, githubActions, {
+    audit: (user, message, now) => audit(env, user, message, now),
+    openTerminal: async (request, user, session, cols, rows) => {
       const terminalRequest = new Request(request.url, { headers: { upgrade: "websocket" } });
       const upstream = await interactiveTerminalService(env, runtime, sessions).openUpstream(
         terminalRequest,
-        serviceUser,
+        user,
         session,
-        120,
-        34,
+        cols,
+        rows,
       );
       return upstream.socket;
     },
-    stopSession: (sessionId) =>
-      sessions.mutate(request, serviceUser, sessionId, "stop").then((result) => result.session),
-    warn: (event) => console.warn(JSON.stringify(event)),
-  };
-  return new OpenClawMutationService(store);
-}
-
-function openClawCreateService(
-  env: RuntimeEnv,
-  serviceUser: User,
-  sessions: InteractiveSessionApplication,
-): OpenClawCreateService {
-  const admin = new AdminRepository(env);
-  const branches = new OpenClawBranchService({
-    token: env.GITHUB_TOKEN,
-    requireRepo: (repo) => admin.requireRepo(repo),
   });
-  const store: OpenClawCreateStore = {
-    defaultRuntime: deploymentConfig(env).defaultRuntime,
-    now: () => Date.now(),
-    preparationSignal: () => AbortSignal.timeout(openClawPreparationTimeoutMs),
-    readRequestSession: async (requestId, requestHash) => {
-      const session = await readOpenClawRequestSession(env, requestId, requestHash);
-      return session ? sessions.present(session, serviceUser) : null;
-    },
-    prepareBranch: (repo, branch, baseBranch, signal) =>
-      branches.ensure(repo, branch, baseBranch, signal),
-    createSession: (body, githubToken, options) =>
-      sessions.create(serviceUser, body, githubToken, options).then((result) => result.session),
-    audit: (message, now) => audit(env, serviceUser, message, now),
-    warn: (event) => console.warn(JSON.stringify(event)),
-  };
-  return new OpenClawCreateService(store);
-}
-
-function openClawController(
-  env: RuntimeEnv,
-  runtime: RuntimeApplication,
-  sessions: InteractiveSessionApplication,
-): OpenClawController {
-  const serviceUser = openClawServiceUser();
-  const store: OpenClawControllerStore = {
-    createCrabbox: (input) => openClawCreateService(env, serviceUser, sessions).create(input),
-    readRoomRoot: (rootSessionId) => readOpenClawRoomRoot(env, rootSessionId),
-    readRoomSessions: (rootSessionId) =>
-      readOpenClawRoomSessions(env, rootSessionId, openClawRoomMaxSessions),
-    stopSessionRoot: (request, rootSessionId) =>
-      openClawRootStopService(request, env, serviceUser, runtime, sessions).stop(rootSessionId),
-    requireRootScopedSession: (sessionId, rootSessionId) =>
-      openClawSupervision(env, sessions).requireRootScopedSession(sessionId, rootSessionId),
-    readTranscriptEvents: (sessionId, maximumEvents) =>
-      readInteractiveSessionEventRows(env, sessionId, {
-        limit: maximumEvents,
-        newest: true,
-      }),
-    countTranscriptEvents: (sessionId) => countInteractiveSessionEvents(env, sessionId),
-    sendMessage: (request, session, input) =>
-      openClawMutationService(request, env, serviceUser, runtime, sessions).sendMessage(
-        session,
-        input,
-      ),
-    stopSession: (request, sessionId) =>
-      openClawMutationService(request, env, serviceUser, runtime, sessions).stopSession(sessionId),
-    registerActionSession: (input) =>
-      openClawActionSessionRegistrationService(env, serviceUser).register(input),
-    now: () => Date.now(),
-    createEmbedTicket: (sessionId, expiresAt) => {
-      const secret = openClawEmbedTicketSecret(env);
-      if (!secret) throw serviceUnavailable("OpenClaw embed ticket secret is not configured");
-      return createOpenClawEmbedTicket(secret, sessionId, expiresAt);
-    },
-    decorateSession: (session) => sessions.present(session, serviceUser),
-    browserUrl: (sessionId) => browserSessionUrl(env, sessionId),
-    browserEmbedUrl: (sessionId, token) => browserSessionEmbedUrl(env, sessionId, token),
-    runnerPtyUrl: (sessionId, agentToken) =>
-      buildGitHubActionsRunnerPtyUrl(appCanonicalOrigin, sessionId, agentToken),
-  };
-  return new OpenClawController(store);
-}
-
-function openClawActionSessionRegistrationService(
-  env: RuntimeEnv,
-  serviceUser: User,
-): GitHubActionsSessionRegistrationService {
-  const admin = new AdminRepository(env);
-  const repository = new GitHubActionsRepository(env);
-  const store: GitHubActionsSessionRegistrationStore = {
-    now: () => Date.now(),
-    newAgentToken,
-    hashToken: sha256,
-    requireRepo: (repo) => admin.requireRepo(repo),
-    readByWorkKey: (workKey) => repository.readByWorkKey(workKey),
-    nextSessionId: () => nextInteractiveSessionId(env),
-    insertSession: (values) => repository.insertSession(values),
-    readById: (id) => repository.readById(id),
-    updateSession: (id, values) => repository.updateSession(id, values),
-    isConstraintError,
-    disconnectRunner: (id) => disconnectGitHubActionsRunner(env, id),
-    appendEvent: (id, message, now) =>
-      appendInteractiveSessionEvent(env, id, serviceUser, message, now),
-    audit: (message, now) => audit(env, serviceUser, message, now),
-    readSession: (id) => readInteractiveSession(env, id),
-  };
-  return new GitHubActionsSessionRegistrationService(store);
-}
-
-function githubActionsWorkStateService(env: RuntimeEnv, user: User): GitHubActionsWorkStateService {
-  const repository = new GitHubActionsRepository(env);
-  const store: GitHubActionsWorkStateStore = {
-    now: () => Date.now(),
-    readRow: (sessionId) => repository.readById(sessionId),
-    persist: (sessionId, values) => repository.updateSession(sessionId, values),
-    appendEvent: (sessionId, message, now) =>
-      appendInteractiveSessionEvent(env, sessionId, user, message, now),
-    disconnectRunner: (sessionId) => disconnectGitHubActionsRunner(env, sessionId),
-    readSession: (sessionId) => readInteractiveSession(env, sessionId),
-  };
-  return new GitHubActionsWorkStateService(store);
-}
-
-function githubActionsRunnerConnectionService(
-  env: RuntimeEnv,
-  user: User,
-): GitHubActionsRunnerConnectionService {
-  const repository = new GitHubActionsRepository(env);
-  const store: GitHubActionsRunnerConnectionStore = {
-    now: () => Date.now(),
-    persist: (sessionId, values) => repository.updateSession(sessionId, values),
-    appendEvent: (sessionId, message, now) =>
-      appendInteractiveSessionEvent(env, sessionId, user, message, now),
-  };
-  return new GitHubActionsRunnerConnectionService(store);
-}
-
-function openClawServiceUser(): User {
-  return {
-    subject: "service:openclaw",
-    login: "openclaw",
-    email: null,
-    name: "OpenClaw",
-    role: "owner",
-    allowed: true,
-    teams: [],
-  };
-}
-
-function agentSessionAuthentication(env: RuntimeEnv): AgentSessionAuthenticator {
-  const store: AgentSessionAuthenticationStore = {
-    readCredential: (id) => readAgentSessionCredential(env, id),
-    hashToken: sha256,
-  };
-  return new AgentSessionAuthenticator(store);
+  return { runtime, sessions, githubActions, openClaw };
 }
 
 async function readState(
@@ -965,64 +693,6 @@ async function readFleetState(
     generatedAt: Date.now(),
     registryAvailable: policyResult.available,
     sandboxAvailable: Boolean(env.SANDBOX),
-  });
-}
-
-async function disconnectGitHubActionsRunner(env: RuntimeEnv, id: string): Promise<void> {
-  const stub = githubActionsRelayStub(env, id);
-  if (!stub) return;
-  const response = await stub.fetch(
-    "https://crabfleet.internal/api/session-control/github-actions/disconnect-runner",
-    { method: "POST" },
-  );
-  if (!response.ok) throw serviceUnavailable("GitHub Actions relay is unavailable");
-}
-
-async function updateGitHubActionsWorkState(
-  request: Request,
-  env: RuntimeEnv,
-  id: string,
-  sessions: InteractiveSessionApplication,
-): Promise<{ session: InteractiveSession }> {
-  const { session, user } = await agentSessionAuthentication(env).require(request, id);
-  const body = await readJson<GitHubActionsWorkStateInput>(request);
-  const current = await githubActionsWorkStateService(env, user).update(session, body);
-  return {
-    session: sessions.present(current, user),
-  };
-}
-
-async function githubActionsRunnerPty(
-  request: Request,
-  env: RuntimeEnv,
-  id: string,
-): Promise<Response> {
-  if (request.headers.get("upgrade")?.toLowerCase() !== "websocket") {
-    throw badRequest("websocket upgrade required");
-  }
-  const { session, user } = await agentSessionAuthentication(env).require(request, id, {
-    allowQueryToken: true,
-  });
-  const stub = githubActionsRelayStub(env, id);
-  if (!stub) throw serviceUnavailable("SESSION_CONTROL Durable Object is not configured");
-  await githubActionsRunnerConnectionService(env, user).connect(session);
-  return stub.fetch("https://crabfleet.internal/api/session-control/github-actions/runner", {
-    headers: { upgrade: "websocket" },
-  });
-}
-
-async function appendInteractiveSessionEvent(
-  env: RuntimeEnv,
-  id: string,
-  user: User,
-  message: string,
-  now = Date.now(),
-): Promise<void> {
-  await appendInteractiveSessionEventRecord(env, {
-    sessionId: id,
-    actor: actor(user),
-    message,
-    now,
   });
 }
 
