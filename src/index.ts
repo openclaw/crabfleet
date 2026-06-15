@@ -161,13 +161,14 @@ import {
   type RunAttemptTable,
   type StandaloneSandboxProvisionTable,
 } from "./worker/database";
-import type {
-  InteractiveRuntime,
-  InteractiveSessionStatus,
-  Role,
-  RunStatus,
-  User,
-  WorkflowStatus,
+import {
+  deadInteractiveSessionStatuses,
+  type InteractiveRuntime,
+  type InteractiveSessionStatus,
+  type Role,
+  type RunStatus,
+  type User,
+  type WorkflowStatus,
 } from "./worker/models";
 import {
   badRequest,
@@ -244,6 +245,7 @@ import {
   OpenClawSupervisionService,
   type OpenClawSupervisionStore,
 } from "./worker/openclaw-supervision";
+import { OpenClawRootStopService, type OpenClawRootStopStore } from "./worker/openclaw-root-stop";
 
 const defaultInteractiveCommand = "codex --yolo";
 
@@ -595,11 +597,6 @@ const lanes = ["Todo", "Running", "Human Review", "Done"];
 const sandboxLeasePrefix = "sandbox:";
 const sandboxLeaseProfile = "autostart-v4";
 const activeRunStatuses: readonly RunStatus[] = ["queued", "leasing", "running"];
-const deadInteractiveSessionStatuses: readonly InteractiveSessionStatus[] = [
-  "stopped",
-  "expired",
-  "failed",
-];
 const runtimeOptions = ["auto", "container", "crabbox"] as const;
 const mergePolicyOptions = ["open_pr", "merge_when_green", "fix_until_green_and_merge"] as const;
 const defaultStallMs = 5 * 60 * 1000;
@@ -2515,99 +2512,15 @@ async function openClawMutateSessionRoot(
   if (body.action !== "stop") throw badRequest("only stop is supported");
   const root = clean(rootSessionId, 120);
   if (!root) throw badRequest("root session id is required");
-  const rootSession = await readInteractiveSession(env, root);
-  if (!rootSession || !openClawRoomRootAllowed(rootSession)) {
-    throw notFound("session root not found");
-  }
   const serviceUser = openClawServiceUser();
-  const supervision = openClawSupervision(env);
-  await audit(env, serviceUser, `openclaw session root stop requested ${root}`, Date.now());
-  await closeOpenClawRootAdmission(env, root);
-  const deadline = Date.now() + 60_000;
-  let terminalReads = 0;
-  let pollDelayMs = 250;
-  let previousState = "";
-  const lifecycleAttempts = new Map<string, number>();
-  const nextLifecycleAttemptAt = new Map<string, number>();
-  while (Date.now() < deadline) {
-    let rows = await readOpenClawRootRows(env, root, openClawRoomMaxSessions);
-    const pending = rows.filter((row) => row.preparation_pending !== 0).slice(0, 4);
-    await mapWithConcurrency(pending, 4, async (row) => {
-      await runOpenClawRootOperationBeforeDeadline(deadline, () =>
-        supervision.rollbackReservation(row.id, row.created_at),
-      );
-    });
-    if (Date.now() >= deadline) break;
-    rows = await readOpenClawRootRows(env, root, openClawRoomMaxSessions);
-    const sessions = rows.map((row) => interactiveSession(row, []));
-    const now = Date.now();
-    const actionable = sessions
-      .filter((session) => !deadInteractiveSessionStatuses.includes(session.status))
-      .filter((session) => (nextLifecycleAttemptAt.get(session.id) ?? 0) <= now)
-      .reverse()
-      .slice(0, 4);
-    await mapWithConcurrency(actionable, 4, async (session) => {
-      const attempt = (lifecycleAttempts.get(session.id) ?? 0) + 1;
-      lifecycleAttempts.set(session.id, attempt);
-      nextLifecycleAttemptAt.set(
-        session.id,
-        now + Math.min(10_000, 500 * 2 ** Math.min(attempt - 1, 5)),
-      );
-      if (session.status === "stopping" && session.adapter !== runtimeAdapterName) {
-        await runOpenClawRootOperationBeforeDeadline(deadline, () =>
-          reconcileExternalInteractiveSessionById(env, session.id, now),
-        );
-        return;
-      }
-      await runOpenClawRootOperationBeforeDeadline(deadline, () =>
-        mutateInteractiveSession(request, env, serviceUser, session.id, "stop").then(
-          () => undefined,
-        ),
-      );
-    });
-    if (Date.now() >= deadline) break;
-    rows = await readOpenClawRootRows(env, root, openClawRoomMaxSessions);
-    const completion = await readOpenClawRootCompletion(env, root);
-    const complete = completion.remaining === 0;
-    terminalReads = complete ? terminalReads + 1 : 0;
-    if (terminalReads >= 2) {
-      const sessions = rows.map((row) => interactiveSession(row, []));
-      await audit(env, serviceUser, `openclaw session root stopped ${root}`, Date.now());
-      return {
-        rootSessionId: root,
-        admissionClosed: true,
-        crabboxes: sessions.map((session) =>
-          openClawCrabboxSummaryResponse(env, serviceUser, session),
-        ),
-      };
-    }
-    const currentState = `${completion.total}:${completion.remaining}:${rows
-      .map((row) => `${row.id}:${row.status}:${row.preparation_pending}`)
-      .join("|")}`;
-    pollDelayMs = currentState === previousState ? Math.min(2_000, pollDelayMs * 2) : 250;
-    previousState = currentState;
-    const remaining = deadline - Date.now();
-    if (remaining <= 0) break;
-    await sleep(Math.min(pollDelayMs, remaining));
-  }
-  throw serviceUnavailable("OpenClaw session root cleanup did not reach a terminal state");
-}
-
-async function runOpenClawRootOperationBeforeDeadline(
-  deadline: number,
-  operation: () => Promise<void>,
-): Promise<void> {
-  const remaining = deadline - Date.now();
-  if (remaining <= 0) return;
-  await new Promise<void>((resolve) => {
-    const timer = setTimeout(resolve, remaining);
-    void operation()
-      .catch(() => undefined)
-      .finally(() => {
-        clearTimeout(timer);
-        resolve();
-      });
-  });
+  const result = await openClawRootStopService(request, env, serviceUser).stop(root);
+  return {
+    rootSessionId: result.rootSessionId,
+    admissionClosed: true,
+    crabboxes: result.sessions.map((session) =>
+      openClawCrabboxSummaryResponse(env, serviceUser, session),
+    ),
+  };
 }
 
 async function openClawReadCrabbox(
@@ -2778,6 +2691,32 @@ function openClawSupervision(env: RuntimeEnv): OpenClawSupervisionService {
       ),
   };
   return new OpenClawSupervisionService(store);
+}
+
+function openClawRootStopService(
+  request: Request,
+  env: RuntimeEnv,
+  serviceUser: User,
+): OpenClawRootStopService {
+  const supervision = openClawSupervision(env);
+  const store: OpenClawRootStopStore = {
+    readRootSession: (rootSessionId) => readInteractiveSession(env, rootSessionId),
+    recordStopRequested: (rootSessionId, now) =>
+      audit(env, serviceUser, `openclaw session root stop requested ${rootSessionId}`, now),
+    closeAdmission: (rootSessionId) => closeOpenClawRootAdmission(env, rootSessionId),
+    readRootRows: (rootSessionId, maximumSessions) =>
+      readOpenClawRootRows(env, rootSessionId, maximumSessions),
+    rollbackReservation: (sessionId, createdAt) =>
+      supervision.rollbackReservation(sessionId, createdAt),
+    stopSession: (session) =>
+      mutateInteractiveSession(request, env, serviceUser, session.id, "stop").then(() => undefined),
+    reconcileSession: (session, now) =>
+      reconcileExternalInteractiveSessionById(env, session.id, now),
+    readRootCompletion: (rootSessionId) => readOpenClawRootCompletion(env, rootSessionId),
+    recordStopped: (rootSessionId, now) =>
+      audit(env, serviceUser, `openclaw session root stopped ${rootSessionId}`, now),
+  };
+  return new OpenClawRootStopService(store, runtimeAdapterName);
 }
 
 function openClawCrabboxResponse(

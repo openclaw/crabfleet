@@ -34,3 +34,9 @@ export type InteractiveSessionStatus =
   | "stopped"
   | "expired"
   | "failed";
+
+export const deadInteractiveSessionStatuses: readonly InteractiveSessionStatus[] = [
+  "stopped",
+  "expired",
+  "failed",
+];

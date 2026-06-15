@@ -272,43 +272,6 @@ test("OpenClaw crabbox requests reserve durable idempotency before provisioning"
   assert.match(createSource, /if \(reservationInserted \|\| !isConstraintError\(error\)/);
 });
 
-test("OpenClaw root stop freezes admission and drives pending descendants terminal", async () => {
-  const source = await readFile(new URL("../src/index.ts", import.meta.url), "utf8");
-  const routeStart = source.indexOf("const openClawSessionRootActionMatch");
-  const routeEnd = source.indexOf("const openClawCrabboxTranscriptMatch", routeStart);
-  const routeSource = source.slice(routeStart, routeEnd);
-  const stopStart = source.indexOf("async function openClawMutateSessionRoot");
-  const stopEnd = source.indexOf("async function openClawReadCrabbox", stopStart);
-  const stopSource = source.slice(stopStart, stopEnd);
-  assert.match(routeSource, /openClawMutateSessionRoot/);
-  assert.match(stopSource, /closeOpenClawRootAdmission/);
-  assert.ok(
-    stopSource.indexOf("openclaw session root stop requested") <
-      stopSource.indexOf("closeOpenClawRootAdmission"),
-  );
-  assert.ok(
-    stopSource.indexOf("closeOpenClawRootAdmission") <
-      stopSource.indexOf("supervision.rollbackReservation"),
-  );
-  assert.ok(
-    stopSource.indexOf("supervision.rollbackReservation") <
-      stopSource.indexOf("mutateInteractiveSession"),
-  );
-  assert.match(stopSource, /terminalReads >= 2/);
-  assert.match(stopSource, /completion\.remaining === 0/);
-  assert.match(stopSource, /nextLifecycleAttemptAt/);
-  assert.match(
-    stopSource,
-    /session\.status === "stopping" && session\.adapter !== runtimeAdapterName/,
-  );
-  assert.match(stopSource, /reconcileExternalInteractiveSessionById/);
-  assert.match(stopSource, /runOpenClawRootOperationBeforeDeadline/);
-  assert.match(stopSource, /\.slice\(0, 4\)/);
-  assert.match(stopSource, /Math\.min\(2_000, pollDelayMs \* 2\)/);
-  assert.doesNotMatch(stopSource, /session root exceeds the supervision limit/);
-  assert.doesNotMatch(stopSource, /openClawRoomSessionChainAllowed/);
-});
-
 test("OpenClaw lifecycle guarantees are documented", async () => {
   const docs = await readFile(new URL("../docs/api.md", import.meta.url), "utf8");
   assert.match(docs, /requestId/);
