@@ -5,12 +5,13 @@ import type { RuntimeEnv } from "../env.ts";
 import {
   activeSandboxCredentialPolicyCondition,
   activeSandboxCredentialPolicyGeneration,
-} from "../sandbox-policy-state.ts";
-import { newSandboxLease, sandboxLeaseId } from "../sandbox-lease.ts";
-import type {
-  StandaloneSandboxProvisionClaim,
-  StandaloneSandboxProvisionFence,
-} from "./standalone-sandbox.ts";
+} from "../sandbox-credential-policy-repository.ts";
+import {
+  newSandboxLease,
+  sandboxLeaseId,
+  type StandaloneSandboxProvisionFence,
+} from "../sandbox-lease.ts";
+import type { StandaloneSandboxProvisionClaim } from "./standalone-sandbox.ts";
 import type { InteractiveProvisionRequest, InteractiveProvisionResult } from "./types.ts";
 
 export async function readStandaloneSandboxProvision(

@@ -1,15 +1,13 @@
 import type { StandaloneSandboxProvisionRow } from "../database.ts";
-import { sandboxLeaseId, type SandboxLease } from "../sandbox-lease.ts";
+import {
+  sandboxLeaseId,
+  type SandboxLease,
+  type StandaloneSandboxProvisionFence,
+} from "../sandbox-lease.ts";
 import { failedProvision } from "./result.ts";
 import type { InteractiveProvisionRequest, InteractiveProvisionResult } from "./types.ts";
 
 export const standaloneSandboxDefaultTtlSeconds = 14_400;
-
-export type StandaloneSandboxProvisionFence = {
-  claim: string;
-  provisionId: string;
-  sandboxId: string;
-};
 
 export type StandaloneSandboxProvisionClaim = {
   lease: SandboxLease;

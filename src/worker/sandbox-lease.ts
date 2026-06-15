@@ -20,6 +20,12 @@ export type SandboxCurrentLeaseFence = {
   sandboxId: string;
 };
 
+export type StandaloneSandboxProvisionFence = {
+  claim: string;
+  provisionId: string;
+  sandboxId: string;
+};
+
 export type SandboxLeaseSource = {
   id: string;
   leaseId?: string | null;
