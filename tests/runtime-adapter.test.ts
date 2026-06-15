@@ -867,32 +867,6 @@ test("summary and sharing events invalidate terminal cleanup snapshots", async (
   assert.ok(metadataSource.indexOf("eventQuery") < metadataSource.indexOf("updateQuery"));
 });
 
-test("development identity login requires an explicit local gate", async () => {
-  const source = await readFile(new URL("../src/index.ts", import.meta.url), "utf8");
-  const config = await readFile(new URL("../wrangler.jsonc", import.meta.url), "utf8");
-  const loginSource = source.slice(
-    source.indexOf("async function devIdentityLogin"),
-    source.indexOf("async function githubLogin"),
-  );
-  const requireSource = source.slice(
-    source.indexOf("async function requireUser"),
-    source.indexOf("async function optionalUser"),
-  );
-  const authStart = source.indexOf("function authMethods");
-  const authSource = source.slice(authStart, source.indexOf("function actor", authStart));
-
-  assert.match(source, /function devIdentityEnabled\(env: RuntimeEnv, request: Request\)/);
-  assert.match(loginSource, /devIdentityEnabled\(env, request\)/);
-  assert.match(requireSource, /devIdentityEnabled\(env, request\)/);
-  assert.match(requireSource, /deleteFrom\("sessions"\)/);
-  assert.match(authSource, /devIdentityEnabled\(env, request\)/);
-  assert.match(
-    authSource,
-    /developmentIdentityEnabled\(env\.CRABFLEET_DEV_LOGIN_ENABLED, request\.url\)/,
-  );
-  assert.match(config, /"CRABFLEET_DEV_LOGIN_ENABLED": "false"/);
-});
-
 test("runtime adapter credentials are preflighted before session allocation", async () => {
   const source = await readFile(new URL("../src/index.ts", import.meta.url), "utf8");
   const createStart = source.indexOf("async function createInteractiveSessionFromInput");

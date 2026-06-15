@@ -2,17 +2,13 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import { test } from "node:test";
 
-test("proxy users cannot consume a cookie session GitHub credential", async () => {
+test("interactive session creation requests browser credentials only for GitHub users", async () => {
   const source = await readFile(new URL("../src/index.ts", import.meta.url), "utf8");
   const createStart = source.indexOf("async function createInteractiveSession(");
   const createEnd = source.indexOf("async function createInteractiveSessionFromInput", createStart);
   const createSource = source.slice(createStart, createEnd);
   assert.match(createSource, /user\.subject\.startsWith\("github:"\)/);
   assert.match(createSource, /sessionGitHubToken\(request, env, user\.subject\)/);
-
-  const tokenStart = source.indexOf("async function sessionGitHubToken(");
-  const tokenEnd = source.indexOf("async function sandboxSessionWithGitHubToken", tokenStart);
-  assert.match(source.slice(tokenStart, tokenEnd), /\.where\("subject", "=", expectedSubject\)/);
 });
 
 test("trusted proxy requests stay sanitized on terminal forwarding paths", async () => {

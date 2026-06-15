@@ -1,5 +1,15 @@
 export type Role = "viewer" | "maintainer" | "owner";
 
+export type User = {
+  subject: string;
+  login: string | null;
+  email: string | null;
+  name: string | null;
+  role: Role;
+  allowed: boolean;
+  teams: string[];
+};
+
 export type InteractiveRuntime = "crabbox" | "container" | "github_actions";
 
 export type WorkflowStatus = "ok" | "missing" | "invalid" | "error";
