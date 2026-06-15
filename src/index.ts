@@ -187,6 +187,10 @@ import { normalizeRepo } from "./worker/repositories";
 import { handlePublicAuthRoute, handleSessionAuthRoute } from "./worker/routes/auth";
 import { handleOpenClawRoute } from "./worker/routes/openclaw";
 import {
+  handleServiceSessionRoute,
+  type ServiceSessionRouteDependencies,
+} from "./worker/routes/service-sessions";
+import {
   isCurrentSandboxLease,
   newSandboxLease,
   sandboxIdForSession,
@@ -1492,207 +1496,12 @@ async function api(
     return json(await provisionInteractiveEndpoint(request, env));
   }
 
-  if (request.method === "POST" && url.pathname === "/api/ssh/auth") {
-    return json(await sshAuth(request, env));
-  }
-
-  if (request.method === "GET" && url.pathname === "/api/ssh/state") {
-    return json(await sshState(request, env));
-  }
-
-  if (request.method === "GET" && url.pathname === "/api/agent/state") {
-    return json(await agentState(request, env));
-  }
-
-  if (request.method === "POST" && url.pathname === "/api/ssh/interactive-sessions") {
-    return json(await sshCreateInteractiveSession(request, env), { status: 201 });
-  }
-
-  if (request.method === "POST" && url.pathname === "/api/agent/interactive-sessions") {
-    return json(await agentCreateInteractiveSession(request, env), { status: 201 });
-  }
-
-  const agentInteractiveWorkStateMatch = url.pathname.match(
-    /^\/api\/agent\/interactive-sessions\/([^/]+)\/work-state$/,
+  const serviceSessionResponse = await handleServiceSessionRoute(
+    request,
+    url,
+    serviceSessionRouteDependencies(env),
   );
-  if (request.method === "POST" && agentInteractiveWorkStateMatch) {
-    return json(
-      await updateGitHubActionsWorkState(
-        request,
-        env,
-        decodeURIComponent(agentInteractiveWorkStateMatch[1] ?? ""),
-      ),
-    );
-  }
-
-  const agentInteractiveRunnerPtyMatch = url.pathname.match(
-    /^\/api\/agent\/interactive-sessions\/([^/]+)\/runner-pty$/,
-  );
-  if (request.method === "GET" && agentInteractiveRunnerPtyMatch) {
-    return githubActionsRunnerPty(
-      request,
-      env,
-      decodeURIComponent(agentInteractiveRunnerPtyMatch[1] ?? ""),
-    );
-  }
-
-  const sshInteractiveReadMatch = url.pathname.match(/^\/api\/ssh\/interactive-sessions\/([^/]+)$/);
-  if (request.method === "GET" && sshInteractiveReadMatch) {
-    const user = await requireSshGatewayUser(request, env);
-    requireRole(user, "viewer");
-    const session = await readFreshInteractiveSession(
-      env,
-      decodeURIComponent(sshInteractiveReadMatch[1] ?? ""),
-    );
-    if (!session) throw notFound("interactive session not found");
-    return json({ session: decorateInteractiveSession(session, user, env) });
-  }
-
-  const agentInteractiveReadMatch = url.pathname.match(
-    /^\/api\/agent\/interactive-sessions\/([^/]+)$/,
-  );
-  if (request.method === "GET" && agentInteractiveReadMatch) {
-    const { user } = await agentSessionAuthentication(env).require(request);
-    const session = await readFreshInteractiveSession(
-      env,
-      decodeURIComponent(agentInteractiveReadMatch[1] ?? ""),
-    );
-    if (!session) throw notFound("interactive session not found");
-    return json({ session: decorateInteractiveSession(session, user, env) });
-  }
-
-  const sshInteractiveActionMatch = url.pathname.match(
-    /^\/api\/ssh\/interactive-sessions\/([^/]+)\/actions$/,
-  );
-  if (request.method === "POST" && sshInteractiveActionMatch) {
-    const user = await requireSshGatewayUser(request, env);
-    requireRole(user, "viewer");
-    const body = await readJson<{ action?: string }>(request);
-    return json(
-      await mutateInteractiveSession(
-        request,
-        env,
-        user,
-        decodeURIComponent(sshInteractiveActionMatch[1] ?? ""),
-        body.action ?? "",
-      ),
-    );
-  }
-
-  const sshInteractiveCheckpointsMatch = url.pathname.match(
-    /^\/api\/ssh\/interactive-sessions\/([^/]+)\/checkpoints$/,
-  );
-  if (sshInteractiveCheckpointsMatch) {
-    const user = await requireSshGatewayUser(request, env);
-    requireRole(user, "viewer");
-    const id = decodeURIComponent(sshInteractiveCheckpointsMatch[1] ?? "");
-    if (request.method === "GET")
-      return json(await listInteractiveSessionCheckpoints(env, user, id));
-    if (request.method === "POST") {
-      return json(await checkpointInteractiveSession(env, user, id), { status: 201 });
-    }
-  }
-
-  const sshInteractiveRestoreMatch = url.pathname.match(
-    /^\/api\/ssh\/interactive-sessions\/([^/]+)\/checkpoints\/([^/]+)\/restore$/,
-  );
-  if (request.method === "POST" && sshInteractiveRestoreMatch) {
-    const user = await requireSshGatewayUser(request, env);
-    requireRole(user, "viewer");
-    return json(
-      await restoreInteractiveSessionCheckpoint(
-        env,
-        user,
-        decodeURIComponent(sshInteractiveRestoreMatch[1] ?? ""),
-        decodeURIComponent(sshInteractiveRestoreMatch[2] ?? ""),
-      ),
-    );
-  }
-
-  const sshInteractiveLogsMatch = url.pathname.match(
-    /^\/api\/ssh\/interactive-sessions\/([^/]+)\/logs$/,
-  );
-  if (request.method === "GET" && sshInteractiveLogsMatch) {
-    const user = await requireSshGatewayUser(request, env);
-    requireRole(user, "viewer");
-    return json(
-      await readInteractiveSessionLogBundle(
-        env,
-        user,
-        decodeURIComponent(sshInteractiveLogsMatch[1] ?? ""),
-      ),
-    );
-  }
-
-  const agentInteractiveLogsMatch = url.pathname.match(
-    /^\/api\/agent\/interactive-sessions\/([^/]+)\/logs$/,
-  );
-  if (request.method === "GET" && agentInteractiveLogsMatch) {
-    const { user } = await agentSessionAuthentication(env).require(request);
-    return json(
-      await readInteractiveSessionLogBundle(
-        env,
-        user,
-        decodeURIComponent(agentInteractiveLogsMatch[1] ?? ""),
-      ),
-    );
-  }
-
-  const sshInteractiveTranscriptMatch = url.pathname.match(
-    /^\/api\/ssh\/interactive-sessions\/([^/]+)\/transcript$/,
-  );
-  if (request.method === "GET" && sshInteractiveTranscriptMatch) {
-    const user = await requireSshGatewayUser(request, env);
-    requireRole(user, "viewer");
-    return interactiveSessionTranscriptResponse(
-      env,
-      user,
-      decodeURIComponent(sshInteractiveTranscriptMatch[1] ?? ""),
-    );
-  }
-
-  const agentInteractiveTranscriptMatch = url.pathname.match(
-    /^\/api\/agent\/interactive-sessions\/([^/]+)\/transcript$/,
-  );
-  if (request.method === "GET" && agentInteractiveTranscriptMatch) {
-    const { user } = await agentSessionAuthentication(env).require(request);
-    return interactiveSessionTranscriptResponse(
-      env,
-      user,
-      decodeURIComponent(agentInteractiveTranscriptMatch[1] ?? ""),
-    );
-  }
-
-  const sshInteractiveSummaryMatch = url.pathname.match(
-    /^\/api\/ssh\/interactive-sessions\/([^/]+)\/summary$/,
-  );
-  if (request.method === "POST" && sshInteractiveSummaryMatch) {
-    const user = await requireSshGatewayUser(request, env);
-    requireRole(user, "viewer");
-    return json(
-      await updateInteractiveSessionSummary(
-        request,
-        env,
-        user,
-        decodeURIComponent(sshInteractiveSummaryMatch[1] ?? ""),
-      ),
-    );
-  }
-
-  const agentInteractiveSummaryMatch = url.pathname.match(
-    /^\/api\/agent\/interactive-sessions\/([^/]+)\/summary$/,
-  );
-  if (request.method === "POST" && agentInteractiveSummaryMatch) {
-    const { user } = await agentSessionAuthentication(env).require(request);
-    return json(
-      await updateInteractiveSessionSummary(
-        request,
-        env,
-        user,
-        decodeURIComponent(agentInteractiveSummaryMatch[1] ?? ""),
-      ),
-    );
-  }
+  if (serviceSessionResponse) return serviceSessionResponse;
 
   const openClawResponse = await handleOpenClawRoute(request, url, {
     controller: openClawController(env),
@@ -2086,6 +1895,38 @@ function sshLinkConfirmHtml(
   </form>
 </body>
 </html>`;
+}
+
+function serviceSessionRouteDependencies(env: RuntimeEnv): ServiceSessionRouteDependencies {
+  return {
+    sshAuth: (request) => sshAuth(request, env),
+    sshState: (request) => sshState(request, env),
+    agentState: (request) => agentState(request, env),
+    createSshSession: (request) => sshCreateInteractiveSession(request, env),
+    createAgentSession: (request) => agentCreateInteractiveSession(request, env),
+    updateAgentWorkState: (request, sessionId) =>
+      updateGitHubActionsWorkState(request, env, sessionId),
+    openAgentRunnerPty: (request, sessionId) => githubActionsRunnerPty(request, env, sessionId),
+    requireSshViewer: async (request) => {
+      const user = await requireSshGatewayUser(request, env);
+      requireRole(user, "viewer");
+      return user;
+    },
+    requireAgentUser: async (request) =>
+      (await agentSessionAuthentication(env).require(request)).user,
+    readFreshSession: (sessionId) => readFreshInteractiveSession(env, sessionId),
+    presentSession: (session, user) => decorateInteractiveSession(session, user, env),
+    mutateSession: (request, user, sessionId, action) =>
+      mutateInteractiveSession(request, env, user, sessionId, action),
+    listCheckpoints: (user, sessionId) => listInteractiveSessionCheckpoints(env, user, sessionId),
+    createCheckpoint: (user, sessionId) => checkpointInteractiveSession(env, user, sessionId),
+    restoreCheckpoint: (user, sessionId, checkpointId) =>
+      restoreInteractiveSessionCheckpoint(env, user, sessionId, checkpointId),
+    readLogs: (user, sessionId) => readInteractiveSessionLogBundle(env, user, sessionId),
+    readTranscript: (user, sessionId) => interactiveSessionTranscriptResponse(env, user, sessionId),
+    updateSummary: (request, user, sessionId) =>
+      updateInteractiveSessionSummary(request, env, user, sessionId),
+  };
 }
 
 async function terminalHubUser(
