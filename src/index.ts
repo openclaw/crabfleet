@@ -1,4 +1,4 @@
-import { sql, type Kysely, type UpdateObject } from "kysely";
+import { sql, type UpdateObject } from "kysely";
 import { ContainerProxy, Sandbox as CloudflareSandboxBase } from "@cloudflare/sandbox";
 import { buildFleetState, type FleetState } from "./fleet-state";
 import { buildGitHubActionsRunnerPtyUrl, githubActionsRuntime } from "./github-actions-runtime";
@@ -36,14 +36,12 @@ import { mapWithConcurrency } from "./worker/concurrency";
 import type { RuntimeEnv } from "./worker/env";
 import {
   database,
-  executeBatch,
   type CompilableQuery,
   type Database,
   type InteractiveSessionRow,
   type RepoWorkflowTable,
-  type RunAttemptTable,
 } from "./worker/database";
-import { type Role, type RunStatus, type User, type WorkflowStatus } from "./worker/models";
+import { type Role, type User, type WorkflowStatus } from "./worker/models";
 import {
   badRequest,
   conflict,
@@ -90,16 +88,19 @@ import {
   type GitHubActionsWorkStateStore,
 } from "./worker/github-actions-session-work-state";
 import {
-  containerCapabilities,
-  crabboxCapabilities,
   interactiveSession,
   interactiveSessionEvent,
-  runtimeCapabilities,
   type InteractiveSession,
   type InteractiveSessionEvent,
   type InteractiveSessionLogArchive,
-  type RuntimeCapabilities,
 } from "./worker/session-model";
+import {
+  cardRuntimeOptions as runtimeOptions,
+  mergePolicyOptions,
+  type WorkflowConfig,
+} from "./worker/card-model";
+import { CardLifecycleService, type CardCreateInput } from "./worker/card-lifecycle-service";
+import { CardRepository } from "./worker/card-repository";
 import { normalizeRepo } from "./worker/repositories";
 import { handlePublicAuthRoute, handleSessionAuthRoute } from "./worker/routes/auth";
 import {
@@ -346,20 +347,6 @@ type GitHubContentPayload = {
   sha?: string;
 };
 
-type WorkflowConfig = {
-  runtime?: string;
-  policy?: string;
-  stallMs?: number;
-  cap?: number;
-  promptPrefix?: string;
-};
-
-type RuntimeDescriptor = {
-  runtime: "container" | "crabbox";
-  reason: string;
-  capabilities: RuntimeCapabilities;
-};
-
 type RepoWorkflow = {
   repo: string;
   status: WorkflowStatus;
@@ -372,70 +359,6 @@ type RepoWorkflow = {
   updatedAt: number;
 };
 
-type Card = {
-  id: string;
-  title: string;
-  prompt: string;
-  repo: string;
-  source: string;
-  runtime: string;
-  policy: string;
-  lane: string;
-  owner: string;
-  startedAt: number | null;
-  createdAt: number;
-  logs: string[];
-  changes: CardChanges;
-  run: RunAttempt | null;
-};
-
-type DiffFileStatus = "added" | "deleted" | "modified" | "renamed";
-
-type RunAttempt = {
-  id: string;
-  cardId: string;
-  attempt: number;
-  runtime: string;
-  status: RunStatus;
-  controlIntent: string | null;
-  leaseId: string | null;
-  attachUrl: string | null;
-  vncUrl: string | null;
-  ptyAvailable: boolean;
-  selectionReason: string | null;
-  capabilities: RuntimeCapabilities;
-  operator: string | null;
-  lastHeartbeatAt: number;
-  startedAt: number | null;
-  endedAt: number | null;
-  createdAt: number;
-  updatedAt: number;
-  error: string | null;
-};
-
-type ChangedFile = {
-  path: string;
-  oldPath?: string;
-  status: DiffFileStatus;
-  additions: number;
-  deletions: number;
-};
-
-type CardChanges = {
-  files: ChangedFile[];
-  patch: string;
-  totals: {
-    additions: number;
-    deletions: number;
-    files: number;
-  };
-};
-
-const lanes = ["Todo", "Running", "Human Review", "Done"];
-const activeRunStatuses: readonly RunStatus[] = ["queued", "leasing", "running"];
-const runtimeOptions = ["auto", "container", "crabbox"] as const;
-const mergePolicyOptions = ["open_pr", "merge_when_green", "fix_until_green_and_merge"] as const;
-const defaultStallMs = 5 * 60 * 1000;
 const workflowCacheMs = 60 * 60 * 1000;
 const runtimeAdapterReconcileIntervalMs = 15_000;
 const runtimeAdapterReconcileLimit = 3;
@@ -656,10 +579,10 @@ function controlPlaneRouteDependencies(
     readState: (request, user) => readState(request, env, user, context),
     readFleet: (user) => readFleetState(env, user, undefined, context),
     searchGitHubRefs: (request) => searchGitHubRefs(request, env),
-    createCard: (request, user) => createCard(request, env, user),
-    readCardRuns: async (cardId) =>
-      (await readCard(env, cardId)) ? readRunsForCard(env, cardId) : null,
-    mutateCard: (user, cardId, action) => mutateCard(env, user, cardId, action),
+    createCard: async (request, user) =>
+      cardLifecycleService(env).create(await readJson<CardCreateInput>(request), user),
+    readCardRuns: (cardId) => cardLifecycleService(env).runs(cardId),
+    mutateCard: (user, cardId, action) => cardLifecycleService(env).mutate(user, cardId, action),
     updatePolicy: (request, user) => updatePolicy(request, env, user),
     evaluateWorkflow: (request, user) => evaluateWorkflow(request, env, user),
     addAllowEntry: (request, user) => addAllowEntry(request, env, user),
@@ -788,6 +711,17 @@ function sandboxSessionResourceService(env: RuntimeEnv) {
   return createSandboxSessionResourceService(env, {
     presentSession: (session, user) => decorateInteractiveSession(session, user, env),
     delegatedControlAvailable: (session) => canGrantDelegatedControl(env, session),
+  });
+}
+
+function cardLifecycleService(env: RuntimeEnv): CardLifecycleService {
+  return new CardLifecycleService({
+    store: new CardRepository(env),
+    now: Date.now,
+    requireRepo: (repo) => requireRepo(env, repo),
+    readSettings: () => readSettings(env),
+    ensureWorkflow: (repo, now) => ensureWorkflowForRepo(env, repo, now),
+    isConstraintError,
   });
 }
 
@@ -1243,7 +1177,7 @@ async function readState(
   user: User,
   context?: ExecutionContext,
 ): Promise<Record<string, unknown>> {
-  await reconcileStalledRuns(env, Date.now());
+  await cardLifecycleService(env).reconcileStalledRuns();
   await reconcileExternalInteractiveSessions(env, Date.now(), context);
   const db = database(env);
   const [settings, allow, repos, cards, interactiveSessions, workflows] = await Promise.all([
@@ -1252,7 +1186,7 @@ async function readState(
       ? db.selectFrom("allow_entries").select(["value", "role"]).orderBy("value").execute()
       : Promise.resolve([]),
     db.selectFrom("repos").select("repo").where("enabled", "=", 1).orderBy("repo").execute(),
-    readCards(env),
+    cardLifecycleService(env).list(),
     readInteractiveSessions(env, user),
     user.role === "owner" ? readWorkflowSummaries(env) : Promise.resolve([]),
   ]);
@@ -2083,243 +2017,6 @@ function interactiveProvisioningEndpoints(env: RuntimeEnv): InteractiveProvision
   });
 }
 
-async function createCard(request: Request, env: RuntimeEnv, user: User): Promise<{ card: Card }> {
-  const body = await readJson<{
-    title?: string;
-    prompt?: string;
-    repo?: string;
-    source?: string;
-    runtime?: string;
-    policy?: string;
-  }>(request);
-  const prompt = clean(body.prompt, 4000);
-  const title = clean(body.title, 140) || titleFromPrompt(prompt);
-  const repo = normalizeRepo(body.repo);
-  if (!prompt || !repo) throw badRequest("prompt and repo are required");
-  await requireRepo(env, repo);
-
-  const now = Date.now();
-  const workflow = await ensureWorkflowForRepo(env, repo, now);
-  const workflowConfig = workflow?.status === "ok" ? workflow.config : undefined;
-  const source = oneOf(body.source, ["Prompt", "Issue", "PR"], "Prompt");
-  const runtime = oneOf(body.runtime, runtimeOptions, "auto");
-  const policy = resolveCardPolicy(body.policy, workflowConfig);
-  const owner = user.login ?? user.email ?? user.subject;
-  const db = database(env);
-  for (let attempt = 0; attempt < 3; attempt += 1) {
-    const id = await nextCardId(env);
-    try {
-      await db
-        .insertInto("cards")
-        .values({
-          id,
-          title,
-          prompt,
-          repo,
-          source,
-          runtime,
-          policy,
-          lane: "Todo",
-          owner,
-          started_at: null,
-          created_at: now,
-          updated_at: now,
-          last_event: "card created",
-          changed_files: "[]",
-          diff_patch: "",
-          active_run_id: null,
-        })
-        .execute();
-      await db
-        .insertInto("events")
-        .values([
-          { card_id: id, actor: actor(user), message: "card created", created_at: now },
-          { card_id: id, actor: actor(user), message: "repo allowlist ok", created_at: now + 1 },
-        ])
-        .execute();
-      return { card: (await readCard(env, id)) as Card };
-    } catch (error) {
-      if (!isConstraintError(error) || attempt === 2) throw error;
-    }
-  }
-  throw new Error("failed to allocate card id");
-}
-
-async function claimRunning(
-  env: RuntimeEnv,
-  user: User,
-  card: Card,
-  now: number,
-): Promise<boolean> {
-  await reconcileStalledRuns(env, now);
-  const currentCard = (await readCard(env, card.id)) ?? card;
-  await requireRepo(env, currentCard.repo);
-  const settings = await readSettings(env);
-  const cap = numberSetting(settings.cap, 20);
-  const db = database(env);
-  const existingRun =
-    currentCard.run && activeRunStatuses.includes(currentCard.run.status) ? currentCard.run : null;
-  if (existingRun) {
-    await heartbeatRun(env, existingRun.id, user, now, "heartbeat ok");
-    return true;
-  }
-
-  const workflow = await ensureWorkflowForRepo(env, currentCard.repo, now);
-  const workflowConfig = workflow?.status === "ok" ? workflow.config : undefined;
-  const attempt = await nextRunAttempt(env, currentCard.id);
-  const runId = `${currentCard.id}-R${attempt}`;
-  const descriptor = selectRuntimeDescriptor(currentCard, workflowConfig);
-  const transition = await sql`
-    UPDATE cards
-      SET lane = 'Running',
-        active_run_id = ${runId},
-        started_at = COALESCE(started_at, ${now}),
-        updated_at = ${now},
-        last_event = ${"run queued"}
-      WHERE id = ${currentCard.id}
-        AND (active_run_id IS NULL OR active_run_id = '' OR active_run_id NOT IN (
-          SELECT id FROM run_attempts WHERE status IN ('queued', 'leasing', 'running')
-        ))
-        AND (lane = 'Running' OR (
-          SELECT count(*) FROM cards WHERE lane = 'Running' AND id <> ${currentCard.id}
-        ) < ${cap})
-  `.execute(db);
-  if ((transition.numAffectedRows ?? 0n) === 0n) {
-    const activeCount = await db
-      .selectFrom("cards")
-      .select(sql<number>`count(*)`.as("count"))
-      .where("lane", "=", "Running")
-      .executeTakeFirst();
-    const message =
-      Number(activeCount?.count ?? 0) >= cap
-        ? `capacity blocked at cap ${cap}`
-        : "run already active";
-    await appendEvent(env, card.id, user, message, now);
-    return false;
-  }
-  await db
-    .insertInto("run_attempts")
-    .values({
-      id: runId,
-      card_id: currentCard.id,
-      attempt,
-      runtime: descriptor.runtime,
-      status: "queued",
-      control_intent: null,
-      lease_id: null,
-      attach_url: null,
-      vnc_url: null,
-      selection_reason: descriptor.reason,
-      capabilities_json: JSON.stringify(descriptor.capabilities),
-      operator: null,
-      last_heartbeat_at: now,
-      started_at: now,
-      ended_at: null,
-      created_at: now,
-      updated_at: now,
-      error: null,
-    })
-    .onConflict((oc) => oc.doNothing())
-    .execute();
-  await appendEvent(env, currentCard.id, user, `scheduler queued ${currentCard.repo}`, now + 1);
-  await appendEvent(
-    env,
-    currentCard.id,
-    user,
-    `runtime=${descriptor.runtime} policy=${currentCard.policy} workflow=${workflow?.status ?? "unseen"} reason=${descriptor.reason}`,
-    now + 2,
-  );
-  return true;
-}
-
-async function mutateCard(
-  env: RuntimeEnv,
-  user: User,
-  id: string,
-  action: string,
-): Promise<{ card: Card }> {
-  const card = await readCard(env, id);
-  if (!card) throw notFound("card not found");
-  const now = Date.now();
-
-  if (action === "start" || action === "pulse") {
-    const wasRunning = card.lane === "Running";
-    if (!wasRunning) {
-      if (!(await claimRunning(env, user, card, now))) {
-        return { card: (await readCard(env, id)) as Card };
-      }
-    } else if (card.run && activeRunStatuses.includes(card.run.status)) {
-      await heartbeatRun(env, card.run.id, user, now + 2, "heartbeat ok");
-      return { card: (await readCard(env, id)) as Card };
-    } else if (!(await claimRunning(env, user, card, now))) {
-      return { card: (await readCard(env, id)) as Card };
-    }
-    await appendEvent(env, card.id, user, "heartbeat ok", now + 3);
-    return { card: (await readCard(env, id)) as Card };
-  }
-
-  if (action === "advance") {
-    const nextLane = lanes[(lanes.indexOf(card.lane) + 1) % lanes.length] ?? "Todo";
-    if (nextLane === "Running") {
-      await claimRunning(env, user, card, now);
-      return { card: (await readCard(env, id)) as Card };
-    }
-    const startedAt = nextLane === "Running" ? now : card.startedAt;
-    await database(env)
-      .updateTable("cards")
-      .set({
-        lane: nextLane,
-        started_at: startedAt,
-        updated_at: now,
-        last_event: `moved to ${nextLane}`,
-      })
-      .where("id", "=", card.id)
-      .execute();
-    if (
-      card.run &&
-      (activeRunStatuses.includes(card.run.status) ||
-        (card.run.status === "review" && nextLane === "Done"))
-    ) {
-      await finishRunForLane(env, card.run.id, nextLane, user, now + 1);
-    }
-    await appendEvent(env, card.id, user, `moved to ${nextLane}`, now);
-    return { card: (await readCard(env, id)) as Card };
-  }
-
-  if (action === "attach") {
-    return { card: (await readCard(env, id)) as Card };
-  }
-
-  if (action === "watch") {
-    await appendEvent(env, card.id, user, "watch attached", now);
-    return { card: (await readCard(env, id)) as Card };
-  }
-
-  if (action === "takeover") {
-    if (!card.run || !activeRunStatuses.includes(card.run.status)) {
-      throw badRequest("no active run to take over");
-    }
-    if (!card.run.capabilities.takeover) throw badRequest("runtime does not support takeover");
-    await database(env)
-      .updateTable("run_attempts")
-      .set({ operator: actor(user), control_intent: "takeover", updated_at: now })
-      .where("id", "=", card.run.id)
-      .execute();
-    await appendEvent(env, card.id, user, "operator takeover granted", now);
-    return { card: (await readCard(env, id)) as Card };
-  }
-
-  if (action === "stall") {
-    if (!card.run || !activeRunStatuses.includes(card.run.status)) {
-      throw badRequest("no active run to mark stalled");
-    }
-    await markCardStalled(env, card, user, now, "operator marked stalled");
-    return { card: (await readCard(env, id)) as Card };
-  }
-
-  throw badRequest("unknown action");
-}
-
 async function updatePolicy(
   request: Request,
   env: RuntimeEnv,
@@ -2683,155 +2380,6 @@ function githubReferenceFromGraphql(repo: string, item: GitHubGraphqlRefPayload)
   };
 }
 
-async function readCards(env: RuntimeEnv): Promise<Card[]> {
-  const db = database(env);
-  const cards = await db
-    .selectFrom("cards")
-    .select([
-      "id",
-      "title",
-      "prompt",
-      "repo",
-      "source",
-      "runtime",
-      "policy",
-      "lane",
-      "owner",
-      "started_at",
-      "created_at",
-      "changed_files",
-      "active_run_id",
-    ])
-    .orderBy("updated_at", "desc")
-    .orderBy("created_at", "desc")
-    .execute();
-  if (!cards.length) return [];
-  const runs = await readActiveRunsForCards(env);
-  const eventRows = (
-    await sql<{ card_id: string; message: string; created_at: number }>`
-      SELECT card_id, message, created_at
-      FROM (
-        SELECT card_id, message, created_at, id,
-          row_number() OVER (PARTITION BY card_id ORDER BY created_at DESC, id DESC) AS rank
-        FROM events
-        WHERE card_id IN (SELECT id FROM cards)
-      )
-      WHERE rank <= 80
-      ORDER BY card_id ASC, created_at ASC, id ASC
-    `.execute(db)
-  ).rows;
-  const logs = new Map<string, string[]>();
-  for (const row of eventRows) {
-    const line = `${new Date(row.created_at).toLocaleTimeString("en-GB")} ${row.message}`;
-    logs.set(row.card_id, [...(logs.get(row.card_id) ?? []), line]);
-  }
-  return cards.map((card) => ({
-    id: card.id,
-    title: card.title,
-    prompt: card.prompt,
-    repo: card.repo,
-    source: card.source,
-    runtime: card.runtime,
-    policy: card.policy,
-    lane: card.lane,
-    owner: card.owner,
-    startedAt: card.started_at,
-    createdAt: card.created_at,
-    logs: logs.get(card.id) ?? [],
-    changes: cardChanges(card.changed_files, ""),
-    run: card.active_run_id ? (runs.get(card.active_run_id) ?? null) : null,
-  }));
-}
-
-async function readCard(env: RuntimeEnv, id: string): Promise<Card | null> {
-  const db = database(env);
-  const card = await db
-    .selectFrom("cards")
-    .select([
-      "id",
-      "title",
-      "prompt",
-      "repo",
-      "source",
-      "runtime",
-      "policy",
-      "lane",
-      "owner",
-      "started_at",
-      "created_at",
-      "changed_files",
-      "diff_patch",
-      "active_run_id",
-    ])
-    .where("id", "=", id)
-    .executeTakeFirst();
-  if (!card) return null;
-  const runs = await readRunsByIds(env, card.active_run_id ? [card.active_run_id] : []);
-  const eventRows = (
-    await sql<{ message: string; created_at: number }>`
-      SELECT message, created_at
-      FROM (
-        SELECT message, created_at, id
-        FROM events
-        WHERE card_id = ${card.id}
-        ORDER BY created_at DESC, id DESC
-        LIMIT 80
-      )
-      ORDER BY created_at ASC, id ASC
-    `.execute(db)
-  ).rows;
-  return {
-    id: card.id,
-    title: card.title,
-    prompt: card.prompt,
-    repo: card.repo,
-    source: card.source,
-    runtime: card.runtime,
-    policy: card.policy,
-    lane: card.lane,
-    owner: card.owner,
-    startedAt: card.started_at,
-    createdAt: card.created_at,
-    logs: eventRows.map(
-      (row) => `${new Date(row.created_at).toLocaleTimeString("en-GB")} ${row.message}`,
-    ),
-    changes: cardChanges(card.changed_files, card.diff_patch),
-    run: card.active_run_id ? (runs.get(card.active_run_id) ?? null) : null,
-  };
-}
-
-async function readRunsByIds(env: RuntimeEnv, ids: string[]): Promise<Map<string, RunAttempt>> {
-  const uniqueIds = [...new Set(ids)].filter(Boolean);
-  if (!uniqueIds.length) return new Map();
-  const rows = await database(env)
-    .selectFrom("run_attempts")
-    .selectAll()
-    .where("id", "in", uniqueIds)
-    .execute();
-  return new Map(rows.map((row) => [row.id, runAttempt(row)]));
-}
-
-async function readActiveRunsForCards(env: RuntimeEnv): Promise<Map<string, RunAttempt>> {
-  const rows = (
-    await sql<RunAttemptTable>`
-      SELECT run_attempts.*
-      FROM run_attempts
-      INNER JOIN cards ON cards.active_run_id = run_attempts.id
-    `.execute(database(env))
-  ).rows;
-  return new Map(rows.map((row) => [row.id, runAttempt(row)]));
-}
-
-async function readRunsForCard(env: RuntimeEnv, cardId: string): Promise<RunAttempt[]> {
-  const rows = await database(env)
-    .selectFrom("run_attempts")
-    .selectAll()
-    .where("card_id", "=", cardId)
-    .orderBy("attempt", "desc")
-    .execute();
-  return rows.map(runAttempt);
-}
-
 async function readInteractiveSessions(env: RuntimeEnv, user: User): Promise<InteractiveSession[]> {
   return (await readInteractiveSessionRecords(env)).map((session) =>
     decorateInteractiveSession(session, user, env),
@@ -3043,24 +2591,6 @@ async function sandboxSessionWithGitHubToken(
   return githubToken ? { ...session, githubToken } : session;
 }
 
-async function nextCardId(env: RuntimeEnv): Promise<string> {
-  const row = await database(env)
-    .selectFrom("cards")
-    .select(sql<number | null>`max(CAST(substr(id, 4) AS INTEGER))`.as("max_id"))
-    .where("id", "like", "CY-%")
-    .executeTakeFirst();
-  return `CY-${String((row?.max_id ?? 100) + 1)}`;
-}
-
-async function nextRunAttempt(env: RuntimeEnv, cardId: string): Promise<number> {
-  const row = await database(env)
-    .selectFrom("run_attempts")
-    .select(sql<number | null>`max(attempt)`.as("max_attempt"))
-    .where("card_id", "=", cardId)
-    .executeTakeFirst();
-  return (row?.max_attempt ?? 0) + 1;
-}
-
 async function nextInteractiveSessionId(env: RuntimeEnv): Promise<string> {
   const db = database(env);
   for (let attempt = 0; attempt < 100; attempt += 1) {
@@ -3087,176 +2617,11 @@ async function requireRepo(env: RuntimeEnv, repo: string): Promise<void> {
   if (!row) throw forbidden(`repo blocked by allowlist: ${repo}`);
 }
 
-async function reconcileStalledRuns(env: RuntimeEnv, now: number): Promise<void> {
-  const threshold = now - stallThresholdMs(await readSettings(env));
-  const staleRuns = await database(env)
-    .selectFrom("run_attempts")
-    .select(["id", "card_id"])
-    .where("status", "in", activeRunStatuses)
-    .where("last_heartbeat_at", "<", threshold)
-    .limit(25)
-    .execute();
-  if (!staleRuns.length) return;
-
-  const db = database(env);
-  const system = systemUser();
-  for (const run of staleRuns) {
-    const runUpdate = await db
-      .updateTable("run_attempts")
-      .set({
-        status: "stalled",
-        ended_at: now,
-        updated_at: now,
-        error: "heartbeat timeout",
-      })
-      .where("id", "=", run.id)
-      .where("status", "in", activeRunStatuses)
-      .where("last_heartbeat_at", "<", threshold)
-      .executeTakeFirst();
-    if ((runUpdate.numUpdatedRows ?? 0n) === 0n) continue;
-
-    await executeBatch(env, [
-      db
-        .updateTable("cards")
-        .set({
-          lane: "Human Review",
-          updated_at: now,
-          last_event: "stalled; heartbeat timeout",
-        })
-        .where("id", "=", run.card_id)
-        .where("active_run_id", "=", run.id),
-      eventInsert(db, run.card_id, actor(system), "stalled; heartbeat timeout", now),
-    ]);
-  }
-}
-
-async function heartbeatRun(
-  env: RuntimeEnv,
-  runId: string,
-  user: User,
-  now: number,
-  message: string,
-): Promise<void> {
-  const run = await database(env)
-    .selectFrom("run_attempts")
-    .select(["id", "card_id"])
-    .where("id", "=", runId)
-    .executeTakeFirst();
-  if (!run) return;
-  const db = database(env);
-  await executeBatch(env, [
-    db
-      .updateTable("run_attempts")
-      .set({ status: "running", last_heartbeat_at: now, updated_at: now })
-      .where("id", "=", runId)
-      .where("status", "in", activeRunStatuses),
-    eventInsert(db, run.card_id, actor(user), message, now),
-    db
-      .updateTable("cards")
-      .set({ updated_at: now, last_event: message })
-      .where("id", "=", run.card_id),
-  ]);
-}
-
-async function finishRunForLane(
-  env: RuntimeEnv,
-  runId: string,
-  lane: string,
-  user: User,
-  now: number,
-): Promise<void> {
-  const status: RunStatus =
-    lane === "Done" ? "completed" : lane === "Human Review" ? "review" : "canceled";
-  const run = await database(env)
-    .selectFrom("run_attempts")
-    .select(["id", "card_id"])
-    .where("id", "=", runId)
-    .executeTakeFirst();
-  if (!run) return;
-  const db = database(env);
-  await executeBatch(env, [
-    db
-      .updateTable("run_attempts")
-      .set({
-        status,
-        ended_at: now,
-        updated_at: now,
-        control_intent: status === "canceled" ? "cancel" : null,
-      })
-      .where("id", "=", runId),
-    eventInsert(db, run.card_id, actor(user), `run ${status}`, now),
-  ]);
-}
-
-async function markCardStalled(
-  env: RuntimeEnv,
-  card: Card,
-  user: User,
-  now: number,
-  reason: string,
-): Promise<void> {
-  const db = database(env);
-  if (!card.run) throw badRequest("no active run to mark stalled");
-  const runUpdate = await db
-    .updateTable("run_attempts")
-    .set({
-      status: "stalled",
-      ended_at: now,
-      updated_at: now,
-      error: reason,
-    })
-    .where("id", "=", card.run.id)
-    .where("card_id", "=", card.id)
-    .where("status", "in", activeRunStatuses)
-    .executeTakeFirst();
-  if ((runUpdate.numUpdatedRows ?? 0n) === 0n) {
-    throw badRequest("run is no longer active");
-  }
-  await executeBatch(env, [
-    db
-      .updateTable("cards")
-      .set({
-        lane: "Human Review",
-        updated_at: now,
-        last_event: "stalled; workspace preserved",
-      })
-      .where("id", "=", card.id)
-      .where("active_run_id", "=", card.run.id),
-    eventInsert(db, card.id, actor(user), reason, now),
-  ]);
-}
-
-async function appendEvent(
-  env: RuntimeEnv,
-  cardId: string,
-  user: User,
-  message: string,
-  now: number,
-): Promise<void> {
-  const db = database(env);
-  await executeBatch(env, [
-    eventInsert(db, cardId, actor(user), message, now),
-    db.updateTable("cards").set({ updated_at: now, last_event: message }).where("id", "=", cardId),
-  ]);
-}
-
 async function audit(env: RuntimeEnv, user: User, message: string, now: number): Promise<void> {
   await database(env)
     .insertInto("audit_events")
     .values({ actor: actor(user), message, created_at: now })
     .execute();
-}
-
-function eventInsert(
-  db: Kysely<Database>,
-  cardId: string,
-  actorName: string,
-  message: string,
-  now: number,
-): CompilableQuery {
-  return db
-    .insertInto("events")
-    .values({ card_id: cardId, actor: actorName, message, created_at: now });
 }
 
 function parseJson<T>(value: string, fallback: T): T {
@@ -3265,55 +2630,6 @@ function parseJson<T>(value: string, fallback: T): T {
   } catch {
     return fallback;
   }
-}
-
-function cardChanges(filesJson: string, patch: string): CardChanges {
-  const files = parseJson<ChangedFile[]>(filesJson, []).filter(isChangedFile);
-  return {
-    files,
-    patch,
-    totals: {
-      additions: files.reduce((sum, file) => sum + file.additions, 0),
-      deletions: files.reduce((sum, file) => sum + file.deletions, 0),
-      files: files.length,
-    },
-  };
-}
-
-function isChangedFile(value: unknown): value is ChangedFile {
-  if (!value || typeof value !== "object") return false;
-  const file = value as Partial<ChangedFile>;
-  return (
-    typeof file.path === "string" &&
-    ["added", "deleted", "modified", "renamed"].includes(String(file.status)) &&
-    typeof file.additions === "number" &&
-    typeof file.deletions === "number"
-  );
-}
-
-function runAttempt(row: RunAttemptTable): RunAttempt {
-  const capabilities = runtimeCapabilities(row.runtime, row.capabilities_json);
-  return {
-    id: row.id,
-    cardId: row.card_id,
-    attempt: row.attempt,
-    runtime: row.runtime,
-    status: row.status,
-    controlIntent: row.control_intent,
-    leaseId: row.lease_id,
-    attachUrl: capabilities.terminal ? row.attach_url : null,
-    vncUrl: row.vnc_url,
-    ptyAvailable: false,
-    selectionReason: row.selection_reason,
-    capabilities,
-    operator: row.operator,
-    lastHeartbeatAt: row.last_heartbeat_at,
-    startedAt: row.started_at,
-    endedAt: row.ended_at,
-    createdAt: row.created_at,
-    updatedAt: row.updated_at,
-    error: row.error,
-  };
 }
 
 function decorateInteractiveSession(
@@ -3434,23 +2750,6 @@ function numberConfig(value: unknown): number | undefined {
   return Number.isFinite(parsed) && parsed > 0 ? parsed : undefined;
 }
 
-function resolveCardPolicy(value: unknown, workflow?: WorkflowConfig): string {
-  const workflowPolicy = optionalOneOf(workflow?.policy, mergePolicyOptions);
-  const fallback = workflowPolicy ?? "open_pr";
-  if (
-    value === undefined ||
-    value === null ||
-    value === "" ||
-    value === "default" ||
-    value === "repo_default"
-  ) {
-    return fallback;
-  }
-  const policy = optionalOneOf(value, mergePolicyOptions);
-  if (!policy) throw badRequest("invalid merge policy");
-  return policy;
-}
-
 function workflowConfigErrors(
   raw: Record<string, string>,
   parsed: {
@@ -3477,57 +2776,6 @@ function workflowConfigErrors(
   return errors;
 }
 
-function selectRuntimeDescriptor(
-  card: Pick<Card, "runtime" | "prompt">,
-  workflow?: WorkflowConfig,
-): RuntimeDescriptor {
-  if (card.runtime === "crabbox") {
-    return runtimeDescriptor("crabbox", "card runtime override");
-  }
-  if (card.runtime === "container") {
-    return runtimeDescriptor("container", "card runtime override");
-  }
-  const needsCrabbox = /\b(vnc|manual|takeover|gpu|perf|performance)\b/i.test(card.prompt);
-  if (needsCrabbox) {
-    return runtimeDescriptor("crabbox", "prompt requires desktop/manual/perf capability");
-  }
-  if (workflow?.runtime === "crabbox") {
-    return runtimeDescriptor("crabbox", "repo CRABBOX.md runtime default");
-  }
-  if (workflow?.runtime === "container") {
-    return runtimeDescriptor("container", "repo CRABBOX.md runtime default");
-  }
-  return runtimeDescriptor("container", "default container runtime");
-}
-
-function runtimeDescriptor(
-  runtime: RuntimeDescriptor["runtime"],
-  reason: string,
-): RuntimeDescriptor {
-  return {
-    runtime,
-    reason,
-    capabilities: runtime === "crabbox" ? crabboxCapabilities : containerCapabilities,
-  };
-}
-
-function stallThresholdMs(settings: Record<string, string>): number {
-  const parsed = Number(settings.stall_ms);
-  return Number.isFinite(parsed) && parsed >= 60_000 ? parsed : defaultStallMs;
-}
-
-function systemUser(): User {
-  return {
-    subject: "system:crabfleet",
-    login: "system",
-    email: null,
-    name: "Crabfleet",
-    role: "owner",
-    allowed: true,
-    teams: [],
-  };
-}
-
 function normalizeAllow(value: unknown): string {
   const raw = String(value ?? "").trim();
   if (!raw) return "";
@@ -3539,14 +2787,6 @@ function clean(value: unknown, max: number): string {
   return String(value ?? "")
     .trim()
     .slice(0, max);
-}
-
-function titleFromPrompt(prompt: string): string {
-  const line = prompt
-    .split(/\r?\n/)
-    .map((part) => part.trim())
-    .find(Boolean);
-  return clean(line?.replace(/^#+\s*/, ""), 140) || "Untitled card";
 }
 
 function oneOf<T extends string>(value: unknown, options: readonly T[], fallback: T): T {
