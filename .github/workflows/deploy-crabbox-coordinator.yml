@@ -52,23 +52,6 @@ jobs:
           npm test --prefix worker
           npm run build --prefix worker
 
-      - name: Sync runtime adapter token
-        env:
-          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          CRABBOX_OPENCLAW_TOKEN: ${{ secrets.CRABBOX_OPENCLAW_TOKEN }}
-        working-directory: worker
-        run: |
-          node -e '
-            const { createHmac } = require("node:crypto");
-            const root = process.env.CRABBOX_OPENCLAW_TOKEN;
-            if (!root) process.exit(1);
-            process.stdout.write(
-              createHmac("sha256", root)
-                .update("openclaw/crabbox-runtime-adapter/v1")
-                .digest("base64url"),
-            );
-          ' | npx wrangler secret put CRABBOX_RUNTIME_ADAPTER_TOKEN --config wrangler.jsonc
-
       - name: Deploy
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
@@ -79,6 +62,34 @@ jobs:
             sleep $((attempt * 5))
           done
           npx wrangler deploy --config wrangler.jsonc
+
+      - name: Sync runtime adapter token
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CRABBOX_OPENCLAW_TOKEN: ${{ secrets.CRABBOX_OPENCLAW_TOKEN }}
+        working-directory: worker
+        run: |
+          token="$(
+            node -e '
+              const { createHmac } = require("node:crypto");
+              const root = process.env.CRABBOX_OPENCLAW_TOKEN;
+              if (!root) process.exit(1);
+              process.stdout.write(
+                createHmac("sha256", root)
+                  .update("openclaw/crabbox-runtime-adapter/v1")
+                  .digest("base64url"),
+              );
+            '
+          )"
+          printf '%s' "$token" |
+            npx wrangler secret put CRABBOX_RUNTIME_ADAPTER_TOKEN --config wrangler.jsonc
+          status="$(
+            curl --silent --show-error --output /dev/null --write-out '%{http_code}' \
+              --header "Authorization: Bearer $token" \
+              https://crabbox.openclaw.ai/v1/workspaces/deploy-auth-check
+          )"
+          test "$status" != "401"
+          test "$status" != "403"
 
       - name: Verify deployment
         run: |
