@@ -138,6 +138,7 @@ import {
   publicDeploymentConfig,
   selectedRuntimeProfile,
 } from "./worker/deployment";
+import { clampedSeconds } from "./worker/duration";
 import type { RuntimeEnv } from "./worker/env";
 import {
   database,
@@ -213,6 +214,19 @@ import {
   type RuntimeCapabilities,
 } from "./worker/session-model";
 import { normalizeRepo } from "./worker/repositories";
+import {
+  isCurrentSandboxLease,
+  newSandboxLease,
+  sandboxIdForSession,
+  sandboxLeaseId,
+  sandboxLeaseInfo,
+  sandboxLeasePrefix,
+  sandboxLeaseRefreshStartedAt,
+  sandboxLeaseWithoutRefresh,
+  type SandboxCurrentLeaseFence,
+  type SandboxLease,
+  type SandboxLeaseRefreshFence,
+} from "./worker/sandbox-lease";
 import { readOpenClawRequestSession } from "./worker/openclaw-request";
 import {
   activateInteractiveSessionReservation,
@@ -269,6 +283,10 @@ import {
   resolveInteractiveSessionCreateRequest,
   type InteractiveSessionCreateRequest,
 } from "./worker/session-create-request";
+import {
+  createInteractiveSessionReservationContext,
+  newAgentToken,
+} from "./worker/session-reservation-context";
 import {
   configuredRuntimeAdapterControlPlane,
   runtimeAdapterConfigurationPresent,
@@ -420,23 +438,6 @@ type RunAttempt = {
 
 type SandboxRuntimeSession = (InteractiveProvisionRequest | InteractiveSession) & {
   githubToken?: string;
-};
-
-type SandboxLease = {
-  sandboxId: string;
-  terminalSessionId: string;
-};
-
-type SandboxLeaseRefreshFence = {
-  claim: string;
-  expiresAt: number;
-  refreshLeaseId: string | null;
-  sandboxId: string;
-};
-
-type SandboxCurrentLeaseFence = {
-  leaseId: string;
-  sandboxId: string;
 };
 
 type StandaloneSandboxProvisionFence = {
@@ -599,8 +600,6 @@ const terminalInputStates = new Map<string, TerminalInputState>();
 const sshLinkSeconds = 5 * 60;
 const terminalClipboardMaxBytes = 10 * 1024 * 1024;
 const lanes = ["Todo", "Running", "Human Review", "Done"];
-const sandboxLeasePrefix = "sandbox:";
-const sandboxLeaseProfile = "autostart-v4";
 const activeRunStatuses: readonly RunStatus[] = ["queued", "leasing", "running"];
 const runtimeOptions = ["auto", "container", "crabbox"] as const;
 const mergePolicyOptions = ["open_pr", "merge_when_green", "fix_until_green_and_merge"] as const;
@@ -621,20 +620,6 @@ const credentialPolicyProvisioningStaleMs = 15 * 60_000;
 const credentialPolicyLegacyGenerationPrefix = "legacy:";
 const credentialPolicyLegacyRepairClaimPrefix = "legacy-repair:";
 const standaloneSandboxDefaultTtlSeconds = 14_400;
-function runtimeAdapterCreateSettings(
-  env: RuntimeEnv,
-  capabilities: RuntimeCapabilities,
-): {
-  ttlSeconds: number;
-  idleTimeoutSeconds: number;
-  capabilities: RuntimeCapabilities;
-} {
-  return {
-    ttlSeconds: clampedSeconds(env.CRABBOX_RUNTIME_ADAPTER_TTL_SECONDS, 14_400),
-    idleTimeoutSeconds: clampedSeconds(env.CRABBOX_RUNTIME_ADAPTER_IDLE_SECONDS, 1_800),
-    capabilities,
-  };
-}
 
 const defaultSandboxEgressHosts = [
   "api.github.com",
@@ -3693,52 +3678,20 @@ async function createInteractiveSessionFromInput(
     let reservationInserted = false;
     const id = await nextInteractiveSessionId(env);
     const rootSessionId = lineage.rootSessionId ?? id;
-    const agentToken = newAgentToken();
-    const initialAgentTokenHash = await sha256(agentToken);
-    const initialSandboxLease = runtime === "container" && env.SANDBOX ? newSandboxLease(id) : null;
-    const initialSandboxOwnership: SandboxCurrentLeaseFence | null = initialSandboxLease
-      ? {
-          leaseId: sandboxLeaseId(initialSandboxLease),
-          sandboxId: initialSandboxLease.sandboxId,
-        }
-      : null;
-    const adapterWorkspaceId = initialRuntimeAdapterWorkspaceId(env, runtime, id);
-    const adapterControlPlane = adapterWorkspaceId
-      ? configuredRuntimeAdapterControlPlane(env, profile)
-      : null;
-    const adapterSettings = adapterWorkspaceId
-      ? runtimeAdapterCreateSettings(env, requestedCapabilities)
-      : null;
-    const adapterCreatePayload =
-      adapterWorkspaceId && adapterSettings
-        ? runtimeAdapterCreatePayload(
-            {
-              namespace: normalizeAdapterNamespace(
-                env.CRABBOX_RUNTIME_ADAPTER_NAMESPACE ?? "",
-              ) as string,
-              id,
-              parentSessionId: lineage.parentSessionId,
-              rootSessionId,
-              repo,
-              branch,
-              runtime,
-              profile,
-              command,
-              prompt,
-              purpose,
-              summary,
-              owner,
-              createdBy,
-              ttlSeconds: adapterSettings.ttlSeconds,
-              idleTimeoutSeconds: adapterSettings.idleTimeoutSeconds,
-              desktop: adapterSettings.capabilities.desktop,
-            },
-            adapterWorkspaceId,
-          )
-        : null;
-    const adapterCreatePayloadJson = adapterCreatePayload
-      ? JSON.stringify(adapterCreatePayload)
-      : null;
+    const {
+      agentToken,
+      initialAgentTokenHash,
+      initialSandboxLease,
+      initialSandboxOwnership,
+      adapterWorkspaceId,
+      adapterControlPlane,
+      adapterSettings,
+      adapterCreatePayloadJson,
+    } = await createInteractiveSessionReservationContext(env, request, {
+      id,
+      parentSessionId: lineage.parentSessionId,
+      rootSessionId,
+    });
     try {
       const reservationValues = buildInteractiveSessionReservationValues({
         id,
@@ -3897,25 +3850,6 @@ async function createInteractiveSessionFromInput(
     }
   }
   throw new Error("failed to allocate interactive session id");
-}
-
-function initialRuntimeAdapterWorkspaceId(
-  env: RuntimeEnv,
-  runtime: "crabbox" | "container",
-  sessionId: string,
-): string | null {
-  if (!runtimeAdapterConfigurationPresent(env) || (runtime === "container" && env.SANDBOX)) {
-    return null;
-  }
-  const namespace = normalizeAdapterNamespace(env.CRABBOX_RUNTIME_ADAPTER_NAMESPACE ?? "");
-  if (!namespace) {
-    throw serviceUnavailable(
-      "runtime adapter namespace is required and must be a DNS-safe label of at most 32 characters",
-    );
-  }
-  const adapterWorkspaceId = namespacedAdapterWorkspaceId(namespace, sessionId);
-  if (!adapterWorkspaceId) throw serviceUnavailable("runtime adapter workspace id is invalid");
-  return adapterWorkspaceId;
 }
 
 function requireRegisteredRuntimeAdapterControlPlane(
@@ -4177,10 +4111,6 @@ function interactiveSessionCreationService(
       finalizeTerminalInteractiveSession(env, sessionId, status, now),
   };
   return new InteractiveSessionCreationService(store);
-}
-
-function newAgentToken(): string {
-  return `${crypto.randomUUID()}${crypto.randomUUID()}`;
 }
 
 async function cleanupInteractiveSessions(
@@ -12049,12 +11979,6 @@ function cloudflareRunnerInstanceType(env: RuntimeEnv): string {
   );
 }
 
-function clampedSeconds(value: string | undefined, fallback: number): number {
-  const parsed = Number(value);
-  if (!Number.isFinite(parsed)) return fallback;
-  return Math.min(86_400, Math.max(300, Math.trunc(parsed)));
-}
-
 async function createCard(request: Request, env: RuntimeEnv, user: User): Promise<{ card: Card }> {
   const body = await readJson<{
     title?: string;
@@ -14297,63 +14221,6 @@ function httpToWebSocketUrl(rawUrl: string): string {
   } catch {
     return "";
   }
-}
-
-function sandboxIdForSession(id: string): string {
-  return clean(`crabbox-${id}`.toLowerCase().replace(/[^a-z0-9_-]/g, "-"), 63);
-}
-
-function newSandboxLease(id: string): { sandboxId: string; terminalSessionId: string } {
-  const suffix = crypto.randomUUID().slice(0, 8).toLowerCase();
-  const base = sandboxIdForSession(id);
-  const sandboxId = `${base.slice(0, 63 - suffix.length - 1)}-${suffix}`;
-  return {
-    sandboxId,
-    terminalSessionId: sandboxTerminalSessionId(id, suffix),
-  };
-}
-
-function sandboxLeaseId(lease: { sandboxId: string; terminalSessionId: string }): string {
-  return `${sandboxLeasePrefix}${lease.sandboxId}:${lease.terminalSessionId}:${sandboxLeaseProfile}`;
-}
-
-function isCurrentSandboxLease(leaseId: string | null | undefined): boolean {
-  return (
-    leaseId?.startsWith(sandboxLeasePrefix) === true && leaseId.endsWith(`:${sandboxLeaseProfile}`)
-  );
-}
-
-function sandboxLeaseRefreshStartedAt(leaseId: string): number | null {
-  const match = /:refreshing-(\d+)-[a-f0-9]+$/.exec(leaseId);
-  return match ? Number(match[1]) : null;
-}
-
-function sandboxLeaseWithoutRefresh(leaseId: string): string {
-  return leaseId.replace(/:refreshing-\d+-[a-f0-9]+$/, "");
-}
-
-function sandboxLeaseInfo(
-  session: Pick<InteractiveSession | InteractiveProvisionRequest, "id"> & {
-    leaseId?: string | null;
-    adapter?: string | null;
-  },
-): { sandboxId: string; terminalSessionId: string } {
-  const rawLease = legacyLeaseIdForAdapter(session.adapter ?? null, session.leaseId ?? null);
-  const raw = rawLease?.startsWith(sandboxLeasePrefix)
-    ? rawLease.slice(sandboxLeasePrefix.length)
-    : "";
-  const [sandboxId, terminalSessionId] = raw.split(":");
-  const fallbackSandboxId = clean(sandboxId, 80) || sandboxIdForSession(session.id);
-  return {
-    sandboxId: fallbackSandboxId,
-    terminalSessionId: clean(terminalSessionId, 100) || sandboxTerminalSessionId(session.id),
-  };
-}
-
-function sandboxTerminalSessionId(id: string, suffix?: string): string {
-  const base = clean(`terminal-${id}`.toLowerCase().replace(/[^a-z0-9_-]/g, "-"), 80);
-  if (!suffix) return base;
-  return `${base.slice(0, 80 - suffix.length - 1)}-${suffix}`;
 }
 
 function sandboxSetupSessionId(id: string): string {

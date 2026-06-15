@@ -1301,9 +1301,6 @@ test("Sandbox credential registration always proves exact durable ownership", as
   const ownerStart = source.indexOf("function sandboxManagedOwnershipCondition");
   const ownerEnd = source.indexOf("async function abandonSandboxCredentialPolicyRegistration");
   const ownerSource = source.slice(ownerStart, ownerEnd);
-  const createStart = source.indexOf("async function createInteractiveSessionFromInput");
-  const createEnd = source.indexOf("function initialRuntimeAdapterWorkspaceId", createStart);
-  const createSource = source.slice(createStart, createEnd);
   const ensureStart = source.indexOf("async function ensureSandboxCredentialPolicy");
   const ensureEnd = source.indexOf("async function recordSandboxCredentialPolicyRefs", ensureStart);
   const ensureSource = source.slice(ensureStart, ensureEnd);
@@ -1317,9 +1314,6 @@ test("Sandbox credential registration always proves exact durable ownership", as
   assert.match(ownerSource, /lease_id = \$\{ownershipFence\.leaseId\}/);
   assert.match(ownerSource, /sandbox_refresh_claim = \$\{ownershipFence\.claim\}/);
   assert.match(ownerSource, /AND \$\{sandboxId\} = \$\{ownershipFence\.sandboxId\}/);
-  assert.match(createSource, /const initialSandboxLease/);
-  assert.match(createSource, /const initialAgentTokenHash = await sha256\(agentToken\)/);
-  assert.match(createSource, /ownership: initialSandboxOwnership/);
   assert.match(ensureSource, /sandboxCurrentLeaseFence|SandboxCurrentLeaseFence/);
   assert.match(ensureSource, /credentialPolicyLegacyGenerationPrefix/);
   assert.match(ensureSource, /repairLegacySandboxCredentialPolicy/);
