@@ -195,6 +195,14 @@ import {
 } from "./worker/routes/control-plane";
 import { handleOpenClawRoute } from "./worker/routes/openclaw";
 import {
+  handleProvisioningRoute,
+  type ProvisioningRouteDependencies,
+} from "./worker/routes/provisioning";
+import {
+  handleSessionIngressRoute,
+  type SessionIngressRouteDependencies,
+} from "./worker/routes/session-ingress";
+import {
   handleServiceSessionRoute,
   type ServiceSessionRouteDependencies,
 } from "./worker/routes/service-sessions";
@@ -1476,33 +1484,12 @@ async function api(
 ): Promise<Response> {
   const url = new URL(request.url);
 
-  const standaloneProvisionPtyMatch = url.pathname.match(
-    /^\/api\/provision\/interactive\/([^/]+)\/pty$/,
+  const provisioningResponse = await handleProvisioningRoute(
+    request,
+    url,
+    provisioningRouteDependencies(env),
   );
-  if (request.method === "GET" && standaloneProvisionPtyMatch) {
-    return standaloneSandboxPty(
-      request,
-      env,
-      decodeURIComponent(standaloneProvisionPtyMatch[1] ?? ""),
-    );
-  }
-
-  const standaloneProvisionStopMatch = url.pathname.match(
-    /^\/api\/provision\/interactive\/([^/]+)\/stop$/,
-  );
-  if (request.method === "POST" && standaloneProvisionStopMatch) {
-    return json(
-      await stopStandaloneSandboxProvision(
-        request,
-        env,
-        decodeURIComponent(standaloneProvisionStopMatch[1] ?? ""),
-      ),
-    );
-  }
-
-  if (request.method === "POST" && url.pathname === "/api/provision/interactive") {
-    return json(await provisionInteractiveEndpoint(request, env));
-  }
+  if (provisioningResponse) return provisioningResponse;
 
   const serviceSessionResponse = await handleServiceSessionRoute(
     request,
@@ -1518,20 +1505,12 @@ async function api(
   });
   if (openClawResponse) return openClawResponse;
 
-  const sharedSessionMatch = url.pathname.match(/^\/api\/shared-sessions\/([^/]+)$/);
-  if (request.method === "GET" && sharedSessionMatch) {
-    return json(
-      await readSharedInteractiveSession(
-        env,
-        decodeURIComponent(sharedSessionMatch[1] ?? ""),
-        url.searchParams.get("token") ?? "",
-      ),
-    );
-  }
-
-  if (request.method === "GET" && url.pathname === "/api/terminal/ws") {
-    return interactiveTerminalHub(request, env, await terminalHubUser(request, env, requestAuth));
-  }
+  const sessionIngressResponse = await handleSessionIngressRoute(
+    request,
+    url,
+    sessionIngressRouteDependencies(env, requestAuth),
+  );
+  if (sessionIngressResponse) return sessionIngressResponse;
 
   const user = await requireUser(request, env, requestAuth);
 
@@ -1720,6 +1699,25 @@ function controlPlaneRouteDependencies(
     removeAllowEntry: (request, user, entry) => removeAllowEntry(request, env, user, entry),
     addRepo: (request, user) => addRepo(request, env, user),
     removeRepo: (request, user, repo) => removeRepo(request, env, user, repo),
+  };
+}
+
+function provisioningRouteDependencies(env: RuntimeEnv): ProvisioningRouteDependencies {
+  return {
+    provision: (request) => provisionInteractiveEndpoint(request, env),
+    stop: (request, provisionId) => stopStandaloneSandboxProvision(request, env, provisionId),
+    openPty: (request, provisionId) => standaloneSandboxPty(request, env, provisionId),
+  };
+}
+
+function sessionIngressRouteDependencies(
+  env: RuntimeEnv,
+  requestAuth: TrustedProxyAuthResult,
+): SessionIngressRouteDependencies {
+  return {
+    readSharedSession: (sessionId, token) => readSharedInteractiveSession(env, sessionId, token),
+    openTerminal: async (request) =>
+      interactiveTerminalHub(request, env, await terminalHubUser(request, env, requestAuth)),
   };
 }
 

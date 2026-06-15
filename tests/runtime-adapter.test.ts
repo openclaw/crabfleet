@@ -939,7 +939,6 @@ test("stateless Sandbox provision hook acquires durable standalone ownership", a
   assert.match(stopSource, /reconcileCredentialPolicyCleanupBatch/);
   assert.match(stopSource, /status: remaining \? "stopping" : "stopped"/);
   assert.match(source, /CRABBOX_STANDALONE_SANDBOX_TTL_SECONDS/);
-  assert.match(source, /standaloneProvisionStopMatch/);
   assert.match(source, /stopStandaloneSandboxProvision/);
   assert.match(source, /policy\?\.expiresAt !== undefined && policy\.expiresAt <= Date\.now\(\)/);
   assert.match(source, /standaloneSandboxPolicyExpiresAt/);
