@@ -20,6 +20,7 @@
 - Move atomic interactive-session metadata/event persistence and terminal snapshot invalidation into the session repository.
 - Extract sharing, multiplayer, and delegated-control mutations into a directly tested session metadata service.
 - Extract terminal attach policy into a directly tested service and persist attach state plus evidence atomically.
+- Extract interactive-session stop authorization, runtime routing, idempotency, cleanup sequencing, conflicts, and audits into a directly tested service.
 - Centralize OpenClaw room visibility, log-free summaries, and bounded transcript sentinel/truncation policy behind direct query tests.
 - Isolate OpenClaw recursive root-stop admission, reservation cleanup, lifecycle retries, reconciliation, and stable-completion polling behind a directly tested service.
 - Extract OpenClaw root-scoped authorization, lineage supervision, reservation outcomes, rollback, and activation orchestration into a directly tested service boundary.

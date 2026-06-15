@@ -1330,20 +1330,17 @@ test("create-only adapters reject stopping responses before persistence", async 
   assert.match(forwardedSource, /if \(!status\) return failedProvision/);
 });
 
-test("Sandbox cleanup and legacy stops use durable terminal transitions", async () => {
+test("legacy and GitHub Actions stops use durable terminal transitions", async () => {
   const source = await readFile(new URL("../src/index.ts", import.meta.url), "utf8");
-  const actionStart = source.indexOf('if (action === "stop")');
-  const actionEnd = source.indexOf('throw badRequest("unknown action")', actionStart);
-  const stopSource = source.slice(actionStart, actionEnd);
-  const legacyCompleteIndex = stopSource.indexOf("completeLegacyInteractiveSessionStop");
-  const cleanupIndex = stopSource.lastIndexOf(
-    "stageTerminalCredentialPolicyCleanupById",
-    legacyCompleteIndex,
-  );
-  const reconcileIndex = stopSource.indexOf("reconcileCredentialPolicyCleanupBatch", cleanupIndex);
   const completeStart = source.indexOf("async function completeLegacyInteractiveSessionStop");
-  const completeEnd = source.indexOf("async function mutateInteractiveSession(", completeStart);
+  const completeEnd = source.indexOf("async function stopGitHubActionsSession", completeStart);
   const completeSource = source.slice(completeStart, completeEnd);
+  const githubActionsStart = source.indexOf("async function stopGitHubActionsSession");
+  const githubActionsEnd = source.indexOf(
+    "async function stopRuntimeAdapterInteractiveSession",
+    githubActionsStart,
+  );
+  const githubActionsSource = source.slice(githubActionsStart, githubActionsEnd);
   const scheduledStart = source.indexOf(
     "async function reconcileLegacyStoppingInteractiveSessionBatch",
   );
@@ -1353,17 +1350,6 @@ test("Sandbox cleanup and legacy stops use durable terminal transitions", async 
   );
   const scheduledSource = source.slice(scheduledStart, scheduledEnd);
 
-  assert.ok(actionStart >= 0 && actionEnd > actionStart);
-  assert.ok(
-    cleanupIndex >= 0 && reconcileIndex > cleanupIndex && legacyCompleteIndex > reconcileIndex,
-  );
-  assert.match(stopSource, /const staged = await stageTerminalCredentialPolicyCleanupById/);
-  assert.match(stopSource, /if \(!staged\)/);
-  assert.match(stopSource, /credential_cleanup_terminal_status/);
-  assert.match(
-    stopSource,
-    /completeLegacyInteractiveSessionStop\(env, session, actor\(user\), now\)/,
-  );
   assert.match(completeSource, /env\.DB\.batch/);
   assert.match(completeSource, /interactive workspace stop requested/);
   assert.match(completeSource, /interactive workspace stopped/);
@@ -1377,17 +1363,9 @@ test("Sandbox cleanup and legacy stops use durable terminal transitions", async 
   assert.match(scheduledSource, /\.where\("runtime", "!=", githubActionsRuntime\)/);
   assert.match(scheduledSource, /completeLegacyInteractiveSessionStop/);
   assert.match(completeSource, /if \(owner\.runtime === githubActionsRuntime\) return false/);
-  assert.match(completeSource, /async function stopGitHubActionsSession/);
-  assert.match(completeSource, /work_state: ""/);
-  assert.match(completeSource, /work_phase: "session_ended"/);
-  assert.match(completeSource, /workflow run not canceled/);
-  assert.match(stopSource, /session\.runtime === githubActionsRuntime/);
-  assert.match(stopSource, /stopGitHubActionsSession\(env, session, userActor, now\)/);
-  assert.match(stopSource, /interactive session lifecycle changed; retry stop/);
-  assert.match(stopSource, /const current = await readInteractiveSession\(env, id\)/);
-  assert.match(stopSource, /current\.adapter !== runtimeAdapterName/);
-  assert.match(stopSource, /current\.adapterWorkspaceId !== session\.adapterWorkspaceId/);
-  assert.match(stopSource, /\["stopping", "stopped", "expired", "failed"\]\.includes/);
+  assert.match(githubActionsSource, /work_state: ""/);
+  assert.match(githubActionsSource, /work_phase: "session_ended"/);
+  assert.match(githubActionsSource, /workflow run not canceled/);
 });
 
 test("legacy expiry enters the shared retryable terminal finalizer", async () => {
@@ -1413,14 +1391,8 @@ test("legacy expiry enters the shared retryable terminal finalizer", async () =>
   );
 });
 
-test("idempotent legacy terminal stop verifies credential cleanup", async () => {
+test("sandbox credential cleanup failures remain explicit", async () => {
   const source = await readFile(new URL("../src/index.ts", import.meta.url), "utf8");
-  const actionStart = source.indexOf('if (action === "stop")');
-  const legacyCompleteIndex = source.indexOf(
-    "completeLegacyInteractiveSessionStop(env, session",
-    actionStart,
-  );
-  const fastPathSource = source.slice(actionStart, legacyCompleteIndex);
   const unregisterStart = source.indexOf("async function unregisterSandboxCredentialPolicyLookup");
   const unregisterEnd = source.indexOf(
     "function sandboxCredentialPolicyRefQueries",
@@ -1428,9 +1400,6 @@ test("idempotent legacy terminal stop verifies credential cleanup", async () => 
   );
   const unregisterSource = source.slice(unregisterStart, unregisterEnd);
 
-  assert.match(fastPathSource, /isSandboxInteractiveSession\(session\)/);
-  assert.match(fastPathSource, /stageTerminalCredentialPolicyCleanup/);
-  assert.match(fastPathSource, /reconcileCredentialPolicyCleanupBatch/);
   assert.match(unregisterSource, /if \(!stub\) throw serviceUnavailable/);
   assert.match(unregisterSource, /if \(!response\.ok\)/);
   assert.doesNotMatch(unregisterSource, /response\.status !== 404/);
