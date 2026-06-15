@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Give shared Worker models and the complete Kysely/D1 schema, dialect, factory, and batch execution dedicated foundation modules.
 - Extract Worker environment and deployment/profile policy into testable foundation modules, replacing source inspection with behavioral coverage for public and client configuration.
 - Centralize secure URL, origin, and literal-loopback validation across OAuth, trusted proxy, runtime adapter, and Fleet routing.
 - De-duplicate the Go CLI and SSH gateway around shared control-plane models, authentication, lifecycle semantics, API calls, terminal operations, and terminal-safe session rendering.

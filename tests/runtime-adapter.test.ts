@@ -808,7 +808,6 @@ test("strict session rows and cleanup preserve terminal finalization anchors", a
   const cleanupEnd = source.indexOf("async function mutateInteractiveSession", cleanupStart);
   const cleanupSource = source.slice(cleanupStart, cleanupEnd);
 
-  assert.match(source, /type InteractiveSessionRow = Selectable<InteractiveSessionTable>/);
   assert.match(cleanupSource, /where\("terminal_finalize_pending", "=", 0\)/);
   assert.match(cleanupSource, /deleteFinalizedInteractiveSession\(env, row, archive\)/);
   assert.match(cleanupSource, /terminalCleanupDeletePending/);
