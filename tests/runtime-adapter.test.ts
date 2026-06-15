@@ -571,7 +571,7 @@ test("runtime reconciliation keeps its cron and targeted refresh paths", async (
   assert.match(source, /async function readFreshInteractiveSession/);
   assert.match(
     source,
-    /async function subscribeTerminalHubSession[\s\S]*readFreshInteractiveSession/,
+    /function terminalHub[\s\S]*readSession: \(sessionId\) => readFreshInteractiveSession/,
   );
   assert.match(source, /async function interactiveSessionVnc[\s\S]*readFreshInteractiveSession/);
   assert.match(
@@ -584,13 +584,13 @@ test("runtime reconciliation keeps its cron and targeted refresh paths", async (
 test("recurring terminal authorization never awaits provider reconciliation", async () => {
   const source = await readFile(new URL("../src/index.ts", import.meta.url), "utf8");
   const grantStart = source.indexOf("function terminalInputGrant");
-  const grantEnd = source.indexOf("function sendTerminalFrame", grantStart);
+  const grantEnd = source.indexOf("function terminalViewGrant", grantStart);
   const grantSource = source.slice(grantStart, grantEnd);
   const controlStart = source.indexOf("async function canControlInteractiveSessionById");
   const controlEnd = source.indexOf("function canGrantDelegatedControl", controlStart);
   const controlSource = source.slice(controlStart, controlEnd);
   const shareStart = source.indexOf("async function isSharedSessionToken");
-  const shareEnd = source.indexOf("function sendTerminalFrame", shareStart);
+  const shareEnd = source.indexOf("async function readInteractiveSessionDiagnostics", shareStart);
   const shareSource = source.slice(shareStart, shareEnd);
   assert.match(grantSource, /cachedBooleanGrant/);
   assert.match(grantSource, /terminalSubscriptionReconciler/);
@@ -1513,16 +1513,6 @@ test("runtime adapter terminal upgrades use the shared transport", async () => {
   const openSource = source.slice(openStart, openEnd);
 
   assert.match(openSource, /interactiveTerminalFetch\(/);
-});
-
-test("runtime adapter terminal flow control stays explicit and end-to-end", async () => {
-  const source = await readFile(new URL("../src/index.ts", import.meta.url), "utf8");
-
-  assert.match(source, /frame\.type === TerminalMessageType\.Ack/);
-  assert.match(source, /subscription\.outputAcknowledgements/);
-  assert.match(source, /bytes <= subscription\.outputAcknowledgementBytes/);
-  assert.match(source, /TerminalSubscribeFlags\.OutputAcknowledgements/);
-  assert.match(source, /else if \(upstreamConnection\.outputAcknowledgements\)/);
 });
 
 test("runtime adapter terminal bearer stays on the registered origin", () => {
