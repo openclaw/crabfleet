@@ -21,14 +21,11 @@ import {
 } from "./generated";
 import { appCanonicalOrigin, canonicalAppRedirect, productHostResponse } from "./canonical-host";
 import {
-  currentAdapterDesktopConnection,
   runtimeAdapterBrowserVncUrl,
-  runtimeAdapterDesktopUrl,
   runtimeAdapterName,
   runtimeAdapterReplayRequest,
   retainedRuntimeAdapterFailureMessage,
   resolveCreateAfterStopRace,
-  safeDesktopUrl,
 } from "./runtime-adapter";
 import { allocateInteractiveSessionIdSql, formatInteractiveSessionId } from "./session-id";
 import { openClawGitHubRepoParts, openClawRoomMaxSessions } from "./openclaw-service";
@@ -297,6 +294,7 @@ import {
 } from "./worker/session-control-do";
 import { defaultSandboxEgressHosts, sandboxPlaceholderOpenAIKey } from "./worker/sandbox-outbound";
 import { sandboxOutbound } from "./worker/sandbox-outbound-service";
+import { createInteractiveDesktopService } from "./worker/interactive-desktop-service";
 import { InteractiveTerminalService } from "./worker/interactive-terminal-service";
 
 type SandboxClassWithOutbound = {
@@ -726,7 +724,7 @@ function browserSessionRouteDependencies(env: RuntimeEnv): BrowserSessionRouteDe
     restoreCheckpoint: (user, sessionId, checkpointId) =>
       restoreInteractiveSessionCheckpoint(env, user, sessionId, checkpointId),
     readDiagnostics: (user, sessionId) => readInteractiveSessionDiagnostics(env, user, sessionId),
-    openVnc: (user, sessionId) => interactiveSessionVnc(env, user, sessionId),
+    openVnc: (user, sessionId) => interactiveDesktopService(env).open(user, sessionId),
     uploadClipboard: (request, user, sessionId) =>
       interactiveTerminalService(env).uploadClipboard(request, user, sessionId),
   };
@@ -786,6 +784,13 @@ function interactiveTerminalService(env: RuntimeEnv): InteractiveTerminalService
     reconcileIntervalMs: runtimeAdapterReconcileIntervalMs,
     resolveSandboxSession: (request, user, session) =>
       sandboxSessionWithGitHubToken(request, env, user, session),
+  });
+}
+
+function interactiveDesktopService(env: RuntimeEnv) {
+  return createInteractiveDesktopService(env, {
+    readFreshSession: (sessionId) => readFreshInteractiveSession(env, sessionId),
+    delegatedControlAvailable: (session) => canGrantDelegatedControl(env, session),
   });
 }
 
@@ -1516,25 +1521,6 @@ async function createInteractiveSessionFromInput(
     }
   }
   throw new Error("failed to allocate interactive session id");
-}
-
-async function registeredRuntimeAdapterControlPlaneForSession(
-  env: RuntimeEnv,
-  sessionId: string,
-  adapterWorkspaceId: string,
-): Promise<string> {
-  const registration = await database(env)
-    .selectFrom("interactive_sessions")
-    .select(["adapter_control_plane", "profile"])
-    .where("id", "=", sessionId)
-    .where("adapter", "=", runtimeAdapterName)
-    .where("adapter_workspace_id", "=", adapterWorkspaceId)
-    .executeTakeFirst();
-  return requireRegisteredRuntimeAdapterControlPlane(
-    env,
-    registration?.profile ?? "",
-    registration?.adapter_control_plane,
-  );
 }
 
 async function stopSupersededRuntimeAdapterProvision(
@@ -2295,108 +2281,6 @@ function getManagedSandbox(env: RuntimeEnv, session: InteractiveSession): Cloudf
   if (!env.SANDBOX) throw serviceUnavailable("Sandbox binding is not configured");
   const lease = sandboxLeaseInfo(session);
   return getSandbox(env.SANDBOX, lease.sandboxId);
-}
-
-async function interactiveSessionVnc(env: RuntimeEnv, user: User, id: string): Promise<Response> {
-  const session = await readFreshInteractiveSession(env, id);
-  if (!session) throw notFound("interactive session not found");
-  if (["stopping", "stopped", "expired", "failed"].includes(session.status)) {
-    throw badRequest(`session is ${session.status}`);
-  }
-  const now = Date.now();
-  const delegatedControl = canGrantDelegatedControl(env, session);
-  if (!canControlInteractiveSession(user, session, now, delegatedControl)) {
-    throw forbidden("terminal control has not been granted");
-  }
-  let target: string;
-  if (session.adapter === runtimeAdapterName) {
-    if (!["ready", "attached", "detached"].includes(session.status)) {
-      throw badRequest(`session is ${session.status}`);
-    }
-    if (!session.capabilities.vnc && !session.capabilities.desktop) {
-      throw badRequest("session does not advertise desktop access");
-    }
-    if (!session.adapterWorkspaceId) {
-      throw serviceUnavailable("runtime adapter workspace reference is incomplete");
-    }
-    let controlPlane: string;
-    try {
-      controlPlane = await registeredRuntimeAdapterControlPlaneForSession(
-        env,
-        session.id,
-        session.adapterWorkspaceId,
-      );
-    } catch (error) {
-      throw serviceUnavailable(clean(error instanceof Error ? error.message : String(error), 240));
-    }
-    let response: Response;
-    let responseBody: unknown;
-    try {
-      response = await runtimeAdapterFetch(
-        env,
-        runtimeAdapterDesktopUrl(controlPlane, session.adapterWorkspaceId),
-        {
-          method: "POST",
-        },
-      );
-      responseBody = await readRuntimeAdapterResponseBody(response);
-    } catch (error) {
-      throw serviceUnavailable(
-        `runtime adapter desktop connection failed: ${clean(String(error), 240)}`,
-      );
-    }
-    if (!response.ok) {
-      throw serviceUnavailable(`runtime adapter desktop connection HTTP ${response.status}`);
-    }
-    const connection = currentAdapterDesktopConnection(responseBody, Date.now());
-    if (!connection) throw serviceUnavailable("desktop connection has an invalid expiry");
-    if (!(await currentRuntimeAdapterDesktopAccess(env, user, session, controlPlane))) {
-      throw forbidden("desktop authorization changed; retry");
-    }
-    target = connection.url;
-  } else {
-    const legacyTarget = safeDesktopUrl(session.vncUrl);
-    if (!legacyTarget) throw badRequest("legacy desktop connection is not available");
-    target = legacyTarget;
-  }
-  return new Response(null, {
-    status: 302,
-    headers: {
-      location: target,
-      "cache-control": "no-store",
-      "referrer-policy": "no-referrer",
-    },
-  });
-}
-
-async function currentRuntimeAdapterDesktopAccess(
-  env: RuntimeEnv,
-  user: User,
-  expected: InteractiveSession,
-  controlPlane: string,
-): Promise<boolean> {
-  const currentRow = await database(env)
-    .selectFrom("interactive_sessions")
-    .selectAll()
-    .where("id", "=", expected.id)
-    .where("adapter", "=", runtimeAdapterName)
-    .where("adapter_workspace_id", "=", expected.adapterWorkspaceId)
-    .where("adapter_control_plane", "=", controlPlane)
-    .where(sql<boolean>`provider_resource_id IS ${expected.providerResourceId}`)
-    .where("runtime", "=", expected.runtime)
-    .where("profile", "=", expected.profile)
-    .where("adapter_create_pending", "=", 0)
-    .where("status", "in", ["ready", "attached", "detached"])
-    .executeTakeFirst();
-  if (!currentRow) return false;
-  const current = interactiveSession(currentRow, []);
-  if (!current.capabilities.vnc && !current.capabilities.desktop) return false;
-  return canControlInteractiveSession(
-    user,
-    current,
-    Date.now(),
-    canGrantDelegatedControl(env, current),
-  );
 }
 
 function interactiveProvisioningService(env: RuntimeEnv): InteractiveProvisioningService {

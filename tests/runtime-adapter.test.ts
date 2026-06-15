@@ -569,6 +569,10 @@ test("runtime reconciliation keeps its cron and targeted refresh paths", async (
     new URL("../src/worker/interactive-terminal-service.ts", import.meta.url),
     "utf8",
   );
+  const desktopSource = await readFile(
+    new URL("../src/worker/interactive-desktop-service.ts", import.meta.url),
+    "utf8",
+  );
   const config = await readFile(new URL("../wrangler.jsonc", import.meta.url), "utf8");
 
   assert.match(config, /"crons": \["\* \* \* \* \*"\]/);
@@ -581,7 +585,11 @@ test("runtime reconciliation keeps its cron and targeted refresh paths", async (
     terminalSource,
     /readSession: \(sessionId\) => this\.dependencies\.readFreshSession/,
   );
-  assert.match(source, /async function interactiveSessionVnc[\s\S]*readFreshInteractiveSession/);
+  assert.match(
+    source,
+    /function interactiveDesktopService[\s\S]*readFreshSession: \(sessionId\) => readFreshInteractiveSession/,
+  );
+  assert.match(desktopSource, /readFreshSession\(sessionId\)/);
   assert.match(
     source,
     /async function reconcileExternalInteractiveSessionById[\s\S]*interactiveSessionReconciliationScheduler\(env\)\.reconcileById\(id, now\)/,
@@ -1584,39 +1592,39 @@ test("runtime adapter profile routes expand one allowlisted path segment", () =>
 });
 
 test("desktop operations use the bounded runtime adapter parser", async () => {
-  const source = await readFile(new URL("../src/index.ts", import.meta.url), "utf8");
-  const start = source.indexOf("async function interactiveSessionVnc");
-  const end = source.indexOf("function interactiveProvisioningService", start);
-  const operation = source.slice(start, end);
-  assert.match(operation, /readRuntimeAdapterResponseBody\(response\)/);
-  assert.doesNotMatch(operation, /response\.(?:json|text)\(/);
+  const source = await readFile(
+    new URL("../src/worker/interactive-desktop-service.ts", import.meta.url),
+    "utf8",
+  );
+  assert.match(source, /readRuntimeAdapterResponseBody\(response\)/);
+  assert.doesNotMatch(source, /response\.(?:json|text)\(/);
 });
 
 test("desktop mint revalidates current ownership before redirect", async () => {
-  const source = await readFile(new URL("../src/index.ts", import.meta.url), "utf8");
-  const vncStart = source.indexOf("async function interactiveSessionVnc");
-  const vncEnd = source.indexOf("function interactiveProvisioningService", vncStart);
-  const vncSource = source.slice(vncStart, vncEnd);
+  const source = await readFile(
+    new URL("../src/worker/interactive-desktop-service.ts", import.meta.url),
+    "utf8",
+  );
 
   assert.ok(
-    vncSource.indexOf("currentAdapterDesktopConnection") <
-      vncSource.indexOf("currentRuntimeAdapterDesktopAccess"),
+    source.indexOf("currentAdapterDesktopConnection") <
+      source.indexOf("this.dependencies.hasCurrentAccess"),
   );
   assert.ok(
-    vncSource.indexOf("currentRuntimeAdapterDesktopAccess") <
-      vncSource.indexOf("target = connection.url"),
+    source.indexOf("this.dependencies.hasCurrentAccess") <
+      source.indexOf("location: connection.url"),
   );
-  assert.match(vncSource, /selectFrom\("interactive_sessions"\)/);
-  assert.match(vncSource, /adapter_workspace_id/);
-  assert.match(vncSource, /adapter_control_plane/);
-  assert.match(vncSource, /provider_resource_id/);
-  assert.match(vncSource, /adapter_create_pending/);
-  assert.match(vncSource, /\["ready", "attached", "detached"\]/);
-  assert.match(vncSource, /current\.capabilities\.vnc/);
-  assert.match(vncSource, /current\.capabilities\.desktop/);
-  assert.match(vncSource, /canControlInteractiveSession/);
-  assert.match(vncSource, /desktop authorization changed; retry/);
-  assert.doesNotMatch(vncSource, /body:\s*JSON\.stringify\(\{\}\)/);
+  assert.match(source, /selectFrom\("interactive_sessions"\)/);
+  assert.match(source, /adapter_workspace_id/);
+  assert.match(source, /adapter_control_plane/);
+  assert.match(source, /provider_resource_id/);
+  assert.match(source, /adapter_create_pending/);
+  assert.match(source, /\["ready", "attached", "detached"\]/);
+  assert.match(source, /current\.capabilities\.vnc/);
+  assert.match(source, /current\.capabilities\.desktop/);
+  assert.match(source, /canControlInteractiveSession/);
+  assert.match(source, /desktop authorization changed; retry/);
+  assert.doesNotMatch(source, /body:\s*JSON\.stringify\(\{\}\)/);
 });
 
 test("runtime adapter terminal upgrades use the shared transport", async () => {

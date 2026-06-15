@@ -273,11 +273,8 @@ export function fleetSessionSummary(
       ptyReadyStatuses.has(session.status),
     vnc:
       !inactiveStatuses.has(session.status) &&
-      Boolean(
-        session.vncUrl ||
-        (session.adapter === "runtime-v1" &&
-          (session.capabilities?.vnc || session.capabilities?.desktop)),
-      ),
+      session.adapter === "runtime-v1" &&
+      Boolean(session.capabilities?.vnc || session.capabilities?.desktop),
     archived,
     logEvents: session.logArchive?.eventCount ?? session.logs?.length ?? 0,
     leaseId: session.leaseId,

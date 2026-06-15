@@ -1,4 +1,4 @@
-import { runtimeAdapterName, safeDesktopUrl, workerOwnedLeaseId } from "../runtime-adapter.ts";
+import { runtimeAdapterName, workerOwnedLeaseId } from "../runtime-adapter.ts";
 import {
   resolveRuntimeProfileCodexSsh,
   runtimeProfileByID,
@@ -37,7 +37,6 @@ export function presentInteractiveSession(
   );
   const activeController = activeDelegatedController(session, context.now);
   const ready = ["ready", "attached", "detached"].includes(session.status);
-  const desktopActive = !["stopping", "stopped", "expired", "failed"].includes(session.status);
   const versionedDesktopAvailable =
     ready &&
     session.adapter === runtimeAdapterName &&
@@ -74,13 +73,7 @@ export function presentInteractiveSession(
     attachUrl: ptyAvailable ? "/api/terminal/ws" : null,
     ptyAvailable,
     codexSsh,
-    vncUrl: canControl
-      ? versionedDesktopAvailable
-        ? context.browserVncUrl(session.id)
-        : desktopActive
-          ? safeDesktopUrl(session.vncUrl)
-          : null
-      : null,
+    vncUrl: canControl && versionedDesktopAvailable ? context.browserVncUrl(session.id) : null,
     controller: activeController,
     controlGrantedAt: activeController ? session.controlGrantedAt : null,
     controlExpiresAt: activeController ? session.controlExpiresAt : null,

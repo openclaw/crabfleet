@@ -117,6 +117,22 @@ test("session presentation hides provider authority from viewers without control
   assert.equal(presented.canRequestControl, true);
 });
 
+test("session presentation never exposes legacy desktop URLs", () => {
+  const session = interactiveSession(
+    sessionRow({
+      owner: "operator",
+      runtime: "crabbox",
+      adapter: null,
+      capabilities_json: JSON.stringify({ desktop: true, vnc: true }),
+      vnc_url: "https://legacy.example/vnc",
+      status: "ready",
+    }),
+    [],
+  );
+
+  assert.equal(presentInteractiveSession(session, user(), context()).vncUrl, null);
+});
+
 test("delegated control expires atomically in presented state", () => {
   const session = interactiveSession(
     sessionRow({

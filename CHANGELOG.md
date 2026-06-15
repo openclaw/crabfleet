@@ -9,6 +9,7 @@
 - Remove unsupported provider stop/recovery compatibility; historical provider rows remain readable while live lifecycle mutations are limited to Sandbox, runtime-v1, and GitHub Actions.
 - Remove legacy Sandbox credential-policy storage migration, repair claims, and read retries; reject old generations, rotate stale SQL references on registration, and purge unreadable stored credentials during fenced cleanup.
 - Extract terminal multiplex composition, upstream routing, lifecycle transitions, sharing authorization, multiplayer input, and clipboard uploads into one service; harden pasted filenames against dot-prefixed path-like input.
+- Extract runtime-adapter desktop connection minting and durable access revalidation into one service; remove the live legacy `vncUrl` redirect fallback.
 - Centralize failed provisioning results and provider-error redaction across managed Sandbox, standalone Sandbox, and runtime-adapter lifecycle paths.
 - Extract OpenClaw nudge and stop validation, audit ordering, terminal delivery, and best-effort delivery records into a directly tested mutation service.
 - Extract OpenClaw crabbox normalization, replay handling, branch preparation, timeout policy, and creation audit into a directly tested service.

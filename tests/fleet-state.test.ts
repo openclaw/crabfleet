@@ -247,14 +247,14 @@ test("fleet attachability follows resolvable PTY routes", () => {
   assert.equal(summary({ ...baseSession, leaseId: null, attachUrl: null }), false);
 });
 
-test("legacy sessions require an actual VNC URL", () => {
+test("non-adapter sessions never advertise legacy VNC URLs", () => {
   const fleet = buildFleetState(
     [
       {
         ...baseSession,
         runtime: "crabbox",
         adapter: null,
-        vncUrl: null,
+        vncUrl: "https://legacy.example/vnc",
         capabilities: { desktop: true, vnc: true },
       },
     ],
