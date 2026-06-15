@@ -757,6 +757,10 @@ test("stateless Sandbox provision hook acquires durable standalone ownership", a
     new URL("../src/worker/sandbox-outbound.ts", import.meta.url),
     "utf8",
   );
+  const registrationServiceSource = await readFile(
+    new URL("../src/worker/sandbox-credential-policy-registration-service.ts", import.meta.url),
+    "utf8",
+  );
   const migration = await readFile(
     new URL("../migrations/0022_credential_policy_cleanup.sql", import.meta.url),
     "utf8",
@@ -866,7 +870,7 @@ test("stateless Sandbox provision hook acquires durable standalone ownership", a
     sandboxOutboundSource,
     /policy\?\.expiresAt !== undefined && policy\.expiresAt <= now/,
   );
-  assert.match(source, /standaloneSandboxPolicyExpiresAt/);
+  assert.match(registrationServiceSource, /standaloneSandboxPolicyExpiresAt/);
   assert.match(
     source,
     /selectFrom\("standalone_sandbox_provisions"\)[\s\S]*failed to allocate an unreserved interactive session id/,
@@ -1025,7 +1029,10 @@ test("active credential-policy generations recover after a post-DO crash", async
 });
 
 test("Sandbox credential registration always proves exact durable ownership", async () => {
-  const source = await readFile(new URL("../src/index.ts", import.meta.url), "utf8");
+  const source = await readFile(
+    new URL("../src/worker/sandbox-credential-policy-registration-service.ts", import.meta.url),
+    "utf8",
+  );
   const policyRepositorySource = await readFile(
     new URL("../src/worker/sandbox-credential-policy-repository.ts", import.meta.url),
     "utf8",
@@ -1036,8 +1043,7 @@ test("Sandbox credential registration always proves exact durable ownership", as
   );
   const ownerSource = policyRepositorySource.slice(ownerStart, ownerEnd);
   const ensureStart = source.indexOf("async function ensureSandboxCredentialPolicy");
-  const ensureEnd = source.indexOf("async function recordSandboxCredentialPolicyRefs", ensureStart);
-  const ensureSource = source.slice(ensureStart, ensureEnd);
+  const ensureSource = source.slice(ensureStart);
 
   assert.doesNotMatch(ownerSource, /ownershipFence\?:/);
   assert.doesNotMatch(
@@ -1127,6 +1133,10 @@ test("sandbox credential cleanup is durably staged and retried", async () => {
     new URL("../src/worker/sandbox-credential-policy-repository.ts", import.meta.url),
     "utf8",
   );
+  const registrationServiceSource = await readFile(
+    new URL("../src/worker/sandbox-credential-policy-registration-service.ts", import.meta.url),
+    "utf8",
+  );
   const migration = await readFile(
     new URL("../migrations/0022_credential_policy_cleanup.sql", import.meta.url),
     "utf8",
@@ -1154,14 +1164,16 @@ test("sandbox credential cleanup is durably staged and retried", async () => {
   const completionEnd = cleanupServiceSource.indexOf("function clean", cleanupEnd);
   const completionSource = cleanupServiceSource.slice(cleanupEnd, completionEnd);
   const provisionStart = source.indexOf("async function provisionWithSandbox");
-  const provisionEnd = source.indexOf(
-    "async function registerSandboxCredentialPolicy",
-    provisionStart,
-  );
+  const provisionEnd = source.indexOf("async function ensureCurrentSandboxLease", provisionStart);
   const provisionSource = source.slice(provisionStart, provisionEnd);
-  const registerStart = provisionEnd;
-  const registerEnd = source.indexOf("async function ensureSandboxCredentialPolicy", registerStart);
-  const registerSource = source.slice(registerStart, registerEnd);
+  const registerStart = registrationServiceSource.indexOf(
+    "async function registerSandboxCredentialPolicy",
+  );
+  const registerEnd = registrationServiceSource.indexOf(
+    "async function ensureSandboxCredentialPolicy",
+    registerStart,
+  );
+  const registerSource = registrationServiceSource.slice(registerStart, registerEnd);
   const registrationLifecycleStart = policyRepositorySource.indexOf(
     "function sandboxCredentialPolicyRegistrationQueries",
   );
