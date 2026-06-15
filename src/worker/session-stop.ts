@@ -1,13 +1,9 @@
 import { conflict, forbidden, notFound } from "./http.ts";
 import { deadInteractiveSessionStatuses } from "./models.ts";
+import type { RuntimeAdapterStopServiceResult } from "./session-runtime-adapter-stop.ts";
 import type { InteractiveSession } from "./session-model.ts";
 
 export type InteractiveSessionTerminalStatus = "stopped" | "expired" | "failed";
-
-export type RuntimeAdapterStopServiceResult = {
-  session: InteractiveSession;
-  auditAt: number | null;
-};
 
 export type InteractiveSessionStopStore = {
   isSandbox(session: InteractiveSession): boolean;

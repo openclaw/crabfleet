@@ -7,8 +7,8 @@ import {
   interactiveSessionTerminalStatus,
   type InteractiveSessionStopStore,
   type InteractiveSessionTerminalStatus,
-  type RuntimeAdapterStopServiceResult,
 } from "../src/worker/session-stop.ts";
+import type { RuntimeAdapterStopServiceResult } from "../src/worker/session-runtime-adapter-stop.ts";
 import { interactiveSession, type InteractiveSession } from "../src/worker/session-model.ts";
 import { sessionRow } from "./helpers/session-row.ts";
 

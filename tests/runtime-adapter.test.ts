@@ -1337,7 +1337,7 @@ test("legacy and GitHub Actions stops use durable terminal transitions", async (
   const completeSource = source.slice(completeStart, completeEnd);
   const githubActionsStart = source.indexOf("async function stopGitHubActionsSession");
   const githubActionsEnd = source.indexOf(
-    "async function stopRuntimeAdapterInteractiveSession",
+    "function interactiveSessionRuntimeAdapterStopService",
     githubActionsStart,
   );
   const githubActionsSource = source.slice(githubActionsStart, githubActionsEnd);
@@ -1992,7 +1992,10 @@ test("adapter bodies share the bounded stream reader", async () => {
       "async function replayStoppingRuntimeAdapterCreate",
       "async function stopRuntimeAdapterWorkspace(",
     ],
-    ["async function stopRuntimeAdapterWorkspace(", "type RuntimeAdapterStopResult"],
+    [
+      "async function stopRuntimeAdapterWorkspace(",
+      "async function stopRuntimeAdapterWorkspaceForSession",
+    ],
     ["async function interactiveSessionVnc", "function interactiveTerminalTarget"],
   ] as const;
   for (const [startMarker, endMarker] of ranges) {

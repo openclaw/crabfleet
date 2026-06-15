@@ -292,8 +292,12 @@ import {
 import {
   InteractiveSessionStopService,
   type InteractiveSessionStopStore,
-  type RuntimeAdapterStopServiceResult,
 } from "./worker/session-stop";
+import {
+  RuntimeAdapterStopService,
+  type RuntimeAdapterStopStore,
+  type RuntimeAdapterWorkspaceStopResult,
+} from "./worker/session-runtime-adapter-stop";
 import { activeDelegatedController, sharedInteractiveSession } from "./worker/session-sharing";
 import type { InteractiveProvisionResult } from "./worker/session-provisioning";
 import {
@@ -4517,110 +4521,60 @@ async function stopGitHubActionsSession(
   return true;
 }
 
-async function stopRuntimeAdapterInteractiveSession(
-  env: RuntimeEnv,
-  user: User,
-  session: InteractiveSession,
-  now: number,
-): Promise<RuntimeAdapterStopServiceResult> {
-  if (!session.adapterWorkspaceId) {
-    throw serviceUnavailable("runtime adapter workspace reference is incomplete");
-  }
-  const stopClaimRevision = Math.max(now, session.updatedAt + 1);
-  const stopClaim = await database(env)
-    .updateTable("interactive_sessions")
-    .set({
-      status: "stopping",
-      lease_id: null,
-      updated_at: stopClaimRevision,
-      last_event: "runtime adapter stop requested",
-      reconcile_error: null,
-      agent_token_hash: null,
-      attach_url: null,
-      vnc_url: null,
-      controller: null,
-      control_requested_by: null,
-      control_requested_at: null,
-      control_granted_at: null,
-      control_expires_at: null,
-    })
-    .where("id", "=", session.id)
-    .where("status", "=", session.status)
-    .where("updated_at", "=", session.updatedAt)
-    .executeTakeFirst();
-  if ((stopClaim.numUpdatedRows ?? 0n) === 0n) {
-    const current = await readInteractiveSession(env, session.id);
-    if (
-      !current ||
-      current.adapter !== runtimeAdapterName ||
-      current.adapterWorkspaceId !== session.adapterWorkspaceId ||
-      !["stopping", "stopped", "expired", "failed"].includes(current.status)
-    ) {
-      throw conflict("interactive session lifecycle changed; retry stop");
-    }
-    return { session: current, auditAt: null };
-  }
-  await appendInteractiveSessionEvent(env, session.id, user, "runtime adapter stop requested", now);
-  let adapterStop: RuntimeAdapterStopResult;
-  try {
-    adapterStop = await stopRuntimeAdapterWorkspaceForSession(
-      env,
-      session.id,
-      session.adapterWorkspaceId,
-    );
-  } catch (error) {
-    const message = safeProviderError(error, [session.adapterWorkspaceId]);
-    const pendingMessage = `runtime adapter stop pending: ${message}`;
-    await persistRuntimeAdapterStopEvidence(
-      env,
-      session.id,
-      session.adapterWorkspaceId,
-      pendingMessage,
-      now,
-      message,
-      actor(user),
-    );
-    throw serviceUnavailable(`runtime adapter stop failed: ${message}`);
-  }
-  if (adapterStop.status === "stopping") {
-    const lifecycle = await database(env)
-      .selectFrom("interactive_sessions")
-      .select("adapter_create_pending")
-      .where("id", "=", session.id)
-      .where("adapter", "=", runtimeAdapterName)
-      .where("adapter_workspace_id", "=", session.adapterWorkspaceId)
-      .where("status", "=", "stopping")
-      .executeTakeFirst();
-    const message = lifecycle?.adapter_create_pending
-      ? `${adapterStop.message}; runtime adapter stop waiting for create resolution`
-      : adapterStop.message;
-    await persistRuntimeAdapterStopEvidence(
-      env,
-      session.id,
-      session.adapterWorkspaceId,
-      message,
-      now,
-      null,
-      actor(user),
-    );
-    const current = await readInteractiveSession(env, session.id);
-    if (!current) throw notFound("interactive session not found");
-    return { session: current, auditAt: null };
-  }
-  const resolvedAt = Date.now();
-  const resolved = await recordConfirmedRuntimeAdapterRelease(
-    env,
-    session.id,
-    session.adapterWorkspaceId,
-    resolvedAt,
-    adapterStop.message,
-  );
-  const current = await readInteractiveSession(env, session.id);
-  if (!current) throw notFound("interactive session not found");
-  return {
-    session: current,
-    auditAt: resolved === "failed" || resolved === "stopped" ? Date.now() : null,
+function interactiveSessionRuntimeAdapterStopService(env: RuntimeEnv): RuntimeAdapterStopService {
+  const store: RuntimeAdapterStopStore = {
+    claimStop: (session, actorName, now) =>
+      persistInteractiveSessionEventMutation(
+        env,
+        session,
+        actorName,
+        "runtime adapter stop requested",
+        {
+          status: "stopping",
+          lease_id: null,
+          reconcile_error: null,
+          agent_token_hash: null,
+          attach_url: null,
+          vnc_url: null,
+          controller: null,
+          control_requested_by: null,
+          control_requested_at: null,
+          control_granted_at: null,
+          control_expires_at: null,
+        },
+        now,
+      ),
+    archive: (sessionId, now) => archiveInteractiveSessionLogs(env, sessionId, now),
+    readSession: (sessionId) => readInteractiveSession(env, sessionId),
+    stopWorkspace: (sessionId, adapterWorkspaceId) =>
+      stopRuntimeAdapterWorkspaceForSession(env, sessionId, adapterWorkspaceId),
+    providerError: (error, adapterWorkspaceId) => safeProviderError(error, [adapterWorkspaceId]),
+    persistEvidence: (sessionId, adapterWorkspaceId, message, now, reconcileError, actorName) =>
+      persistRuntimeAdapterStopEvidence(
+        env,
+        sessionId,
+        adapterWorkspaceId,
+        message,
+        now,
+        reconcileError,
+        actorName,
+      ),
+    readCreatePending: async (sessionId, adapterWorkspaceId) => {
+      const lifecycle = await database(env)
+        .selectFrom("interactive_sessions")
+        .select("adapter_create_pending")
+        .where("id", "=", sessionId)
+        .where("adapter", "=", runtimeAdapterName)
+        .where("adapter_workspace_id", "=", adapterWorkspaceId)
+        .where("status", "=", "stopping")
+        .executeTakeFirst();
+      return lifecycle?.adapter_create_pending === 1;
+    },
+    confirmRelease: (sessionId, adapterWorkspaceId, now, message) =>
+      recordConfirmedRuntimeAdapterRelease(env, sessionId, adapterWorkspaceId, now, message),
+    now: Date.now,
   };
+  return new RuntimeAdapterStopService(store, runtimeAdapterName);
 }
 
 function interactiveSessionStopService(env: RuntimeEnv, user: User): InteractiveSessionStopService {
@@ -4646,8 +4600,12 @@ function interactiveSessionStopService(env: RuntimeEnv, user: User): Interactive
       finalizeTerminalInteractiveSession(env, sessionId, status, now),
     stopGitHubActions: (session, actorName, now) =>
       stopGitHubActionsSession(env, session, actorName, now),
-    stopRuntimeAdapter: (session, _actorName, now) =>
-      stopRuntimeAdapterInteractiveSession(env, user, session, now),
+    stopRuntimeAdapter: (session, actorName, now) =>
+      interactiveSessionRuntimeAdapterStopService(env).stop({
+        session,
+        actor: actorName,
+        now,
+      }),
     stopLegacy: (session, actorName, now) =>
       completeLegacyInteractiveSessionStop(env, session, actorName, now),
     audit: (message, now) => audit(env, user, message, now),
@@ -11093,7 +11051,7 @@ async function reconcileStoppingRuntimeAdapterWorkspace(
     }
   }
 
-  let release: RuntimeAdapterStopResult;
+  let release: RuntimeAdapterWorkspaceStopResult;
   try {
     release = await stopRuntimeAdapterWorkspace(
       env,
@@ -11373,7 +11331,7 @@ async function stopRuntimeAdapterWorkspace(
   profile: string,
   registeredControlPlane: string,
   adapterWorkspaceId: string,
-): Promise<RuntimeAdapterStopResult> {
+): Promise<RuntimeAdapterWorkspaceStopResult> {
   const controlPlane = requireRegisteredRuntimeAdapterControlPlane(
     env,
     profile,
@@ -11406,16 +11364,11 @@ async function stopRuntimeAdapterWorkspace(
   return { status: outcome, message };
 }
 
-type RuntimeAdapterStopResult = {
-  status: "stopping" | "stopped";
-  message: string;
-};
-
 async function stopRuntimeAdapterWorkspaceForSession(
   env: RuntimeEnv,
   sessionId: string,
   adapterWorkspaceId: string,
-): Promise<RuntimeAdapterStopResult> {
+): Promise<RuntimeAdapterWorkspaceStopResult> {
   const registration = await database(env)
     .selectFrom("interactive_sessions")
     .select(["adapter_control_plane", "adapter_create_pending", "profile"])
