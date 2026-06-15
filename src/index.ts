@@ -295,10 +295,8 @@ import {
   cleanupSessionLogArchiveObjects,
   sessionLogTranscript,
 } from "./worker/session-log-archive";
-import {
-  finalizeTerminalInteractiveSession,
-  terminalFinalizationPendingQuery,
-} from "./worker/session-terminal-finalization";
+import { appendInteractiveSessionEventRecord } from "./worker/session-events";
+import { finalizeTerminalInteractiveSession } from "./worker/session-terminal-finalization";
 import {
   InteractiveSessionMetadataService,
   isInteractiveSessionMetadataAction,
@@ -12566,17 +12564,12 @@ async function appendInteractiveSessionEvent(
   message: string,
   now = Date.now(),
 ): Promise<void> {
-  const db = database(env);
-  await executeBatch(env, [
-    db.insertInto("interactive_session_events").values({
-      session_id: id,
-      actor: actor(user),
-      message: clean(message, 1000),
-      created_at: now,
-    }),
-    terminalFinalizationPendingQuery(db, id),
-  ]);
-  await archiveInteractiveSessionLogs(env, id, now).catch(() => undefined);
+  await appendInteractiveSessionEventRecord(env, {
+    sessionId: id,
+    actor: actor(user),
+    message,
+    now,
+  });
 }
 
 async function appendInteractiveSessionLog(
@@ -12586,21 +12579,12 @@ async function appendInteractiveSessionLog(
   message: string,
   now = Date.now(),
 ): Promise<void> {
-  if (user) {
-    await appendInteractiveSessionEvent(env, id, user, message, now);
-    return;
-  }
-  const db = database(env);
-  await executeBatch(env, [
-    db.insertInto("interactive_session_events").values({
-      session_id: id,
-      actor: "system",
-      message: clean(message, 1000),
-      created_at: now,
-    }),
-    terminalFinalizationPendingQuery(db, id),
-  ]);
-  await archiveInteractiveSessionLogs(env, id, now).catch(() => undefined);
+  await appendInteractiveSessionEventRecord(env, {
+    sessionId: id,
+    actor: user ? actor(user) : "system",
+    message,
+    now,
+  });
 }
 
 async function readSettings(env: RuntimeEnv): Promise<Record<string, string>> {

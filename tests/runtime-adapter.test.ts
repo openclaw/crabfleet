@@ -596,9 +596,6 @@ test("terminal archive finalization remains durably retryable", async () => {
     new URL("../migrations/0021_runtime_adapter_hardening.sql", import.meta.url),
     "utf8",
   );
-  const appendStart = source.indexOf("async function appendInteractiveSessionEvent");
-  const appendEnd = source.indexOf("async function readSettings", appendStart);
-  const appendSource = source.slice(appendStart, appendEnd);
 
   assert.match(source, /expression\("terminal_finalize_pending", "=", 1\)/);
   assert.match(source, /row\.terminal_finalize_pending === 1/);
@@ -624,9 +621,6 @@ test("terminal archive finalization remains durably retryable", async () => {
     archiveSource,
     /session_updated_at IS NOT excluded\.session_updated_at[\s\S]*excluded\.updated_at >=/,
   );
-  assert.match(appendSource, /executeBatch\(env, \[/);
-  assert.match(appendSource, /insertInto\("interactive_session_events"\)/);
-  assert.match(appendSource, /terminalFinalizationPendingQuery\(db, id\)/);
   assert.match(finalizationSource, /executeBatch\(env, \[/);
   assert.match(finalizationSource, /INSERT INTO interactive_session_events/);
   assert.match(finalizationSource, /terminalFinalizationPendingQuery\(db, id\)/);
@@ -810,6 +804,10 @@ test("production runtime adapter calls use the Crabbox service binding", async (
 
 test("strict session rows and cleanup preserve terminal finalization anchors", async () => {
   const source = await readFile(new URL("../src/index.ts", import.meta.url), "utf8");
+  const eventSource = await readFile(
+    new URL("../src/worker/session-events.ts", import.meta.url),
+    "utf8",
+  );
   const finalizationSource = await readFile(
     new URL("../src/worker/session-terminal-finalization.ts", import.meta.url),
     "utf8",
@@ -840,8 +838,8 @@ test("strict session rows and cleanup preserve terminal finalization anchors", a
   assert.match(cleanupSource, /JOIN active_ancestor ON session\.id = active_ancestor\.id/);
   assert.match(cleanupSource, /WHERE id = interactive_sessions\.id/);
   assert.match(cleanupSource, /WHERE id = \$\{row\.id\}/);
-  assert.match(source, /terminalFinalizationPendingQuery/);
-  assert.match(source, /executeBatch\(env, \[[\s\S]*interactive_session_events/);
+  assert.match(eventSource, /terminalFinalizationPendingQuery/);
+  assert.match(eventSource, /executeBatch\(env, \[[\s\S]*interactive_session_events/);
   assert.match(finalizationSource, /COALESCE\([\s\S]*event_count[\s\S]*count\(\*\)/);
   assert.match(finalizationSource, /events_key IS NOT NULL/);
 });
