@@ -71,6 +71,8 @@ import {
 import {
   APP_HTML,
   GHOSTTY_BROWSER_EXTERNAL_JS,
+  GHOSTTY_VT_WASM_BASE64,
+  GHOSTTY_VT_WASM_PATH,
   GHOSTTY_WEB_JS,
   LOGO_PNG_BASE64,
   OG_IMAGE_PNG_BASE64,
@@ -1953,11 +1955,24 @@ export default {
       }
 
       if (url.pathname === "/vendor/ghostty-web.js") {
-        return text(GHOSTTY_WEB_JS, "text/javascript; charset=utf-8");
+        return text(GHOSTTY_WEB_JS, "text/javascript; charset=utf-8", {
+          "cache-control": "no-store",
+        });
+      }
+
+      if (url.pathname === GHOSTTY_VT_WASM_PATH) {
+        return new Response(base64Bytes(GHOSTTY_VT_WASM_BASE64), {
+          headers: {
+            ...securityHeaders("application/wasm"),
+            "cache-control": "no-store",
+          },
+        });
       }
 
       if (url.pathname === "/vendor/__vite-browser-external-2447137e.js") {
-        return text(GHOSTTY_BROWSER_EXTERNAL_JS, "text/javascript; charset=utf-8");
+        return text(GHOSTTY_BROWSER_EXTERNAL_JS, "text/javascript; charset=utf-8", {
+          "cache-control": "no-store",
+        });
       }
 
       if (url.pathname === "/docs/spec.md") {

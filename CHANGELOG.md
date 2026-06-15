@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Serve Ghostty's WASM runtime so embedded Codex workspaces mount the live interactive terminal instead of falling back to a static session transcript.
 - De-duplicate the Go CLI and SSH gateway around shared control-plane models, authentication, lifecycle semantics, API calls, terminal operations, and terminal-safe session rendering.
 - Unify managed terminal clients on the multiplex `/api/terminal/ws` protocol, remove direct PTY routes, and share one framed Go transport across the CLI and SSH gateway.
 - Connect Crabfleet lifecycle and terminal traffic to Crabbox through a Cloudflare service binding and deploy an identical route-scoped credential atomically across both coordinators.
