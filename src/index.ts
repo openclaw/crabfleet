@@ -14521,7 +14521,7 @@ async function readSharedInteractiveSession(
       leaseId: null,
       attachUrl: null,
       vncUrl: null,
-      ptyAvailable: false,
+      ptyAvailable: interactiveSessionPtyAvailable(env, session, embedded),
       controller: activeController,
       controlGrantedAt: activeController ? session.controlGrantedAt : null,
       controlExpiresAt: activeController ? session.controlExpiresAt : null,
@@ -15855,6 +15855,25 @@ function sessionLogSummary(
   };
 }
 
+function interactiveSessionPtyAvailable(
+  env: RuntimeEnv,
+  session: InteractiveSession,
+  canControl: boolean,
+): boolean {
+  const routeKind = interactivePtyRouteKind(env, session);
+  const routeAvailable =
+    session.runtime === githubActionsRuntime ||
+    (routeKind === "sandbox"
+      ? Boolean(env.SANDBOX)
+      : Boolean(interactiveTerminalTarget(env, session, routeKind)));
+  const ptyAvailable =
+    canControl &&
+    session.capabilities.terminal &&
+    ["ready", "attached", "detached"].includes(session.status) &&
+    routeAvailable;
+  return ptyAvailable;
+}
+
 function decorateInteractiveSession(
   session: InteractiveSession,
   user: User,
@@ -15873,17 +15892,7 @@ function decorateInteractiveSession(
     session.adapter === runtimeAdapterName &&
     (session.capabilities.vnc || session.capabilities.desktop);
   const legacyDesktopUrl = desktopActive ? safeDesktopUrl(session.vncUrl) : null;
-  const routeKind = interactivePtyRouteKind(env, session);
-  const routeAvailable =
-    session.runtime === githubActionsRuntime ||
-    (routeKind === "sandbox"
-      ? Boolean(env.SANDBOX)
-      : Boolean(interactiveTerminalTarget(env, session, routeKind)));
-  const ptyAvailable =
-    canControl &&
-    session.capabilities.terminal &&
-    ["ready", "attached", "detached"].includes(session.status) &&
-    routeAvailable;
+  const ptyAvailable = interactiveSessionPtyAvailable(env, session, canControl);
   const attachUrl = ptyAvailable ? "/api/terminal/ws" : null;
   const codexSshReady =
     session.adapter === runtimeAdapterName &&
