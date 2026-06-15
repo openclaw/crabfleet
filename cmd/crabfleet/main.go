@@ -1,23 +1,21 @@
 package main
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
-	"net/url"
 	"os"
 	"os/exec"
 	"runtime"
-	"sort"
 	"strings"
 	"time"
 
 	"github.com/alecthomas/kong"
-	"github.com/openclaw/crabfleet/internal/terminalws"
+	"github.com/openclaw/crabfleet/internal/fleetapi"
+	"github.com/openclaw/crabfleet/internal/fleettext"
 )
 
 const defaultAPIURL = "https://crabfleet.openclaw.ai"
@@ -129,141 +127,6 @@ type summaryCmd struct {
 
 type openCmd struct{}
 
-type apiClient struct {
-	baseURL        string
-	token          string
-	fingerprint    string
-	agentToken     string
-	agentSessionID string
-	http           *http.Client
-}
-
-type stateResponse struct {
-	User                user                 `json:"user"`
-	Repos               []string             `json:"repos"`
-	InteractiveSessions []interactiveSession `json:"interactiveSessions"`
-}
-
-type user struct {
-	Login   string `json:"login"`
-	Email   string `json:"email"`
-	Subject string `json:"subject"`
-	Role    string `json:"role"`
-}
-
-type interactiveSession struct {
-	ID              string               `json:"id"`
-	ParentSessionID string               `json:"parentSessionId"`
-	RootSessionID   string               `json:"rootSessionId"`
-	Repo            string               `json:"repo"`
-	Branch          string               `json:"branch"`
-	Runtime         string               `json:"runtime"`
-	Adapter         string               `json:"adapter"`
-	Status          string               `json:"status"`
-	Owner           string               `json:"owner"`
-	CreatedBy       string               `json:"createdBy"`
-	Purpose         string               `json:"purpose"`
-	Summary         string               `json:"summary"`
-	Capabilities    *sessionCapabilities `json:"capabilities"`
-	PtyAvailable    bool                 `json:"ptyAvailable"`
-	LeaseID         string               `json:"leaseId"`
-	AttachURL       string               `json:"attachUrl"`
-	VNCURL          string               `json:"vncUrl"`
-	LastEvent       string               `json:"lastEvent"`
-	LogArchive      logArchive           `json:"logArchive"`
-}
-
-func legacyProviderCleanupMayBeRequired(session interactiveSession) bool {
-	if session.Adapter == "runtime-v1" || session.Runtime == "github_actions" {
-		return false
-	}
-	switch session.Status {
-	case "stopping", "stopped", "expired":
-		return true
-	default:
-		return false
-	}
-}
-
-func lifecycleStopNote(session interactiveSession) string {
-	if session.Runtime == "github_actions" && session.Status == "stopped" {
-		return "GitHub Actions workflow run was not canceled and may continue on GitHub"
-	}
-	if legacyProviderCleanupMayBeRequired(session) {
-		return "provider deletion was not confirmed; legacy runtimes may require separate cleanup"
-	}
-	return ""
-}
-
-type sessionCapabilities struct {
-	Terminal bool `json:"terminal"`
-}
-
-type createSessionRequest struct {
-	Repo            string `json:"repo,omitempty"`
-	Branch          string `json:"branch,omitempty"`
-	Runtime         string `json:"runtime,omitempty"`
-	Profile         string `json:"profile,omitempty"`
-	Command         string `json:"command,omitempty"`
-	Prompt          string `json:"prompt,omitempty"`
-	ParentSessionID string `json:"parentSessionId,omitempty"`
-	RootSessionID   string `json:"rootSessionId,omitempty"`
-	Purpose         string `json:"purpose,omitempty"`
-	Summary         string `json:"summary,omitempty"`
-}
-
-type createSessionResponse struct {
-	Session interactiveSession `json:"session"`
-}
-
-type sessionResponse struct {
-	Session interactiveSession `json:"session"`
-}
-
-type checkpointResponse struct {
-	Session    interactiveSession `json:"session"`
-	Checkpoint checkpoint         `json:"checkpoint"`
-}
-
-type checkpointsResponse struct {
-	Session     interactiveSession `json:"session"`
-	Checkpoints []checkpoint       `json:"checkpoints"`
-}
-
-type actionResponse struct {
-	Session interactiveSession `json:"session"`
-}
-
-type sessionLogResponse struct {
-	Session interactiveSession `json:"session"`
-	Events  []sessionLogEvent  `json:"events"`
-	Archive logArchive         `json:"archive"`
-}
-
-type sessionLogEvent struct {
-	Actor     string `json:"actor"`
-	Message   string `json:"message"`
-	CreatedAt int64  `json:"createdAt"`
-}
-
-type logArchive struct {
-	SessionID     string `json:"sessionId"`
-	EventCount    int    `json:"eventCount"`
-	EventsKey     string `json:"eventsKey"`
-	TranscriptKey string `json:"transcriptKey"`
-	SummaryKey    string `json:"summaryKey"`
-	ArchivedAt    int64  `json:"archivedAt"`
-	UpdatedAt     int64  `json:"updatedAt"`
-}
-
-type checkpoint struct {
-	ID        string `json:"id"`
-	Name      string `json:"name"`
-	SessionID string `json:"sessionId"`
-	Workdir   string `json:"workdir"`
-	CreatedAt int64  `json:"createdAt"`
-}
-
 func main() {
 	var app cli
 	ctx := kong.Parse(
@@ -277,18 +140,15 @@ func main() {
 	ctx.FatalIfErrorf(err)
 }
 
-func (c *cli) apiClient() *apiClient {
-	return &apiClient{
-		baseURL:        strings.TrimRight(c.API, "/"),
-		token:          c.Token,
-		fingerprint:    c.Fingerprint,
-		agentToken:     c.AgentToken,
-		agentSessionID: c.AgentID,
-		http:           &http.Client{Timeout: 2 * time.Minute},
+func (c *cli) apiClient() *fleetapi.Client {
+	auth := fleetapi.SSHAuth(c.Token, c.Fingerprint)
+	if c.Token == "" || c.Fingerprint == "" {
+		auth = fleetapi.AgentAuth(c.AgentToken, c.AgentID)
 	}
+	return fleetapi.NewClient(c.API, &http.Client{Timeout: 2 * time.Minute}, auth)
 }
 
-func (loginCmd) Run(app *cli, _ *apiClient) error {
+func (loginCmd) Run(app *cli, _ *fleetapi.Client) error {
 	if app.JSON {
 		return json.NewEncoder(os.Stdout).Encode(map[string]string{
 			"ssh": fmt.Sprintf("ssh link@%s", app.SSHHost),
@@ -299,8 +159,8 @@ func (loginCmd) Run(app *cli, _ *apiClient) error {
 	return nil
 }
 
-func (whoamiCmd) Run(app *cli, api *apiClient) error {
-	state, err := api.state(context.Background())
+func (whoamiCmd) Run(app *cli, api *fleetapi.Client) error {
+	state, err := api.State(context.Background())
 	if err != nil {
 		if app.NoInput || app.JSON {
 			return err
@@ -310,12 +170,12 @@ func (whoamiCmd) Run(app *cli, api *apiClient) error {
 	if app.JSON {
 		return json.NewEncoder(os.Stdout).Encode(state.User)
 	}
-	fmt.Fprintf(os.Stdout, "login: %s\nrole: %s\n", displayUser(state.User), state.User.Role)
+	fmt.Fprintf(os.Stdout, "login: %s\nrole: %s\n", fleettext.DisplayUser(state.User), state.User.Role)
 	return nil
 }
 
-func (listCmd) Run(app *cli, api *apiClient) error {
-	state, err := api.state(context.Background())
+func (listCmd) Run(app *cli, api *fleetapi.Client) error {
+	state, err := api.State(context.Background())
 	if err != nil {
 		if app.NoInput || app.JSON {
 			return err
@@ -325,13 +185,15 @@ func (listCmd) Run(app *cli, api *apiClient) error {
 	if app.JSON {
 		return json.NewEncoder(os.Stdout).Encode(state)
 	}
-	printFleet(os.Stdout, state.InteractiveSessions)
+	if !fleettext.WriteSessionGroups(os.Stdout, state.InteractiveSessions, "") {
+		fmt.Fprintln(os.Stdout, "crabboxes: none")
+	}
 	return nil
 }
 
-func (cmd newCmd) Run(app *cli, api *apiClient) error {
+func (cmd newCmd) Run(app *cli, api *fleetapi.Client) error {
 	req := cmd.sessionRequest(app)
-	session, err := api.createSession(context.Background(), req)
+	session, err := api.CreateSession(context.Background(), req)
 	if err != nil {
 		if app.NoInput || app.JSON {
 			return err
@@ -357,15 +219,15 @@ func (cmd newCmd) Run(app *cli, api *apiClient) error {
 	}
 	fmt.Fprintf(os.Stdout, "session: %s\nrepo: %s\nstatus: %s\n", session.ID, session.Repo, session.Status)
 	if session.ParentSessionID != "" {
-		fmt.Fprintf(os.Stdout, "parent: %s\n", terminalSafe(session.ParentSessionID))
+		fmt.Fprintf(os.Stdout, "parent: %s\n", fleettext.Safe(session.ParentSessionID))
 	}
 	if session.RootSessionID != "" && session.RootSessionID != session.ID {
-		fmt.Fprintf(os.Stdout, "root: %s\n", terminalSafe(session.RootSessionID))
+		fmt.Fprintf(os.Stdout, "root: %s\n", fleettext.Safe(session.RootSessionID))
 	}
 	if session.Summary != "" {
-		fmt.Fprintf(os.Stdout, "summary: %s\n", terminalSafe(session.Summary))
+		fmt.Fprintf(os.Stdout, "summary: %s\n", fleettext.Safe(session.Summary))
 	}
-	if attachable(session) {
+	if session.Attachable() {
 		fmt.Fprintf(os.Stdout, "attach: crabfleet attach %s\n", session.ID)
 	}
 	if session.VNCURL != "" {
@@ -374,13 +236,13 @@ func (cmd newCmd) Run(app *cli, api *apiClient) error {
 	if cmd.VNC && session.VNCURL != "" {
 		return openURL(session.VNCURL)
 	}
-	if !cmd.Detach && !app.NoInput && isTerminal(os.Stdin) && isTerminal(os.Stdout) && attachable(session) {
+	if !cmd.Detach && !app.NoInput && isTerminal(os.Stdin) && isTerminal(os.Stdout) && session.Attachable() {
 		return runSSH(app, "attach", session.ID)
 	}
 	return nil
 }
 
-func (cmd newCmd) sessionRequest(app *cli) createSessionRequest {
+func (cmd newCmd) sessionRequest(app *cli) fleetapi.CreateSessionRequest {
 	prompt := strings.Join(cmd.Prompt, " ")
 	parent := cmd.Parent
 	if parent == "" {
@@ -394,7 +256,7 @@ func (cmd newCmd) sessionRequest(app *cli) createSessionRequest {
 	if cmd.Runtime != nil {
 		runtime = *cmd.Runtime
 	}
-	return createSessionRequest{
+	return fleetapi.CreateSessionRequest{
 		Repo:            cmd.Repo,
 		Branch:          cmd.Branch,
 		Runtime:         runtime,
@@ -408,7 +270,7 @@ func (cmd newCmd) sessionRequest(app *cli) createSessionRequest {
 	}
 }
 
-func (cmd newCmd) sshCreateArgs(req createSessionRequest) []string {
+func (cmd newCmd) sshCreateArgs(req fleetapi.CreateSessionRequest) []string {
 	args := []string{"new", "--branch", req.Branch}
 	if req.Runtime != "" {
 		args = append(args, "--runtime", req.Runtime)
@@ -446,12 +308,12 @@ func (cmd newCmd) sshCreateArgs(req createSessionRequest) []string {
 	return args
 }
 
-func (cmd attachCmd) Run(app *cli, _ *apiClient) error {
+func (cmd attachCmd) Run(app *cli, _ *fleetapi.Client) error {
 	return runSSH(app, "attach", cmd.ID)
 }
 
-func (cmd statusCmd) Run(app *cli, api *apiClient) error {
-	session, err := api.session(context.Background(), cmd.ID)
+func (cmd statusCmd) Run(app *cli, api *fleetapi.Client) error {
+	session, err := api.Session(context.Background(), cmd.ID)
 	if err != nil {
 		if app.NoInput || app.JSON {
 			return err
@@ -461,12 +323,12 @@ func (cmd statusCmd) Run(app *cli, api *apiClient) error {
 	if app.JSON {
 		return json.NewEncoder(os.Stdout).Encode(session)
 	}
-	printSessionStatus(os.Stdout, session)
+	fleettext.WriteSessionStatus(os.Stdout, session)
 	return nil
 }
 
-func (cmd deleteCmd) Run(app *cli, api *apiClient) error {
-	session, err := api.action(context.Background(), cmd.ID, "stop")
+func (cmd deleteCmd) Run(app *cli, api *fleetapi.Client) error {
+	session, err := api.Action(context.Background(), cmd.ID, "stop")
 	if err != nil {
 		if app.NoInput || app.JSON {
 			return err
@@ -477,28 +339,28 @@ func (cmd deleteCmd) Run(app *cli, api *apiClient) error {
 		return json.NewEncoder(os.Stdout).Encode(session)
 	}
 	fmt.Fprintf(os.Stdout, "session: %s\nstatus: %s\n", session.ID, session.Status)
-	if note := lifecycleStopNote(session); note != "" {
+	if note := session.LifecycleStopNote(); note != "" {
 		fmt.Fprintf(os.Stdout, "note: %s\n", note)
 	}
 	return nil
 }
 
-func (doctorCmd) Run(app *cli, api *apiClient) error {
+func (doctorCmd) Run(app *cli, api *fleetapi.Client) error {
 	result := map[string]string{
 		"api":  "unknown",
 		"auth": "unknown",
 	}
-	if err := api.health(context.Background()); err != nil {
+	if err := api.Health(context.Background()); err != nil {
 		result["api"] = "failed: " + err.Error()
 	} else {
 		result["api"] = "ok"
 	}
-	state, err := api.state(context.Background())
+	state, err := api.State(context.Background())
 	if err != nil {
 		result["auth"] = "failed: " + err.Error()
 	} else {
 		result["auth"] = "ok"
-		result["user"] = displayUser(state.User)
+		result["user"] = fleettext.DisplayUser(state.User)
 		result["role"] = state.User.Role
 		result["sessions"] = fmt.Sprintf("%d", len(state.InteractiveSessions))
 	}
@@ -514,8 +376,8 @@ func (doctorCmd) Run(app *cli, api *apiClient) error {
 	return nil
 }
 
-func (cmd checkpointsCmd) Run(app *cli, api *apiClient) error {
-	checkpoints, err := api.checkpoints(context.Background(), cmd.ID)
+func (cmd checkpointsCmd) Run(app *cli, api *fleetapi.Client) error {
+	checkpoints, err := api.Checkpoints(context.Background(), cmd.ID)
 	if err != nil {
 		if app.NoInput || app.JSON {
 			return err
@@ -542,8 +404,8 @@ func (cmd checkpointsCmd) Run(app *cli, api *apiClient) error {
 	return nil
 }
 
-func (cmd checkpointCmd) Run(app *cli, api *apiClient) error {
-	checkpoint, err := api.checkpoint(context.Background(), cmd.ID)
+func (cmd checkpointCmd) Run(app *cli, api *fleetapi.Client) error {
+	checkpoint, err := api.Checkpoint(context.Background(), cmd.ID)
 	if err != nil {
 		if app.NoInput || app.JSON {
 			return err
@@ -557,8 +419,8 @@ func (cmd checkpointCmd) Run(app *cli, api *apiClient) error {
 	return nil
 }
 
-func (cmd restoreCmd) Run(app *cli, api *apiClient) error {
-	checkpoint, err := api.restore(context.Background(), cmd.ID, cmd.Checkpoint)
+func (cmd restoreCmd) Run(app *cli, api *fleetapi.Client) error {
+	checkpoint, err := api.Restore(context.Background(), cmd.ID, cmd.Checkpoint)
 	if err != nil {
 		if app.NoInput || app.JSON {
 			return err
@@ -572,8 +434,8 @@ func (cmd restoreCmd) Run(app *cli, api *apiClient) error {
 	return nil
 }
 
-func (cmd vncCmd) Run(app *cli, api *apiClient) error {
-	state, err := api.state(context.Background())
+func (cmd vncCmd) Run(app *cli, api *fleetapi.Client) error {
+	state, err := api.State(context.Background())
 	if err != nil {
 		if app.NoInput || app.JSON {
 			return err
@@ -607,8 +469,8 @@ func (cmd vncCmd) Run(app *cli, api *apiClient) error {
 	return fmt.Errorf("session %s not found", cmd.ID)
 }
 
-func (cmd logsCmd) Run(app *cli, api *apiClient) error {
-	logs, err := api.logs(context.Background(), cmd.ID)
+func (cmd logsCmd) Run(app *cli, api *fleetapi.Client) error {
+	logs, err := api.Logs(context.Background(), cmd.ID)
 	if err != nil {
 		if app.NoInput || app.JSON {
 			return err
@@ -618,12 +480,12 @@ func (cmd logsCmd) Run(app *cli, api *apiClient) error {
 	if app.JSON {
 		return json.NewEncoder(os.Stdout).Encode(logs)
 	}
-	printSessionLogs(os.Stdout, logs)
+	fleettext.WriteSessionLogs(os.Stdout, logs)
 	return nil
 }
 
-func (cmd transcriptCmd) Run(app *cli, api *apiClient) error {
-	transcript, err := api.transcript(context.Background(), cmd.ID)
+func (cmd transcriptCmd) Run(app *cli, api *fleetapi.Client) error {
+	transcript, err := api.Transcript(context.Background(), cmd.ID)
 	if err != nil {
 		if app.NoInput || app.JSON {
 			return err
@@ -643,7 +505,7 @@ func (cmd transcriptCmd) Run(app *cli, api *apiClient) error {
 	return nil
 }
 
-func (cmd messageCmd) Run(app *cli, api *apiClient) error {
+func (cmd messageCmd) Run(app *cli, api *fleetapi.Client) error {
 	message := strings.Join(cmd.Text, " ")
 	if message == "" && !isTerminal(os.Stdin) {
 		data, err := io.ReadAll(io.LimitReader(os.Stdin, 64*1024))
@@ -655,7 +517,7 @@ func (cmd messageCmd) Run(app *cli, api *apiClient) error {
 	if message == "" {
 		return errors.New("message text is required")
 	}
-	if err := api.message(context.Background(), cmd.ID, message, !cmd.NoEnter); err != nil {
+	if err := api.Message(context.Background(), cmd.ID, message, !cmd.NoEnter, 120, 34); err != nil {
 		if app.NoInput || app.JSON {
 			return err
 		}
@@ -672,14 +534,14 @@ func (cmd messageCmd) Run(app *cli, api *apiClient) error {
 			"sent":    true,
 		})
 	}
-	fmt.Fprintf(os.Stdout, "sent: %s\n", terminalSafe(cmd.ID))
+	fmt.Fprintf(os.Stdout, "sent: %s\n", fleettext.Safe(cmd.ID))
 	return nil
 }
 
-func (cmd summaryCmd) Run(app *cli, api *apiClient) error {
+func (cmd summaryCmd) Run(app *cli, api *fleetapi.Client) error {
 	summary := strings.Join(cmd.Text, " ")
 	if summary == "" && cmd.Purpose == "" {
-		session, err := api.session(context.Background(), cmd.ID)
+		session, err := api.Session(context.Background(), cmd.ID)
 		if err != nil {
 			if app.NoInput || app.JSON {
 				return err
@@ -689,10 +551,10 @@ func (cmd summaryCmd) Run(app *cli, api *apiClient) error {
 		if app.JSON {
 			return json.NewEncoder(os.Stdout).Encode(session)
 		}
-		printSessionSummary(os.Stdout, session)
+		fleettext.WriteSessionSummary(os.Stdout, session)
 		return nil
 	}
-	session, err := api.updateSummary(context.Background(), cmd.ID, summary, cmd.Purpose)
+	session, err := api.UpdateSummary(context.Background(), cmd.ID, summary, cmd.Purpose)
 	if err != nil {
 		if app.NoInput || app.JSON {
 			return err
@@ -709,368 +571,12 @@ func (cmd summaryCmd) Run(app *cli, api *apiClient) error {
 	if app.JSON {
 		return json.NewEncoder(os.Stdout).Encode(session)
 	}
-	printSessionSummary(os.Stdout, session)
+	fleettext.WriteSessionSummary(os.Stdout, session)
 	return nil
 }
 
-func (openCmd) Run(app *cli, _ *apiClient) error {
+func (openCmd) Run(app *cli, _ *fleetapi.Client) error {
 	return openURL(app.API + "/app/")
-}
-
-func (c *apiClient) state(ctx context.Context) (stateResponse, error) {
-	var out stateResponse
-	err := c.do(ctx, http.MethodGet, "/api/ssh/state", nil, &out)
-	return out, err
-}
-
-func (c *apiClient) health(ctx context.Context) error {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+"/healthz", nil)
-	if err != nil {
-		return err
-	}
-	resp, err := c.http.Do(req)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return fmt.Errorf("api %s", resp.Status)
-	}
-	return nil
-}
-
-func (c *apiClient) session(ctx context.Context, id string) (interactiveSession, error) {
-	var out sessionResponse
-	err := c.do(ctx, http.MethodGet, "/api/ssh/interactive-sessions/"+url.PathEscape(id), nil, &out)
-	return out.Session, err
-}
-
-func (c *apiClient) createSession(ctx context.Context, req createSessionRequest) (interactiveSession, error) {
-	var out createSessionResponse
-	err := c.do(ctx, http.MethodPost, "/api/ssh/interactive-sessions", req, &out)
-	return out.Session, err
-}
-
-func (c *apiClient) action(ctx context.Context, id string, action string) (interactiveSession, error) {
-	var out actionResponse
-	err := c.do(
-		ctx,
-		http.MethodPost,
-		"/api/ssh/interactive-sessions/"+url.PathEscape(id)+"/actions",
-		map[string]string{"action": action},
-		&out,
-	)
-	return out.Session, err
-}
-
-func (c *apiClient) checkpoints(ctx context.Context, id string) (checkpointsResponse, error) {
-	var out checkpointsResponse
-	err := c.do(ctx, http.MethodGet, "/api/ssh/interactive-sessions/"+url.PathEscape(id)+"/checkpoints", nil, &out)
-	return out, err
-}
-
-func (c *apiClient) checkpoint(ctx context.Context, id string) (checkpointResponse, error) {
-	var out checkpointResponse
-	err := c.do(ctx, http.MethodPost, "/api/ssh/interactive-sessions/"+url.PathEscape(id)+"/checkpoints", nil, &out)
-	return out, err
-}
-
-func (c *apiClient) restore(ctx context.Context, id string, checkpoint string) (checkpointResponse, error) {
-	var out checkpointResponse
-	err := c.do(
-		ctx,
-		http.MethodPost,
-		"/api/ssh/interactive-sessions/"+url.PathEscape(id)+"/checkpoints/"+url.PathEscape(checkpoint)+"/restore",
-		nil,
-		&out,
-	)
-	return out, err
-}
-
-func (c *apiClient) logs(ctx context.Context, id string) (sessionLogResponse, error) {
-	var out sessionLogResponse
-	err := c.do(ctx, http.MethodGet, "/api/ssh/interactive-sessions/"+url.PathEscape(id)+"/logs", nil, &out)
-	return out, err
-}
-
-func (c *apiClient) transcript(ctx context.Context, id string) (string, error) {
-	return c.text(ctx, http.MethodGet, "/api/ssh/interactive-sessions/"+url.PathEscape(id)+"/transcript", nil)
-}
-
-func (c *apiClient) message(ctx context.Context, id string, message string, enter bool) error {
-	_, authMode, err := c.authenticatedPath("/api/terminal/ws")
-	if err != nil {
-		return err
-	}
-	endpoint, err := terminalws.Endpoint(c.baseURL)
-	if err != nil {
-		return err
-	}
-
-	headers := http.Header{}
-	c.setAuthHeaders(headers, authMode)
-	client, err := terminalws.Dial(ctx, endpoint, id, terminalws.Options{
-		Header: headers,
-		Cols:   120,
-		Rows:   34,
-	})
-	if err != nil {
-		return err
-	}
-	defer client.Close()
-	payload := message
-	if enter {
-		payload += "\n"
-	}
-	return client.SendInput(ctx, []byte(payload))
-}
-
-func (c *apiClient) updateSummary(ctx context.Context, id string, summary string, purpose string) (interactiveSession, error) {
-	var out sessionResponse
-	err := c.do(ctx, http.MethodPost, "/api/ssh/interactive-sessions/"+url.PathEscape(id)+"/summary", map[string]string{
-		"summary": summary,
-		"purpose": purpose,
-	}, &out)
-	return out.Session, err
-}
-
-func (c *apiClient) do(ctx context.Context, method string, path string, body any, out any) error {
-	resp, err := c.request(ctx, method, path, body, "application/json")
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		text, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
-		return fmt.Errorf("api %s: %s", resp.Status, strings.TrimSpace(string(text)))
-	}
-	if out == nil {
-		return nil
-	}
-	return json.NewDecoder(resp.Body).Decode(out)
-}
-
-func (c *apiClient) text(ctx context.Context, method string, path string, body any) (string, error) {
-	resp, err := c.request(ctx, method, path, body, "text/markdown")
-	if err != nil {
-		return "", err
-	}
-	defer resp.Body.Close()
-	data, readErr := io.ReadAll(io.LimitReader(resp.Body, 4*1024*1024))
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		if readErr != nil {
-			return "", readErr
-		}
-		return "", fmt.Errorf("api %s: %s", resp.Status, strings.TrimSpace(string(data)))
-	}
-	if readErr != nil {
-		return "", readErr
-	}
-	return string(data), nil
-}
-
-func (c *apiClient) request(ctx context.Context, method string, path string, body any, accept string) (*http.Response, error) {
-	apiPath, authMode, err := c.authenticatedPath(path)
-	if err != nil {
-		return nil, err
-	}
-	var reader io.Reader
-	if body != nil {
-		payload, err := json.Marshal(body)
-		if err != nil {
-			return nil, err
-		}
-		reader = bytes.NewReader(payload)
-	}
-	req, err := http.NewRequestWithContext(ctx, method, c.baseURL+apiPath, reader)
-	if err != nil {
-		return nil, err
-	}
-	req.Header.Set("Accept", accept)
-	c.setAuthHeaders(req.Header, authMode)
-	if body != nil {
-		req.Header.Set("Content-Type", "application/json")
-	}
-	return c.http.Do(req)
-}
-
-func (c *apiClient) setAuthHeaders(headers http.Header, authMode string) {
-	if authMode == "ssh" {
-		headers.Set("Authorization", "Bearer "+c.token)
-		headers.Set("X-Crabfleet-SSH-Fingerprint", c.fingerprint)
-		return
-	}
-	headers.Set("Authorization", "Bearer "+c.agentToken)
-	headers.Set("X-Crabfleet-Session-ID", c.agentSessionID)
-}
-
-func (c *apiClient) authenticatedPath(path string) (string, string, error) {
-	if c.token != "" && c.fingerprint != "" {
-		return path, "ssh", nil
-	}
-	if c.agentToken != "" && c.agentSessionID != "" {
-		return strings.Replace(path, "/api/ssh/", "/api/agent/", 1), "agent", nil
-	}
-	return "", "", errors.New("API mode requires CRABFLEET_SSH_GATEWAY_TOKEN + CRABFLEET_SSH_FINGERPRINT or CRABFLEET_AGENT_TOKEN + CRABFLEET_SESSION_ID")
-}
-
-func printFleet(out io.Writer, sessions []interactiveSession) {
-	groups := map[string][]interactiveSession{}
-	for _, session := range sessions {
-		owner := session.Owner
-		if owner == "" {
-			owner = "unassigned"
-		}
-		groups[owner] = append(groups[owner], session)
-	}
-	owners := make([]string, 0, len(groups))
-	for owner := range groups {
-		owners = append(owners, owner)
-	}
-	sort.Strings(owners)
-	if len(owners) == 0 {
-		fmt.Fprintln(out, "crabboxes: none")
-		return
-	}
-	for _, owner := range owners {
-		fmt.Fprintf(out, "%s:\n", terminalSafe(owner))
-		printSessionTree(out, groups[owner], "  ")
-	}
-}
-
-func printSessionTree(out io.Writer, sessions []interactiveSession, indent string) {
-	byParent := map[string][]interactiveSession{}
-	known := map[string]bool{}
-	seen := map[string]bool{}
-	for _, session := range sessions {
-		known[session.ID] = true
-		byParent[session.ParentSessionID] = append(byParent[session.ParentSessionID], session)
-	}
-	for parent := range byParent {
-		sort.SliceStable(byParent[parent], func(i, j int) bool {
-			return byParent[parent][i].ID < byParent[parent][j].ID
-		})
-	}
-	var roots []interactiveSession
-	for _, session := range sessions {
-		if session.ParentSessionID == "" || !known[session.ParentSessionID] {
-			roots = append(roots, session)
-		}
-	}
-	sort.SliceStable(roots, func(i, j int) bool {
-		return roots[i].ID < roots[j].ID
-	})
-	var walk func(interactiveSession, string)
-	walk = func(session interactiveSession, prefix string) {
-		if seen[session.ID] {
-			return
-		}
-		seen[session.ID] = true
-		fmt.Fprintf(out, "%s%s\n", prefix, sessionLine(session))
-		for _, child := range byParent[session.ID] {
-			walk(child, prefix+"  ")
-		}
-	}
-	for _, root := range roots {
-		walk(root, indent)
-	}
-	for _, session := range sessions {
-		if !seen[session.ID] {
-			walk(session, indent)
-		}
-	}
-}
-
-func sessionLine(session interactiveSession) string {
-	parts := []string{
-		terminalSafe(session.ID),
-		terminalSafe(session.Status),
-		terminalSafe(session.Runtime),
-		terminalSafe(session.Repo),
-	}
-	if summary := sessionSummary(session); summary != "" {
-		parts = append(parts, "- "+terminalSafe(summary))
-	}
-	return strings.Join(parts, "  ")
-}
-
-func sessionSummary(session interactiveSession) string {
-	if session.Summary != "" {
-		return session.Summary
-	}
-	if session.Purpose != "" {
-		return session.Purpose
-	}
-	return session.LastEvent
-}
-
-func printSessionLogs(out io.Writer, logs sessionLogResponse) {
-	fmt.Fprintf(
-		out,
-		"session: %s\nrepo: %s\nstatus: %s\n",
-		terminalSafe(logs.Session.ID),
-		terminalSafe(logs.Session.Repo),
-		terminalSafe(logs.Session.Status),
-	)
-	if logs.Archive.EventCount > 0 {
-		fmt.Fprintf(out, "archive: %d events\n", logs.Archive.EventCount)
-	}
-	for _, event := range logs.Events {
-		timestamp := time.UnixMilli(event.CreatedAt).Format("15:04:05")
-		fmt.Fprintf(
-			out,
-			"%s %s %s\n",
-			timestamp,
-			terminalSafe(event.Actor),
-			terminalSafe(event.Message),
-		)
-	}
-}
-
-func printSessionStatus(out io.Writer, session interactiveSession) {
-	fmt.Fprintf(out, "session: %s\n", terminalSafe(session.ID))
-	fmt.Fprintf(out, "repo: %s\n", terminalSafe(session.Repo))
-	fmt.Fprintf(out, "branch: %s\n", terminalSafe(session.Branch))
-	fmt.Fprintf(out, "runtime: %s\n", terminalSafe(session.Runtime))
-	fmt.Fprintf(out, "status: %s\n", terminalSafe(session.Status))
-	fmt.Fprintf(out, "owner: %s\n", terminalSafe(session.Owner))
-	if session.LeaseID != "" {
-		fmt.Fprintf(out, "lease: %s\n", terminalSafe(session.LeaseID))
-	}
-	if session.ParentSessionID != "" {
-		fmt.Fprintf(out, "parent: %s\n", terminalSafe(session.ParentSessionID))
-	}
-	if session.RootSessionID != "" {
-		fmt.Fprintf(out, "root: %s\n", terminalSafe(session.RootSessionID))
-	}
-	if session.CreatedBy != "" {
-		fmt.Fprintf(out, "created-by: %s\n", terminalSafe(session.CreatedBy))
-	}
-	if session.Purpose != "" {
-		fmt.Fprintf(out, "purpose: %s\n", terminalSafe(session.Purpose))
-	}
-	if session.Summary != "" {
-		fmt.Fprintf(out, "summary: %s\n", terminalSafe(session.Summary))
-	}
-	if session.AttachURL != "" {
-		fmt.Fprintf(out, "attach: %s\n", terminalSafe(session.AttachURL))
-	}
-	if session.VNCURL != "" {
-		fmt.Fprintf(out, "vnc: %s\n", terminalSafe(session.VNCURL))
-	}
-	if session.LastEvent != "" {
-		fmt.Fprintf(out, "event: %s\n", terminalSafe(session.LastEvent))
-	}
-}
-
-func printSessionSummary(out io.Writer, session interactiveSession) {
-	fmt.Fprintf(out, "session: %s\n", terminalSafe(session.ID))
-	if session.Purpose != "" {
-		fmt.Fprintf(out, "purpose: %s\n", terminalSafe(session.Purpose))
-	}
-	if session.Summary != "" {
-		fmt.Fprintf(out, "summary: %s\n", terminalSafe(session.Summary))
-	}
 }
 
 func runSSH(app *cli, args ...string) error {
@@ -1153,55 +659,7 @@ func vncURLFromOutput(output string) string {
 	return ""
 }
 
-func terminalSafe(value string) string {
-	return strings.Map(func(r rune) rune {
-		if r == '\n' || r == '\r' || r == '\t' {
-			return ' '
-		}
-		if r < 0x20 || r == 0x7f || (r >= 0x80 && r <= 0x9f) {
-			return -1
-		}
-		return r
-	}, value)
-}
-
-func attachable(session interactiveSession) bool {
-	if !terminalCapable(session) {
-		return false
-	}
-	if !ptyAttachable(session) {
-		return false
-	}
-	switch session.Status {
-	case "ready", "attached", "detached":
-		return true
-	default:
-		return false
-	}
-}
-
-func terminalCapable(session interactiveSession) bool {
-	return session.Capabilities == nil || session.Capabilities.Terminal
-}
-
-func ptyAttachable(session interactiveSession) bool {
-	return session.PtyAvailable
-}
-
 func isTerminal(file *os.File) bool {
 	info, err := file.Stat()
 	return err == nil && (info.Mode()&os.ModeCharDevice) != 0
-}
-
-func displayUser(u user) string {
-	if u.Login != "" {
-		return "@" + u.Login
-	}
-	if u.Email != "" {
-		return u.Email
-	}
-	if u.Subject != "" {
-		return u.Subject
-	}
-	return "unknown"
 }

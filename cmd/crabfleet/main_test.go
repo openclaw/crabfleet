@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
-	"strings"
 	"testing"
 
 	"github.com/alecthomas/kong"
@@ -182,88 +181,6 @@ func TestCLIUsesDeleteCanonicalNameWithStopAlias(t *testing.T) {
 	}
 	if legacy.Delete.ID != "IS-8" {
 		t.Fatalf("stop alias id = %q", legacy.Delete.ID)
-	}
-}
-
-func TestLegacyProviderCleanupWarningRequiresConfirmedLegacyStop(t *testing.T) {
-	if !legacyProviderCleanupMayBeRequired(interactiveSession{Status: "stopped"}) {
-		t.Fatal("confirmed legacy stop should retain the cleanup warning")
-	}
-	for _, session := range []interactiveSession{
-		{Status: "failed"},
-		{Status: "stopped", Adapter: "runtime-v1"},
-		{Status: "stopped", Runtime: "github_actions"},
-	} {
-		if legacyProviderCleanupMayBeRequired(session) {
-			t.Fatalf("session %#v must not recommend provider cleanup", session)
-		}
-	}
-	if got := lifecycleStopNote(interactiveSession{Status: "stopped", Runtime: "github_actions"}); !strings.Contains(got, "not canceled") {
-		t.Fatalf("GitHub Actions note = %q", got)
-	}
-	if got := lifecycleStopNote(interactiveSession{Status: "failed"}); got != "" {
-		t.Fatalf("failed unowned workspace note = %q", got)
-	}
-}
-
-func TestAttachableRequiresAuthoritativePTYAvailability(t *testing.T) {
-	if !attachable(interactiveSession{Status: "ready", PtyAvailable: true}) {
-		t.Fatal("ready session with an available PTY should be attachable")
-	}
-	if attachable(interactiveSession{Status: "pending_adapter", LeaseID: "sandbox:test"}) {
-		t.Fatal("pending session should not be attachable")
-	}
-	if attachable(interactiveSession{Status: "ready", AttachURL: "/api/terminal/ws"}) {
-		t.Fatal("attach URL must not override missing PTY availability")
-	}
-	if attachable(interactiveSession{
-		Status:       "ready",
-		LeaseID:      "sandbox:test",
-		PtyAvailable: true,
-		Capabilities: &sessionCapabilities{Terminal: false},
-	}) {
-		t.Fatal("session with withdrawn terminal capability should not be attachable")
-	}
-	if attachable(interactiveSession{
-		Status:       "ready",
-		LeaseID:      "sandbox:test",
-		PtyAvailable: false,
-	}) {
-		t.Fatal("server PTY availability should be authoritative")
-	}
-}
-
-func TestPrintFleetShowsOwnerSessionTreeAndSummaries(t *testing.T) {
-	var out bytes.Buffer
-	printFleet(&out, []interactiveSession{
-		{
-			ID:              "IS-2",
-			Owner:           "steipete",
-			Repo:            "openclaw/crabfleet",
-			Runtime:         "container",
-			Status:          "ready",
-			Summary:         "child mission",
-			ParentSessionID: "IS-1",
-		},
-		{
-			ID:      "IS-1",
-			Owner:   "steipete",
-			Repo:    "openclaw/crabfleet",
-			Runtime: "container",
-			Status:  "ready",
-			Purpose: "root mission",
-		},
-	})
-
-	text := out.String()
-	for _, want := range []string{
-		"steipete:",
-		"  IS-1  ready  container  openclaw/crabfleet  - root mission",
-		"    IS-2  ready  container  openclaw/crabfleet  - child mission",
-	} {
-		if !strings.Contains(text, want) {
-			t.Fatalf("output missing %q:\n%s", want, text)
-		}
 	}
 }
 

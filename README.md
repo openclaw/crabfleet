@@ -396,6 +396,11 @@ crabfleet/
 ├── migrations/           # D1 database migrations
 ├── scripts/              # Build scripts
 │   └── generate-assets.mjs
+├── cmd/                   # Go CLI and SSH gateway entry points
+├── internal/
+│   ├── fleetapi/          # Shared Go control-plane client and domain contracts
+│   ├── fleettext/         # Shared terminal-safe session rendering
+│   └── terminalws/        # Shared multiplex terminal protocol client
 ├── vite.config.mjs       # Preact/Vite app bundle config
 ├── docs/                 # Documentation (GitHub Pages)
 │   ├── CNAME             # docs.crabfleet.ai custom domain
