@@ -325,10 +325,28 @@ import {
   claimManagedSandboxProvision,
   commitManagedSandboxProvision,
 } from "./worker/provisioning/sandbox-repository";
+import {
+  isManagedInteractiveSessionId,
+  standaloneSandboxDefaultTtlSeconds,
+  standaloneSandboxProvisionRequestHashInput,
+  StandaloneSandboxProvisioningService,
+  type StandaloneSandboxProvisionFence,
+} from "./worker/provisioning/standalone-sandbox";
+import {
+  activateStandaloneSandboxProvision,
+  claimStandaloneSandboxProvision,
+  readStandaloneSandboxProvision,
+  stageStandaloneSandboxClaimCleanup,
+} from "./worker/provisioning/standalone-sandbox-repository";
 import type {
   InteractiveProvisionRequest,
   InteractiveProvisionResult,
 } from "./worker/provisioning/types";
+import {
+  activeSandboxCredentialPolicyCondition,
+  activeSandboxCredentialPolicyGeneration,
+  sandboxLookupIds,
+} from "./worker/sandbox-policy-state";
 import {
   interactiveCommand,
   interactiveSessionPurpose,
@@ -510,12 +528,6 @@ type SandboxRuntimeSession = (InteractiveProvisionRequest | InteractiveSession) 
   githubToken?: string;
 };
 
-type StandaloneSandboxProvisionFence = {
-  claim: string;
-  provisionId: string;
-  sandboxId: string;
-};
-
 type SandboxManagedOwnershipFence = SandboxCurrentLeaseFence | SandboxLeaseRefreshFence;
 
 type SandboxTerminalCleanupOwnership = {
@@ -645,8 +657,6 @@ const credentialPolicyRegistrationClaimMs = 60_000;
 const credentialPolicyProvisioningStaleMs = 15 * 60_000;
 const credentialPolicyLegacyGenerationPrefix = "legacy:";
 const credentialPolicyLegacyRepairClaimPrefix = "legacy-repair:";
-const standaloneSandboxDefaultTtlSeconds = 14_400;
-
 const defaultSandboxEgressHosts = [
   "api.github.com",
   "api.openai.com",
@@ -4059,79 +4069,6 @@ async function existingSandboxCredentialPolicyGeneration(
   return existing?.registration_generation ?? null;
 }
 
-function activeSandboxCredentialPolicyCondition(
-  env: RuntimeEnv,
-  sessionId: string,
-  sandboxId: string,
-  generation: string,
-  updatedAt?: number,
-): RawBuilder<boolean> {
-  const lookupIds = sandboxLookupIds(env, sandboxId);
-  const updatedAtCondition =
-    updatedAt === undefined ? sql<boolean>`1 = 1` : sql<boolean>`updated_at = ${updatedAt}`;
-  return sql<boolean>`
-    (
-      SELECT count(DISTINCT lookup_id)
-      FROM interactive_session_credential_policies
-      WHERE session_id = ${sessionId}
-        AND sandbox_id = ${sandboxId}
-        AND lookup_id IN (${sql.join(lookupIds)})
-        AND state = 'active'
-        AND registration_generation = ${generation}
-        AND registration_claim IS NULL
-        AND ${updatedAtCondition}
-    ) = ${lookupIds.length}
-    AND NOT EXISTS (
-      SELECT 1
-      FROM interactive_session_credential_policies
-      WHERE session_id = ${sessionId}
-        AND sandbox_id = ${sandboxId}
-        AND (
-          state != 'active'
-          OR registration_generation != ${generation}
-          OR registration_claim IS NOT NULL
-          OR NOT (${updatedAtCondition})
-        )
-    )
-  `;
-}
-
-async function activeSandboxCredentialPolicyGeneration(
-  env: RuntimeEnv,
-  sessionId: string,
-  sandboxId: string,
-): Promise<string | null> {
-  const rows = await database(env)
-    .selectFrom("interactive_session_credential_policies")
-    .select(["lookup_id", "state", "registration_generation", "registration_claim"])
-    .where("session_id", "=", sessionId)
-    .where("sandbox_id", "=", sandboxId)
-    .execute();
-  const expected = sandboxLookupIds(env, sandboxId);
-  const generation = rows[0]?.registration_generation;
-  if (
-    !generation ||
-    !expected.every((lookupId) =>
-      rows.some(
-        (row) =>
-          row.lookup_id === lookupId &&
-          row.state === "active" &&
-          row.registration_generation === generation &&
-          row.registration_claim === null,
-      ),
-    ) ||
-    rows.some(
-      (row) =>
-        row.state !== "active" ||
-        row.registration_generation !== generation ||
-        row.registration_claim !== null,
-    )
-  ) {
-    return null;
-  }
-  return generation;
-}
-
 async function queueSandboxCredentialPolicyCleanup(
   env: RuntimeEnv,
   sessionId: string,
@@ -6600,6 +6537,42 @@ function managedSandboxProvisioningService(env: RuntimeEnv): ManagedSandboxProvi
   });
 }
 
+function standaloneSandboxProvisioningService(
+  env: RuntimeEnv,
+): StandaloneSandboxProvisioningService {
+  const provisionTtlMs =
+    clampedSeconds(env.CRABBOX_STANDALONE_SANDBOX_TTL_SECONDS, standaloneSandboxDefaultTtlSeconds) *
+    1000;
+  return new StandaloneSandboxProvisioningService({
+    now: Date.now,
+    requestHash: (session) =>
+      sha256(JSON.stringify(standaloneSandboxProvisionRequestHashInput(session))),
+    readOwner: (provisionId) => readStandaloneSandboxProvision(env, provisionId),
+    stageOwnerCleanup: (owner, message, now) =>
+      stageStandaloneSandboxProvisionCleanup(env, owner, message, now),
+    reconcileCleanup: (provisionId, now) =>
+      reconcileCredentialPolicyCleanupBatch(env, now, provisionId),
+    claim: (session, requestHash, now) =>
+      claimStandaloneSandboxProvision(
+        env,
+        session,
+        requestHash,
+        now,
+        credentialPolicyProvisioningStaleMs,
+        provisionTtlMs,
+      ),
+    provision: (session, claim) =>
+      provisionWithSandbox(env, session, undefined, claim.lease, claim.fence),
+    stageClaimCleanup: (claim, message, now) =>
+      stageStandaloneSandboxClaimCleanup(env, claim, message, now),
+    queuePolicyCleanup: (provisionId, sandboxId, now) =>
+      queueSandboxCredentialPolicyCleanup(env, provisionId, sandboxId, now),
+    activate: (provisionId, claim, result, now) =>
+      activateStandaloneSandboxProvision(env, provisionId, claim, result, now),
+    providerError: safeProviderError,
+  });
+}
+
 async function provisionInteractiveEndpoint(
   request: Request,
   env: RuntimeEnv,
@@ -6655,276 +6628,13 @@ async function provisionInteractiveEndpoint(
     return managedSandboxProvisioningService(env).provision(payload, managed);
   }
   if (interactiveProvisioningService(env).supportsStandalone(payload.runtime)) {
-    if (managedInteractiveSessionId(payload.id)) {
-      return failedProvision(
-        "interactive provision failed: standalone provision id uses the managed session namespace",
-      );
-    }
-    return provisionStandaloneSandbox(env, payload);
+    return standaloneSandboxProvisioningService(env).provision(payload);
   }
   return failedProvision(
     payload.runtime === "container"
       ? "interactive provision failed: Cloudflare Sandbox binding is not configured"
       : "interactive provision failed: standalone provision supports container runtime only",
   );
-}
-
-async function provisionStandaloneSandbox(
-  env: RuntimeEnv,
-  payload: InteractiveProvisionRequest,
-): Promise<InteractiveProvisionResult> {
-  if (managedInteractiveSessionId(payload.id)) {
-    return failedProvision(
-      "interactive provision failed: standalone provision id uses the managed session namespace",
-    );
-  }
-  const { githubToken: _githubToken, ...ownershipPayload } = payload;
-  const requestHash = await sha256(JSON.stringify(ownershipPayload));
-  const db = database(env);
-  const now = Date.now();
-  let previous = await db
-    .selectFrom("standalone_sandbox_provisions")
-    .selectAll()
-    .where("id", "=", payload.id)
-    .executeTakeFirst();
-  if (previous && previous.request_hash !== requestHash) {
-    return failedProvision("interactive provision failed: provision id is already registered");
-  }
-  if (previous?.state === "active") {
-    if (!previous.expires_at || previous.expires_at <= Date.now()) {
-      await stageStandaloneSandboxProvisionCleanup(
-        env,
-        previous,
-        "standalone Sandbox provision expired",
-        Date.now(),
-      );
-      await reconcileCredentialPolicyCleanupBatch(env, Date.now(), payload.id);
-      return failedProvision("interactive provision failed: standalone Sandbox provision expired");
-    }
-    return {
-      status: "ready",
-      leaseId: previous.lease_id,
-      attachUrl: previous.attach_url,
-      vncUrl: previous.vnc_url,
-      expiresAt: previous.expires_at,
-      expiresAtPresent: true,
-      message: previous.message,
-    };
-  }
-  if (previous?.state === "cleanup_pending") {
-    return failedProvision("interactive provision failed: previous credential cleanup is pending");
-  }
-  if (
-    previous?.state === "provisioning" &&
-    (previous.ownership_claim_expires_at ?? Number.NEGATIVE_INFINITY) <= now
-  ) {
-    const staged = await stageStandaloneSandboxProvisionCleanup(
-      env,
-      previous,
-      "abandoned standalone Sandbox provision cleanup",
-      now,
-    );
-    if (!staged) {
-      return failedProvision("interactive provision failed: standalone ownership changed");
-    }
-    await reconcileCredentialPolicyCleanupBatch(env, now, payload.id);
-    previous = await db
-      .selectFrom("standalone_sandbox_provisions")
-      .selectAll()
-      .where("id", "=", payload.id)
-      .executeTakeFirst();
-    if (previous) {
-      return failedProvision(
-        "interactive provision failed: previous credential cleanup is pending",
-      );
-    }
-  }
-
-  const expiresAt =
-    now +
-    clampedSeconds(env.CRABBOX_STANDALONE_SANDBOX_TTL_SECONDS, standaloneSandboxDefaultTtlSeconds) *
-      1000;
-  const lease = newSandboxLease(payload.id);
-  const claim = `standalone:${crypto.randomUUID()}`;
-  await sql`
-    INSERT INTO standalone_sandbox_provisions (
-      id,
-      request_hash,
-      sandbox_id,
-      state,
-      ownership_claim,
-      ownership_claim_expires_at,
-      lease_id,
-      attach_url,
-      vnc_url,
-      expires_at,
-      message,
-      created_at,
-      updated_at
-    ) VALUES (
-      ${payload.id},
-      ${requestHash},
-      ${lease.sandboxId},
-      'provisioning',
-      ${claim},
-      ${now + credentialPolicyProvisioningStaleMs},
-      ${sandboxLeaseId(lease)},
-      NULL,
-      NULL,
-      ${expiresAt},
-      'standalone Sandbox provision started',
-      ${now},
-      ${now}
-    )
-    ON CONFLICT(id) DO UPDATE SET
-      sandbox_id = excluded.sandbox_id,
-      ownership_claim = excluded.ownership_claim,
-      ownership_claim_expires_at = excluded.ownership_claim_expires_at,
-      lease_id = excluded.lease_id,
-      attach_url = NULL,
-      vnc_url = NULL,
-      expires_at = excluded.expires_at,
-      message = excluded.message,
-      updated_at = excluded.updated_at
-    WHERE standalone_sandbox_provisions.request_hash = excluded.request_hash
-      AND standalone_sandbox_provisions.state = 'provisioning'
-      AND standalone_sandbox_provisions.ownership_claim_expires_at <= ${now}
-  `.execute(db);
-  const ownership = await db
-    .selectFrom("standalone_sandbox_provisions")
-    .select(["sandbox_id", "state", "ownership_claim", "ownership_claim_expires_at", "expires_at"])
-    .where("id", "=", payload.id)
-    .executeTakeFirst();
-  if (
-    ownership?.sandbox_id !== lease.sandboxId ||
-    ownership.state !== "provisioning" ||
-    ownership.ownership_claim !== claim ||
-    (ownership.ownership_claim_expires_at ?? 0) <= now ||
-    ownership.expires_at !== expiresAt
-  ) {
-    return failedProvision("interactive provision failed: provision id is already in progress");
-  }
-  if (previous?.sandbox_id && previous.sandbox_id !== lease.sandboxId) {
-    await queueSandboxCredentialPolicyCleanup(env, payload.id, previous.sandbox_id, now);
-  }
-  const fence: StandaloneSandboxProvisionFence = {
-    claim,
-    provisionId: payload.id,
-    sandboxId: lease.sandboxId,
-  };
-  const result = await provisionWithSandbox(env, payload, undefined, lease, fence);
-  const finishedAt = Date.now();
-  if (result.status !== "ready") {
-    await db
-      .updateTable("standalone_sandbox_provisions")
-      .set({
-        state: "cleanup_pending",
-        ownership_claim: null,
-        ownership_claim_expires_at: null,
-        message: result.message,
-        updated_at: finishedAt,
-      })
-      .where("id", "=", payload.id)
-      .where("sandbox_id", "=", lease.sandboxId)
-      .where("ownership_claim", "=", claim)
-      .where("expires_at", "=", expiresAt)
-      .execute();
-    await queueSandboxCredentialPolicyCleanup(env, payload.id, lease.sandboxId, finishedAt);
-    await reconcileCredentialPolicyCleanupBatch(env, finishedAt, payload.id);
-    return result;
-  }
-  const policyGeneration = await activeSandboxCredentialPolicyGeneration(
-    env,
-    payload.id,
-    lease.sandboxId,
-  );
-  const activationVersion = Math.max(Date.now(), finishedAt + 1);
-  if (policyGeneration) {
-    const ownerStillClaimed = sql<boolean>`EXISTS (
-      SELECT 1
-      FROM standalone_sandbox_provisions AS owner
-      WHERE owner.id = ${payload.id}
-        AND owner.sandbox_id = ${lease.sandboxId}
-        AND owner.state = 'provisioning'
-        AND owner.ownership_claim = ${claim}
-        AND owner.ownership_claim_expires_at > ${activationVersion}
-        AND owner.expires_at = ${expiresAt}
-        AND owner.expires_at > ${activationVersion}
-    )`;
-    await executeBatch(env, [
-      db
-        .updateTable("interactive_session_credential_policies")
-        .set({ updated_at: activationVersion })
-        .where("session_id", "=", payload.id)
-        .where("sandbox_id", "=", lease.sandboxId)
-        .where("state", "=", "active")
-        .where("registration_generation", "=", policyGeneration)
-        .where("registration_claim", "is", null)
-        .where(ownerStillClaimed),
-      db
-        .updateTable("standalone_sandbox_provisions")
-        .set({
-          state: "active",
-          ownership_claim: null,
-          ownership_claim_expires_at: null,
-          lease_id: result.leaseId,
-          attach_url: result.attachUrl,
-          vnc_url: result.vncUrl,
-          message: result.message,
-          updated_at: activationVersion,
-        })
-        .where("id", "=", payload.id)
-        .where("sandbox_id", "=", lease.sandboxId)
-        .where("state", "=", "provisioning")
-        .where("ownership_claim", "=", claim)
-        .where("ownership_claim_expires_at", ">", activationVersion)
-        .where("expires_at", "=", expiresAt)
-        .where("expires_at", ">", activationVersion)
-        .where(
-          activeSandboxCredentialPolicyCondition(
-            env,
-            payload.id,
-            lease.sandboxId,
-            policyGeneration,
-            activationVersion,
-          ),
-        ),
-    ]);
-  }
-  const activated = await db
-    .selectFrom("standalone_sandbox_provisions")
-    .select(["state", "sandbox_id", "lease_id", "expires_at"])
-    .where("id", "=", payload.id)
-    .executeTakeFirst();
-  if (
-    activated?.state !== "active" ||
-    activated.sandbox_id !== lease.sandboxId ||
-    activated.lease_id !== result.leaseId ||
-    activated.expires_at !== expiresAt
-  ) {
-    await db
-      .updateTable("standalone_sandbox_provisions")
-      .set({
-        state: "cleanup_pending",
-        ownership_claim: null,
-        ownership_claim_expires_at: null,
-        message: "standalone ownership claim expired",
-        updated_at: finishedAt,
-      })
-      .where("id", "=", payload.id)
-      .where("sandbox_id", "=", lease.sandboxId)
-      .where("ownership_claim", "=", claim)
-      .where("expires_at", "=", expiresAt)
-      .execute();
-    await queueSandboxCredentialPolicyCleanup(env, payload.id, lease.sandboxId, finishedAt);
-    await reconcileCredentialPolicyCleanupBatch(env, finishedAt, payload.id);
-    return failedProvision("interactive provision failed: standalone ownership claim expired");
-  }
-  return { ...result, expiresAt, expiresAtPresent: true };
-}
-
-function managedInteractiveSessionId(id: string): boolean {
-  return /^is-[0-9]+$/i.test(id);
 }
 
 async function stageStandaloneSandboxProvisionCleanup(
@@ -7036,7 +6746,7 @@ async function expireStandaloneSandboxProvisions(
     await stageStandaloneSandboxProvisionCleanup(
       env,
       owner,
-      managedInteractiveSessionId(owner.id)
+      isManagedInteractiveSessionId(owner.id)
         ? "standalone provision used the reserved managed session namespace"
         : "standalone Sandbox provision expired",
       now,
@@ -7111,14 +6821,14 @@ async function standaloneSandboxPty(
     !isCurrentSandboxLease(owner.lease_id) ||
     !owner.expires_at ||
     owner.expires_at <= Date.now() ||
-    managedInteractiveSessionId(provisionId)
+    isManagedInteractiveSessionId(provisionId)
   ) {
     if (owner) {
       const now = Date.now();
       await stageStandaloneSandboxProvisionCleanup(
         env,
         owner,
-        managedInteractiveSessionId(provisionId)
+        isManagedInteractiveSessionId(provisionId)
           ? "standalone provision used the reserved managed session namespace"
           : "standalone Sandbox provision expired",
         now,
@@ -8168,12 +7878,6 @@ async function githubNodeBelongsToRepo(
     repository.owner.login.toLowerCase() === owner &&
     repository.name.toLowerCase() === name
   );
-}
-
-function sandboxLookupIds(env: RuntimeEnv, sandboxId: string): string[] {
-  const ids = new Set([sandboxId]);
-  if (env.SANDBOX) ids.add(env.SANDBOX.idFromName(sandboxId).toString());
-  return [...ids];
 }
 
 async function ensureCurrentSandboxLease(

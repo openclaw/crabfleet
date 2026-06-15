@@ -865,7 +865,6 @@ test("stateless Sandbox provision hook acquires durable standalone ownership", a
   const sandboxStart = source.indexOf("async function provisionWithSandbox");
   const sandboxEnd = source.indexOf("function sandboxManagedOwnershipCondition", sandboxStart);
   const sandboxSource = source.slice(sandboxStart, sandboxEnd);
-  const activationSource = endpointSource.slice(endpointSource.indexOf("const activationVersion"));
   const stopStart = source.indexOf("async function stopStandaloneSandboxProvision");
   const stopEnd = source.indexOf("function standaloneSandboxAttachUrl", stopStart);
   const stopSource = source.slice(stopStart, stopEnd);
@@ -888,20 +887,13 @@ test("stateless Sandbox provision hook acquires durable standalone ownership", a
   assert.match(endpointSource, /if \(managed\)/);
   assert.ok(
     endpointSource.indexOf("if (managed)") <
-      endpointSource.indexOf("return provisionStandaloneSandbox(env, payload)"),
+      endpointSource.indexOf("return standaloneSandboxProvisioningService(env).provision(payload)"),
   );
   assert.match(
     endpointSource,
     /managedSandboxProvisioningService\(env\)\.provision\(payload, managed\)/,
   );
-  assert.match(endpointSource, /managedInteractiveSessionId\(payload\.id\)/);
-  assert.match(endpointSource, /managed session namespace/);
-  assert.match(endpointSource, /INSERT INTO standalone_sandbox_provisions/);
-  assert.match(endpointSource, /ownership_claim_expires_at/);
-  assert.match(endpointSource, /\$\{sandboxLeaseId\(lease\)\}/);
-  assert.match(endpointSource, /lease_id = excluded\.lease_id/);
-  assert.match(endpointSource, /provisionWithSandbox\([\s\S]*fence/);
-  assert.match(endpointSource, /state: "active"/);
+  assert.match(endpointSource, /standaloneSandboxProvisioningService\(env\)\.provision\(payload\)/);
   assert.match(ownershipSource, /FROM standalone_sandbox_provisions AS owner/);
   assert.match(ownershipSource, /owner\.ownership_claim = \$\{ownershipFence\.claim\}/);
   assert.match(ptySource, /authorizeProvisionBearerToken\(request, env\)/);
@@ -930,20 +922,6 @@ test("stateless Sandbox provision hook acquires durable standalone ownership", a
   );
   assert.match(standaloneCleanupSource, /where\("updated_at", "=", owner\.updated_at\)/);
   assert.match(sandboxSource, /standaloneSandboxAttachUrl\(env, session\.id\)/);
-  assert.match(
-    endpointSource,
-    /const activationVersion = Math\.max\(Date\.now\(\), finishedAt \+ 1\)/,
-  );
-  assert.match(activationSource, /executeBatch\(env, \[/);
-  assert.ok(
-    activationSource.indexOf('.updateTable("interactive_session_credential_policies")') <
-      activationSource.indexOf('.updateTable("standalone_sandbox_provisions")'),
-  );
-  assert.match(activationSource, /set\(\{ updated_at: activationVersion \}\)/);
-  assert.match(
-    endpointSource,
-    /activeSandboxCredentialPolicyCondition\([\s\S]*policyGeneration,[\s\S]*activationVersion/,
-  );
   assert.match(migration, /CREATE TABLE IF NOT EXISTS standalone_sandbox_provisions/);
   assert.match(migration, /request_hash TEXT NOT NULL/);
   assert.match(migration, /sandbox_id TEXT NOT NULL UNIQUE/);
@@ -961,7 +939,6 @@ test("stateless Sandbox provision hook acquires durable standalone ownership", a
   assert.match(stopSource, /reconcileCredentialPolicyCleanupBatch/);
   assert.match(stopSource, /status: remaining \? "stopping" : "stopped"/);
   assert.match(source, /CRABBOX_STANDALONE_SANDBOX_TTL_SECONDS/);
-  assert.match(source, /function managedInteractiveSessionId/);
   assert.match(source, /standaloneProvisionStopMatch/);
   assert.match(source, /stopStandaloneSandboxProvision/);
   assert.match(source, /policy\?\.expiresAt !== undefined && policy\.expiresAt <= Date\.now\(\)/);

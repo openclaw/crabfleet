@@ -264,6 +264,8 @@ export type StandaloneSandboxProvisionTable = {
   updated_at: number;
 };
 
+export type StandaloneSandboxProvisionRow = Selectable<StandaloneSandboxProvisionTable>;
+
 export type AuditEventTable = {
   id: Generated<number>;
   actor: string;
