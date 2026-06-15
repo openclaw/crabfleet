@@ -1731,11 +1731,8 @@ test("terminal endpoints enforce current runtime capabilities", async () => {
   );
   const decorateSource = source.slice(decorateStart, decorateEnd);
 
-  assert.match(source, /type InteractiveSession = \{[\s\S]*ptyAvailable\?: boolean;/);
   assert.match(source, /if \(!session\.capabilities\.terminal\)/);
-  assert.match(source, /runtimeCapabilities\(row\.runtime, row\.capabilities_json\)\.terminal/);
   assert.match(source, /runtimeAdapterTerminalFailureStatus\(existing\.adapter\) === "detached"/);
-  assert.match(source, /attachUrl: capabilities\.terminal \? row\.attach_url : null/);
   assert.match(decorateSource, /const routeKind = interactivePtyRouteKind\(env, session\)/);
   assert.match(decorateSource, /interactiveTerminalTarget\(env, session, routeKind\)/);
   assert.match(decorateSource, /routeAvailable/);
