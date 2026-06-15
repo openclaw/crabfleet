@@ -11,6 +11,7 @@ export type OpenClawRootStopStore = {
   readRootRows(rootSessionId: string, maximumSessions: number): Promise<InteractiveSessionRow[]>;
   rollbackReservation(sessionId: string, createdAt: number): Promise<void>;
   stopSession(session: InteractiveSession): Promise<void>;
+  canReconcileStoppingSession(sessionId: string): Promise<boolean>;
   reconcileSession(session: InteractiveSession, now: number): Promise<void>;
   readRootCompletion(rootSessionId: string): Promise<{ total: number; remaining: number }>;
   recordStopped(rootSessionId: string, now: number): Promise<void>;
@@ -98,6 +99,11 @@ export class OpenClawRootStopService {
             now + Math.min(10_000, 500 * 2 ** Math.min(attempt - 1, 5)),
           );
           if (session.status === "stopping" && session.adapter !== this.adapterName) {
+            if (!(await this.store.canReconcileStoppingSession(session.id))) {
+              throw serviceUnavailable(
+                `OpenClaw session root contains unsupported stopping session ${session.id}`,
+              );
+            }
             await this.runBeforeDeadline(deadline, () => this.store.reconcileSession(session, now));
             return;
           }

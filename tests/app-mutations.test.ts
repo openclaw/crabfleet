@@ -71,5 +71,5 @@ test("interactive stop dialogs distinguish workspace deletion and workflow detac
   const fallback = interactiveStopDialog(null, "IS-3");
   assert.equal(fallback.title, "Stop Crabbox session?");
   assert.equal(fallback.confirmLabel, "Stop session");
-  assert.match(fallback.description, /legacy backend does not expose provider deletion/);
+  assert.match(fallback.description, /releases the managed Sandbox resources/);
 });

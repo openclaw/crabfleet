@@ -545,7 +545,7 @@ GitHub Actions resume lifecycle.
 ### Repeated Legacy Stop Events
 
 This indicates a lifecycle regression. GitHub Actions sessions must be excluded
-from legacy stopping reconciliation and must not carry a synthetic workspace
+from non-adapter stopping reconciliation and must not carry a synthetic workspace
 lease.
 
 ### Action Succeeded but Session Is Not Complete

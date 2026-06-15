@@ -1,6 +1,5 @@
 import { sql } from "kysely";
 
-import { githubActionsRuntime } from "../github-actions-runtime.ts";
 import { mapWithConcurrency } from "./concurrency.ts";
 import { database, type InteractiveSessionRow } from "./database.ts";
 import type { RuntimeEnv } from "./env.ts";
@@ -22,7 +21,6 @@ const terminalReconciliationStatuses: readonly InteractiveSessionStatus[] = [
 
 export type InteractiveSessionReconciliationSchedulerConfig = {
   adapterName: string;
-  sandboxLeasePrefix: string;
   intervalMs: number;
   limit: number;
   concurrency: number;
@@ -32,13 +30,10 @@ export type InteractiveSessionReconciliationSchedulerStore = {
   cleanupAbandonedPreparations(now: number): Promise<void>;
   cleanupCredentialPolicies(now: number, sessionId?: string): Promise<void>;
   providerConfigured(): boolean;
-  readLegacyStoppingCandidates(sessionId?: string): Promise<InteractiveSessionRow[]>;
-  completeLegacyStop(row: InteractiveSessionRow, now: number): Promise<void>;
   requeueTerminalArchiveBackfill(sessionId?: string): Promise<void>;
   readBatchCandidates(providerConfigured: boolean): Promise<InteractiveSessionRow[]>;
   readSession(sessionId: string): Promise<InteractiveSessionRow | undefined>;
   reconcile(row: InteractiveSessionRow, now: number): Promise<void>;
-  report(message: string, error: unknown): void;
 };
 
 export class InteractiveSessionReconciliationScheduler {
@@ -56,13 +51,11 @@ export class InteractiveSessionReconciliationScheduler {
   async runBatch(now: number): Promise<void> {
     await this.store.cleanupAbandonedPreparations(now);
     await this.store.cleanupCredentialPolicies(now);
-    await this.recoverLegacyStops(now);
     await this.reconcileExternalBatch(now);
   }
 
   async reconcileById(sessionId: string, now: number): Promise<void> {
     await this.store.cleanupCredentialPolicies(now, sessionId);
-    await this.recoverLegacyStops(now, sessionId);
     await this.store.requeueTerminalArchiveBackfill(sessionId);
     const row = await this.store.readSession(sessionId);
     if (
@@ -75,15 +68,6 @@ export class InteractiveSessionReconciliationScheduler {
     ) {
       await this.store.reconcile(row, now);
     }
-  }
-
-  private async recoverLegacyStops(now: number, sessionId?: string): Promise<void> {
-    const candidates = await this.store.readLegacyStoppingCandidates(sessionId);
-    await mapWithConcurrency(candidates, this.config.concurrency, async (row) => {
-      await this.store.completeLegacyStop(row, now).catch((error) => {
-        this.store.report(`legacy interactive session stop recovery failed for ${row.id}`, error);
-      });
-    });
   }
 
   private async reconcileExternalBatch(now: number): Promise<void> {
@@ -120,34 +104,6 @@ export function interactiveSessionReconciliationDue(
     activeReconciliationStatuses.includes(row.status);
   if (!terminalFinalizationPending && !activeAdapter) return false;
   return !row.last_reconciled_at || now - row.last_reconciled_at >= options.intervalMs;
-}
-
-export async function readLegacyStoppingInteractiveSessionCandidates(
-  env: RuntimeEnv,
-  options: {
-    adapterName: string;
-    sandboxLeasePrefix: string;
-    limit: number;
-    sessionId?: string;
-  },
-): Promise<InteractiveSessionRow[]> {
-  let query = database(env)
-    .selectFrom("interactive_sessions")
-    .selectAll()
-    .where("status", "=", "stopping")
-    .where((expression) =>
-      expression.or([
-        expression("adapter", "is", null),
-        expression("adapter", "!=", options.adapterName),
-      ]),
-    )
-    .where("runtime", "!=", githubActionsRuntime)
-    .where("credential_cleanup_terminal_status", "is", null)
-    .where(sql<boolean>`lease_id IS NULL OR lease_id NOT LIKE ${`${options.sandboxLeasePrefix}%`}`)
-    .orderBy("updated_at", "asc")
-    .limit(options.limit);
-  if (options.sessionId) query = query.where("id", "=", options.sessionId);
-  return query.execute();
 }
 
 export async function requeueTerminalArchiveObjectBackfill(

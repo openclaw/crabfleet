@@ -1,4 +1,4 @@
-import { legacyLeaseIdForAdapter, runtimeAdapterName, safeDesktopUrl } from "../runtime-adapter.ts";
+import { runtimeAdapterName, safeDesktopUrl, workerOwnedLeaseId } from "../runtime-adapter.ts";
 import {
   resolveRuntimeProfileCodexSsh,
   runtimeProfileByID,
@@ -70,7 +70,7 @@ export function presentInteractiveSession(
     providerResourceId: canControl ? session.providerResourceId : null,
     lastReconciledAt: canControl ? session.lastReconciledAt : null,
     reconcileError: canControl ? session.reconcileError : null,
-    leaseId: canControl ? legacyLeaseIdForAdapter(session.adapter, session.leaseId) : null,
+    leaseId: canControl ? workerOwnedLeaseId(session.adapter, session.leaseId) : null,
     attachUrl: ptyAvailable ? "/api/terminal/ws" : null,
     ptyAvailable,
     codexSsh,

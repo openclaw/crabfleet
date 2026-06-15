@@ -51,7 +51,6 @@ import { appCanonicalOrigin, canonicalAppRedirect, productHostResponse } from ".
 import {
   adapterWorkspaceIdMatches,
   currentAdapterDesktopConnection,
-  legacyLeaseIdForAdapter,
   parseAdapterWorkspaceResult,
   redactedAdapterMessage,
   redactedAdapterResponseMessage,
@@ -62,12 +61,13 @@ import {
   runtimeAdapterReplayRequest,
   retainedRuntimeAdapterFailureMessage,
   runtimeAdapterStopOutcome,
-  runtimeAdapterTerminalFailureStatus,
+  terminalFailureStatusForAdapter,
   runtimeAdapterWorkspaceIdConflict,
   runtimeAdapterWorkspaceUrl,
   resolveCreateAfterStopRace,
   safeDesktopUrl,
   shouldReplayRuntimeAdapterCreate,
+  workerOwnedLeaseId,
   validatedRuntimeAdapterCreatePayloadJson,
   type AdapterProvisionRecord,
 } from "./runtime-adapter";
@@ -261,7 +261,6 @@ import {
   persistGitHubActionsSessionStop,
   persistInteractiveSessionEventMutation,
   persistInteractiveSessionProvisionResult,
-  persistLegacyInteractiveSessionStop,
   readInteractiveSessionTerminalCleanupIntent,
   readInteractiveSessionEventRows,
   readInteractiveSessionLogArchives,
@@ -270,7 +269,6 @@ import {
   readInteractiveSessionRecords,
   readSharedInteractiveSessionRow,
   readRuntimeAdapterCreatePending,
-  type LegacyInteractiveSessionStopOwner,
 } from "./worker/session-repository";
 import {
   InteractiveSessionAttachService,
@@ -297,7 +295,6 @@ import {
   InteractiveSessionReconciliationScheduler,
   readInteractiveSessionReconciliationCandidates,
   readInteractiveSessionReconciliationRow,
-  readLegacyStoppingInteractiveSessionCandidates,
   requeueTerminalArchiveObjectBackfill,
   type InteractiveSessionReconciliationSchedulerStore,
 } from "./worker/session-reconciliation-scheduler";
@@ -2010,6 +2007,19 @@ function openClawRootStopService(
       supervision.rollbackReservation(sessionId, createdAt),
     stopSession: (session) =>
       mutateInteractiveSession(request, env, serviceUser, session.id, "stop").then(() => undefined),
+    canReconcileStoppingSession: async (sessionId) => {
+      const owner = await database(env)
+        .selectFrom("interactive_sessions")
+        .select(["adapter", "lease_id", "credential_cleanup_terminal_status"])
+        .where("id", "=", sessionId)
+        .executeTakeFirst();
+      return Boolean(
+        owner &&
+        owner.adapter === null &&
+        (owner.credential_cleanup_terminal_status !== null ||
+          owner.lease_id?.startsWith(sandboxLeasePrefix)),
+      );
+    },
     reconcileSession: (session, now) =>
       reconcileExternalInteractiveSessionById(env, session.id, now),
     readRootCompletion: (rootSessionId) => readOpenClawRootCompletion(env, rootSessionId),
@@ -2366,27 +2376,6 @@ function interactiveSessionReconciliationScheduler(
     cleanupCredentialPolicies: (now, sessionId) =>
       reconcileCredentialPolicyCleanupBatch(env, now, sessionId),
     providerConfigured: () => runtimeAdapterProviderConfigured(env),
-    readLegacyStoppingCandidates: (sessionId) =>
-      readLegacyStoppingInteractiveSessionCandidates(env, {
-        adapterName: runtimeAdapterName,
-        sandboxLeasePrefix,
-        limit: runtimeAdapterReconcileLimit,
-        ...(sessionId ? { sessionId } : {}),
-      }),
-    completeLegacyStop: (session, now) =>
-      completeLegacyInteractiveSessionStop(
-        env,
-        {
-          id: session.id,
-          status: session.status,
-          runtime: session.runtime,
-          adapter: session.adapter,
-          leaseId: session.lease_id,
-          updatedAt: session.updated_at,
-        },
-        "system",
-        now,
-      ).then(() => undefined),
     requeueTerminalArchiveBackfill: (sessionId) =>
       requeueTerminalArchiveObjectBackfill(env, sessionId, runtimeAdapterReconcileLimit),
     readBatchCandidates: (providerConfigured) =>
@@ -2398,11 +2387,9 @@ function interactiveSessionReconciliationScheduler(
       ),
     readSession: (sessionId) => readInteractiveSessionReconciliationRow(env, sessionId),
     reconcile: (row, now) => reconcileExternalInteractiveSession(env, row, now),
-    report: (message, error) => console.error(message, error),
   };
   return new InteractiveSessionReconciliationScheduler(store, {
     adapterName: runtimeAdapterName,
-    sandboxLeasePrefix,
     intervalMs: runtimeAdapterReconcileIntervalMs,
     limit: runtimeAdapterReconcileLimit,
     concurrency: runtimeAdapterReconcileConcurrency,
@@ -3068,28 +3055,6 @@ function interactiveSessionMetadataService(
   return new InteractiveSessionMetadataService(store);
 }
 
-async function completeLegacyInteractiveSessionStop(
-  env: RuntimeEnv,
-  owner: LegacyInteractiveSessionStopOwner,
-  eventActor: string,
-  now: number,
-): Promise<boolean> {
-  if (owner.runtime === githubActionsRuntime) return false;
-  const stopped = await persistLegacyInteractiveSessionStop(
-    env,
-    owner,
-    eventActor,
-    runtimeAdapterName,
-    sandboxLeasePrefix,
-    now,
-  );
-  if (stopped) {
-    await archiveInteractiveSessionLogs(env, owner.id, now).catch(() => undefined);
-    await finalizeTerminalInteractiveSession(env, owner.id, "stopped", now).catch(() => undefined);
-  }
-  return stopped;
-}
-
 async function stopGitHubActionsSession(
   env: RuntimeEnv,
   session: InteractiveSession,
@@ -3179,8 +3144,6 @@ function interactiveSessionStopService(env: RuntimeEnv, user: User): Interactive
         actor: actorName,
         now,
       }),
-    stopLegacy: (session, actorName, now) =>
-      completeLegacyInteractiveSessionStop(env, session, actorName, now),
     audit: (message, now) => audit(env, user, message, now),
   };
   return new InteractiveSessionStopService(store, runtimeAdapterName);
@@ -4534,16 +4497,16 @@ async function completeCredentialPolicyCleanupSession(
   ).catch(() => undefined);
 }
 
-function legacyInteractiveSessionLeaseId(
+function managedSandboxLeaseId(
   session: Pick<InteractiveSession, "adapter" | "leaseId">,
 ): string | null {
-  return legacyLeaseIdForAdapter(session.adapter, session.leaseId);
+  return workerOwnedLeaseId(session.adapter, session.leaseId);
 }
 
 function isSandboxInteractiveSession(
   session: Pick<InteractiveSession, "adapter" | "leaseId">,
 ): boolean {
-  return legacyInteractiveSessionLeaseId(session)?.startsWith(sandboxLeasePrefix) === true;
+  return managedSandboxLeaseId(session)?.startsWith(sandboxLeasePrefix) === true;
 }
 
 async function disconnectGitHubActionsRunner(env: RuntimeEnv, id: string): Promise<void> {
@@ -5181,7 +5144,7 @@ async function markInteractiveTerminalUnavailable(
     .where("id", "=", id)
     .executeTakeFirst();
   if (!existing || ["expired", "failed", "stopped"].includes(existing.status)) return;
-  if (runtimeAdapterTerminalFailureStatus(existing.adapter) === "detached") {
+  if (terminalFailureStatusForAdapter(existing.adapter) === "detached") {
     if (existing.status === "stopping") return;
     await markInteractiveTerminalDetached(env, user, id, now, message);
     return;

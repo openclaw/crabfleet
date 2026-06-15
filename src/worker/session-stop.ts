@@ -28,7 +28,6 @@ export type InteractiveSessionStopStore = {
     actor: string,
     now: number,
   ): Promise<RuntimeAdapterStopServiceResult>;
-  stopLegacy(session: InteractiveSession, actor: string, now: number): Promise<boolean>;
   audit(message: string, now: number): Promise<void>;
 };
 
@@ -93,16 +92,7 @@ export class InteractiveSessionStopService {
     if (this.store.isSandbox(session)) {
       return this.stopSandbox(session, now);
     }
-
-    if (!(await this.store.stopLegacy(session, actor, now))) {
-      const current = await this.readSession(session.id);
-      if (!deadInteractiveSessionStatuses.includes(current.status)) {
-        throw conflict("interactive session lifecycle changed; retry stop");
-      }
-      return current;
-    }
-    await this.store.audit(`interactive session stopped ${session.id}`, now);
-    return this.readSession(session.id);
+    throw conflict("interactive session runtime is unsupported");
   }
 
   private async stopSandbox(session: InteractiveSession, now: number): Promise<InteractiveSession> {

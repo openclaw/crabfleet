@@ -9,7 +9,6 @@ import {
   definitiveRuntimeAdapterCreateFailure,
   effectiveAdapterCapabilities,
   currentAdapterDesktopConnection,
-  legacyLeaseIdForAdapter,
   namespacedAdapterWorkspaceId,
   normalizeAdapterNamespace,
   normalizeAdapterWorkspaceId,
@@ -25,7 +24,7 @@ import {
   runtimeAdapterReplayRequest,
   retainedRuntimeAdapterFailureMessage,
   runtimeAdapterStopOutcome,
-  runtimeAdapterTerminalFailureStatus,
+  terminalFailureStatusForAdapter,
   runtimeAdapterTerminalOriginMatches,
   runtimeAdapterWorkspaceIdConflict,
   runtimeAdapterWorkspaceUrl,
@@ -33,6 +32,7 @@ import {
   safeDesktopUrl,
   safeWebSocketUrl,
   shouldReplayRuntimeAdapterCreate,
+  workerOwnedLeaseId,
   validatedRuntimeAdapterCreatePayloadJson,
 } from "../src/runtime-adapter.ts";
 import { publicDeploymentConfig } from "../src/worker/deployment.ts";
@@ -434,15 +434,13 @@ test("adapter failure release retains the actual failure reason", () => {
 });
 
 test("runtime adapter terminal failures stay retryable until lifecycle release", () => {
-  assert.equal(runtimeAdapterTerminalFailureStatus("runtime-v1"), "detached");
-  assert.equal(runtimeAdapterTerminalFailureStatus("legacy"), "expired");
-  assert.equal(runtimeAdapterTerminalFailureStatus(null), "expired");
+  assert.equal(terminalFailureStatusForAdapter("runtime-v1"), "detached");
+  assert.equal(terminalFailureStatusForAdapter(null), "expired");
 });
 
-test("runtime adapter provider identities never become legacy lease ids", () => {
-  assert.equal(legacyLeaseIdForAdapter("runtime-v1", "sandbox:provider-owned"), null);
-  assert.equal(legacyLeaseIdForAdapter("runtime-v1", "cloudflare:provider-owned"), null);
-  assert.equal(legacyLeaseIdForAdapter("legacy", "sandbox:legacy-owned"), "sandbox:legacy-owned");
+test("provider-owned identities never become Worker-owned lease ids", () => {
+  assert.equal(workerOwnedLeaseId("runtime-v1", "sandbox:provider-owned"), null);
+  assert.equal(workerOwnedLeaseId(null, "sandbox:worker-owned"), "sandbox:worker-owned");
 });
 
 test("confirmed stop races terminalize only after create ambiguity clears", () => {
@@ -1076,11 +1074,8 @@ test("Sandbox credential registration always proves exact durable ownership", as
   );
 });
 
-test("legacy and GitHub Actions stop wrappers finalize persisted transitions", async () => {
+test("GitHub Actions stop wrapper finalizes persisted transitions", async () => {
   const source = await readFile(new URL("../src/index.ts", import.meta.url), "utf8");
-  const completeStart = source.indexOf("async function completeLegacyInteractiveSessionStop");
-  const completeEnd = source.indexOf("async function stopGitHubActionsSession", completeStart);
-  const completeSource = source.slice(completeStart, completeEnd);
   const githubActionsStart = source.indexOf("async function stopGitHubActionsSession");
   const githubActionsEnd = source.indexOf(
     "function interactiveSessionRuntimeAdapterStopService",
@@ -1088,17 +1083,13 @@ test("legacy and GitHub Actions stop wrappers finalize persisted transitions", a
   );
   const githubActionsSource = source.slice(githubActionsStart, githubActionsEnd);
 
-  assert.match(completeSource, /persistLegacyInteractiveSessionStop/);
-  assert.match(completeSource, /archiveInteractiveSessionLogs/);
-  assert.match(completeSource, /finalizeTerminalInteractiveSession/);
-  assert.match(completeSource, /if \(owner\.runtime === githubActionsRuntime\) return false/);
   assert.match(githubActionsSource, /persistGitHubActionsSessionStop/);
   assert.match(githubActionsSource, /disconnectGitHubActionsRunner/);
   assert.match(githubActionsSource, /archiveInteractiveSessionLogs/);
   assert.match(githubActionsSource, /finalizeTerminalInteractiveSession/);
 });
 
-test("legacy expiry enters the shared retryable terminal finalizer", async () => {
+test("managed terminal expiry enters the shared retryable terminal finalizer", async () => {
   const source = await readFile(new URL("../src/index.ts", import.meta.url), "utf8");
   const expiryStart = source.indexOf("async function markInteractiveTerminalUnavailable");
   const expiryEnd = source.indexOf("async function uploadInteractiveSessionClipboard", expiryStart);
@@ -1376,7 +1367,7 @@ test("terminal endpoints enforce current runtime capabilities", async () => {
   const source = await readFile(new URL("../src/index.ts", import.meta.url), "utf8");
 
   assert.match(source, /if \(!session\.capabilities\.terminal\)/);
-  assert.match(source, /runtimeAdapterTerminalFailureStatus\(existing\.adapter\) === "detached"/);
+  assert.match(source, /terminalFailureStatusForAdapter\(existing\.adapter\) === "detached"/);
   assert.doesNotMatch(source, /async function interactiveSessionPty/);
   assert.doesNotMatch(source, /\/api\/(?:ssh\/|agent\/)?interactive-sessions\/\(\[\^\/\]\+\)\/pty/);
 });

@@ -10,7 +10,6 @@ import {
   persistGitHubActionsSessionStop,
   persistInteractiveSessionEventMutation,
   persistInteractiveSessionProvisionResult,
-  persistLegacyInteractiveSessionStop,
   readInteractiveSessionEventRows,
   readInteractiveSessionLogArchives,
   readInteractiveSessionLogs,
@@ -387,44 +386,6 @@ test("session event mutations report lost revision ownership", async () => {
   );
 });
 
-test("legacy stop persistence records request and completion in one fenced batch", async () => {
-  let batch: PreparedStatement[] = [];
-  const stopped = await persistLegacyInteractiveSessionStop(
-    runtimeEnv(
-      () => {
-        throw new Error("legacy stop must execute as one batch");
-      },
-      (statements) => {
-        batch = statements;
-        return [{ results: [] }, { results: [] }, { results: [{ updated_at: 101 }] }];
-      },
-    ),
-    {
-      id: "IS-2",
-      status: "ready",
-      runtime: "container",
-      adapter: null,
-      leaseId: null,
-      updatedAt: 100,
-    },
-    "operator",
-    "runtime-v1",
-    "sandbox:v1:",
-    90,
-  );
-
-  assert.equal(stopped, true);
-  assert.equal(batch.length, 3);
-  assert.match(batch[0]?.sql ?? "", /insert into interactive_session_events/i);
-  assert.ok(batch[0]?.parameters.includes("interactive workspace stop requested"));
-  assert.match(batch[1]?.sql ?? "", /insert into interactive_session_events/i);
-  assert.ok(batch[1]?.parameters.includes("interactive workspace stopped"));
-  assert.match(batch[2]?.sql ?? "", /^update "interactive_sessions"/i);
-  assert.match(batch[2]?.sql ?? "", /credential_cleanup_terminal_status is null/i);
-  assert.match(batch[2]?.sql ?? "", /terminal_finalize_pending/i);
-  assert.ok(batch[2]?.parameters.includes(101));
-});
-
 test("GitHub Actions stop persistence clears terminal authority and workflow state", async () => {
   let batch: PreparedStatement[] = [];
   const stopped = await persistGitHubActionsSessionStop(
@@ -464,25 +425,7 @@ test("stop persistence reports lost ownership", async () => {
     () => {
       throw new Error("stop persistence must execute as one batch");
     },
-    () => [{ results: [] }, { results: [] }, { results: [] }],
-  );
-  assert.equal(
-    await persistLegacyInteractiveSessionStop(
-      env,
-      {
-        id: "IS-2",
-        status: "ready",
-        runtime: "container",
-        adapter: null,
-        leaseId: null,
-        updatedAt: 100,
-      },
-      "operator",
-      "runtime-v1",
-      "sandbox:v1:",
-      101,
-    ),
-    false,
+    () => [{ results: [] }, { results: [] }],
   );
   assert.equal(
     await persistGitHubActionsSessionStop(

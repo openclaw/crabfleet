@@ -5,6 +5,7 @@
 - Keep SSH terminal dimensions synchronized after attach and verify the TypeScript and Go multiplex clients against shared protocol vectors.
 - Remove the configurable PTY bridge so managed terminal upstreams are limited to built-in Sandbox, versioned runtime-adapter attach, and GitHub Actions relay behind the multiplex terminal protocol.
 - Remove generic create-only provisioning, the external Cloudflare runner, and the ClawFleet compatibility provider so managed workspaces use only built-in Sandbox or the versioned runtime adapter.
+- Remove unsupported provider stop/recovery compatibility; historical provider rows remain readable while live lifecycle mutations are limited to Sandbox, runtime-v1, and GitHub Actions.
 - Extract OpenClaw nudge and stop validation, audit ordering, terminal delivery, and best-effort delivery records into a directly tested mutation service.
 - Extract OpenClaw crabbox normalization, replay handling, branch preparation, timeout policy, and creation audit into a directly tested service.
 - Extract interactive-session lineage normalization, parent visibility, and canonical root derivation into a directly tested service.
@@ -25,7 +26,7 @@
 - Extract terminal attach policy into a directly tested service and persist attach state plus evidence atomically.
 - Extract interactive-session stop authorization, runtime routing, idempotency, cleanup sequencing, conflicts, and audits into a directly tested service.
 - Extract runtime-adapter stop claim, provider outcome, retry evidence, create-resolution, and confirmed-release orchestration into a directly tested service.
-- Move legacy and GitHub Actions stop transitions plus stop-state lookups into the session repository.
+- Move GitHub Actions stop transitions plus stop-state lookups into the session repository.
 - Extract interactive-session ownership, management, multiplayer, and delegated-control authorization into one directly tested policy module.
 - Move interactive-session archive cadence, D1 snapshots, R2 objects, cleanup, transcripts, and summaries into one archive module.
 - Extract interactive-session capability, control, provider redaction, desktop, and Codex SSH presentation policy behind direct tests.
@@ -33,7 +34,7 @@
 - Unify session event batching, message bounds, finalization invalidation, and best-effort archive refresh behind one service.
 - Extract finalized-session admission, fenced transactional deletion, authorization filtering, and archive-object cleanup behind one service.
 - Extract runtime-adapter reconciliation claims, transition projection, atomic evidence persistence, race recovery, and terminal finalization behind one service.
-- Extract scheduled and targeted reconciliation admission, legacy-stop recovery, cadence limits, and terminal archive backfill behind one scheduler.
+- Extract scheduled and targeted reconciliation admission, cadence limits, and terminal archive backfill behind one scheduler.
 - Replace duplicate bounded-concurrency loops with one directly tested worker utility.
 - Extract agent-session authentication and remove the legacy `X-Crabbox-Session-ID` alias.
 - Extract GitHub Actions session validation, idempotent registration, token rotation, resume reset, runner replacement, and evidence ordering.

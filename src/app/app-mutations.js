@@ -60,7 +60,7 @@ export function interactiveStopDialog(session, id) {
       ? "This releases the runtime workspace and cannot be undone. Its final status and logs stay visible in Crabfleet."
       : endsWorkflowSession
         ? "This ends the Crabfleet terminal session and disconnects it. It does not cancel the GitHub Actions workflow run, which may continue on GitHub. Final Crabfleet logs stay visible."
-        : "This stops Crabfleet access and marks the session stopped. This legacy backend does not expose provider deletion, so its runtime may require separate cleanup.",
+        : "This stops Crabfleet access and releases the managed Sandbox resources. Final status and logs stay visible in Crabfleet.",
     subject: label,
     confirmLabel: deletesWorkspace
       ? "Delete workspace"

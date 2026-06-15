@@ -19,7 +19,6 @@ type StopCalls = {
   finalized: InteractiveSessionTerminalStatus[];
   githubActions: number;
   runtimeAdapter: number;
-  legacy: number;
   audits: string[];
 };
 
@@ -32,7 +31,6 @@ function fixture(
     reread?: InteractiveSession | null;
     githubActionsStopped?: boolean;
     runtimeAdapterResult?: RuntimeAdapterStopServiceResult;
-    legacyStopped?: boolean;
     finalizeFailure?: boolean;
   } = {},
 ) {
@@ -44,7 +42,6 @@ function fixture(
     finalized: [],
     githubActions: 0,
     runtimeAdapter: 0,
-    legacy: 0,
     audits: [],
   };
   const store: InteractiveSessionStopStore = {
@@ -72,10 +69,6 @@ function fixture(
     stopRuntimeAdapter: async () => {
       calls.runtimeAdapter += 1;
       return options.runtimeAdapterResult ?? { session, auditAt: null };
-    },
-    stopLegacy: async () => {
-      calls.legacy += 1;
-      return options.legacyStopped ?? true;
     },
     audit: async (message) => {
       calls.audits.push(message);
@@ -120,7 +113,6 @@ test("terminal status detection owns only stable terminal states", () => {
 test("stop requires session management authority", async () => {
   const context = fixture();
   await assert.rejects(() => stop(context, false), hasStatus(403));
-  assert.equal(context.calls.legacy, 0);
 });
 
 test("terminal sandbox stops stage cleanup and return the reconciled session", async () => {
@@ -190,7 +182,6 @@ test("sandbox stops record intent before cleanup reconciliation", async () => {
   ]);
   assert.deepEqual(context.calls.events, ["interactive workspace stop requested"]);
   assert.deepEqual(context.calls.reconciled, ["IS-9"]);
-  assert.equal(context.calls.legacy, 0);
 });
 
 test("sandbox stop races accept durable intent or terminal state and reject live ownership loss", async () => {
@@ -205,22 +196,21 @@ test("sandbox stop races accept durable intent or terminal state and reject live
   await assert.rejects(() => stop(lost), hasStatus(409));
 });
 
-test("legacy stops audit owned completion and accept concurrent terminal completion", async () => {
-  const success = fixture();
-  assert.equal(await stop(success), success.session);
-  assert.deepEqual(success.calls.audits, ["interactive session stopped IS-9"]);
-
-  const terminal = interactiveSession(sessionRow({ status: "stopped" }), []);
-  const raced = fixture({ legacyStopped: false, reread: terminal });
-  assert.equal(await stop(raced), terminal);
-  assert.deepEqual(raced.calls.audits, []);
+test("unsupported live session providers cannot be stopped", async () => {
+  await assert.rejects(
+    () => stop(fixture()),
+    (error: unknown) => {
+      assert.ok(error instanceof Error);
+      assert.match(error.message, /runtime is unsupported/);
+      return hasStatus(409)(error);
+    },
+  );
 });
 
-test("stop races reject live rereads and missing sessions", async () => {
+test("stop races reject live rereads", async () => {
   const githubActions = interactiveSession(sessionRow({ runtime: "github_actions" }), []);
   await assert.rejects(
     () => stop(fixture({ session: githubActions, githubActionsStopped: false })),
     hasStatus(409),
   );
-  await assert.rejects(() => stop(fixture({ legacyStopped: false, reread: null })), hasStatus(404));
 });

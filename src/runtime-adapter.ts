@@ -287,16 +287,11 @@ export function shouldReplayRuntimeAdapterCreate(
   return createPending && (status === "provisioning" || status === "pending_adapter");
 }
 
-export function runtimeAdapterTerminalFailureStatus(
-  adapter: string | null,
-): "detached" | "expired" {
+export function terminalFailureStatusForAdapter(adapter: string | null): "detached" | "expired" {
   return adapter === runtimeAdapterName ? "detached" : "expired";
 }
 
-export function legacyLeaseIdForAdapter(
-  adapter: string | null,
-  leaseId: string | null,
-): string | null {
+export function workerOwnedLeaseId(adapter: string | null, leaseId: string | null): string | null {
   return adapter === runtimeAdapterName ? null : leaseId;
 }
 

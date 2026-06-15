@@ -7,7 +7,6 @@ import {
   InteractiveSessionReconciliationScheduler,
   readInteractiveSessionReconciliationCandidates,
   readInteractiveSessionReconciliationRow,
-  readLegacyStoppingInteractiveSessionCandidates,
   requeueTerminalArchiveObjectBackfill,
   type InteractiveSessionReconciliationSchedulerStore,
 } from "../src/worker/session-reconciliation-scheduler.ts";
@@ -49,10 +48,6 @@ function schedulerStore(
     async cleanupAbandonedPreparations() {},
     async cleanupCredentialPolicies() {},
     providerConfigured: () => true,
-    async readLegacyStoppingCandidates() {
-      return [];
-    },
-    async completeLegacyStop() {},
     async requeueTerminalArchiveBackfill() {},
     async readBatchCandidates() {
       return [];
@@ -61,7 +56,6 @@ function schedulerStore(
       return undefined;
     },
     async reconcile() {},
-    report() {},
     ...overrides,
   };
 }
@@ -71,19 +65,15 @@ function scheduler(
 ): InteractiveSessionReconciliationScheduler {
   return new InteractiveSessionReconciliationScheduler(store, {
     adapterName: "runtime-adapter",
-    sandboxLeasePrefix: "sandbox:",
     intervalMs: 15_000,
     limit: 2,
     concurrency: 2,
   });
 }
 
-test("batch scheduling orders cleanup, recovers legacy stops, and reconciles only bounded due rows", async () => {
+test("batch scheduling orders cleanup and reconciles only bounded due rows", async () => {
   const order: string[] = [];
   const reconciled: string[] = [];
-  const reports: string[] = [];
-  const legacyOne = sessionRow({ id: "IS-L1", status: "stopping", adapter: null });
-  const legacyTwo = sessionRow({ id: "IS-L2", status: "stopping", adapter: null });
   const active = sessionRow({
     id: "IS-A",
     status: "ready",
@@ -110,14 +100,6 @@ test("batch scheduling orders cleanup, recovers legacy stops, and reconciles onl
       async cleanupCredentialPolicies() {
         order.push("credentials");
       },
-      async readLegacyStoppingCandidates() {
-        order.push("legacy-read");
-        return [legacyOne, legacyTwo];
-      },
-      async completeLegacyStop(row) {
-        order.push(`legacy:${row.id}`);
-        if (row.id === legacyTwo.id) throw new Error("stop unavailable");
-      },
       async requeueTerminalArchiveBackfill() {
         order.push("backfill");
       },
@@ -129,19 +111,12 @@ test("batch scheduling orders cleanup, recovers legacy stops, and reconciles onl
       async reconcile(row) {
         reconciled.push(row.id);
       },
-      report(message) {
-        reports.push(message);
-      },
     }),
   ).runBatch(100_000);
 
-  assert.deepEqual(order.slice(0, 3), ["abandoned", "credentials", "legacy-read"]);
-  assert.ok(order.indexOf("backfill") > order.indexOf(`legacy:${legacyTwo.id}`));
+  assert.deepEqual(order.slice(0, 3), ["abandoned", "credentials", "backfill"]);
   assert.ok(order.indexOf("batch-read") > order.indexOf("backfill"));
   assert.deepEqual(new Set(reconciled), new Set([active.id, terminal.id]));
-  assert.deepEqual(reports, [
-    `legacy interactive session stop recovery failed for ${legacyTwo.id}`,
-  ]);
 });
 
 test("targeted scheduling completes cleanup and admits terminal finalization without a provider", async () => {
@@ -158,10 +133,6 @@ test("targeted scheduling completes cleanup and admits terminal finalization wit
         order.push(`credentials:${sessionId}`);
       },
       providerConfigured: () => false,
-      async readLegacyStoppingCandidates(sessionId) {
-        order.push(`legacy:${sessionId}`);
-        return [];
-      },
       async requeueTerminalArchiveBackfill(sessionId) {
         order.push(`backfill:${sessionId}`);
       },
@@ -177,7 +148,6 @@ test("targeted scheduling completes cleanup and admits terminal finalization wit
 
   assert.deepEqual(order, [
     `credentials:${row.id}`,
-    `legacy:${row.id}`,
     `backfill:${row.id}`,
     `read:${row.id}`,
     `reconcile:${row.id}`,
@@ -228,7 +198,7 @@ test("reconciliation cadence requires terminal work or a configured active adapt
   );
 });
 
-test("scheduler queries preserve legacy, provider, terminal, and archive-backfill admission", async () => {
+test("scheduler queries preserve provider, terminal, and archive-backfill admission", async () => {
   const row = sessionRow({ id: "IS-1", status: "stopping" });
   const queries: string[] = [];
   const env = runtimeEnv((sql, parameters, kind) => {
@@ -241,13 +211,6 @@ test("scheduler queries preserve legacy, provider, terminal, and archive-backfil
       return { changes: 1 };
     }
     assert.equal(kind, "all");
-    if (/lease_id IS NULL OR lease_id NOT LIKE/i.test(sql)) {
-      assert.match(sql, /"status" =/i);
-      assert.match(sql, /"runtime" !=/i);
-      assert.ok(parameters.includes("runtime-adapter"));
-      assert.ok(parameters.includes("sandbox:%"));
-      return { results: [row] };
-    }
     if (/"terminal_finalize_pending" =/i.test(sql) && /"adapter" =/i.test(sql)) {
       assert.match(sql, /order by "last_reconciled_at" asc/i);
       assert.ok(parameters.includes("runtime-adapter"));
@@ -261,21 +224,10 @@ test("scheduler queries preserve legacy, provider, terminal, and archive-backfil
   }, true);
 
   assert.equal(
-    (
-      await readLegacyStoppingInteractiveSessionCandidates(env, {
-        adapterName: "runtime-adapter",
-        sandboxLeasePrefix: "sandbox:",
-        limit: 3,
-        sessionId: "IS-1",
-      })
-    )[0]?.id,
-    "IS-1",
-  );
-  assert.equal(
     (await readInteractiveSessionReconciliationCandidates(env, "runtime-adapter", true, 3))[0]?.id,
     "IS-1",
   );
   assert.equal((await readInteractiveSessionReconciliationRow(env, "IS-1"))?.id, "IS-1");
   await requeueTerminalArchiveObjectBackfill(env, "IS-1", 3);
-  assert.equal(queries.length, 4);
+  assert.equal(queries.length, 3);
 });

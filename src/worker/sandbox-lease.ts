@@ -1,4 +1,4 @@
-import { legacyLeaseIdForAdapter } from "../runtime-adapter.ts";
+import { workerOwnedLeaseId } from "../runtime-adapter.ts";
 
 export const sandboxLeasePrefix = "sandbox:";
 export const sandboxLeaseProfile = "autostart-v4";
@@ -60,7 +60,7 @@ export function sandboxLeaseWithoutRefresh(leaseId: string): string {
 }
 
 export function sandboxLeaseInfo(source: SandboxLeaseSource): SandboxLease {
-  const rawLease = legacyLeaseIdForAdapter(source.adapter ?? null, source.leaseId ?? null);
+  const rawLease = workerOwnedLeaseId(source.adapter ?? null, source.leaseId ?? null);
   const raw = rawLease?.startsWith(sandboxLeasePrefix)
     ? rawLease.slice(sandboxLeasePrefix.length)
     : "";

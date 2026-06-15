@@ -42,6 +42,7 @@ function rootStopStore(overrides: Partial<OpenClawRootStopStore> = {}): OpenClaw
     readRootRows: async () => [],
     rollbackReservation: async () => undefined,
     stopSession: async () => undefined,
+    canReconcileStoppingSession: async () => false,
     reconcileSession: async () => undefined,
     readRootCompletion: async () => ({ total: 0, remaining: 0 }),
     recordStopped: async () => undefined,
@@ -162,12 +163,13 @@ test("OpenClaw root stop reconciles non-adapter stopping sessions", async () => 
   const service = new OpenClawRootStopService(
     rootStopStore({
       readRootRows: async () => rows(),
+      canReconcileStoppingSession: async () => true,
       reconcileSession: async () => {
         reconciled += 1;
         stopping = false;
       },
       stopSession: async () => {
-        throw new Error("stopping legacy sessions must reconcile");
+        throw new Error("stopping non-adapter sessions must reconcile");
       },
       readRootCompletion: async () => ({
         total: 2,
@@ -180,6 +182,43 @@ test("OpenClaw root stop reconciles non-adapter stopping sessions", async () => 
 
   await service.stop("IS-1");
   assert.equal(reconciled, 1);
+});
+
+test("OpenClaw root stop rejects unsupported stopping sessions without polling to timeout", async () => {
+  const root = sessionRow({
+    id: "IS-1",
+    root_session_id: "IS-1",
+    created_by: "service:openclaw",
+    status: "stopped",
+  });
+  const child = sessionRow({
+    id: "IS-2",
+    parent_session_id: "IS-1",
+    root_session_id: "IS-1",
+    created_by: "session:IS-1",
+    status: "stopping",
+    adapter: null,
+  });
+  const testClock = clock();
+  const service = new OpenClawRootStopService(
+    rootStopStore({
+      readRootRows: async () => [child, root],
+      canReconcileStoppingSession: async () => false,
+      readRootCompletion: async () => ({ total: 2, remaining: 1 }),
+    }),
+    "runtime-adapter",
+    { clock: testClock },
+  );
+
+  await assert.rejects(service.stop("IS-1"), (error: unknown) => {
+    assert.equal(
+      typeof error === "object" && error !== null && "status" in error ? error.status : null,
+      503,
+    );
+    assert.match(String(error), /unsupported stopping session IS-2/);
+    return true;
+  });
+  assert.equal(testClock.current, 0);
 });
 
 test("OpenClaw root stop rejects non-room roots before recording mutations", async () => {

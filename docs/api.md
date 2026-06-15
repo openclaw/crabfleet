@@ -325,7 +325,7 @@ Viewer+ with writable terminal control. Uploads a browser clipboard image/file b
 
 ### GET /api/interactive-sessions/:id/vnc
 
-Viewer+ with writable session control. For `runtime-v1`, Crabfleet authenticates the browser session, asks the adapter to mint a current desktop connection, validates its HTTPS URL and optional bounded expiry, and issues a no-store redirect. Versioned-adapter desktop URLs are never persisted in D1 or returned by fleet state. API and CLI session views expose an absolute canonical Crabfleet browser URL for this cookie-authenticated route; the SSH gateway does not mint or receive the underlying adapter URL. Legacy adapters retain their existing validated absolute VNC URL behavior for browser and CLI clients.
+Viewer+ with writable session control. For `runtime-v1`, Crabfleet authenticates the browser session, asks the adapter to mint a current desktop connection, validates its HTTPS URL and optional bounded expiry, and issues a no-store redirect. Versioned-adapter desktop URLs are never persisted in D1 or returned by fleet state. API and CLI session views expose an absolute canonical Crabfleet browser URL for this cookie-authenticated route; the SSH gateway does not mint or receive the underlying adapter URL. Built-in Sandbox sessions may expose their validated desktop URL while active.
 
 ### POST /api/openclaw/action-sessions
 
