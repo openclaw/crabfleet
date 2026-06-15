@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Centralize OpenClaw room visibility, log-free summaries, and bounded transcript sentinel/truncation policy behind direct query tests.
 - Isolate OpenClaw recursive root-stop admission, reservation cleanup, lifecycle retries, reconciliation, and stable-completion polling behind a directly tested service.
 - Extract OpenClaw root-scoped authorization, lineage supervision, reservation outcomes, rollback, and activation orchestration into a directly tested service boundary.
 - Move OpenClaw room reads, reservation fencing, activation, rollback, cleanup polling, admission state, completion counts, and lineage reads into a directly tested repository boundary.

@@ -111,13 +111,10 @@ import { cachedBooleanGrant } from "./terminal-authorization";
 import { obsoleteSessionArchiveObjectKeys, sessionArchiveAttemptKeys } from "./session-archive";
 import { readBoundedResponseText } from "./bounded-response";
 import {
-  boundedUtf8Tail,
   openClawBranchPreparationCanDefer,
   openClawGitBranchAllowed,
   openClawGitHubRepoParts,
   openClawRoomMaxSessions,
-  openClawRoomRootAllowed,
-  openClawRoomSessionChainAllowed,
   openClawServiceAuthorized,
 } from "./openclaw-service";
 import {
@@ -246,6 +243,12 @@ import {
   type OpenClawSupervisionStore,
 } from "./worker/openclaw-supervision";
 import { OpenClawRootStopService, type OpenClawRootStopStore } from "./worker/openclaw-root-stop";
+import {
+  buildOpenClawTranscript,
+  openClawSessionSummary,
+  openClawTranscriptEventWindow,
+  openClawVisibleRoomSessions,
+} from "./worker/openclaw-queries";
 
 const defaultInteractiveCommand = "codex --yolo";
 
@@ -2481,20 +2484,12 @@ async function openClawReadSessionRoot(
   const root = clean(rootSessionId, 120);
   if (!root) throw badRequest("root session id is required");
   const rootSession = await readOpenClawRoomRoot(env, root);
-  if (!rootSession || !openClawRoomRootAllowed(rootSession)) {
-    throw notFound("session root not found");
-  }
   const room = await readOpenClawRoomSessions(env, root, openClawRoomMaxSessions);
-  if (!room.sessions.length) throw notFound("session root not found");
-  if (room.overflow) {
-    throw serviceUnavailable("session root exceeds the supervision limit");
-  }
+  const sessions = openClawVisibleRoomSessions(root, rootSession, room);
   const serviceUser = openClawServiceUser();
   return {
     rootSessionId: root,
-    crabboxes: room.sessions
-      .filter((session) => openClawRoomSessionChainAllowed(room.sessions, session.id, root))
-      .map((session) => openClawCrabboxSummaryResponse(env, serviceUser, session)),
+    crabboxes: sessions.map((session) => openClawCrabboxSummaryResponse(env, serviceUser, session)),
   };
 }
 
@@ -2547,18 +2542,19 @@ async function openClawReadCrabboxTranscript(
   requireOpenClawRoomService(request, env);
   const session = await openClawRootScopedCrabbox(request, env, id);
   const [eventWindow, eventCount] = await Promise.all([
-    readInteractiveSessionEventRows(env, id, { limit: 241, newest: true }),
+    readInteractiveSessionEventRows(env, id, {
+      limit: openClawTranscriptEventWindow,
+      newest: true,
+    }),
     countInteractiveSessionEvents(env, id),
   ]);
-  const hasMoreEvents = eventWindow.length > 240;
-  const events = hasMoreEvents ? eventWindow.slice(1) : eventWindow;
-  const transcript = boundedUtf8Tail(sessionLogTranscript(session, events));
+  const transcript = buildOpenClawTranscript(eventWindow, eventCount, (events) =>
+    sessionLogTranscript(session, events),
+  );
   const response = openClawCrabboxSummaryResponse(env, openClawServiceUser(), session);
   return {
     ...response,
-    transcript: transcript.text,
-    eventCount,
-    truncated: transcript.truncated || hasMoreEvents || eventCount > events.length,
+    ...transcript,
   };
 }
 
@@ -2736,7 +2732,7 @@ function openClawCrabboxSummaryResponse(
   session: InteractiveSession,
 ): { session: InteractiveSession; browserUrl: string } {
   const response = openClawCrabboxResponse(env, serviceUser, session);
-  return { ...response, session: { ...response.session, logs: [] } };
+  return { ...response, session: openClawSessionSummary(response.session) };
 }
 
 function openClawDecoratedCrabboxResponse(

@@ -166,22 +166,6 @@ test("OpenClaw mutations persist request evidence before consequential work", as
   );
 });
 
-test("OpenClaw transcript reads a sentinel event before reporting completeness", async () => {
-  const source = await readFile(new URL("../src/index.ts", import.meta.url), "utf8");
-  const transcriptStart = source.indexOf("async function openClawReadCrabboxTranscript");
-  const transcriptEnd = source.indexOf("async function openClawMessageCrabbox", transcriptStart);
-  const transcriptSource = source.slice(transcriptStart, transcriptEnd);
-
-  assert.match(transcriptSource, /limit: 241, newest: true/);
-  assert.match(transcriptSource, /const hasMoreEvents = eventWindow\.length > 240/);
-  assert.match(transcriptSource, /eventWindow\.slice\(1\)/);
-  assert.match(transcriptSource, /openClawCrabboxSummaryResponse/);
-  assert.match(
-    transcriptSource,
-    /transcript\.truncated \|\| hasMoreEvents \|\| eventCount > events\.length/,
-  );
-});
-
 test("interactive lineage rejects caller-claimed roots without a parent", async () => {
   const source = await readFile(new URL("../src/index.ts", import.meta.url), "utf8");
   const start = source.indexOf("async function resolveInteractiveSessionLineage");
