@@ -199,6 +199,10 @@ import {
   type GitHubActionsSessionRegistrationStore,
 } from "./worker/github-actions-session-registration";
 import {
+  GitHubActionsRunnerConnectionService,
+  type GitHubActionsRunnerConnectionStore,
+} from "./worker/github-actions-runner-connection";
+import {
   GitHubActionsWorkStateService,
   type GitHubActionsWorkStateInput,
   type GitHubActionsWorkStateStore,
@@ -11832,32 +11836,21 @@ async function githubActionsRunnerPty(
   const { session, user } = await agentSessionAuthentication(env).require(request, id, {
     allowQueryToken: true,
   });
-  if (session.runtime !== githubActionsRuntime || !session.workKey) {
-    throw badRequest("session is not a GitHub Actions work session");
-  }
   const stub = githubActionsRelayStub(env, id);
   if (!stub) throw serviceUnavailable("SESSION_CONTROL Durable Object is not configured");
-  const now = Date.now();
-  const state =
-    session.workState === "registered" || !session.workState ? "running" : session.workState;
-  const phase =
-    !session.workPhase || session.workPhase === "waiting_for_runner"
-      ? "runner_connected"
-      : session.workPhase;
-  await database(env)
-    .updateTable("interactive_sessions")
-    .set({
-      status: ["attached", "detached"].includes(session.status) ? session.status : "ready",
-      work_state: state,
-      work_phase: phase,
-      last_heartbeat_at: now,
-      last_seen_at: now,
-      updated_at: now,
-      last_event: "GitHub Actions runner connected",
-    })
-    .where("id", "=", id)
-    .execute();
-  await appendInteractiveSessionEvent(env, id, user, "GitHub Actions runner connected", now);
+  const store: GitHubActionsRunnerConnectionStore = {
+    now: () => Date.now(),
+    persist: async (sessionId, values) => {
+      await database(env)
+        .updateTable("interactive_sessions")
+        .set(values)
+        .where("id", "=", sessionId)
+        .execute();
+    },
+    appendEvent: (sessionId, message, now) =>
+      appendInteractiveSessionEvent(env, sessionId, user, message, now),
+  };
+  await new GitHubActionsRunnerConnectionService(store).connect(session);
   return stub.fetch("https://crabfleet.internal/api/session-control/github-actions/runner", {
     headers: { upgrade: "websocket" },
   });
