@@ -3,26 +3,41 @@ import test from "node:test";
 
 import type { RuntimeEnv } from "../src/worker/env.ts";
 import {
+  activateInteractiveSessionReservation,
   closeOpenClawRootAdmission,
+  openClawRoomReservationPosition,
   openClawRootAdmissionOpen,
+  readAbandonedInteractiveSessionReservations,
   readOpenClawLineageSession,
   readOpenClawRoomRoot,
   readOpenClawRoomSessions,
   readOpenClawRootCompletion,
   readOpenClawRootRows,
+  removeInteractiveSessionReservation,
 } from "../src/worker/openclaw-repository.ts";
 import { sessionRow } from "./helpers/session-row.ts";
 
 type D1Result = { results?: unknown[]; changes?: number };
 type D1Handler = (sql: string, parameters: unknown[], kind: "all" | "run") => D1Result;
+type PreparedStatement = {
+  sql: string;
+  parameters: unknown[];
+  all(): Promise<unknown>;
+  run(): Promise<unknown>;
+};
 
-function runtimeEnv(handler: D1Handler): RuntimeEnv {
+function runtimeEnv(
+  handler: D1Handler,
+  batchHandler: (statements: PreparedStatement[]) => void = () => undefined,
+): RuntimeEnv {
   return {
     DB: {
       prepare(sql: string) {
         return {
           bind(...parameters: unknown[]) {
-            return {
+            const statement: PreparedStatement = {
+              sql,
+              parameters,
               async all() {
                 const result = handler(sql, parameters, "all");
                 return { results: result.results ?? [], meta: { changes: result.changes ?? 0 } };
@@ -32,8 +47,13 @@ function runtimeEnv(handler: D1Handler): RuntimeEnv {
                 return { meta: { changes: result.changes ?? 0 } };
               },
             };
+            return statement;
           },
         };
+      },
+      async batch(statements: unknown[]) {
+        batchHandler(statements as PreparedStatement[]);
+        return [];
       },
     } as unknown as D1Database,
   } as RuntimeEnv;
@@ -172,4 +192,100 @@ test("OpenClaw admission and lineage persistence preserve explicit preparation s
   const lineage = await readOpenClawLineageSession(env, "IS-2", 1);
   assert.equal(lineage?.id, "IS-2");
   assert.deepEqual(lineage?.logs, []);
+});
+
+test("OpenClaw room reservation positions are fenced by insertion order and open admission", async () => {
+  const position = await openClawRoomReservationPosition(
+    runtimeEnv((sql, parameters, kind) => {
+      assert.equal(kind, "all");
+      assert.match(sql, /inserted\.rowid AS inserted_rowid/i);
+      assert.match(sql, /candidate\.rowid <= inserted\.rowid/i);
+      assert.match(sql, /room_root\.openclaw_admission_closed = 0/i);
+      assert.match(sql, /inserted\.preparation_pending = 1/i);
+      assert.match(sql, /GROUP BY inserted\.rowid/i);
+      assert.deepEqual(parameters, ["IS-1", "IS-1", "IS-1", "IS-2", 10, 10]);
+      return { results: [{ inserted_rowid: 7, position: "3" }] };
+    }),
+    "IS-1",
+    "IS-2",
+    10,
+  );
+  assert.equal(position, 3);
+});
+
+test("OpenClaw stale reservation reads are bounded and map persistence names", async () => {
+  const rows = await readAbandonedInteractiveSessionReservations(
+    runtimeEnv((sql, parameters, kind) => {
+      assert.equal(kind, "all");
+      assert.match(sql, /status.*=.*preparation_pending.*=.*updated_at.*<=/is);
+      assert.match(sql, /order by "updated_at" asc/i);
+      assert.deepEqual(parameters, ["provisioning", 1, 500, 8]);
+      return { results: [{ id: "IS-2", created_at: 100 }] };
+    }),
+    500,
+    8,
+  );
+  assert.deepEqual(rows, [{ sessionId: "IS-2", createdAt: 100 }]);
+});
+
+test("OpenClaw reservation rollback deletes all owned records in one batch", async () => {
+  let batch: PreparedStatement[] = [];
+  const removed = await removeInteractiveSessionReservation(
+    runtimeEnv(
+      (sql, parameters, kind) => {
+        assert.equal(kind, "all");
+        assert.match(sql, /^select "id" from "interactive_sessions"/i);
+        assert.deepEqual(parameters, ["IS-2"]);
+        return { results: [] };
+      },
+      (statements) => {
+        batch = statements;
+      },
+    ),
+    "IS-2",
+    100,
+  );
+
+  assert.equal(removed, true);
+  assert.equal(batch.length, 4);
+  assert.match(batch[0]?.sql ?? "", /^delete from "openclaw_request_replays"/i);
+  assert.match(batch[1]?.sql ?? "", /^delete from "interactive_session_events"/i);
+  assert.match(batch[2]?.sql ?? "", /^delete from "interactive_session_log_archives"/i);
+  assert.match(batch[3]?.sql ?? "", /^delete from "interactive_sessions"/i);
+  assert.ok(batch.every((statement) => statement.parameters.includes("IS-2")));
+  assert.ok(batch.every((statement) => statement.parameters.includes(100)));
+});
+
+test("OpenClaw reservation activation reports the fenced compare-and-set result", async () => {
+  let updateSql = "";
+  const activated = await activateInteractiveSessionReservation(
+    runtimeEnv((sql, _parameters, kind) => {
+      assert.equal(kind, "run");
+      updateSql = sql;
+      return { changes: 1 };
+    }),
+    "IS-2",
+    100,
+    "workspace-2",
+    "runtime-adapter",
+  );
+  assert.equal(activated, true);
+  assert.match(updateSql, /preparation_pending/);
+  assert.match(updateSql, /adapter_create_pending/);
+  assert.match(updateSql, /adapter_workspace_id IS/i);
+  assert.match(updateSql, /created_at.*=.*updated_at.*=/is);
+
+  assert.equal(
+    await activateInteractiveSessionReservation(
+      runtimeEnv((_sql, _parameters, kind) => {
+        assert.equal(kind, "run");
+        return { changes: 0 };
+      }),
+      "IS-3",
+      200,
+      null,
+      "runtime-adapter",
+    ),
+    false,
+  );
 });

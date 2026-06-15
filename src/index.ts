@@ -228,13 +228,17 @@ import {
   readOpenClawRequestSession,
 } from "./worker/openclaw-request";
 import {
+  activateInteractiveSessionReservation,
   closeOpenClawRootAdmission,
+  openClawRoomReservationPosition,
   openClawRootAdmissionOpen,
+  readAbandonedInteractiveSessionReservations,
   readOpenClawLineageSession,
   readOpenClawRoomRoot,
   readOpenClawRoomSessions,
   readOpenClawRootCompletion,
   readOpenClawRootRows,
+  removeInteractiveSessionReservation,
 } from "./worker/openclaw-repository";
 
 const defaultInteractiveCommand = "codex --yolo";
@@ -2795,27 +2799,12 @@ async function enforceOpenClawRoomSessionLimitAfterInsert(
     await rollbackInteractiveSessionReservation(env, insertedSessionId, insertedAt);
     throw badRequest("invalid OpenClaw room lineage");
   }
-  const db = database(env);
-  const admission = await sql<{ inserted_rowid: number; position: number }>`
-    SELECT inserted.rowid AS inserted_rowid, count(candidate.rowid) AS position
-    FROM interactive_sessions AS inserted
-    JOIN interactive_sessions AS candidate
-      ON candidate.rowid <= inserted.rowid
-      AND (candidate.root_session_id = ${rootSessionId} OR candidate.id = ${rootSessionId})
-      AND (candidate.created_by = 'service:openclaw' OR candidate.created_by LIKE 'session:%')
-      AND candidate.runtime != 'github_actions'
-      AND candidate.work_key IS NULL
-    JOIN interactive_sessions AS room_root
-      ON room_root.id = ${rootSessionId}
-      AND room_root.openclaw_admission_closed = 0
-    WHERE inserted.id = ${insertedSessionId}
-      AND inserted.status = 'provisioning'
-      AND inserted.preparation_pending = 1
-      AND inserted.created_at = ${insertedAt}
-      AND inserted.updated_at = ${insertedAt}
-    GROUP BY inserted.rowid
-  `.execute(db);
-  const position = Number(admission.rows[0]?.position ?? 0);
+  const position = await openClawRoomReservationPosition(
+    env,
+    rootSessionId,
+    insertedSessionId,
+    insertedAt,
+  );
   if (position > 0 && position <= openClawRoomMaxSessions) return;
   if (!position) {
     await rollbackInteractiveSessionReservation(env, insertedSessionId, insertedAt);
@@ -2851,99 +2840,50 @@ async function openClawRoomReservationLineageAllowed(
   return openClawRoomSessionChainAllowed([...chain.values()], session.id, rootSessionId);
 }
 
+async function cleanupAbandonedInteractiveSessionPreparations(
+  env: RuntimeEnv,
+  now: number,
+): Promise<void> {
+  const rows = await readAbandonedInteractiveSessionReservations(
+    env,
+    now - interactiveSessionPreparationStaleMs,
+    runtimeAdapterReconcileLimit,
+  );
+  await mapWithConcurrency(rows, runtimeAdapterReconcileConcurrency, async (row) => {
+    await rollbackInteractiveSessionReservation(env, row.sessionId, row.createdAt).catch(
+      (error) => {
+        console.error(`interactive session preparation cleanup failed for ${row.sessionId}`, error);
+      },
+    );
+  });
+}
+
 async function rollbackInteractiveSessionReservation(
   env: RuntimeEnv,
   insertedSessionId: string,
   insertedAt: number,
 ): Promise<void> {
-  const db = database(env);
-  const ownsReservation = sql<boolean>`EXISTS (
-    SELECT 1
-    FROM interactive_sessions
-    WHERE id = ${insertedSessionId}
-      AND status = 'provisioning'
-      AND preparation_pending = 1
-      AND created_at = ${insertedAt}
-      AND updated_at = ${insertedAt}
-  )`;
-  await executeBatch(env, [
-    db
-      .deleteFrom("openclaw_request_replays")
-      .where("session_id", "=", insertedSessionId)
-      .where(ownsReservation),
-    db
-      .deleteFrom("interactive_session_events")
-      .where("session_id", "=", insertedSessionId)
-      .where(ownsReservation),
-    db
-      .deleteFrom("interactive_session_log_archives")
-      .where("session_id", "=", insertedSessionId)
-      .where(ownsReservation),
-    db
-      .deleteFrom("interactive_sessions")
-      .where("id", "=", insertedSessionId)
-      .where("status", "=", "provisioning")
-      .where("preparation_pending", "=", 1)
-      .where("created_at", "=", insertedAt)
-      .where("updated_at", "=", insertedAt),
-  ]);
-  const current = await db
-    .selectFrom("interactive_sessions")
-    .select("id")
-    .where("id", "=", insertedSessionId)
-    .executeTakeFirst();
-  if (current) throw serviceUnavailable("interactive session reservation rollback failed");
+  if (await removeInteractiveSessionReservation(env, insertedSessionId, insertedAt)) return;
+  throw serviceUnavailable("interactive session reservation rollback failed");
 }
 
-async function cleanupAbandonedInteractiveSessionPreparations(
-  env: RuntimeEnv,
-  now: number,
-): Promise<void> {
-  const rows = await database(env)
-    .selectFrom("interactive_sessions")
-    .select(["id", "created_at"])
-    .where("status", "=", "provisioning")
-    .where("preparation_pending", "=", 1)
-    .where("updated_at", "<=", now - interactiveSessionPreparationStaleMs)
-    .orderBy("updated_at", "asc")
-    .limit(runtimeAdapterReconcileLimit)
-    .execute();
-  await mapWithConcurrency(rows, runtimeAdapterReconcileConcurrency, async (row) => {
-    await rollbackInteractiveSessionReservation(env, row.id, row.created_at).catch((error) => {
-      console.error(`interactive session preparation cleanup failed for ${row.id}`, error);
-    });
-  });
-}
-
-async function activateInteractiveSessionReservation(
+async function requireInteractiveSessionReservationActivation(
   env: RuntimeEnv,
   insertedSessionId: string,
   insertedAt: number,
   adapterWorkspaceId: string | null,
 ): Promise<void> {
-  const activated = await database(env)
-    .updateTable("interactive_sessions")
-    .set({
-      preparation_pending: 0,
-      ...(adapterWorkspaceId
-        ? {
-            adapter: runtimeAdapterName,
-            adapter_create_pending: 1,
-            last_reconciled_at: insertedAt,
-            reconcile_error: "runtime adapter create pending",
-          }
-        : {}),
-    })
-    .where("id", "=", insertedSessionId)
-    .where("status", "=", "provisioning")
-    .where("preparation_pending", "=", 1)
-    .where("adapter", "is", null)
-    .where(sql<boolean>`adapter_workspace_id IS ${adapterWorkspaceId}`)
-    .where("adapter_create_pending", "=", 0)
-    .where("created_at", "=", insertedAt)
-    .where("updated_at", "=", insertedAt)
-    .executeTakeFirst();
-  if ((activated.numUpdatedRows ?? 0n) > 0n) return;
+  if (
+    await activateInteractiveSessionReservation(
+      env,
+      insertedSessionId,
+      insertedAt,
+      adapterWorkspaceId,
+      runtimeAdapterName,
+    )
+  ) {
+    return;
+  }
   await rollbackInteractiveSessionReservation(env, insertedSessionId, insertedAt);
   throw serviceUnavailable("interactive session reservation activation failed");
 }
@@ -4158,7 +4098,7 @@ async function createInteractiveSessionFromInput(
         throw error;
       }
       if (preparationReservation) {
-        await activateInteractiveSessionReservation(env, id, now, adapterWorkspaceId);
+        await requireInteractiveSessionReservationActivation(env, id, now, adapterWorkspaceId);
       }
       await appendInteractiveSessionEvent(env, id, user, "interactive workspace requested", now);
       const provisioned = await provisionInteractiveSession(
