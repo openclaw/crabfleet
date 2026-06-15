@@ -4,12 +4,14 @@ import { test } from "node:test";
 
 test("app actions use styled HTML dialogs instead of browser prompts", async () => {
   const source = await readFile(new URL("../src/app/main.jsx", import.meta.url), "utf8");
+  const dialogs = await readFile(new URL("../src/app/dialogs.jsx", import.meta.url), "utf8");
 
   assert.doesNotMatch(source, /\bwindow\.(?:alert|confirm|prompt)\s*\(/);
-  assert.match(source, /<dialog/);
-  assert.match(source, /showModal\(\)/);
-  assert.match(source, /function Drawer[\s\S]*?<dialog[\s\S]*?aria-labelledby=\{titleId\}/);
-  assert.match(source, /function Drawer[\s\S]*?previousFocus\?\.focus\?\.\(\)/);
+  assert.doesNotMatch(dialogs, /\bwindow\.(?:alert|confirm|prompt)\s*\(/);
+  assert.match(dialogs, /<dialog/);
+  assert.match(dialogs, /showModal\(\)/);
+  assert.match(dialogs, /function Drawer[\s\S]*?<dialog[\s\S]*?aria-labelledby=\{titleId\}/);
+  assert.match(dialogs, /function Drawer[\s\S]*?previousFocus\?\.focus\?\.\(\)/);
   assert.match(source, /closeAllDrawers\(\);\s*setSignedIn\(false\);/);
   assert.match(source, /async function showSharedLinkError[\s\S]*?closeAllDrawers\(\);/);
   assert.match(source, /runtimeProfiles\.map\(\(profile\) =>/);
