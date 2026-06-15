@@ -26,6 +26,7 @@
 - Extract interactive-session ownership, management, multiplayer, and delegated-control authorization into one directly tested policy module.
 - Move interactive-session archive cadence, D1 snapshots, R2 objects, cleanup, transcripts, and summaries into one archive module.
 - Extract interactive-session capability, control, provider redaction, desktop, and Codex SSH presentation policy behind direct tests.
+- Move terminal completion evidence, archive freshness checks, and finalization-marker persistence into one lifecycle module.
 - Centralize OpenClaw room visibility, log-free summaries, and bounded transcript sentinel/truncation policy behind direct query tests.
 - Isolate OpenClaw recursive root-stop admission, reservation cleanup, lifecycle retries, reconciliation, and stable-completion polling behind a directly tested service.
 - Extract OpenClaw root-scoped authorization, lineage supervision, reservation outcomes, rollback, and activation orchestration into a directly tested service boundary.

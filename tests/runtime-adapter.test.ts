@@ -501,6 +501,10 @@ test("confirmed stop races terminalize only after create ambiguity clears", () =
 
 test("runtime adapter lifecycle cannot escape durable session ownership", async () => {
   const source = await readFile(new URL("../src/index.ts", import.meta.url), "utf8");
+  const finalizationSource = await readFile(
+    new URL("../src/worker/session-terminal-finalization.ts", import.meta.url),
+    "utf8",
+  );
   const stopStart = source.indexOf("async function stopSupersededRuntimeAdapterProvision");
   const stopEnd = source.indexOf("async function resolveInteractiveSessionLineage", stopStart);
   const stopSource = source.slice(stopStart, stopEnd);
@@ -541,11 +545,18 @@ test("runtime adapter lifecycle cannot escape durable session ownership", async 
   assert.match(reconcileSource, /current\.stoppedAt \?\? now/);
   assert.match(reconcileSource, /finalizeTerminalInteractiveSession/);
   assert.match(source, /AND NOT EXISTS \(/);
-  assert.match(source, /archiveInteractiveSessionLogs\(env, id, now, \{ force: true \}\)/);
+  assert.match(
+    finalizationSource,
+    /archiveInteractiveSessionLogs\(env, id, now, \{ force: true \}\)/,
+  );
 });
 
 test("confirmed adapter failure release keeps the original failure evidence", async () => {
   const source = await readFile(new URL("../src/index.ts", import.meta.url), "utf8");
+  const finalizationSource = await readFile(
+    new URL("../src/worker/session-terminal-finalization.ts", import.meta.url),
+    "utf8",
+  );
   const migration = await readFile(
     new URL("../migrations/0021_runtime_adapter_hardening.sql", import.meta.url),
     "utf8",
@@ -556,9 +567,6 @@ test("confirmed adapter failure release keeps the original failure evidence", as
     releaseStart,
   );
   const releaseSource = source.slice(releaseStart, releaseEnd);
-  const finalizeStart = source.indexOf("async function finalizeTerminalInteractiveSession");
-  const finalizeEnd = source.indexOf("async function readSettings", finalizeStart);
-  const finalizeSource = source.slice(finalizeStart, finalizeEnd);
 
   assert.match(releaseSource, /"terminal_failure_reason"/);
   assert.match(releaseSource, /retainedRuntimeAdapterFailureMessage/);
@@ -568,14 +576,18 @@ test("confirmed adapter failure release keeps the original failure evidence", as
   );
   assert.match(releaseSource, /reconcile_error: resolved\.status === "failed" \? failureMessage/);
   assert.match(releaseSource, /\? failureMessage/);
-  assert.match(finalizeSource, /retainedRuntimeAdapterFailureMessage/);
-  assert.match(finalizeSource, /INSERT INTO interactive_session_events/);
-  assert.match(finalizeSource, /SELECT \$\{id\}, 'system', \$\{message\}/);
+  assert.match(finalizationSource, /retainedRuntimeAdapterFailureMessage/);
+  assert.match(finalizationSource, /INSERT INTO interactive_session_events/);
+  assert.match(finalizationSource, /SELECT \$\{id\}, 'system', \$\{message\}/);
   assert.match(migration, /ADD COLUMN terminal_failure_reason TEXT/);
 });
 
 test("terminal archive finalization remains durably retryable", async () => {
   const source = await readFile(new URL("../src/index.ts", import.meta.url), "utf8");
+  const finalizationSource = await readFile(
+    new URL("../src/worker/session-terminal-finalization.ts", import.meta.url),
+    "utf8",
+  );
   const archiveSource = await readFile(
     new URL("../src/worker/session-log-archive.ts", import.meta.url),
     "utf8",
@@ -585,24 +597,21 @@ test("terminal archive finalization remains durably retryable", async () => {
     "utf8",
   );
   const appendStart = source.indexOf("async function appendInteractiveSessionEvent");
-  const appendEnd = source.indexOf(
-    "async function finalizeTerminalInteractiveSession",
-    appendStart,
-  );
+  const appendEnd = source.indexOf("async function readSettings", appendStart);
   const appendSource = source.slice(appendStart, appendEnd);
-  const finalizeStart = source.indexOf("async function finalizeTerminalInteractiveSession");
-  const finalizeEnd = source.indexOf("async function readSettings", finalizeStart);
-  const finalizeSource = source.slice(finalizeStart, finalizeEnd);
 
   assert.match(source, /expression\("terminal_finalize_pending", "=", 1\)/);
   assert.match(source, /row\.terminal_finalize_pending === 1/);
   assert.match(source, /const terminalCleanupDeletePending = 2/);
-  assert.match(source, /completeTerminalFinalization/);
-  assert.match(source, /SET terminal_finalize_pending = 0/);
+  assert.match(finalizationSource, /completeTerminalFinalization/);
+  assert.match(finalizationSource, /SET terminal_finalize_pending = 0/);
   assert.match(archiveSource, /interactive_session_log_archives\.events_key IS NULL/);
   assert.match(archiveSource, /interactive_session_log_archives\.transcript_key IS NULL/);
   assert.match(archiveSource, /interactive_session_log_archives\.summary_key IS NULL/);
-  assert.match(source, /archive\.session_updated_at = interactive_sessions\.updated_at/);
+  assert.match(
+    finalizationSource,
+    /archive\.session_updated_at = interactive_sessions\.updated_at/,
+  );
   assert.match(
     archiveSource,
     /excluded\.session_updated_at > interactive_session_log_archives\.session_updated_at/,
@@ -618,9 +627,9 @@ test("terminal archive finalization remains durably retryable", async () => {
   assert.match(appendSource, /executeBatch\(env, \[/);
   assert.match(appendSource, /insertInto\("interactive_session_events"\)/);
   assert.match(appendSource, /terminalFinalizationPendingQuery\(db, id\)/);
-  assert.match(finalizeSource, /executeBatch\(env, \[/);
-  assert.match(finalizeSource, /INSERT INTO interactive_session_events/);
-  assert.match(finalizeSource, /terminalFinalizationPendingQuery\(db, id\)/);
+  assert.match(finalizationSource, /executeBatch\(env, \[/);
+  assert.match(finalizationSource, /INSERT INTO interactive_session_events/);
+  assert.match(finalizationSource, /terminalFinalizationPendingQuery\(db, id\)/);
   assert.match(migration, /ADD COLUMN terminal_finalize_pending INTEGER NOT NULL DEFAULT 0/);
   assert.match(migration, /ADD COLUMN session_updated_at INTEGER/);
   assert.match(migration, /status IN \('stopped', 'expired', 'failed'\)/);
@@ -801,6 +810,10 @@ test("production runtime adapter calls use the Crabbox service binding", async (
 
 test("strict session rows and cleanup preserve terminal finalization anchors", async () => {
   const source = await readFile(new URL("../src/index.ts", import.meta.url), "utf8");
+  const finalizationSource = await readFile(
+    new URL("../src/worker/session-terminal-finalization.ts", import.meta.url),
+    "utf8",
+  );
   const cleanupStart = source.indexOf("async function cleanupInteractiveSessions");
   const cleanupEnd = source.indexOf("async function mutateInteractiveSession", cleanupStart);
   const cleanupSource = source.slice(cleanupStart, cleanupEnd);
@@ -829,8 +842,8 @@ test("strict session rows and cleanup preserve terminal finalization anchors", a
   assert.match(cleanupSource, /WHERE id = \$\{row\.id\}/);
   assert.match(source, /terminalFinalizationPendingQuery/);
   assert.match(source, /executeBatch\(env, \[[\s\S]*interactive_session_events/);
-  assert.match(source, /COALESCE\([\s\S]*event_count[\s\S]*count\(\*\)/);
-  assert.match(source, /events_key IS NOT NULL/);
+  assert.match(finalizationSource, /COALESCE\([\s\S]*event_count[\s\S]*count\(\*\)/);
+  assert.match(finalizationSource, /events_key IS NOT NULL/);
 });
 
 test("summary events invalidate terminal cleanup snapshots", async () => {
