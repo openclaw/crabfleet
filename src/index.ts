@@ -135,13 +135,16 @@ import { obsoleteSessionArchiveObjectKeys, sessionArchiveAttemptKeys } from "./s
 import { readBoundedResponseText } from "./bounded-response";
 import {
   boundedUtf8Tail,
+	createOpenClawEmbedTicket,
   openClawBranchPreparationCanDefer,
+	openClawEmbedTicketTtlSeconds,
   openClawGitBranchAllowed,
   openClawGitHubRepoParts,
   openClawRoomMaxSessions,
   openClawRoomRootAllowed,
   openClawRoomSessionChainAllowed,
   openClawServiceAuthorized,
+	verifyOpenClawEmbedTicket,
 } from "./openclaw-service";
 import {
   inspectTrustedProxyAssertion,
@@ -231,6 +234,7 @@ type RuntimeEnv = Env & {
   CRABFLEET_SSH_GATEWAY_TOKEN?: string;
   CRABBOX_OPENCLAW_TOKEN?: string;
   CRABBOX_MULTICODEX_TOKEN?: string;
+  CRABBOX_EMBED_TICKET_SECRET?: string;
   CRABBOX_TOKEN_ENCRYPTION_KEY?: string;
   BACKUP_BUCKET_NAME?: string;
   CLOUDFLARE_ACCOUNT_ID?: string;
@@ -2362,6 +2366,20 @@ async function api(
     );
   }
 
+	const openClawCrabboxEmbedTicketMatch = url.pathname.match(
+		/^\/api\/openclaw\/crabboxes\/([^/]+)\/embed-ticket$/,
+	);
+	if (request.method === "POST" && openClawCrabboxEmbedTicketMatch) {
+		return json(
+			await openClawCreateCrabboxEmbedTicket(
+				request,
+				env,
+				decodeURIComponent(openClawCrabboxEmbedTicketMatch[1] ?? ""),
+			),
+			{ status: 201 },
+		);
+	}
+
   const openClawCrabboxReadMatch = url.pathname.match(/^\/api\/openclaw\/crabboxes\/([^/]+)$/);
   if (request.method === "GET" && openClawCrabboxReadMatch) {
     return json(
@@ -3741,6 +3759,36 @@ async function openClawMutateCrabbox(
   return openClawCrabboxSummaryResponse(env, serviceUser, result.session);
 }
 
+async function openClawCreateCrabboxEmbedTicket(
+	request: Request,
+	env: RuntimeEnv,
+	id: string,
+): Promise<{ browserUrl: string; expiresAt: number }> {
+	requireOpenClawRoomService(request, env);
+	const body = await readJson<{ rootSessionId?: string; ttlSeconds?: number }>(request);
+	if (
+		body.ttlSeconds !== undefined &&
+		(typeof body.ttlSeconds !== "number" || !Number.isFinite(body.ttlSeconds))
+	) {
+		throw badRequest("ttlSeconds must be a finite number");
+	}
+	const session = await openClawRootScopedCrabbox(request, env, id, body.rootSessionId);
+	if (["stopping", "stopped", "expired", "failed"].includes(session.status)) {
+		throw badRequest(`session is ${session.status}`);
+	}
+	if (!session.capabilities.terminal) {
+		throw badRequest("session does not advertise terminal access");
+	}
+	const secret = openClawEmbedTicketSecret(env);
+	if (!secret) throw serviceUnavailable("OpenClaw embed ticket secret is not configured");
+	const expiresAt = Date.now() + openClawEmbedTicketTtlSeconds(body.ttlSeconds) * 1000;
+	const token = await createOpenClawEmbedTicket(secret, session.id, expiresAt);
+	return {
+		browserUrl: `${browserAppOrigin(env)}/app/sessions/${encodeURIComponent(session.id)}?token=${encodeURIComponent(token)}`,
+		expiresAt,
+	};
+}
+
 async function openClawRootScopedCrabbox(
   request: Request,
   env: RuntimeEnv,
@@ -4223,6 +4271,10 @@ function requireOpenClawAutomationService(request: Request, env: RuntimeEnv): vo
 
 function requireOpenClawRoomService(request: Request, env: RuntimeEnv): void {
   requireOpenClawServiceToken(request, [env.CRABBOX_OPENCLAW_TOKEN, env.CRABBOX_MULTICODEX_TOKEN]);
+}
+
+function openClawEmbedTicketSecret(env: RuntimeEnv): string {
+  return env.CRABBOX_EMBED_TICKET_SECRET || "";
 }
 
 function requireOpenClawServiceToken(
@@ -8234,7 +8286,7 @@ async function subscribeTerminalHubSession(
   }
 
   try {
-    const canInput = terminalInputGrant(env, user, session);
+		const canInput = terminalInputGrant(request, env, user, session);
     const canInputNow = await canInput();
     const canView = terminalViewGrant(request, env, user, session);
     const reconcileSubscription = terminalSubscriptionReconciler(env, id);
@@ -8674,12 +8726,17 @@ async function readClipboardUploadBytes(request: Request): Promise<Uint8Array> {
 }
 
 function terminalInputGrant(
+	request: Request,
   env: RuntimeEnv,
   user: User | null,
   session: InteractiveSession,
 ): () => Promise<boolean> {
-  if (!user || !session.capabilities.terminal) return async () => false;
-  return cachedBooleanGrant(() => canControlInteractiveSessionById(env, user, session.id));
+	if (!session.capabilities.terminal) return async () => false;
+	return cachedBooleanGrant(() =>
+		user
+			? canControlInteractiveSessionById(env, user, session.id)
+			: canControlEmbeddedTerminalRequest(request, env, session.id),
+	);
 }
 
 function terminalSubscriptionReconciler(env: RuntimeEnv, id: string): () => void {
@@ -8722,6 +8779,17 @@ async function canViewSharedTerminalRequest(
   return (!shareSession || shareSession === id) && (await isSharedSessionToken(env, id, token));
 }
 
+async function canControlEmbeddedTerminalRequest(
+	request: Request,
+	env: RuntimeEnv,
+	id: string,
+): Promise<boolean> {
+	const url = new URL(request.url);
+	const shareSession = url.searchParams.get("shareSession") ?? "";
+	const token = url.searchParams.get("token") ?? "";
+	return shareSession === id && (await isOpenClawEmbedSessionToken(env, id, token));
+}
+
 async function canOpenAnonymousTerminalHub(request: Request, env: RuntimeEnv): Promise<boolean> {
   const url = new URL(request.url);
   const shareSession = url.searchParams.get("shareSession") ?? "";
@@ -8744,6 +8812,7 @@ async function canViewTerminalSession(
 
 async function isSharedSessionToken(env: RuntimeEnv, id: string, token: string): Promise<boolean> {
   if (!token) return false;
+	if (await isOpenClawEmbedSessionToken(env, id, token)) return true;
   const row = await database(env)
     .selectFrom("interactive_sessions")
     .select(["share_token_hash", "share_mode", "status", "runtime", "capabilities_json"])
@@ -8756,6 +8825,15 @@ async function isSharedSessionToken(env: RuntimeEnv, id: string, token: string):
     runtimeCapabilities(row.runtime, row.capabilities_json).terminal &&
     (await sha256(token)) === row.share_token_hash,
   );
+}
+
+async function isOpenClawEmbedSessionToken(
+	env: RuntimeEnv,
+	id: string,
+	token: string,
+): Promise<boolean> {
+	const secret = openClawEmbedTicketSecret(env);
+	return Boolean(secret && (await verifyOpenClawEmbedTicket(secret, token, id)));
 }
 
 function sendTerminalFrame(
@@ -14394,10 +14472,14 @@ async function readSharedInteractiveSession(
     .selectAll()
     .where("id", "=", id)
     .where("preparation_pending", "=", 0)
-    .where("share_mode", "=", "link_read")
     .executeTakeFirst();
-  if (!row || !row.share_token_hash || !token) throw notFound("shared session not found");
-  if ((await sha256(token)) !== row.share_token_hash) throw notFound("shared session not found");
+	const embedded = await isOpenClawEmbedSessionToken(env, id, token);
+	const shared =
+		row?.share_mode === "link_read" &&
+		Boolean(row.share_token_hash) &&
+		Boolean(token) &&
+		(await sha256(token)) === row.share_token_hash;
+	if (!row || (!embedded && !shared)) throw notFound("shared session not found");
   const logs = await readInteractiveSessionLogs(env, [id]);
   const archives = await readInteractiveSessionLogArchives(env, [id]);
   const session = interactiveSession(row, logs.get(id) ?? [], archives.get(id) ?? null);
@@ -14419,10 +14501,10 @@ async function readSharedInteractiveSession(
       controlGrantedAt: activeController ? session.controlGrantedAt : null,
       controlExpiresAt: activeController ? session.controlExpiresAt : null,
       multiplayerMode: session.multiplayerMode,
-      canControl: false,
+			canControl: embedded,
       canManage: false,
       canRequestControl: false,
-      sharedReadOnly: true,
+			sharedReadOnly: !embedded,
     },
   };
 }

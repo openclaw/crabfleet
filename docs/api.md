@@ -592,6 +592,8 @@ using browser cookies or an individual session's agent token:
 - `GET /api/openclaw/crabboxes/:id/transcript`: read a bounded recent transcript.
 - `POST /api/openclaw/crabboxes/:id/message`: send one terminal message/nudge.
 - `POST /api/openclaw/crabboxes/:id/actions`: request the supported `stop` action.
+- `POST /api/openclaw/crabboxes/:id/embed-ticket`: mint a short-lived browser URL
+  that can view and control only that crabbox terminal without a Crabfleet login.
 - `POST /api/openclaw/session-roots/:rootSessionId/actions`: freeze room-tree
   admission and recursively stop every pending or active descendant.
 
@@ -616,6 +618,14 @@ as not found. Creation rejects a supervised descendant that would exceed the
 responses contain at most the newest 240 events and
 64 KiB of UTF-8 text and report whether evidence was truncated. Every message
 and stop request writes an audit event.
+
+Embed-ticket bodies require `rootSessionId` and may include `ttlSeconds`.
+Lifetimes default to one hour and are clamped between one minute and four
+hours. The returned signed bearer is scoped to one terminal session and never
+exposes the room service credential. It cannot read fleet state, manage the
+session, paste files, or access sibling sessions. Ticket signing requires the
+Crabfleet-only `CRABBOX_EMBED_TICKET_SECRET`; room-service consumers must never
+receive that signing secret.
 
 Message request:
 
