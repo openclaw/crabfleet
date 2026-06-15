@@ -271,6 +271,7 @@ import {
   countInteractiveSessionEvents,
   insertInteractiveSessionReservation,
   markInteractiveSessionPendingAdapter,
+  persistInteractiveSessionMetadataMutation,
   persistInteractiveSessionProvisionResult,
   readInteractiveSessionEventRows,
   readInteractiveSessionLogArchives,
@@ -4320,40 +4321,16 @@ async function mutateInteractiveSessionMetadataAtomically(
   values: UpdateObject<Database, "interactive_sessions">,
   now = Date.now(),
 ): Promise<void> {
-  const db = database(env);
-  const eventMessage = clean(message, 1000);
-  const revision = Math.max(now, session.updatedAt + 1);
-  const expectedOwner = sql<boolean>`
-    id = ${session.id}
-    AND status = ${session.status}
-    AND updated_at = ${session.updatedAt}
-  `;
-  const eventQuery = sql`
-    INSERT INTO interactive_session_events (session_id, actor, message, created_at)
-    SELECT ${session.id}, ${actor(user)}, ${eventMessage}, ${now}
-    FROM interactive_sessions
-    WHERE ${expectedOwner}
-  `;
-  const updateQuery = db
-    .updateTable("interactive_sessions")
-    .set({
-      ...values,
-      terminal_finalize_pending: sql<number>`CASE
-        WHEN status IN ('stopped', 'expired', 'failed') THEN 1
-        ELSE terminal_finalize_pending
-      END`,
-      updated_at: revision,
-      last_event: eventMessage,
-    })
-    .where(expectedOwner)
-    .returning("updated_at");
-  const results = await env.DB.batch<{ updated_at: number }>(
-    [eventQuery, updateQuery].map((query) => {
-      const compiled = query.compile(db);
-      return env.DB.prepare(compiled.sql).bind(...compiled.parameters);
-    }),
-  );
-  if (!results.at(-1)?.results.some((row) => row.updated_at === revision)) {
+  if (
+    !(await persistInteractiveSessionMetadataMutation(
+      env,
+      session,
+      actor(user),
+      message,
+      values,
+      now,
+    ))
+  ) {
     throw conflict("interactive session lifecycle changed; retry metadata update");
   }
   await archiveInteractiveSessionLogs(env, session.id, now).catch(() => undefined);

@@ -1,8 +1,9 @@
-import { sql, type Insertable } from "kysely";
+import { sql, type Insertable, type UpdateObject } from "kysely";
 
 import {
   database,
   executeBatch,
+  type Database,
   type InteractiveSessionRow,
   type InteractiveSessionTable,
 } from "./database.ts";
@@ -275,6 +276,50 @@ export async function countInteractiveSessionEvents(env: RuntimeEnv, id: string)
   return Number(row?.count ?? 0);
 }
 
+export async function persistInteractiveSessionMetadataMutation(
+  env: RuntimeEnv,
+  session: { id: string; status: string; updatedAt: number },
+  actorName: string,
+  message: string,
+  values: UpdateObject<Database, "interactive_sessions">,
+  now: number,
+): Promise<boolean> {
+  const db = database(env);
+  const eventMessage = clean(message, 1000);
+  const revision = Math.max(now, session.updatedAt + 1);
+  const expectedOwner = sql<boolean>`
+    id = ${session.id}
+    AND status = ${session.status}
+    AND updated_at = ${session.updatedAt}
+  `;
+  const eventQuery = sql`
+    INSERT INTO interactive_session_events (session_id, actor, message, created_at)
+    SELECT ${session.id}, ${actorName}, ${eventMessage}, ${now}
+    FROM interactive_sessions
+    WHERE ${expectedOwner}
+  `;
+  const updateQuery = db
+    .updateTable("interactive_sessions")
+    .set({
+      ...values,
+      terminal_finalize_pending: sql<number>`CASE
+        WHEN status IN ('stopped', 'expired', 'failed') THEN 1
+        ELSE terminal_finalize_pending
+      END`,
+      updated_at: revision,
+      last_event: eventMessage,
+    })
+    .where(expectedOwner)
+    .returning("updated_at");
+  const results = await env.DB.batch<{ updated_at: number }>(
+    [eventQuery, updateQuery].map((query) => {
+      const compiled = query.compile(db);
+      return env.DB.prepare(compiled.sql).bind(...compiled.parameters);
+    }),
+  );
+  return results.at(-1)?.results.some((row) => row.updated_at === revision) ?? false;
+}
+
 export async function insertInteractiveSessionReservation(
   env: RuntimeEnv,
   values: InteractiveSessionReservationValues,
@@ -376,4 +421,10 @@ export async function markInteractiveSessionPendingAdapter(
     .where(sql<boolean>`lease_id IS ${input.initialLeaseId}`)
     .where("agent_token_hash", "=", input.initialAgentTokenHash)
     .execute();
+}
+
+function clean(value: unknown, maximum: number): string {
+  return String(value ?? "")
+    .trim()
+    .slice(0, maximum);
 }

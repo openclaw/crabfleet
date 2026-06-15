@@ -7,6 +7,7 @@ import {
   countInteractiveSessionEvents,
   insertInteractiveSessionReservation,
   markInteractiveSessionPendingAdapter,
+  persistInteractiveSessionMetadataMutation,
   persistInteractiveSessionProvisionResult,
   readInteractiveSessionEventRows,
   readInteractiveSessionLogArchives,
@@ -31,7 +32,7 @@ type PreparedStatement = {
 
 function runtimeEnv(
   handler: D1Handler,
-  batchHandler: (statements: PreparedStatement[]) => void = () => undefined,
+  batchHandler: (statements: PreparedStatement[]) => unknown[] | void = () => undefined,
 ): RuntimeEnv {
   return {
     DB: {
@@ -55,8 +56,7 @@ function runtimeEnv(
         };
       },
       async batch(statements: unknown[]) {
-        batchHandler(statements as PreparedStatement[]);
-        return [];
+        return batchHandler(statements as PreparedStatement[]) ?? [];
       },
     } as unknown as D1Database,
   } as RuntimeEnv;
@@ -319,6 +319,67 @@ test("session event counts normalize missing and persisted values", async () => 
       "IS-3",
     ),
     0,
+  );
+});
+
+test("session metadata mutations persist events before fenced snapshot-invalidating updates", async () => {
+  let batch: PreparedStatement[] = [];
+  const updated = await persistInteractiveSessionMetadataMutation(
+    runtimeEnv(
+      () => {
+        throw new Error("metadata mutation must execute as one batch");
+      },
+      (statements) => {
+        batch = statements;
+        return [{ results: [] }, { results: [{ updated_at: 101 }] }];
+      },
+    ),
+    { id: "IS-2", status: "ready", updatedAt: 100 },
+    "operator",
+    " summary updated ",
+    { summary: "done" },
+    90,
+  );
+
+  assert.equal(updated, true);
+  assert.equal(batch.length, 2);
+  assert.match(batch[0]?.sql ?? "", /^\s*insert into interactive_session_events/i);
+  assert.deepEqual(batch[0]?.parameters, [
+    "IS-2",
+    "operator",
+    "summary updated",
+    90,
+    "IS-2",
+    "ready",
+    100,
+  ]);
+  assert.match(batch[1]?.sql ?? "", /^update "interactive_sessions"/i);
+  assert.match(batch[1]?.sql ?? "", /terminal_finalize_pending/i);
+  assert.match(batch[1]?.sql ?? "", /when status in \('stopped', 'expired', 'failed'\) then 1/i);
+  assert.match(batch[1]?.sql ?? "", /returning "updated_at"/i);
+  assert.ok(batch[1]?.parameters.includes("done"));
+  assert.ok(batch[1]?.parameters.includes(101));
+  assert.ok(batch[1]?.parameters.includes("IS-2"));
+  assert.ok(batch[1]?.parameters.includes("ready"));
+  assert.ok(batch[1]?.parameters.includes(100));
+});
+
+test("session metadata mutations report lost revision ownership", async () => {
+  assert.equal(
+    await persistInteractiveSessionMetadataMutation(
+      runtimeEnv(
+        () => {
+          throw new Error("metadata mutation must execute as one batch");
+        },
+        () => [{ results: [] }, { results: [] }],
+      ),
+      { id: "IS-2", status: "ready", updatedAt: 100 },
+      "operator",
+      "summary updated",
+      { summary: "done" },
+      101,
+    ),
+    false,
   );
 });
 

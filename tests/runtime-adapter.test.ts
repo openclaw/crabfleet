@@ -838,7 +838,7 @@ test("summary and sharing events invalidate terminal cleanup snapshots", async (
   const shareEnd = source.indexOf('if (action === "enable_multiplayer")', shareStart);
   const shareSource = source.slice(shareStart, shareEnd);
   const summaryStart = source.indexOf("async function updateInteractiveSessionSummary");
-  const summaryEnd = source.indexOf("async function readInteractiveSessionLogs", summaryStart);
+  const summaryEnd = source.indexOf("async function updateGitHubActionsWorkState", summaryStart);
   const summarySource = source.slice(summaryStart, summaryEnd);
   const metadataStart = source.indexOf("async function mutateInteractiveSessionMetadataAtomically");
   const metadataEnd = source.indexOf("async function mutateInteractiveSession(", metadataStart);
@@ -851,13 +851,8 @@ test("summary and sharing events invalidate terminal cleanup snapshots", async (
   assert.match(cleanupSource, /count\(\*\)/);
   assert.match(shareSource, /mutateInteractiveSessionMetadataAtomically/);
   assert.match(summarySource, /mutateInteractiveSessionMetadataAtomically/);
-  assert.match(metadataSource, /INSERT INTO interactive_session_events/);
-  assert.match(metadataSource, /terminal_finalize_pending: sql<number>`CASE/);
-  assert.match(metadataSource, /WHEN status IN \('stopped', 'expired', 'failed'\) THEN 1/);
-  assert.match(metadataSource, /updated_at = \$\{session\.updatedAt\}/);
-  assert.match(metadataSource, /\.returning\("updated_at"\)/);
-  assert.match(metadataSource, /env\.DB\.batch/);
-  assert.ok(metadataSource.indexOf("eventQuery") < metadataSource.indexOf("updateQuery"));
+  assert.match(metadataSource, /persistInteractiveSessionMetadataMutation/);
+  assert.match(metadataSource, /archiveInteractiveSessionLogs/);
 });
 
 test("runtime adapter credentials are preflighted before session allocation", () => {
