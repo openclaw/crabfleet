@@ -17,7 +17,7 @@ test("opaque direct terminal URLs pass through the multiplex hub unchanged", asy
   const upstreamSource = source.slice(upstreamStart, upstreamEnd);
   assert.match(
     upstreamSource,
-    /fetch\(sizedTerminalTargetUrl\(target\.url, routeKind, cols, rows\)/,
+    /interactiveTerminalFetch\(\s*env,\s*session,\s*sizedTerminalTargetUrl\(target\.url, routeKind, cols, rows\)/,
   );
   assert.doesNotMatch(upstreamSource, /addQuery\(target\.url/);
 
@@ -28,8 +28,11 @@ test("opaque direct terminal URLs pass through the multiplex hub unchanged", asy
   assert.match(directSource, /const targetUrl = sizedTerminalTargetUrl\(\s*target\.url,/);
   assert.match(directSource, /terminalSize\(request, "cols", 120\)/);
   assert.match(directSource, /terminalSize\(request, "rows", 34\)/);
-  assert.match(directSource, /upstreamResponse = await fetch\(targetUrl/);
-  assert.doesNotMatch(directSource, /upstreamResponse = await fetch\(target\.url/);
+  assert.match(
+    directSource,
+    /upstreamResponse = await interactiveTerminalFetch\(\s*env,\s*session,\s*targetUrl,/,
+  );
+  assert.doesNotMatch(directSource, /interactiveTerminalFetch\([^)]*target\.url/);
 });
 
 test("known bridge and runner targets receive terminal dimensions", () => {

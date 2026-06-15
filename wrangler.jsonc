@@ -24,6 +24,7 @@
     "BACKUP_BUCKET_NAME": "crabfleet-session-logs",
     "CLOUDFLARE_ACCOUNT_ID": "91b59577e757131d68d55a471fe32aca",
     "CRABFLEET_DEV_LOGIN_ENABLED": "false",
+    "CRABBOX_COORDINATOR_ORIGIN": "https://crabbox.openclaw.ai",
     "CRABBOX_INTERACTIVE_PROVISION_URL": "https://crabfleet.openclaw.ai/api/provision/interactive",
     "CRABBOX_RUNTIME_ADAPTER_NAMESPACE": "openclaw",
     "CRABBOX_RUNTIME_ADAPTER_URL": "https://crabbox.openclaw.ai",

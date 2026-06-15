@@ -215,6 +215,7 @@ type RuntimeEnv = Env & {
   CRABBOX_RUNTIME_ADAPTER_TTL_SECONDS?: string;
   CRABBOX_RUNTIME_ADAPTER_IDLE_SECONDS?: string;
   CRABBOX_COORDINATOR?: Fetcher;
+  CRABBOX_COORDINATOR_ORIGIN?: string;
   CRABBOX_CLOUDFLARE_RUNNER_URL?: string;
   CRABBOX_CLOUDFLARE_RUNNER_TOKEN?: string;
   CRABBOX_CLOUDFLARE_RUNNER_INSTANCE_TYPE?: string;
@@ -8502,9 +8503,12 @@ async function openInteractiveTerminalUpstream(
 
   const target = interactiveTerminalTarget(env, session, routeKind);
   if (!target) throw serviceUnavailable("PTY bridge is not configured for this session");
-  const upstreamResponse = await fetch(sizedTerminalTargetUrl(target.url, routeKind, cols, rows), {
-    headers: interactiveTerminalHeaders(session, target.authorization),
-  });
+  const upstreamResponse = await interactiveTerminalFetch(
+    env,
+    session,
+    sizedTerminalTargetUrl(target.url, routeKind, cols, rows),
+    interactiveTerminalHeaders(session, target.authorization),
+  );
   const upstream = upstreamResponse.webSocket;
   if (!upstream || upstreamResponse.status !== 101) {
     throw serviceUnavailable(`PTY bridge HTTP ${upstreamResponse.status}`);
@@ -8873,9 +8877,12 @@ async function interactiveSessionPty(
   const server = pair[1];
   let upstreamResponse: Response;
   try {
-    upstreamResponse = await fetch(targetUrl, {
-      headers: interactiveTerminalHeaders(session, target.authorization),
-    });
+    upstreamResponse = await interactiveTerminalFetch(
+      env,
+      session,
+      targetUrl,
+      interactiveTerminalHeaders(session, target.authorization),
+    );
   } catch (error) {
     server.accept();
     server.close(
@@ -13502,11 +13509,7 @@ async function runtimeAdapterFetch(
   headers.set("authorization", `Bearer ${token}`);
   headers.set("accept", "application/json");
   if (init.body) headers.set("content-type", "application/json");
-  const adapter = runtimeAdapterControlPlaneIdentity(env.CRABBOX_RUNTIME_ADAPTER_URL);
-  const fetcher =
-    env.CRABBOX_COORDINATOR && adapter && new URL(adapter).origin === target.origin
-      ? env.CRABBOX_COORDINATOR
-      : globalThis;
+  const fetcher = runtimeAdapterFetcher(env, target);
   const response = await fetcher.fetch(target, {
     ...init,
     headers,
@@ -13517,6 +13520,34 @@ async function runtimeAdapterFetch(
     throw new Error("runtime adapter redirect refused");
   }
   return response;
+}
+
+function runtimeAdapterFetcher(env: RuntimeEnv, target: URL): Fetcher | typeof globalThis {
+  const coordinator =
+    runtimeAdapterControlPlaneIdentity(env.CRABBOX_COORDINATOR_ORIGIN) ??
+    runtimeAdapterControlPlaneIdentity(env.CRABBOX_RUNTIME_ADAPTER_URL);
+  if (!env.CRABBOX_COORDINATOR || !coordinator) return globalThis;
+  const normalizedTarget = new URL(target);
+  if (normalizedTarget.protocol === "wss:") normalizedTarget.protocol = "https:";
+  if (normalizedTarget.protocol === "ws:") normalizedTarget.protocol = "http:";
+  return new URL(coordinator).origin === normalizedTarget.origin
+    ? env.CRABBOX_COORDINATOR
+    : globalThis;
+}
+
+async function interactiveTerminalFetch(
+  env: RuntimeEnv,
+  session: Pick<InteractiveSession, "adapter">,
+  url: string,
+  headers: Headers,
+): Promise<Response> {
+  const target = new URL(url);
+  const fetchTarget = new URL(target);
+  if (fetchTarget.protocol === "wss:") fetchTarget.protocol = "https:";
+  if (fetchTarget.protocol === "ws:") fetchTarget.protocol = "http:";
+  const fetcher =
+    session.adapter === runtimeAdapterName ? runtimeAdapterFetcher(env, target) : globalThis;
+  return fetcher.fetch(fetchTarget, { headers });
 }
 
 async function readRuntimeAdapterResponseBody(response: Response): Promise<unknown> {

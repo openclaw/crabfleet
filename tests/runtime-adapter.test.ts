@@ -762,15 +762,24 @@ test("worker deployment installs the shared runtime adapter credential", async (
 test("production runtime adapter calls use the Crabbox service binding", async () => {
   const source = await readFile(new URL("../src/index.ts", import.meta.url), "utf8");
   const config = await readFile(new URL("../wrangler.jsonc", import.meta.url), "utf8");
-  const fetchStart = source.indexOf("async function runtimeAdapterFetch");
+  const lifecycleStart = source.indexOf("async function runtimeAdapterFetch");
+  const lifecycleEnd = source.indexOf("function runtimeAdapterFetcher", lifecycleStart);
+  const lifecycleSource = source.slice(lifecycleStart, lifecycleEnd);
+  const fetchStart = source.indexOf("function runtimeAdapterFetcher");
   const fetchEnd = source.indexOf("async function readRuntimeAdapterResponseBody", fetchStart);
   const fetchSource = source.slice(fetchStart, fetchEnd);
 
   assert.match(config, /"binding": "CRABBOX_COORDINATOR"/);
   assert.match(config, /"service": "crabbox-coordinator"/);
+  assert.match(config, /"CRABBOX_COORDINATOR_ORIGIN": "https:\/\/crabbox\.openclaw\.ai"/);
   assert.match(fetchSource, /env\.CRABBOX_COORDINATOR/);
-  assert.match(fetchSource, /new URL\(adapter\)\.origin === target\.origin/);
-  assert.match(fetchSource, /fetcher\.fetch\(target/);
+  assert.match(fetchSource, /env\.CRABBOX_COORDINATOR_ORIGIN/);
+  assert.match(fetchSource, /normalizedTarget\.protocol === "wss:"/);
+  assert.match(fetchSource, /new URL\(coordinator\)\.origin === normalizedTarget\.origin/);
+  assert.match(fetchSource, /session\.adapter === runtimeAdapterName/);
+  assert.match(fetchSource, /interactiveTerminalFetch/);
+  assert.match(lifecycleSource, /runtimeAdapterFetcher\(env, target\)/);
+  assert.match(lifecycleSource, /fetcher\.fetch\(target/);
 });
 
 test("strict session rows and cleanup preserve terminal finalization anchors", async () => {
@@ -2144,6 +2153,26 @@ test("runtime adapter terminals use the server-side adapter bearer", async () =>
   const decorateSource = source.slice(decorateStart, decorateEnd);
   assert.match(decorateSource, /interactiveTerminalTarget\(env, session, routeKind\)/);
   assert.match(decorateSource, /routeAvailable/);
+});
+
+test("runtime adapter terminal upgrades use the coordinator service binding", async () => {
+  const source = await readFile(new URL("../src/index.ts", import.meta.url), "utf8");
+  const openStart = source.indexOf("async function openInteractiveTerminalUpstream");
+  const openEnd = source.indexOf("async function markInteractiveTerminalConnected", openStart);
+  const openSource = source.slice(openStart, openEnd);
+  const legacyStart = source.indexOf("async function interactiveSessionPty");
+  const legacyEnd = source.indexOf("async function interactiveSandboxTerminal", legacyStart);
+  const legacySource = source.slice(legacyStart, legacyEnd);
+  const fetchStart = source.indexOf("async function interactiveTerminalFetch");
+  const fetchEnd = source.indexOf("async function runtimeAdapterFetch", fetchStart);
+  const fetchSource = source.slice(fetchStart, fetchEnd);
+
+  assert.match(openSource, /interactiveTerminalFetch\(/);
+  assert.match(legacySource, /interactiveTerminalFetch\(/);
+  assert.match(fetchSource, /session\.adapter === runtimeAdapterName/);
+  assert.match(fetchSource, /runtimeAdapterFetcher\(env, target\)/);
+  assert.match(fetchSource, /fetchTarget\.protocol === "wss:"/);
+  assert.match(fetchSource, /fetcher\.fetch\(fetchTarget, \{ headers \}\)/);
 });
 
 test("runtime adapter terminal flow control stays explicit and end-to-end", async () => {
