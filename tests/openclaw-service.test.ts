@@ -15,6 +15,7 @@ import {
   openClawTranscriptMaxBytes,
   sessionBelongsToRoot,
 } from "../src/openclaw-service.ts";
+import { openClawRequestId } from "../src/worker/openclaw-request.ts";
 
 test("OpenClaw service authorization accepts dedicated scoped consumers", () => {
   assert.equal(openClawServiceAuthorized("Bearer openclaw", ["openclaw", "multicodex"]), true);
@@ -345,11 +346,8 @@ test("OpenClaw crabbox requests reserve durable idempotency before provisioning"
     "utf8",
   );
   const endpointStart = source.indexOf("async function openClawCreateCrabbox");
-  const endpointEnd = source.indexOf("async function openClawCrabboxRequestHash", endpointStart);
+  const endpointEnd = source.indexOf("async function openClawReadSessionRoot", endpointStart);
   const endpointSource = source.slice(endpointStart, endpointEnd);
-  const replayStart = source.indexOf("async function readOpenClawRequestSession");
-  const replayEnd = source.indexOf("async function openClawReadSessionRoot", replayStart);
-  const replaySource = source.slice(replayStart, replayEnd);
   const createStart = source.indexOf("async function createInteractiveSessionFromInput");
   const createEnd = source.indexOf("function initialRuntimeAdapterWorkspaceId", createStart);
   const createSource = source.slice(createStart, createEnd);
@@ -364,22 +362,11 @@ test("OpenClaw crabbox requests reserve durable idempotency before provisioning"
   assert.match(migration, /UNIQUE INDEX IF NOT EXISTS idx_interactive_sessions_openclaw_request/);
   assert.match(migration, /CREATE TABLE IF NOT EXISTS openclaw_request_replays/);
   assert.match(endpointSource, /readOpenClawRequestSession/);
-  assert.match(endpointSource, /requestId must be at most 200 characters/);
+  assert.equal(openClawRequestId("request-1"), "request-1");
   assert.ok(
     endpointSource.indexOf("readOpenClawRequestSession") <
       endpointSource.indexOf("createInteractiveSessionFromInput"),
   );
-  assert.match(source, /profile: clean\(body\.profile, 120\)/);
-  assert.match(source, /runtime,\s+profile: clean\(body\.profile, 120\)/);
-  assert.match(source, /githubTokenHash: githubToken \? await sha256\(githubToken\) : null/);
-  assert.match(replaySource, /row\.preparation_pending !== 0/);
-  assert.match(replaySource, /OpenClaw crabbox request is still preparing/);
-  assert.match(
-    replaySource,
-    /OpenClaw crabbox request already completed and is no longer available/,
-  );
-  assert.match(replaySource, /\.selectFrom\("openclaw_request_replays as replay"\)/);
-  assert.match(replaySource, /\.leftJoin\("interactive_sessions as session"/);
   assert.match(createSource, /openclaw_request_id: options\.openClawRequestId \?\? null/);
   assert.match(createSource, /openclaw_request_hash: options\.openClawRequestHash \?\? null/);
   assert.match(createSource, /\.insertInto\("openclaw_request_replays"\)/);

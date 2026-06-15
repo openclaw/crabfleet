@@ -221,6 +221,12 @@ import {
   type InteractiveSessionLogArchive,
   type RuntimeCapabilities,
 } from "./worker/session-model";
+import { normalizeRepo } from "./worker/repositories";
+import {
+  openClawCrabboxRequestHash,
+  openClawRequestId,
+  readOpenClawRequestSession,
+} from "./worker/openclaw-request";
 
 const defaultInteractiveCommand = "codex --yolo";
 
@@ -2391,14 +2397,10 @@ async function openClawCreateCrabbox(
   if (baseBranch) body.baseBranch = baseBranch;
   else delete body.baseBranch;
   const serviceUser = openClawServiceUser();
-  if (body.requestId !== undefined && typeof body.requestId !== "string") {
-    throw badRequest("requestId must be a string");
-  }
-  if (body.requestId && body.requestId.length > 200) {
-    throw badRequest("requestId must be at most 200 characters");
-  }
-  const requestId = body.requestId || null;
-  const requestHash = requestId ? await openClawCrabboxRequestHash(env, body, owner) : null;
+  const requestId = openClawRequestId(body.requestId);
+  const requestHash = requestId
+    ? await openClawCrabboxRequestHash(body, owner, deploymentConfig(env).defaultRuntime)
+    : null;
   if (requestId && requestHash) {
     const existing = await readOpenClawRequestSession(env, requestId, requestHash);
     if (existing) {
@@ -2451,82 +2453,6 @@ async function openClawCreateCrabbox(
     Date.now(),
   );
   return openClawDecoratedCrabboxResponse(env, result.session);
-}
-
-async function openClawCrabboxRequestHash(
-  env: RuntimeEnv,
-  body: {
-    repo?: string;
-    branch?: string;
-    runtime?: string;
-    profile?: string;
-    command?: string;
-    prompt?: string;
-    parentSessionId?: string;
-    rootSessionId?: string;
-    purpose?: string;
-    summary?: string;
-    baseBranch?: string;
-    githubToken?: string;
-  },
-  owner: string,
-): Promise<string> {
-  const githubToken = clean(body.githubToken, 4000);
-  const runtime = oneOf(
-    body.runtime,
-    ["crabbox", "container"] as const,
-    deploymentConfig(env).defaultRuntime,
-  );
-  return sha256(
-    JSON.stringify({
-      repo: normalizeRepo(body.repo),
-      branch: clean(body.branch, 120),
-      runtime,
-      profile: clean(body.profile, 120),
-      command: clean(body.command, 4000),
-      prompt: clean(body.prompt, 4000),
-      parentSessionId: clean(body.parentSessionId, 120),
-      rootSessionId: clean(body.rootSessionId, 120),
-      purpose: clean(body.purpose, 500),
-      summary: clean(body.summary, 500),
-      baseBranch: clean(body.baseBranch, 120),
-      githubTokenHash: githubToken ? await sha256(githubToken) : null,
-      owner,
-    }),
-  );
-}
-
-async function readOpenClawRequestSession(
-  env: RuntimeEnv,
-  requestId: string,
-  requestHash: string,
-): Promise<InteractiveSession | null> {
-  const replay = await database(env)
-    .selectFrom("openclaw_request_replays as replay")
-    .leftJoin("interactive_sessions as session", "session.id", "replay.session_id")
-    .selectAll("session")
-    .select("replay.request_hash as replay_request_hash")
-    .where("replay.request_id", "=", requestId)
-    .executeTakeFirst();
-  if (!replay) return null;
-  if (replay.replay_request_hash !== requestHash) {
-    throw conflict("OpenClaw crabbox request id already belongs to a different request");
-  }
-  if (!replay.id) {
-    throw conflict("OpenClaw crabbox request already completed and is no longer available");
-  }
-  const row = replay as InteractiveSessionRow;
-  if (
-    row.created_by !== "service:openclaw" ||
-    row.openclaw_request_id !== requestId ||
-    row.openclaw_request_hash !== requestHash
-  ) {
-    throw serviceUnavailable("OpenClaw crabbox replay record is inconsistent");
-  }
-  if (row.preparation_pending !== 0) {
-    throw serviceUnavailable("OpenClaw crabbox request is still preparing");
-  }
-  return interactiveSession(row, []);
 }
 
 async function openClawReadSessionRoot(
@@ -14868,15 +14794,6 @@ function systemUser(): User {
     allowed: true,
     teams: [],
   };
-}
-
-function normalizeRepo(value: unknown): string {
-  return String(value ?? "")
-    .trim()
-    .toLowerCase()
-    .replace(/^https:\/\/github\.com\//, "")
-    .replace(/\.git$/, "")
-    .replace(/\/+$/, "");
 }
 
 function normalizeAllow(value: unknown): string {

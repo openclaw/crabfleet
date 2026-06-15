@@ -7,6 +7,7 @@ import {
 import { trustedProxyPublicOrigin, type TrustedProxyEnv } from "../trusted-proxy-auth.ts";
 import { configuredHttpOrigin } from "../url-security.ts";
 import { badRequest } from "./http.ts";
+import { normalizeRepo } from "./repositories.ts";
 
 export const defaultPreferredRepo = "openclaw/crabfleet";
 
@@ -91,15 +92,6 @@ export function clientDeploymentConfig(env: DeploymentEnv): DeploymentConfig {
 
 export function browserAppOrigin(env: DeploymentEnv): string {
   return trustedProxyPublicOrigin(env) ?? deploymentConfig(env).canonicalUrl;
-}
-
-function normalizeRepo(value: unknown): string {
-  return String(value ?? "")
-    .trim()
-    .toLowerCase()
-    .replace(/^https:\/\/github\.com\//, "")
-    .replace(/\.git$/, "")
-    .replace(/\/+$/, "");
 }
 
 function clean(value: unknown, maximum: number): string {

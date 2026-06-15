@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Centralize repository normalization and OpenClaw request identity, semantic hashing, and durable replay lookup behind direct behavior tests.
 - Centralize interactive-session types, capability defaults, hidden adapter identity, and database row/event/archive mapping in a directly tested model module.
 - Give Worker users, allowlist roles, cookie sessions, trusted-proxy identities, GitHub OAuth/API membership, session-owned credentials, and secret encryption dedicated auth modules with behavioral coverage.
 - Isolate Worker ingress authentication, trusted-proxy credential stripping, and independent service-route policy behind direct behavioral tests.
