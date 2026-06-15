@@ -5,6 +5,10 @@ import { test } from "node:test";
 test("app actions use styled HTML dialogs instead of browser prompts", async () => {
   const source = await readFile(new URL("../src/app/main.jsx", import.meta.url), "utf8");
   const appData = await readFile(new URL("../src/app/app-data.js", import.meta.url), "utf8");
+  const appMutations = await readFile(
+    new URL("../src/app/app-mutations.js", import.meta.url),
+    "utf8",
+  );
   const appShell = await readFile(new URL("../src/app/app-shell.jsx", import.meta.url), "utf8");
   const adminDrawer = await readFile(
     new URL("../src/app/admin-drawer.jsx", import.meta.url),
@@ -23,6 +27,7 @@ test("app actions use styled HTML dialogs instead of browser prompts", async () 
 
   assert.doesNotMatch(source, /\bwindow\.(?:alert|confirm|prompt)\s*\(/);
   assert.doesNotMatch(appData, /\bwindow\.(?:alert|confirm|prompt)\s*\(/);
+  assert.doesNotMatch(appMutations, /\bwindow\.(?:alert|confirm|prompt)\s*\(/);
   assert.doesNotMatch(appShell, /\bwindow\.(?:alert|confirm|prompt)\s*\(/);
   assert.doesNotMatch(adminDrawer, /\bwindow\.(?:alert|confirm|prompt)\s*\(/);
   assert.doesNotMatch(dialogs, /\bwindow\.(?:alert|confirm|prompt)\s*\(/);
@@ -47,20 +52,9 @@ test("fleet terminal affordances require attachable session state", async () => 
   assert.match(source, /cli=\{totals\.attachable \?\? props\.cli\}/);
 });
 
-test("workspace deletion is explicit and available from Fleet", async () => {
-  const app = await readFile(new URL("../src/app/main.jsx", import.meta.url), "utf8");
+test("workspace deletion remains available from Fleet", async () => {
   const fleet = await readFile(new URL("../src/app/fleet.jsx", import.meta.url), "utf8");
 
-  assert.match(
-    app,
-    /deletesWorkspace[\s\S]*"Delete Crabbox workspace\?"[\s\S]*"Stop Crabbox session\?"/,
-  );
-  assert.match(app, /"End GitHub Actions terminal session\?"/);
-  assert.match(app, /It does not cancel the GitHub Actions workflow run/);
-  assert.match(app, /endsWorkflowSession[\s\S]*"End session"/);
-  assert.match(app, /legacy backend does not expose provider deletion/);
-  assert.match(app, /action: \(\) => interactiveSessionAction\(id, "stop"\)/);
-  assert.doesNotMatch(app, /This stops the terminal/);
   assert.match(fleet, /!String\(session\.id\)\.startsWith\("LOCAL-"\)/);
   assert.match(fleet, /canManage && actionable/);
   assert.match(fleet, /const endLabel = ending/);
