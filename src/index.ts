@@ -151,6 +151,7 @@ import {
 } from "./worker/session-lineage";
 import {
   InteractiveSessionCreationService,
+  type InteractiveSessionCreateOptions,
   type InteractiveSessionCreationStore,
 } from "./worker/session-creation";
 import {
@@ -1265,193 +1266,16 @@ async function createInteractiveSessionFromInput(
   user: User,
   body: InteractiveSessionCreateRequest,
   githubToken?: string,
-  options: {
-    createdBy?: string;
-    owner?: string;
-    parentSessionId?: string | null;
-    rootSessionId?: string | null;
-    openClawRequestId?: string | null;
-    openClawRequestHash?: string | null;
-    afterReserve?: () => Promise<void>;
-  } = {},
+  options: InteractiveSessionCreateOptions = {},
 ): Promise<{ session: InteractiveSession }> {
-  const request = resolveInteractiveSessionCreateRequest(env, body, {
-    owner: options.owner || actor(user),
-    createdBy: options.createdBy || actor(user),
-  });
-  const {
-    repo,
-    branch,
-    runtime,
-    profile,
-    requestedCapabilities,
-    command,
-    prompt,
-    purpose,
-    summary,
-    owner,
-    createdBy,
-  } = request;
-  await new AdminRepository(env).requireRepo(repo);
-  const lineage = await interactiveSessionLineageService(env).resolve(
-    user,
-    options.parentSessionId ?? (clean(body.parentSessionId, 120) || null),
-    options.rootSessionId ?? (clean(body.rootSessionId, 120) || null),
-  );
   const supervision = openClawSupervision(env);
-  const creation = interactiveSessionCreationService(env, user, supervision);
-  const supervisedRootSessionId = await supervision.supervisedRootForCreate(createdBy, lineage);
-  const preparationReservation = Boolean(options.afterReserve || supervisedRootSessionId);
-  const now = Date.now();
-  for (let attempt = 0; attempt < 3; attempt += 1) {
-    let reservationInserted = false;
-    const id = await nextInteractiveSessionId(env);
-    const rootSessionId = lineage.rootSessionId ?? id;
-    const {
-      agentToken,
-      initialAgentTokenHash,
-      initialSandboxLease,
-      initialSandboxOwnership,
-      adapterWorkspaceId,
-      adapterControlPlane,
-      adapterSettings,
-      adapterCreatePayloadJson,
-    } = await createInteractiveSessionReservationContext(env, request, {
-      id,
-      parentSessionId: lineage.parentSessionId,
-      rootSessionId,
-    });
-    try {
-      const reservationValues = buildInteractiveSessionReservationValues({
-        id,
-        parentSessionId: lineage.parentSessionId,
-        rootSessionId,
-        repo,
-        branch,
-        runtime,
-        adapterName: runtimeAdapterName,
-        profile,
-        adapterWorkspaceId,
-        adapterControlPlane,
-        requestedCapabilities,
-        adapterSettings,
-        adapterCreatePayloadJson,
-        preparationReservation,
-        openClawRequestId: options.openClawRequestId ?? null,
-        openClawRequestHash: options.openClawRequestHash ?? null,
-        command,
-        prompt,
-        purpose,
-        summary,
-        owner,
-        createdBy,
-        initialLeaseId: initialSandboxOwnership?.leaseId ?? null,
-        initialAgentTokenHash,
-        now,
-      });
-      if (options.openClawRequestId && options.openClawRequestHash) {
-        await insertInteractiveSessionReservation(env, reservationValues, {
-          requestId: options.openClawRequestId,
-          requestHash: options.openClawRequestHash,
-          sessionId: id,
-          createdAt: now,
-        });
-      } else {
-        await insertInteractiveSessionReservation(env, reservationValues, null);
-      }
-      reservationInserted = true;
-      const provisioned = await creation.provision(
-        {
-          id,
-          insertedAt: now,
-          supervisedRootSessionId,
-          requiresActivation: preparationReservation,
-          adapterWorkspaceId,
-        },
-        options.afterReserve,
-        () =>
-          interactiveProvisioningService(env).provisionManaged(
-            {
-              id,
-              ...(adapterWorkspaceId ? { adapterWorkspaceId } : {}),
-              ...(adapterControlPlane ? { adapterControlPlane } : {}),
-              ...(adapterSettings
-                ? {
-                    adapterTtlSeconds: adapterSettings.ttlSeconds,
-                    adapterIdleTimeoutSeconds: adapterSettings.idleTimeoutSeconds,
-                    adapterRequestedCapabilities: adapterSettings.capabilities,
-                    adapterCreatePayloadJson,
-                  }
-                : {}),
-              parentSessionId: lineage.parentSessionId,
-              rootSessionId,
-              repo,
-              branch,
-              runtime,
-              profile,
-              command,
-              prompt,
-              purpose,
-              summary,
-              owner,
-              createdBy,
-              ...(githubToken ? { githubToken } : {}),
-            },
-            agentToken,
-            initialSandboxLease && initialSandboxOwnership
-              ? { lease: initialSandboxLease, ownership: initialSandboxOwnership }
-              : undefined,
-          ),
-      );
-      const provisionPersistence = await creation.completeProvision(
-        {
-          sessionId: id,
-          insertedAt: now,
-          profile,
-          requestedCapabilities,
-          initialLeaseId: initialSandboxOwnership?.leaseId ?? null,
-          initialAgentTokenHash,
-          adapterName: runtimeAdapterName,
-        },
-        provisioned,
-      );
-      if (!provisionPersistence.updated && provisioned) {
-        const current = await creation.recoverSupersededProvision(
-          {
-            sessionId: id,
-            adapterName: runtimeAdapterName,
-            sandboxLeasePrefix,
-            now: Date.now(),
-          },
-          provisioned,
-        );
-        return { session: decorateInteractiveSession(current, user, env) };
-      }
-      await audit(
-        env,
-        user,
-        `interactive session created ${id} repo=${repo} runtime=${runtime}`,
-        now,
-      );
-      return {
-        session: decorateInteractiveSession(
-          (await readInteractiveSession(env, id)) as InteractiveSession,
-          user,
-          env,
-        ),
-      };
-    } catch (error) {
-      const replay = await creation.recoverReservationFailure(error, {
-        reservationInserted,
-        attempt,
-        maximumAttempts: 3,
-        requestId: options.openClawRequestId ?? null,
-        requestHash: options.openClawRequestHash ?? null,
-      });
-      if (replay) return { session: replay };
-    }
-  }
-  throw new Error("failed to allocate interactive session id");
+  return {
+    session: await interactiveSessionCreationService(env, user, supervision).create(
+      body,
+      githubToken,
+      options,
+    ),
+  };
 }
 
 function interactiveSessionLineageService(env: RuntimeEnv): InteractiveSessionLineageService {
@@ -1467,7 +1291,38 @@ function interactiveSessionCreationService(
   user: User,
   supervision: OpenClawSupervisionService,
 ): InteractiveSessionCreationService {
+  const admin = new AdminRepository(env);
   const store: InteractiveSessionCreationStore = {
+    now: () => Date.now(),
+    defaultIdentity: () => {
+      const identity = actor(user);
+      return { owner: identity, createdBy: identity };
+    },
+    resolveRequest: (body, identity) => resolveInteractiveSessionCreateRequest(env, body, identity),
+    requireRepo: (repo) => admin.requireRepo(repo),
+    resolveLineage: (parentSessionId, rootSessionId) =>
+      interactiveSessionLineageService(env).resolve(user, parentSessionId, rootSessionId),
+    supervisedRootForCreate: (createdBy, lineage) =>
+      supervision.supervisedRootForCreate(createdBy, lineage),
+    nextSessionId: () => nextInteractiveSessionId(env),
+    createReservationContext: (request, session) =>
+      createInteractiveSessionReservationContext(env, request, session),
+    insertReservation: (input, replay) =>
+      insertInteractiveSessionReservation(
+        env,
+        buildInteractiveSessionReservationValues(input),
+        replay,
+      ),
+    provisionManaged: (request, agentToken, ownership) =>
+      interactiveProvisioningService(env).provisionManaged(request, agentToken, ownership),
+    auditCreated: (sessionId, request, now) =>
+      audit(
+        env,
+        user,
+        `interactive session created ${sessionId} repo=${request.repo} runtime=${request.runtime}`,
+        now,
+      ),
+    decorateSession: (session) => decorateInteractiveSession(session, user, env),
     enforceSupervision: (rootSessionId, insertedSessionId, insertedAt) =>
       supervision.enforceRoomSessionLimitAfterInsert(rootSessionId, insertedSessionId, insertedAt),
     rollbackReservation: (insertedSessionId, insertedAt) =>
@@ -1511,7 +1366,11 @@ function interactiveSessionCreationService(
       await reconcileCredentialPolicyCleanupBatch(env, Date.now(), sessionId);
     },
   };
-  return new InteractiveSessionCreationService(store);
+  return new InteractiveSessionCreationService(store, {
+    adapterName: runtimeAdapterName,
+    sandboxLeasePrefix,
+    maximumAttempts: 3,
+  });
 }
 
 async function cleanupInteractiveSessions(

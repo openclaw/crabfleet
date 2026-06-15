@@ -1,9 +1,37 @@
 import type { InteractiveSession } from "./session-model.ts";
 import type {
+  InteractiveSessionCreateRequest,
+  ResolvedInteractiveSessionCreateRequest,
+} from "./session-create-request.ts";
+import type { InteractiveSessionLineage } from "./session-lineage.ts";
+import type { InteractiveSessionReservationContext } from "./session-reservation-context.ts";
+import type {
+  InteractiveSessionReplayReservation,
+  InteractiveSessionReservationBuildInput,
+} from "./session-repository.ts";
+import type {
   InteractiveProvisionPersistence,
   InteractiveProvisionPersistenceInput,
+  InteractiveProvisionRequest,
   InteractiveProvisionResult,
+  SandboxProvisionOwnership,
 } from "./provisioning/types.ts";
+
+export type InteractiveSessionCreateOptions = {
+  createdBy?: string;
+  owner?: string;
+  parentSessionId?: string | null;
+  rootSessionId?: string | null;
+  openClawRequestId?: string | null;
+  openClawRequestHash?: string | null;
+  afterReserve?: () => Promise<void>;
+};
+
+export type InteractiveSessionCreationConfiguration = {
+  adapterName: string;
+  sandboxLeasePrefix: string;
+  maximumAttempts: number;
+};
 
 export type InteractiveSessionCreationReservation = {
   id: string;
@@ -21,6 +49,45 @@ export type InteractiveSessionProvisionRecoveryInput = {
 };
 
 export type InteractiveSessionCreationStore = {
+  now(): number;
+  defaultIdentity(): { owner: string; createdBy: string };
+  resolveRequest(
+    body: InteractiveSessionCreateRequest,
+    identity: { owner: string; createdBy: string },
+  ): ResolvedInteractiveSessionCreateRequest;
+  requireRepo(repo: string): Promise<void>;
+  resolveLineage(
+    parentSessionId: string | null,
+    rootSessionId: string | null,
+  ): Promise<InteractiveSessionLineage>;
+  supervisedRootForCreate(
+    createdBy: string,
+    lineage: InteractiveSessionLineage,
+  ): Promise<string | null>;
+  nextSessionId(): Promise<string>;
+  createReservationContext(
+    request: ResolvedInteractiveSessionCreateRequest,
+    session: {
+      id: string;
+      parentSessionId: string | null;
+      rootSessionId: string;
+    },
+  ): Promise<InteractiveSessionReservationContext>;
+  insertReservation(
+    input: InteractiveSessionReservationBuildInput,
+    replay: InteractiveSessionReplayReservation | null,
+  ): Promise<void>;
+  provisionManaged(
+    request: InteractiveProvisionRequest,
+    agentToken: string,
+    ownership?: SandboxProvisionOwnership,
+  ): Promise<InteractiveProvisionResult | null>;
+  auditCreated(
+    sessionId: string,
+    request: ResolvedInteractiveSessionCreateRequest,
+    now: number,
+  ): Promise<void>;
+  decorateSession(session: InteractiveSession): InteractiveSession;
   enforceSupervision(
     rootSessionId: string,
     insertedSessionId: string,
@@ -63,9 +130,131 @@ export type InteractiveSessionCreationStore = {
 
 export class InteractiveSessionCreationService {
   private readonly store: InteractiveSessionCreationStore;
+  private readonly configuration: InteractiveSessionCreationConfiguration;
 
-  constructor(store: InteractiveSessionCreationStore) {
+  constructor(
+    store: InteractiveSessionCreationStore,
+    configuration: InteractiveSessionCreationConfiguration,
+  ) {
     this.store = store;
+    this.configuration = configuration;
+  }
+
+  async create(
+    body: InteractiveSessionCreateRequest,
+    githubToken?: string,
+    options: InteractiveSessionCreateOptions = {},
+  ): Promise<InteractiveSession> {
+    const defaultIdentity = this.store.defaultIdentity();
+    const request = this.store.resolveRequest(body, {
+      owner: options.owner || defaultIdentity.owner,
+      createdBy: options.createdBy || defaultIdentity.createdBy,
+    });
+    await this.store.requireRepo(request.repo);
+    const lineage = await this.store.resolveLineage(
+      options.parentSessionId ?? boundedId(body.parentSessionId),
+      options.rootSessionId ?? boundedId(body.rootSessionId),
+    );
+    const supervisedRootSessionId = await this.store.supervisedRootForCreate(
+      request.createdBy,
+      lineage,
+    );
+    const preparationReservation = Boolean(options.afterReserve || supervisedRootSessionId);
+    const now = this.store.now();
+
+    for (let attempt = 0; attempt < this.configuration.maximumAttempts; attempt += 1) {
+      let reservationInserted = false;
+      const id = await this.store.nextSessionId();
+      const rootSessionId = lineage.rootSessionId ?? id;
+      const context = await this.store.createReservationContext(request, {
+        id,
+        parentSessionId: lineage.parentSessionId,
+        rootSessionId,
+      });
+      try {
+        await this.store.insertReservation(
+          reservationBuildInput({
+            id,
+            rootSessionId,
+            lineage,
+            request,
+            context,
+            preparationReservation,
+            options,
+            now,
+            adapterName: this.configuration.adapterName,
+          }),
+          options.openClawRequestId && options.openClawRequestHash
+            ? {
+                requestId: options.openClawRequestId,
+                requestHash: options.openClawRequestHash,
+                sessionId: id,
+                createdAt: now,
+              }
+            : null,
+        );
+        reservationInserted = true;
+        const provisioned = await this.provision(
+          {
+            id,
+            insertedAt: now,
+            supervisedRootSessionId,
+            requiresActivation: preparationReservation,
+            adapterWorkspaceId: context.adapterWorkspaceId,
+          },
+          options.afterReserve,
+          () =>
+            this.store.provisionManaged(
+              provisionRequest(id, rootSessionId, lineage, request, context, githubToken),
+              context.agentToken,
+              context.initialSandboxLease && context.initialSandboxOwnership
+                ? {
+                    lease: context.initialSandboxLease,
+                    ownership: context.initialSandboxOwnership,
+                  }
+                : undefined,
+            ),
+        );
+        const persistence = await this.completeProvision(
+          {
+            sessionId: id,
+            insertedAt: now,
+            profile: request.profile,
+            requestedCapabilities: request.requestedCapabilities,
+            initialLeaseId: context.initialSandboxOwnership?.leaseId ?? null,
+            initialAgentTokenHash: context.initialAgentTokenHash,
+            adapterName: this.configuration.adapterName,
+          },
+          provisioned,
+        );
+        if (!persistence.updated && provisioned) {
+          const current = await this.recoverSupersededProvision(
+            {
+              sessionId: id,
+              adapterName: this.configuration.adapterName,
+              sandboxLeasePrefix: this.configuration.sandboxLeasePrefix,
+              now: this.store.now(),
+            },
+            provisioned,
+          );
+          return this.store.decorateSession(current);
+        }
+        await this.store.auditCreated(id, request, now);
+        const current = await this.store.readSession(id);
+        if (!current) throw new Error("interactive session disappeared after creation");
+        return this.store.decorateSession(current);
+      } catch (error) {
+        const replay = await this.recoverReservationFailure(error, {
+          reservationInserted,
+          attempt,
+          maximumAttempts: this.configuration.maximumAttempts,
+          requestId: options.openClawRequestId ?? null,
+          requestHash: options.openClawRequestHash ?? null,
+        });
+        if (replay) return replay;
+      }
+    }
+    throw new Error("failed to allocate interactive session id");
   }
 
   async provision<T>(
@@ -189,4 +378,90 @@ export class InteractiveSessionCreationService {
     if (!current) throw new Error("interactive session disappeared during provisioning");
     return current;
   }
+}
+
+function reservationBuildInput(input: {
+  id: string;
+  rootSessionId: string;
+  lineage: InteractiveSessionLineage;
+  request: ResolvedInteractiveSessionCreateRequest;
+  context: InteractiveSessionReservationContext;
+  preparationReservation: boolean;
+  options: InteractiveSessionCreateOptions;
+  now: number;
+  adapterName: string;
+}): InteractiveSessionReservationBuildInput {
+  const { id, rootSessionId, lineage, request, context, preparationReservation, options, now } =
+    input;
+  return {
+    id,
+    parentSessionId: lineage.parentSessionId,
+    rootSessionId,
+    repo: request.repo,
+    branch: request.branch,
+    runtime: request.runtime,
+    adapterName: input.adapterName,
+    profile: request.profile,
+    adapterWorkspaceId: context.adapterWorkspaceId,
+    adapterControlPlane: context.adapterControlPlane,
+    requestedCapabilities: request.requestedCapabilities,
+    adapterSettings: context.adapterSettings,
+    adapterCreatePayloadJson: context.adapterCreatePayloadJson,
+    preparationReservation,
+    openClawRequestId: options.openClawRequestId ?? null,
+    openClawRequestHash: options.openClawRequestHash ?? null,
+    command: request.command,
+    prompt: request.prompt,
+    purpose: request.purpose,
+    summary: request.summary,
+    owner: request.owner,
+    createdBy: request.createdBy,
+    initialLeaseId: context.initialSandboxOwnership?.leaseId ?? null,
+    initialAgentTokenHash: context.initialAgentTokenHash,
+    now,
+  };
+}
+
+function provisionRequest(
+  id: string,
+  rootSessionId: string,
+  lineage: InteractiveSessionLineage,
+  request: ResolvedInteractiveSessionCreateRequest,
+  context: InteractiveSessionReservationContext,
+  githubToken?: string,
+): InteractiveProvisionRequest {
+  return {
+    id,
+    ...(context.adapterWorkspaceId ? { adapterWorkspaceId: context.adapterWorkspaceId } : {}),
+    ...(context.adapterControlPlane ? { adapterControlPlane: context.adapterControlPlane } : {}),
+    ...(context.adapterSettings
+      ? {
+          adapterTtlSeconds: context.adapterSettings.ttlSeconds,
+          adapterIdleTimeoutSeconds: context.adapterSettings.idleTimeoutSeconds,
+          adapterRequestedCapabilities: context.adapterSettings.capabilities,
+          adapterCreatePayloadJson: context.adapterCreatePayloadJson,
+        }
+      : {}),
+    parentSessionId: lineage.parentSessionId,
+    rootSessionId,
+    repo: request.repo,
+    branch: request.branch,
+    runtime: request.runtime,
+    profile: request.profile,
+    command: request.command,
+    prompt: request.prompt,
+    purpose: request.purpose,
+    summary: request.summary,
+    owner: request.owner,
+    createdBy: request.createdBy,
+    ...(githubToken ? { githubToken } : {}),
+  };
+}
+
+function boundedId(value: unknown): string | null {
+  return (
+    String(value ?? "")
+      .trim()
+      .slice(0, 120) || null
+  );
 }
