@@ -172,6 +172,11 @@ import {
   type ResolvedRuntimeProfileCodexSsh,
   type RuntimeProfileDescriptor,
 } from "./runtime-profiles";
+import {
+  defaultInteractiveRuntime,
+  parseInteractiveRuntimes,
+  type ConfigurableInteractiveRuntime,
+} from "./interactive-runtimes";
 
 type Role = "viewer" | "maintainer" | "owner";
 type InteractiveRuntime = "crabbox" | "container" | "github_actions";
@@ -184,7 +189,8 @@ type DeploymentConfig = {
   productUrl: string;
   sshHost: string;
   preferredRepo: string;
-  defaultRuntime: "crabbox" | "container";
+  defaultRuntime: ConfigurableInteractiveRuntime;
+  interactiveRuntimes: ConfigurableInteractiveRuntime[];
   defaultProfile: string;
   runtimeProfiles: RuntimeProfileDescriptor[];
 };
@@ -245,6 +251,7 @@ type RuntimeEnv = Env & {
   CRABFLEET_SSH_HOST?: string;
   CRABFLEET_PREFERRED_REPO?: string;
   CRABFLEET_DEFAULT_RUNTIME?: string;
+  CRABFLEET_INTERACTIVE_RUNTIMES?: string;
   CRABFLEET_DEFAULT_PROFILE?: string;
   CRABFLEET_RUNTIME_PROFILES_JSON?: string;
   CRABFLEET_DEV_LOGIN_ENABLED?: string;
@@ -1111,6 +1118,7 @@ function runtimeAdapterCreateSettings(
 function deploymentConfig(env: RuntimeEnv): DeploymentConfig {
   const defaultProfile = clean(env.CRABFLEET_DEFAULT_PROFILE, 120) || "default";
   const runtimeProfiles = parseRuntimeProfiles(env.CRABFLEET_RUNTIME_PROFILES_JSON);
+  const interactiveRuntimes = parseInteractiveRuntimes(env.CRABFLEET_INTERACTIVE_RUNTIMES);
   if (runtimeProfiles.length > 0 && !runtimeProfileByID(runtimeProfiles, defaultProfile)) {
     throw new TypeError("CRABFLEET_DEFAULT_PROFILE must name a configured runtime profile");
   }
@@ -1120,11 +1128,8 @@ function deploymentConfig(env: RuntimeEnv): DeploymentConfig {
     productUrl: configuredHttpOrigin(env.CRABFLEET_PRODUCT_URL, "https://crabfleet.ai"),
     sshHost: clean(env.CRABFLEET_SSH_HOST, 240) || "crabd.sh",
     preferredRepo: normalizeRepo(env.CRABFLEET_PREFERRED_REPO) || preferredRepo,
-    defaultRuntime: oneOf(
-      env.CRABFLEET_DEFAULT_RUNTIME,
-      ["crabbox", "container"] as const,
-      "container",
-    ),
+    defaultRuntime: defaultInteractiveRuntime(env.CRABFLEET_DEFAULT_RUNTIME, interactiveRuntimes),
+    interactiveRuntimes,
     defaultProfile,
     runtimeProfiles,
   };
@@ -5097,9 +5102,14 @@ async function createInteractiveSessionFromInput(
   await requireRepo(env, repo);
   const branch = clean(body.branch, 120) || "main";
   const deployment = deploymentConfig(env);
-  const runtime = oneOf(body.runtime, ["crabbox", "container"], deployment.defaultRuntime) as
-    | "crabbox"
-    | "container";
+  const requestedRuntime = clean(body.runtime, 40);
+  if (
+    requestedRuntime &&
+    !deployment.interactiveRuntimes.includes(requestedRuntime as ConfigurableInteractiveRuntime)
+  ) {
+    throw badRequest("runtime is not enabled for interactive sessions");
+  }
+  const runtime = (requestedRuntime || deployment.defaultRuntime) as ConfigurableInteractiveRuntime;
   const { profile, descriptor: runtimeProfile } = selectedRuntimeProfile(deployment, body.profile);
   requireRuntimeAdapterCreatePreflight(env, runtime, profile);
   const requestedCapabilities = runtimeProfileCapabilities(
