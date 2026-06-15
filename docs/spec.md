@@ -159,17 +159,9 @@ Required properties:
 
 Ambiguous creates are replayed only with the original payload and key. A `workspace_id_conflict` proves non-ownership and never causes Crabfleet to adopt or delete the pre-existing workspace.
 
-### Legacy Backends
+### Provision Hook
 
-Compatibility paths remain for:
-
-- create-only `CRABBOX_INTERACTIVE_PROVISION_URL`;
-- `CRABBOX_RUNTIME_PROVISION_URL`;
-- `CRABBOX_CLOUDFLARE_RUNNER_URL`;
-- `CRABBOX_CLAWFLEET_URL`;
-- explicit `CRABBOX_PTY_BRIDGE_URL`.
-
-These paths do not gain lifecycle guarantees they do not implement. Legacy sessions may stop only inside Crabfleet when the backend has no delete/release contract.
+`POST /api/provision/interactive` provisions only built-in Cloudflare Sandbox workspaces. External workspaces use the versioned runtime-adapter lifecycle through managed interactive sessions.
 
 ### GitHub Actions
 
@@ -206,7 +198,7 @@ Terminal attachability requires:
 
 - active lifecycle status;
 - current `terminal` capability;
-- a resolvable built-in Sandbox, bridge, runner, or provider terminal;
+- a resolvable built-in Sandbox, bridge, or provider terminal;
 - current viewer authorization and control state.
 
 `ptyAvailable` is the Worker-authoritative result. Raw provider terminal credentials are never returned to clients.
@@ -283,7 +275,7 @@ D1 is the source of truth for current app state.
 - Sandbox credential-policy registry;
 - checkpoint registry.
 
-The Worker owns the general multiplex terminal hub and connects each subscription to its Sandbox, bridge, runner, or adapter backend. There is no `BoardDO` or `RunDO`. Board and Fleet state use D1 plus REST polling. The browser refreshes general state every 15 seconds; terminal bytes use WebSockets.
+The Worker owns the general multiplex terminal hub and connects each subscription to its Sandbox, bridge, or adapter backend. There is no `BoardDO` or `RunDO`. Board and Fleet state use D1 plus REST polling. The browser refreshes general state every 15 seconds; terminal bytes use WebSockets.
 
 ### R2
 

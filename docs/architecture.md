@@ -115,8 +115,6 @@ Interactive sessions are the live execution plane. Supported paths:
 
 - **Built-in Sandbox:** Worker provisions a Cloudflare Sandbox, prepares the repo, starts a Codex-capable shell, and proxies PTY traffic.
 - **Versioned runtime adapter:** Worker durably registers a tenant-namespaced workspace ID, creates and reconciles the provider workspace, proxies PTY access, mints transient desktop links, and confirms provider release before terminal state.
-- **Legacy provision hook:** create-only compatibility path. It can return terminal/VNC metadata but has no provider release lifecycle.
-- **ClawFleet compatibility:** create-only Crabbox integration retained for deployments still using it.
 - **GitHub Actions:** OpenClaw automation registers a logical work key; an Actions runner connects outbound to `SessionControlDO`, reports work state, and receives browser steering.
 
 Sessions can carry parent/root lineage, purpose, summary, share state, delegated control, multiplayer mode, archive metadata, and runtime-specific capability state.
@@ -154,10 +152,10 @@ Browser, CLI, agent, and SSH gateway clients use the multiplex `/api/terminal/ws
 - rechecks D1 authorization without waiting on provider I/O;
 - forwards input only for the current controller;
 - closes subscriptions after control or terminal capability is revoked;
-- appends dimensions only to known bridge/runner routes, never opaque signed adapter URLs;
+- appends dimensions only to configured bridge routes, never opaque signed adapter URLs;
 - keeps runtime bearer credentials out of browser responses.
 
-Versioned adapter VNC uses the authenticated Worker route `/api/interactive-sessions/:id/vnc`, which mints a fresh provider desktop connection after authorization. Legacy sessions may expose a validated stored VNC URL.
+Versioned adapter VNC uses the authenticated Worker route `/api/interactive-sessions/:id/vnc`, which mints a fresh provider desktop connection after authorization.
 
 ## Sandbox Credentials
 

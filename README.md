@@ -29,7 +29,7 @@ Crabfleet gives OpenClaw maintainers a fleet dashboard where every Codex crabbox
 - **Cloudflare Sandbox containers** for standalone interactive Codex CLI workspaces with live PTY attach.
 - **Runtime descriptors** for card scheduling evidence and capability display.
 - **Versioned lifecycle adapter** for idempotent external workspace creation, bounded status reconciliation, provider-backed deletion, terminal attachment, and authenticated transient desktop connections.
-- **Provision endpoint** at `/api/provision/interactive` that can use the built-in Sandbox backend or retain a legacy create-only adapter or ClawFleet integration, with durable ownership and a bearer-authenticated standalone PTY route.
+- **Provision endpoint** at `/api/provision/interactive` for durable built-in Sandbox ownership and a bearer-authenticated standalone PTY route.
 - **SessionControlDO relay** for one outbound GitHub Actions runner and multiple authenticated Ghostty viewers per action session.
 - **R2 session archives** for periodically refreshed interactive-session event NDJSON, transcripts, and summaries, finalized at terminal completion.
 - **GitHub API** for OAuth, org/team membership, and issue/PR previews across enabled repos.
@@ -204,29 +204,17 @@ The Crabbox namespace cutover intentionally has no old-name compatibility. Exist
 - `GITHUB_ORG` – GitHub org for membership check (default: `openclaw`)
 - `GITHUB_TOKEN` – GitHub token for all enabled repo issue/PR previews and private repo `CRABBOX.md` refreshes (optional; public/default repo paths work without it)
 - `CRABBOX_TOKEN_ENCRYPTION_KEY` – Optional encryption key for per-session GitHub OAuth tokens; defaults to `GITHUB_CLIENT_SECRET`
-- `CRABBOX_INTERACTIVE_PROVISION_URL` – Optional adapter endpoint for standalone Codex CLI workspaces
-- `CRABBOX_INTERACTIVE_PROVISION_TOKEN` – Optional bearer token sent to the interactive provision endpoint; required when backend URLs below are configured and always required to stop an existing standalone Sandbox
+- `CRABBOX_INTERACTIVE_PROVISION_TOKEN` – Required bearer token for the built-in Sandbox provision, PTY, and stop endpoints
 - `CRABBOX_STANDALONE_SANDBOX_TTL_SECONDS` – Optional built-in standalone Sandbox lifetime, default `14400`, bounded to 300–86400 seconds
-- `CRABBOX_RUNTIME_ADAPTER_URL` – Optional fixed base URL for the versioned workspace lifecycle adapter; mutually exclusive with `CRABBOX_RUNTIME_ADAPTER_URL_TEMPLATE`, takes precedence over the legacy create-only runtime provision URL, and becomes immutable registration identity for each created lifecycle. Nested base paths are preserved; raw query or fragment delimiters are rejected.
+- `CRABBOX_RUNTIME_ADAPTER_URL` – Optional fixed base URL for the versioned workspace lifecycle adapter; mutually exclusive with `CRABBOX_RUNTIME_ADAPTER_URL_TEMPLATE` and becomes immutable registration identity for each created lifecycle. Nested base paths are preserved; raw query or fragment delimiters are rejected.
 - `CRABBOX_RUNTIME_ADAPTER_URL_TEMPLATE` – Optional profile-routed alternative containing exactly one `{profile}` full path segment. Selected profile IDs must be lowercase DNS labels; the resolved URL is validated and persisted with the same immutable lifecycle fence as a fixed adapter URL.
 - `CRABBOX_COORDINATOR_ORIGIN` – Optional public origin corresponding to the `CRABBOX_COORDINATOR` service binding. Matching fixed or profile-routed lifecycle and terminal requests use the binding; other adapter origins use normal outbound fetch.
 - `CRABBOX_RUNTIME_ADAPTER_TOKEN` – Required bearer token for the versioned lifecycle adapter; sent only over HTTPS or literal loopback HTTP
 - `CRABBOX_RUNTIME_ADAPTER_NAMESPACE` – Required stable tenant namespace when the versioned adapter is enabled; a DNS-safe label of at most 32 characters used in every workspace ID and idempotency key
 - `CRABBOX_RUNTIME_ADAPTER_TTL_SECONDS` – Optional requested workspace TTL, default `14400`
 - `CRABBOX_RUNTIME_ADAPTER_IDLE_SECONDS` – Optional requested workspace idle timeout, default `1800`
-- `CRABBOX_RUNTIME_PROVISION_URL` – Optional generic backend URL used by `/api/provision/interactive`
-- `CRABBOX_RUNTIME_PROVISION_TOKEN` – Optional bearer token sent to the generic runtime backend
-- `CRABBOX_CLOUDFLARE_RUNNER_URL` – Optional Crabbox Cloudflare container runner URL used by `/api/provision/interactive`
-- `CRABBOX_CLOUDFLARE_RUNNER_TOKEN` – Optional bearer token sent to the Cloudflare runner
-- `CRABBOX_CLOUDFLARE_RUNNER_INSTANCE_TYPE` – Optional runner instance type, default `standard-4`
-- `CRABBOX_CLOUDFLARE_RUNNER_WORKDIR` – Optional base workdir for provisioned sandboxes, default `/workspace/crabbox`
-- `CRABBOX_CLOUDFLARE_RUNNER_TTL_SECONDS` – Optional sandbox TTL, default `14400`
-- `CRABBOX_CLOUDFLARE_RUNNER_IDLE_SECONDS` – Optional idle timeout, default `1800`
 - `CRABBOX_PTY_BRIDGE_URL` – Optional WebSocket PTY bridge URL/template for live Ghostty attach; requires WSS except literal loopback WS and supports `{id}`, `{leaseId}`, `{repo}`, `{branch}`, and `{runtime}`
 - `CRABBOX_PTY_BRIDGE_TOKEN` – Optional bearer token sent from Crabfleet to the PTY bridge
-- `CRABBOX_CLAWFLEET_URL` – Optional ClawFleet dashboard/API URL used by `/api/provision/interactive` for `crabbox` sessions
-- `CRABBOX_CLAWFLEET_TOKEN` – Optional bearer token sent to ClawFleet
-- `CRABBOX_CLAWFLEET_PUBLIC_URL` – Optional public ClawFleet URL used when building attach/VNC links
 - `CRABBOX_OPENCLAW_TOKEN` – Internal bearer token for OpenClaw service crabbox and GitHub Actions session registration
 - `CRABBOX_MULTICODEX_TOKEN` – Optional dedicated bearer token for MultiCodex room supervision
 - `CRABFLEET_SSH_GATEWAY_TOKEN` / `CRABBOX_SSH_GATEWAY_TOKEN` – Shared bearer token for the Go SSH gateway internal API
@@ -327,7 +315,7 @@ go run ./cmd/crabbox-ssh-gateway
 Unknown public keys get a short GitHub OAuth link through `ssh link@host`. Linked keys can
 run `whoami`, `list`, `new`, `attach SESSION_ID`, and `delete SESSION_ID`; `new` creates an
 interactive Codex session and attaches. Delete confirms runtime release for versioned lifecycle
-adapters; legacy create-only and ClawFleet sessions stop locally and may need provider cleanup.
+adapters and cleans up built-in Sandbox sessions through their durable ownership records.
 
 Production should expose the gateway at `crabd.sh` as a DNS-only `A` record.
 Use `ssh link@crabd.sh` once to connect a GitHub-backed SSH key, then run
@@ -382,7 +370,7 @@ curl -fsS https://crabfleet.openclaw.ai/api/openclaw/crabboxes \
   -d '{"owner":"@steipete","repo":"openclaw/crabfleet","prompt":"prep the meeting follow-up"}'
 ```
 
-The created crabbox appears in the fleet grid under the requested owner. Provisioning follows normal interactive-session routing: built-in Sandbox for Container, the versioned adapter for Crabbox, or an intentionally configured legacy path.
+The created crabbox appears in the fleet grid under the requested owner. Provisioning follows normal interactive-session routing: built-in Sandbox for Container or the versioned adapter for Crabbox.
 
 ### Project Structure
 

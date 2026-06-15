@@ -23,13 +23,9 @@ test("opaque provider terminal URLs pass through the multiplex hub unchanged", a
   assert.doesNotMatch(source, /async function interactiveSessionPty/);
 });
 
-test("known bridge and runner targets receive terminal dimensions", () => {
+test("configured bridge targets receive terminal dimensions", () => {
   assert.equal(
     sizedTerminalTargetUrl("wss://bridge.example/pty?token=opaque", "bridge", 120, 34),
     "wss://bridge.example/pty?token=opaque&cols=120&rows=34",
-  );
-  assert.equal(
-    sizedTerminalTargetUrl("wss://runner.example/pty?cols=80", "cloudflare", 132, 40),
-    "wss://runner.example/pty?cols=132&rows=40",
   );
 });

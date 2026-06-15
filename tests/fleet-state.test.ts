@@ -246,13 +246,6 @@ test("fleet attachability follows resolvable PTY routes", () => {
   );
   assert.equal(
     summary(
-      { ...baseSession, leaseId: "cloudflare:workspace-1", attachUrl: null },
-      { cloudflareRunnerUrl: "https://runner.example" },
-    ),
-    true,
-  );
-  assert.equal(
-    summary(
       { ...baseSession, leaseId: null, attachUrl: null },
       { ptyBridgeUrl: "https://bridge.example/pty/{id}" },
     ),

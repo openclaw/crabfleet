@@ -47,17 +47,10 @@ import {
   SPEC_V2_HTML,
   SPEC_V2_MARKDOWN,
 } from "./generated";
-import {
-  appCanonicalHost,
-  appCanonicalOrigin,
-  appRedirectHosts,
-  canonicalAppRedirect,
-  productHostResponse,
-} from "./canonical-host";
+import { appCanonicalOrigin, canonicalAppRedirect, productHostResponse } from "./canonical-host";
 import {
   adapterFailureReleaseState,
   adapterWorkspaceIdMatches,
-  createOnlyAdapterStatus,
   definitiveRuntimeAdapterCreateFailure,
   effectiveAdapterCapabilities,
   currentAdapterDesktopConnection,
@@ -324,7 +317,11 @@ import {
   type RuntimeAdapterWorkspaceStopResult,
 } from "./worker/session-runtime-adapter-stop";
 import { sharedInteractiveSession } from "./worker/session-sharing";
-import type { InteractiveProvisionResult } from "./worker/session-provisioning";
+import {
+  managedInteractiveProvisionBackend,
+  standaloneInteractiveProvisionSupported,
+  type InteractiveProvisionResult,
+} from "./worker/session-provisioning";
 import {
   interactiveCommand,
   interactiveSessionPurpose,
@@ -622,21 +619,6 @@ type StandaloneSandboxTerminalOwnership = {
 
 type SandboxExecutionSession = Awaited<ReturnType<CloudflareSandbox["createSession"]>>;
 type SandboxSessionTarget = Pick<SandboxExecutionSession, "exec" | "mkdir" | "setEnvVars">;
-
-type ClawFleetInstancePayload = {
-  name?: string;
-  status?: string;
-  novnc_port?: number;
-  gateway_port?: number;
-};
-
-type CloudflareSandboxPayload = {
-  id?: string;
-  state?: string;
-  workdir?: string;
-  instanceType?: string;
-  labels?: Record<string, string>;
-};
 
 type ChangedFile = {
   path: string;
@@ -3191,7 +3173,6 @@ async function readFleetState(
     registryAvailable: policyResult.available,
     sandboxAvailable: Boolean(env.SANDBOX),
     ptyBridgeUrl: env.CRABBOX_PTY_BRIDGE_URL,
-    cloudflareRunnerUrl: env.CRABBOX_CLOUDFLARE_RUNNER_URL,
   });
 }
 
@@ -6585,7 +6566,11 @@ async function provisionInteractiveSession(
     ownership: SandboxCurrentLeaseFence;
   },
 ): Promise<InteractiveProvisionResult | null> {
-  if (session.runtime === "container" && env.SANDBOX) {
+  const backend = managedInteractiveProvisionBackend(session.runtime, {
+    sandbox: Boolean(env.SANDBOX),
+    runtimeAdapter: runtimeAdapterConfigurationPresent(env),
+  });
+  if (backend === "sandbox") {
     if (!sandboxProvision) {
       return failedProvision("Cloudflare Sandbox durable ownership is missing");
     }
@@ -6597,75 +6582,17 @@ async function provisionInteractiveSession(
       sandboxProvision.ownership,
     );
   }
-  if (runtimeAdapterConfigurationPresent(env)) {
+  if (backend === "runtime-adapter") {
     return provisionWithRuntimeAdapter(env, session, agentToken);
   }
-  if (!env.CRABBOX_INTERACTIVE_PROVISION_URL) return null;
-  if (isBuiltInInteractiveProvisionUrl(env, env.CRABBOX_INTERACTIVE_PROVISION_URL)) {
-    return provisionInteractivePayload(env, session, agentToken);
-  }
-  let response: Response;
-  try {
-    const headers = new Headers({ "content-type": "application/json" });
-    if (env.CRABBOX_INTERACTIVE_PROVISION_TOKEN) {
-      headers.set("authorization", `Bearer ${env.CRABBOX_INTERACTIVE_PROVISION_TOKEN}`);
-    }
-    response = await fetch(env.CRABBOX_INTERACTIVE_PROVISION_URL, {
-      method: "POST",
-      headers,
-      body: JSON.stringify(session),
-    });
-  } catch (error) {
-    return {
-      status: "failed",
-      leaseId: null,
-      attachUrl: null,
-      vncUrl: null,
-      message: `interactive provision failed: ${clean(String(error), 240)}`,
-    };
-  }
-  if (!response.ok) {
-    return {
-      status: "failed",
-      leaseId: null,
-      attachUrl: null,
-      vncUrl: null,
-      message: `interactive provision failed: HTTP ${response.status}`,
-    };
-  }
-  const body = (await response.json().catch(() => ({}))) as Record<string, unknown>;
-  const status = createOnlyAdapterStatus(body.status);
-  if (!status) {
-    return {
-      status: "failed",
-      leaseId: null,
-      attachUrl: null,
-      vncUrl: null,
-      message: "interactive provision failed: invalid adapter response",
-    };
-  }
-  const leaseId = clean(body.leaseId ?? body.lease_id, 240) || null;
-  const attachUrl = clean(body.attachUrl ?? body.attach_url, 1000) || null;
-  const vncUrl = clean(body.vncUrl ?? body.vnc_url, 1000) || null;
-  return {
-    status,
-    leaseId,
-    attachUrl,
-    vncUrl,
-    message: redactedAdapterMessage(
-      clean(body.message, 500) || null,
-      status,
-      [leaseId],
-      [attachUrl, vncUrl],
-    ),
-  };
+  return null;
 }
 
 async function provisionInteractiveEndpoint(
   request: Request,
   env: RuntimeEnv,
 ): Promise<InteractiveProvisionResult> {
-  authorizeProvisionEndpoint(request, env);
+  authorizeProvisionBearerToken(request, env);
   const session = await readJson<Partial<InteractiveProvisionRequest>>(request);
   const id = clean(session.id, 120);
   const repo = normalizeRepo(session.repo);
@@ -6715,7 +6642,7 @@ async function provisionInteractiveEndpoint(
     }
     return provisionManagedSandboxEndpoint(env, payload, managed);
   }
-  if (payload.runtime === "container" && env.SANDBOX) {
+  if (standaloneInteractiveProvisionSupported(payload.runtime, Boolean(env.SANDBOX))) {
     if (managedInteractiveSessionId(payload.id)) {
       return failedProvision(
         "interactive provision failed: standalone provision id uses the managed session namespace",
@@ -6723,7 +6650,11 @@ async function provisionInteractiveEndpoint(
     }
     return provisionStandaloneSandbox(env, payload);
   }
-  return provisionInteractivePayload(env, payload);
+  return failedProvision(
+    payload.runtime === "container"
+      ? "interactive provision failed: Cloudflare Sandbox binding is not configured"
+      : "interactive provision failed: standalone provision supports container runtime only",
+  );
 }
 
 function managedSandboxProvisionPayloadMatches(
@@ -7370,7 +7301,7 @@ async function standaloneSandboxPty(
   env: RuntimeEnv,
   provisionId: string,
 ): Promise<Response> {
-  authorizeProvisionEndpoint(request, env);
+  authorizeProvisionBearerToken(request, env);
   if (request.headers.get("upgrade")?.toLowerCase() !== "websocket") {
     throw badRequest("websocket upgrade required");
   }
@@ -7486,70 +7417,6 @@ function standaloneSandboxTerminalGrant(
       .executeTakeFirst();
     return Boolean(owner);
   });
-}
-
-function isBuiltInInteractiveProvisionUrl(env: RuntimeEnv, value: string): boolean {
-  if (value === "/api/provision/interactive") return true;
-  try {
-    const url = new URL(value);
-    return (
-      url.pathname === "/api/provision/interactive" &&
-      (url.hostname === new URL(deploymentConfig(env).canonicalUrl).hostname ||
-        url.hostname === appCanonicalHost ||
-        appRedirectHosts.has(url.hostname))
-    );
-  } catch {
-    return false;
-  }
-}
-
-async function provisionInteractivePayload(
-  env: RuntimeEnv,
-  payload: InteractiveProvisionRequest,
-  _agentToken?: string,
-): Promise<InteractiveProvisionResult> {
-  if (payload.runtime === "container" && env.SANDBOX) {
-    return failedProvision("Cloudflare Sandbox provision requires durable ownership");
-  }
-  if (runtimeAdapterConfigurationPresent(env)) {
-    return failedProvision(
-      "versioned runtime adapter requires a durable interactive session lifecycle",
-    );
-  }
-  if (env.CRABBOX_RUNTIME_PROVISION_URL) {
-    return forwardRuntimeProvision(env, payload);
-  }
-  if (payload.runtime === "container" && env.CRABBOX_CLOUDFLARE_RUNNER_URL) {
-    return provisionWithCloudflareRunner(env, payload);
-  }
-  if (payload.runtime === "crabbox" && env.CRABBOX_CLAWFLEET_URL) {
-    return provisionWithClawFleet(env, payload);
-  }
-  return {
-    status: "pending_adapter",
-    leaseId: null,
-    attachUrl: null,
-    attachUrlPresent: true,
-    vncUrl: null,
-    message: "provision route live; runtime backend not configured",
-  };
-}
-
-function authorizeProvisionEndpoint(request: Request, env: RuntimeEnv): void {
-  const hasBackend = Boolean(
-    env.SANDBOX ||
-    runtimeAdapterConfigurationPresent(env) ||
-    env.CRABBOX_RUNTIME_PROVISION_URL ||
-    env.CRABBOX_CLOUDFLARE_RUNNER_URL ||
-    env.CRABBOX_CLAWFLEET_URL,
-  );
-  if (!env.CRABBOX_INTERACTIVE_PROVISION_TOKEN) {
-    if (hasBackend) {
-      throw serviceUnavailable("interactive provision token is not configured");
-    }
-    return;
-  }
-  authorizeProvisionBearerToken(request, env);
 }
 
 function authorizeProvisionBearerToken(request: Request, env: RuntimeEnv): void {
@@ -9178,15 +9045,6 @@ function sandboxHasGitHubCredential(env: RuntimeEnv, session: SandboxRuntimeSess
   return Boolean(("githubToken" in session && session.githubToken) || env.GITHUB_TOKEN);
 }
 
-function githubTokenEnv(session: Pick<InteractiveProvisionRequest, "githubToken">): {
-  GITHUB_TOKEN?: string;
-  GH_TOKEN?: string;
-} {
-  return session.githubToken
-    ? { GITHUB_TOKEN: session.githubToken, GH_TOKEN: session.githubToken }
-    : {};
-}
-
 async function provisionWithRuntimeAdapter(
   env: RuntimeEnv,
   session: InteractiveProvisionRequest,
@@ -10344,167 +10202,6 @@ function runtimeAdapterProviderConfigured(env: RuntimeEnv): boolean {
   );
 }
 
-async function forwardRuntimeProvision(
-  env: RuntimeEnv,
-  session: InteractiveProvisionRequest,
-): Promise<InteractiveProvisionResult> {
-  let response: Response;
-  try {
-    const headers = new Headers({ "content-type": "application/json" });
-    if (env.CRABBOX_RUNTIME_PROVISION_TOKEN) {
-      headers.set("authorization", `Bearer ${env.CRABBOX_RUNTIME_PROVISION_TOKEN}`);
-    }
-    response = await fetch(env.CRABBOX_RUNTIME_PROVISION_URL as string, {
-      method: "POST",
-      headers,
-      body: JSON.stringify(session),
-    });
-  } catch (error) {
-    return failedProvision(`interactive provision failed: ${safeProviderError(error)}`);
-  }
-  if (!response.ok) {
-    return failedProvision(`interactive provision failed: runtime HTTP ${response.status}`);
-  }
-  return provisionResultFromBody(
-    (await response.json().catch(() => ({}))) as Record<string, unknown>,
-    "interactive provision failed: invalid runtime response",
-  );
-}
-
-async function provisionWithCloudflareRunner(
-  env: RuntimeEnv,
-  session: InteractiveProvisionRequest,
-): Promise<InteractiveProvisionResult> {
-  if (!env.CRABBOX_CLOUDFLARE_RUNNER_TOKEN) {
-    return failedProvision("cloudflare runner token is not configured");
-  }
-
-  const runnerUrl = env.CRABBOX_CLOUDFLARE_RUNNER_URL as string;
-  const sandboxId = clean(`crabbox-${session.id}`.toLowerCase().replace(/[^a-z0-9_-]/g, "-"), 64);
-  const workdir = cloudflareRunnerWorkdir(env, session);
-  const instanceType = cloudflareRunnerInstanceType(env);
-  let response: Response;
-  try {
-    response = await fetch(joinUrl(runnerUrl, "/v1/sandboxes"), {
-      method: "POST",
-      headers: {
-        authorization: `Bearer ${env.CRABBOX_CLOUDFLARE_RUNNER_TOKEN}`,
-        "content-type": "application/json",
-      },
-      body: JSON.stringify({
-        id: sandboxId,
-        leaseId: sandboxId,
-        repo: session.repo,
-        branch: session.branch,
-        workdir,
-        instanceType,
-        ttlSeconds: clampedSeconds(env.CRABBOX_CLOUDFLARE_RUNNER_TTL_SECONDS, 14_400),
-        idleTimeoutSeconds: clampedSeconds(env.CRABBOX_CLOUDFLARE_RUNNER_IDLE_SECONDS, 1_800),
-        env: githubTokenEnv(session),
-        labels: {
-          app: "crabbox",
-          session: session.id,
-          repo: session.repo,
-          branch: session.branch,
-          owner: session.owner,
-          runtime: session.runtime,
-          command: session.command,
-        },
-      }),
-    });
-  } catch (error) {
-    return failedProvision(`cloudflare runner provision failed: ${safeProviderError(error)}`);
-  }
-  if (!response.ok) {
-    return failedProvision(`cloudflare runner provision failed: HTTP ${response.status}`);
-  }
-
-  const body = (await response.json().catch(() => ({}))) as CloudflareSandboxPayload;
-  const state = clean(body.state, 80);
-  const ready = state === "running" || state === "healthy";
-  return {
-    status: ready ? "ready" : "provisioning",
-    leaseId: `cloudflare:${clean(body.id, 120) || sandboxId}`,
-    attachUrl: null,
-    vncUrl: null,
-    message: ready
-      ? `cloudflare sandbox ready (${clean(body.instanceType, 80) || instanceType}); PTY bridge pending`
-      : `cloudflare sandbox ${state || "provisioning"}`,
-  };
-}
-
-async function provisionWithClawFleet(
-  env: RuntimeEnv,
-  session: InteractiveProvisionRequest,
-): Promise<InteractiveProvisionResult> {
-  if (session.runtime !== "crabbox") {
-    return {
-      status: "pending_adapter",
-      leaseId: null,
-      attachUrl: null,
-      vncUrl: null,
-      message: "container runtime requires CRABBOX_RUNTIME_PROVISION_URL",
-    };
-  }
-
-  let response: Response;
-  try {
-    const headers = new Headers({ "content-type": "application/json" });
-    if (env.CRABBOX_CLAWFLEET_TOKEN) {
-      headers.set("authorization", `Bearer ${env.CRABBOX_CLAWFLEET_TOKEN}`);
-    }
-    response = await fetch(joinUrl(env.CRABBOX_CLAWFLEET_URL as string, "/api/v1/instances"), {
-      method: "POST",
-      headers,
-      body: JSON.stringify({ count: 1, runtime_type: "openclaw" }),
-    });
-  } catch (error) {
-    return failedProvision(`clawfleet provision failed: ${safeProviderError(error)}`);
-  }
-  if (!response.ok) {
-    return failedProvision(`clawfleet provision failed: HTTP ${response.status}`);
-  }
-
-  const body = (await response.json().catch(() => ({}))) as Record<string, unknown>;
-  const instances = Array.isArray(body.data) ? body.data : [];
-  const instance = (instances[0] ?? {}) as ClawFleetInstancePayload;
-  const name = clean(instance.name, 120);
-  if (!name) return failedProvision("clawfleet provision failed: missing instance name");
-
-  const publicUrl = env.CRABBOX_CLAWFLEET_PUBLIC_URL || env.CRABBOX_CLAWFLEET_URL || "";
-  const status = instance.status === "running" ? "ready" : "provisioning";
-  return {
-    status,
-    leaseId: `clawfleet:${name}`,
-    attachUrl: joinUrl(publicUrl, `/console/${encodeURIComponent(name)}/`),
-    vncUrl: directPortUrl(publicUrl, instance.novnc_port, "/vnc.html?autoconnect=1&resize=remote"),
-    message: `clawfleet instance ${name} ${status}`,
-  };
-}
-
-function provisionResultFromBody(
-  body: Record<string, unknown>,
-  invalidMessage: string,
-): InteractiveProvisionResult {
-  const status = createOnlyAdapterStatus(body.status);
-  if (!status) return failedProvision(invalidMessage);
-  const leaseId = clean(body.leaseId ?? body.lease_id, 240) || null;
-  const attachUrl = clean(body.attachUrl ?? body.attach_url, 1000) || null;
-  const vncUrl = clean(body.vncUrl ?? body.vnc_url, 1000) || null;
-  return {
-    status,
-    leaseId,
-    attachUrl,
-    vncUrl,
-    message: redactedAdapterMessage(
-      clean(body.message, 500) || null,
-      status,
-      [leaseId],
-      [attachUrl, vncUrl],
-    ),
-  };
-}
-
 function failedProvision(message: string): InteractiveProvisionResult {
   return {
     status: "failed",
@@ -10525,25 +10222,6 @@ function safeProviderError(
     "failed",
     identifiers,
     connectionValues,
-  );
-}
-
-function cloudflareRunnerWorkdir(env: RuntimeEnv, session: InteractiveProvisionRequest): string {
-  const base = clean(env.CRABBOX_CLOUDFLARE_RUNNER_WORKDIR, 160) || "/workspace/crabbox";
-  const suffix = session.id.toLowerCase().replace(/[^a-z0-9_-]/g, "-");
-  return `${base.replace(/\/+$/, "")}/${suffix}`;
-}
-
-function cloudflareRunnerInstanceType(env: RuntimeEnv): string {
-  return (
-    optionalOneOf(env.CRABBOX_CLOUDFLARE_RUNNER_INSTANCE_TYPE, [
-      "lite",
-      "basic",
-      "standard-1",
-      "standard-2",
-      "standard-3",
-      "standard-4",
-    ] as const) ?? "standard-4"
   );
 }
 
@@ -12089,14 +11767,6 @@ function clipboardExtension(mediaType: string): string {
   );
 }
 
-function joinUrl(base: string, path: string): string {
-  try {
-    return new URL(path, base.endsWith("/") ? base : `${base}/`).toString();
-  } catch {
-    return "";
-  }
-}
-
 function sandboxSetupSessionId(id: string): string {
   return clean(`setup-${id}`.toLowerCase().replace(/[^a-z0-9_-]/g, "-"), 80);
 }
@@ -12261,18 +11931,6 @@ async function runSandboxSetupStep(step: string, operation: () => Promise<unknow
   } catch (error) {
     const message = clean(error instanceof Error ? error.message : String(error), 500);
     throw new Error(`${step}: ${message || "failed"}`);
-  }
-}
-
-function directPortUrl(base: string, port: unknown, path: string): string | null {
-  const parsedPort = Number(port);
-  if (!Number.isInteger(parsedPort) || parsedPort <= 0) return null;
-  try {
-    const url = new URL(path, base.endsWith("/") ? base : `${base}/`);
-    url.port = String(parsedPort);
-    return url.toString();
-  } catch {
-    return null;
   }
 }
 

@@ -42,13 +42,6 @@ test("terminal route selection follows managed backend priority", () => {
     "bridge",
   );
   assert.equal(interactivePtyRouteKind({} as RuntimeEnv, routed), "attach");
-  assert.equal(
-    interactivePtyRouteKind(
-      { CRABBOX_CLOUDFLARE_RUNNER_URL: "https://runner.example" } as RuntimeEnv,
-      session({ lease_id: "cloudflare:sandbox-1", attach_url: null }),
-    ),
-    "cloudflare",
-  );
 });
 
 test("bridge targets expand templates, append session context, and use bridge auth", () => {
@@ -114,24 +107,11 @@ test("signed attach targets remain opaque and adapter auth is origin-bound", () 
   );
 });
 
-test("Cloudflare runner targets and terminal headers carry canonical session context", () => {
-  const current = session({ lease_id: "cloudflare:sandbox/1", attach_url: null });
-  const target = interactiveTerminalTarget(
-    {
-      CRABBOX_CLOUDFLARE_RUNNER_URL: "https://runner.example/base",
-      CRABBOX_CLOUDFLARE_RUNNER_TOKEN: "runner-token",
-    } as RuntimeEnv,
-    current,
-    "cloudflare",
-  );
-  assert.equal(
-    target?.url,
-    "https://runner.example/v1/sandboxes/sandbox%2F1/pty?sessionId=IS-route&leaseId=cloudflare%3Asandbox%2F1&repo=openclaw%2Fcrabfleet&branch=feature%2Fterminal+route&runtime=crabbox&profile=default&command=codex+--yolo",
-  );
-  assert.equal(target?.authorization, "Bearer runner-token");
+test("terminal headers carry canonical session context", () => {
+  const current = session({ lease_id: "sandbox:owned" });
   assert.deepEqual(terminalQuery(current), {
     sessionId: "IS-route",
-    leaseId: "cloudflare:sandbox/1",
+    leaseId: "sandbox:owned",
     repo: "openclaw/crabfleet",
     branch: "feature/terminal route",
     runtime: "crabbox",

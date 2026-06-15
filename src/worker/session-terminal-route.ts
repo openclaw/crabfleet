@@ -3,7 +3,6 @@ import {
   legacyLeaseIdForAdapter,
   runtimeAdapterName,
   runtimeAdapterTerminalOriginMatches,
-  safeDesktopUrl,
   safeWebSocketUrl,
 } from "../runtime-adapter.ts";
 import type { RuntimeEnv } from "./env.ts";
@@ -50,26 +49,6 @@ export function interactiveTerminalTarget(
     };
   }
 
-  const leaseId = legacyLeaseIdForAdapter(session.adapter, session.leaseId);
-  if (
-    routeKind === "cloudflare" &&
-    leaseId?.startsWith("cloudflare:") &&
-    env.CRABBOX_CLOUDFLARE_RUNNER_URL
-  ) {
-    const sandboxId = leaseId.slice("cloudflare:".length);
-    const runnerUrl = safeDesktopUrl(env.CRABBOX_CLOUDFLARE_RUNNER_URL);
-    if (!runnerUrl) return null;
-    const url = addQuery(
-      joinUrl(runnerUrl, `/v1/sandboxes/${encodeURIComponent(sandboxId)}/pty`),
-      terminalQuery(session),
-    );
-    if (!url) return null;
-    return {
-      url,
-      authorization: bearer(env.CRABBOX_CLOUDFLARE_RUNNER_TOKEN),
-    };
-  }
-
   return null;
 }
 
@@ -99,7 +78,6 @@ export function interactivePtyRouteKind(
   return ptyRouteKind(session, {
     sandboxAvailable: Boolean(env.SANDBOX),
     bridgeUrl: env.CRABBOX_PTY_BRIDGE_URL,
-    cloudflareRunnerUrl: env.CRABBOX_CLOUDFLARE_RUNNER_URL,
   });
 }
 
@@ -143,14 +121,6 @@ export function interactiveTerminalHeaders(
   });
   if (authorization) headers.set("authorization", authorization);
   return headers;
-}
-
-function joinUrl(base: string, path: string): string {
-  try {
-    return new URL(path, base.endsWith("/") ? base : `${base}/`).toString();
-  } catch {
-    return "";
-  }
 }
 
 function addQuery(rawUrl: string, params: Record<string, string>): string {

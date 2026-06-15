@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Remove generic create-only provisioning, the external Cloudflare runner, and the ClawFleet compatibility provider so managed workspaces use only built-in Sandbox or the versioned runtime adapter.
 - Extract OpenClaw nudge and stop validation, audit ordering, terminal delivery, and best-effort delivery records into a directly tested mutation service.
 - Extract OpenClaw crabbox normalization, replay handling, branch preparation, timeout policy, and creation audit into a directly tested service.
 - Extract interactive-session lineage normalization, parent visibility, and canonical root derivation into a directly tested service.
@@ -36,7 +37,7 @@
 - Extract GitHub Actions session validation, idempotent registration, token rotation, resume reset, runner replacement, and evidence ordering.
 - Extract GitHub Actions work-state projection, heartbeat persistence, event suppression, terminal mapping, runner disconnect, and reread.
 - Extract GitHub Actions runner-connect validation, lifecycle projection, heartbeat persistence, and durable connection evidence.
-- Extract interactive terminal route selection, bridge expansion, signed attach preservation, adapter authorization, runner targets, query projection, and headers.
+- Extract interactive terminal route selection, bridge expansion, signed attach preservation, adapter authorization, query projection, and headers.
 - Extract terminal WebSocket relay queues, output acknowledgements, message normalization, authorization polling, and peer close handling.
 - Extract runtime-adapter lifecycle and terminal transport, coordinator binding selection, redirect refusal, and bounded response parsing.
 - Centralize OpenClaw room visibility, log-free summaries, and bounded transcript sentinel/truncation policy behind direct query tests.
@@ -77,7 +78,7 @@
 - Add durable steerable GitHub Actions sessions with service registration, scoped runner URLs, work-state heartbeats, Fleet metadata, and a SessionControlDO PTY relay.
 - Add a tenant-namespaced versioned runtime lifecycle adapter with replayable idempotent create, monotonic workspace identities, CAS reconciliation, durable terminal finalization, confirmed provider release before failure/stop, presence-aware capability/expiry tracking, authenticated transient VNC redirects, and deployment-neutral configuration.
 - Reconcile runtime lifecycles and every adapter's terminal archives on cron and direct access, preserve partial capability-object defaults while honoring authoritative lists and explicit terminal withdrawal, make PTY availability server-authoritative, preserve opaque signed terminal and desktop URLs byte-for-byte, retain adapter failure evidence through confirmed release and exact session-version archive finalization, preflight adapter credentials before session allocation, bind every external lifecycle to its immutable registered control plane, generation-fence managed and standalone Sandbox credential ownership across crashes and late requests, repair incomplete equal-count archives, run teardown only after an exact cleanup CAS, use unique concurrent archive attempts, and transactionally remove D1 archive pointers before best-effort R2 object cleanup.
-- Harden adapter and terminal boundaries by redacting connection credentials from durable messages, requiring byte-exact grammar-valid workspace identity echoes, rejecting malformed non-null expiries and create-only `stopping` results, keeping recurring WebSocket authorization provider-free, and paging credential cleanup with durable fair-progress cursors while retaining Sandbox failure evidence.
+- Harden adapter and terminal boundaries by redacting connection credentials from durable messages, requiring byte-exact grammar-valid workspace identity echoes, rejecting malformed non-null expiries, keeping recurring WebSocket authorization provider-free, and paging credential cleanup with durable fair-progress cursors while retaining Sandbox failure evidence.
 - Fence ambiguous create replay during stop to the exact registered lifecycle, require immutable-request ownership claims before the stateless hook can provision a managed session ID, expose standalone Sandbox terminals through their own bearer-authenticated WebSocket route, atomically pair terminal events with archive-finalization markers, and prevent older equal-count session snapshots from replacing newer archive pointers.
 - Require an exact durable lease or provision/refresh claim for every Sandbox credential-policy transition, atomically activate standalone owners with their matching policy generation, redact structured and header-form provider credentials, fence slow reconciliation by the original session revision and completion time, and reject adapter base URLs containing raw query or fragment delimiters.
 - Atomically fence credential-policy cleanup against its durable owner and revalidate ownership before unregistering, keep versioned-adapter terminal credentials behind Worker-owned PTY routes, and rotate a fresh agent token into every managed Sandbox provision claim.
@@ -86,7 +87,7 @@
 - Reject stale same-generation credential-policy registrations, preflight and atomically stage failed managed Sandbox claims, require the provision bearer for standalone stop after backend removal, and backfill D1-only terminal archives when R2 is enabled later.
 - Proactively generation-wrap migrated legacy Sandbox credential policies under a live durable lease before cleanup, preserve live pre-token sessions, and use crash-safe cron retries that retain unattended session credentials.
 - Bound every runtime-adapter response stream, revalidate desktop authorization after minting, make legacy local stops atomic with scheduled crash recovery, and redact credentials before opaque provider identifiers.
-- Recover active credential policies after a post-registration crash, redact provider identities from structured adapter errors, and propagate terminal dimensions through configured bridge and runner PTY routes without rewriting opaque adapter URLs.
+- Recover active credential policies after a post-registration crash, redact provider identities from structured adapter errors, and propagate terminal dimensions through configured bridge PTY routes without rewriting opaque adapter URLs.
 - Support an optional authoritative `GITHUB_REDIRECT_URI` deployment binding with strict HTTPS callback validation, canonical-origin login handoff, and callback host/path enforcement while retaining safe request-origin defaults.
 - Replace native browser confirms and prompts with accessible Crabfleet dialogs for session cleanup, shutdown, and share-link fallback.
 - Sharpen the app visual system with flatter controls, tighter surfaces, and restrained overlay elevation.
@@ -167,8 +168,7 @@
 - Keep Escape routed to focused Codex terminals instead of closing the session drawer.
 - Enable the experimental Codex goals feature in provisioned interactive sessions.
 - Fix interactive Codex session provisioning to show the terminal immediately and stream live PTY bytes into Ghostty.
-- Add a Cloudflare container runner backend for standalone interactive session provisioning.
-- Add a built-in interactive provision endpoint with generic runtime and ClawFleet adapter backends.
+- Add a built-in interactive provision endpoint with durable standalone Sandbox ownership.
 - Add standalone interactive Codex CLI sessions with Ghostty grid attach and an external runtime provision hook.
 - Document the real deployed control-plane status, runtime adapter boundary, workflow config, and test stack.
 - Close open side drawers with Escape.

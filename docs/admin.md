@@ -212,7 +212,7 @@ Worker secrets live in Cloudflare bindings, not D1/R2:
 
 - GitHub OAuth/client and optional deployment token.
 - Bootstrap token.
-- Runtime adapter/provision/runner/ClawFleet tokens.
+- Runtime adapter and standalone Sandbox provision tokens.
 - OpenClaw and SSH gateway service tokens.
 - OpenAI API key.
 - token-encryption key.
@@ -347,7 +347,6 @@ Check the selected runtime and deployment backend:
 
 - built-in `SANDBOX` binding for Container;
 - `CRABBOX_RUNTIME_ADAPTER_URL` or `CRABBOX_RUNTIME_ADAPTER_URL_TEMPLATE`, plus token and namespace, for versioned Crabbox;
-- legacy provision/runner/ClawFleet settings only when intentionally used.
 
 ### Delete Remains `stopping`
 

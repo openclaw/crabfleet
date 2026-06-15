@@ -6,7 +6,6 @@ import {
   adapterFailureReleaseState,
   adapterWorkspaceIdMatches,
   clearedAdapterCapabilities,
-  createOnlyAdapterStatus,
   definitiveRuntimeAdapterCreateFailure,
   effectiveAdapterCapabilities,
   currentAdapterDesktopConnection,
@@ -300,13 +299,6 @@ test("adapter workspace identity is namespaced, bounded, and exact", () => {
   );
 });
 
-test("create-only adapters cannot return an unowned stopping lifecycle", () => {
-  assert.equal(createOnlyAdapterStatus("ready"), "ready");
-  assert.equal(createOnlyAdapterStatus("failed"), "failed");
-  assert.equal(createOnlyAdapterStatus("stopping"), null);
-  assert.equal(createOnlyAdapterStatus(" ready "), null);
-});
-
 test("status-only inspect preserves omitted capability and expiry fields", () => {
   const omitted = parseAdapterWorkspaceResult({ id: "fleet-a-is-101", status: "ready" });
   assert.equal(omitted?.capabilitiesPresent, false);
@@ -513,10 +505,6 @@ test("runtime adapter lifecycle cannot escape durable session ownership", async 
   const releaseEnd = source.indexOf("function runtimeAdapterProvisionResult", releaseStart);
   const releaseSource = source.slice(releaseStart, releaseEnd);
 
-  assert.match(
-    source,
-    /versioned runtime adapter requires a durable interactive session lifecycle/,
-  );
   assert.match(stopSource, /recordConfirmedRuntimeAdapterRelease/);
   assert.match(stopSource, /select\(\[[\s\S]*"adapter_create_pending"[\s\S]*"terminal_status"/);
   assert.match(stopSource, /AND adapter_create_pending = \$\{lifecycle\.adapter_create_pending\}/);
@@ -921,7 +909,7 @@ test("stateless Sandbox provision hook acquires durable standalone ownership", a
     "utf8",
   );
   const endpointStart = source.indexOf("async function provisionInteractiveEndpoint");
-  const endpointEnd = source.indexOf("function isBuiltInInteractiveProvisionUrl", endpointStart);
+  const endpointEnd = source.indexOf("function authorizeProvisionBearerToken", endpointStart);
   const endpointSource = source.slice(endpointStart, endpointEnd);
   const ownershipStart = source.indexOf("function sandboxCredentialPolicyOwnerCondition");
   const ownershipEnd = source.indexOf(
@@ -934,7 +922,7 @@ test("stateless Sandbox provision hook acquires durable standalone ownership", a
   const managedSource = source.slice(managedStart, managedEnd);
   const managedCommitSource = managedSource.slice(managedSource.indexOf("const commitRevision"));
   const ptyStart = source.indexOf("async function standaloneSandboxPty");
-  const ptyEnd = source.indexOf("function isBuiltInInteractiveProvisionUrl", ptyStart);
+  const ptyEnd = source.indexOf("function authorizeProvisionBearerToken", ptyStart);
   const ptySource = source.slice(ptyStart, ptyEnd);
   const sandboxStart = source.indexOf("async function provisionWithSandbox");
   const sandboxEnd = source.indexOf("function sandboxManagedOwnershipCondition", sandboxStart);
@@ -1005,7 +993,7 @@ test("stateless Sandbox provision hook acquires durable standalone ownership", a
   assert.match(managedSource, /previousSandboxId/);
   assert.match(managedSource, /state: "cleanup_pending"/);
   assert.match(managedSource, /claimed\.numUpdatedRows/);
-  assert.match(ptySource, /authorizeProvisionEndpoint\(request, env\)/);
+  assert.match(ptySource, /authorizeProvisionBearerToken\(request, env\)/);
   assert.match(ptySource, /standalone_sandbox_provisions/);
   assert.match(ptySource, /where\("state", "=", "active"\)/);
   assert.match(ptySource, /owner\.expires_at <= Date\.now\(\)/);
@@ -1206,20 +1194,6 @@ test("Sandbox credential registration always proves exact durable ownership", as
     ensureSource,
     /registerSandboxCredentialPolicy\(env, session, sandboxId, ownership\)/,
   );
-});
-
-test("create-only adapters reject stopping responses before persistence", async () => {
-  const source = await readFile(new URL("../src/index.ts", import.meta.url), "utf8");
-  const externalStart = source.indexOf("async function provisionInteractiveSession");
-  const externalEnd = source.indexOf("async function provisionInteractiveEndpoint", externalStart);
-  const externalSource = source.slice(externalStart, externalEnd);
-  const forwardedStart = source.indexOf("function provisionResultFromBody");
-  const forwardedEnd = source.indexOf("function failedProvision", forwardedStart);
-  const forwardedSource = source.slice(forwardedStart, forwardedEnd);
-
-  assert.match(externalSource, /createOnlyAdapterStatus\(body\.status\)/);
-  assert.match(forwardedSource, /createOnlyAdapterStatus\(body\.status\)/);
-  assert.match(forwardedSource, /if \(!status\) return failedProvision/);
 });
 
 test("legacy and GitHub Actions stop wrappers finalize persisted transitions", async () => {

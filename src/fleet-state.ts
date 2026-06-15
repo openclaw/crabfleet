@@ -1,4 +1,4 @@
-import { normalizedSecureHttpUrl, normalizedSecureWebSocketUrl } from "./url-security.ts";
+import { normalizedSecureWebSocketUrl } from "./url-security.ts";
 
 export type FleetStatus =
   | "provisioning"
@@ -73,7 +73,6 @@ export type FleetStateOptions = {
   registryAvailable?: boolean;
   sandboxAvailable?: boolean | undefined;
   ptyBridgeUrl?: string | null | undefined;
-  cloudflareRunnerUrl?: string | null | undefined;
 };
 
 export type FleetSessionSummary = {
@@ -146,7 +145,7 @@ export type FleetState = {
   sessions: FleetSessionSummary[];
 };
 
-export type PtyRouteKind = "sandbox" | "bridge" | "attach" | "cloudflare";
+export type PtyRouteKind = "sandbox" | "bridge" | "attach";
 
 export type PtyRouteSession = {
   adapter?: string | null;
@@ -157,7 +156,6 @@ export type PtyRouteSession = {
 export type PtyRouteConfig = {
   sandboxAvailable?: boolean | undefined;
   bridgeUrl?: string | null | undefined;
-  cloudflareRunnerUrl?: string | null | undefined;
 };
 
 const allStatuses: FleetStatus[] = [
@@ -234,10 +232,7 @@ export function buildFleetState(
 export function fleetSessionSummary(
   session: FleetSessionInput,
   policy: FleetSandboxPolicySummary | null,
-  options: Pick<
-    FleetStateOptions,
-    "sandboxAvailable" | "ptyBridgeUrl" | "cloudflareRunnerUrl"
-  > = {},
+  options: Pick<FleetStateOptions, "sandboxAvailable" | "ptyBridgeUrl"> = {},
 ): FleetSessionSummary {
   const sandboxId = sandboxIdFromLeaseId(session.leaseId);
   const archived = Boolean(session.logArchive?.eventCount);
@@ -276,7 +271,6 @@ export function fleetSessionSummary(
             ptyRouteKind(session, {
               sandboxAvailable: options.sandboxAvailable,
               bridgeUrl: options.ptyBridgeUrl,
-              cloudflareRunnerUrl: options.cloudflareRunnerUrl,
             }),
           ))) &&
       ptyReadyStatuses.has(session.status),
@@ -321,9 +315,6 @@ export function ptyRouteKind(
   if (config.sandboxAvailable && leaseId?.startsWith("sandbox:")) return "sandbox";
   if (configuredBridgeWebSocketUrl(config.bridgeUrl)) return "bridge";
   if (safePtyWebSocketUrl(session.attachUrl)) return "attach";
-  if (leaseId?.startsWith("cloudflare:") && safePtyHttpUrl(config.cloudflareRunnerUrl ?? null)) {
-    return "cloudflare";
-  }
   return null;
 }
 
@@ -344,8 +335,4 @@ function configuredBridgeWebSocketUrl(value: string | null | undefined): string 
 
 function safePtyWebSocketUrl(value: string | null | undefined): string | null {
   return normalizedSecureWebSocketUrl(value);
-}
-
-function safePtyHttpUrl(value: string | null | undefined): string | null {
-  return normalizedSecureHttpUrl(value);
 }

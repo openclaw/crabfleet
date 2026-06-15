@@ -1,4 +1,4 @@
-export type TerminalRouteKind = "sandbox" | "bridge" | "attach" | "cloudflare";
+export type TerminalRouteKind = "sandbox" | "bridge" | "attach";
 
 export function sizedTerminalTargetUrl(
   rawUrl: string,
@@ -6,7 +6,7 @@ export function sizedTerminalTargetUrl(
   cols: number,
   rows: number,
 ): string {
-  if (routeKind !== "bridge" && routeKind !== "cloudflare") return rawUrl;
+  if (routeKind !== "bridge") return rawUrl;
   try {
     const url = new URL(rawUrl);
     url.searchParams.set("cols", String(cols));

@@ -148,17 +148,6 @@ const statusMap: Record<string, AdapterSessionStatus> = {
   error: "failed",
 };
 
-const createOnlyAdapterStatuses = new Set<AdapterSessionStatus>([
-  "provisioning",
-  "pending_adapter",
-  "ready",
-  "attached",
-  "detached",
-  "stopped",
-  "expired",
-  "failed",
-]);
-
 export function runtimeAdapterCollectionUrl(base: string): string {
   return joinAdapterUrl(base, "/v1/workspaces");
 }
@@ -296,12 +285,6 @@ export function shouldReplayRuntimeAdapterCreate(
   createPending: boolean,
 ): boolean {
   return createPending && (status === "provisioning" || status === "pending_adapter");
-}
-
-export function createOnlyAdapterStatus(value: unknown): AdapterSessionStatus | null {
-  return typeof value === "string" && createOnlyAdapterStatuses.has(value as AdapterSessionStatus)
-    ? (value as AdapterSessionStatus)
-    : null;
 }
 
 export function runtimeAdapterTerminalFailureStatus(
