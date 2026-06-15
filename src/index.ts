@@ -275,9 +275,11 @@ import {
   readInteractiveSessionEventRows,
   readInteractiveSessionLogArchives,
   readInteractiveSessionLogs,
+  readSharedInteractiveSessionRow,
   readVisibleInteractiveSessionRow,
   readVisibleInteractiveSessionRows,
 } from "./worker/session-repository";
+import { activeDelegatedController, sharedInteractiveSession } from "./worker/session-sharing";
 import type { InteractiveProvisionResult } from "./worker/session-provisioning";
 import {
   interactiveCommand,
@@ -12762,42 +12764,13 @@ async function readSharedInteractiveSession(
   id: string,
   token: string,
 ): Promise<{ session: InteractiveSession }> {
-  const row = await database(env)
-    .selectFrom("interactive_sessions")
-    .selectAll()
-    .where("id", "=", id)
-    .where("preparation_pending", "=", 0)
-    .where("share_mode", "=", "link_read")
-    .executeTakeFirst();
+  const row = await readSharedInteractiveSessionRow(env, id);
   if (!row || !row.share_token_hash || !token) throw notFound("shared session not found");
   if ((await sha256(token)) !== row.share_token_hash) throw notFound("shared session not found");
   const logs = await readInteractiveSessionLogs(env, [id]);
   const archives = await readInteractiveSessionLogArchives(env, [id]);
   const session = interactiveSession(row, logs.get(id) ?? [], archives.get(id) ?? null);
-  const activeController = activeDelegatedController(session, Date.now());
-  return {
-    session: {
-      ...session,
-      adapter: null,
-      profile: "",
-      adapterWorkspaceId: null,
-      providerResourceId: null,
-      lastReconciledAt: null,
-      reconcileError: null,
-      leaseId: null,
-      attachUrl: null,
-      vncUrl: null,
-      ptyAvailable: false,
-      controller: activeController,
-      controlGrantedAt: activeController ? session.controlGrantedAt : null,
-      controlExpiresAt: activeController ? session.controlExpiresAt : null,
-      multiplayerMode: session.multiplayerMode,
-      canControl: false,
-      canManage: false,
-      canRequestControl: false,
-      sharedReadOnly: true,
-    },
-  };
+  return { session: sharedInteractiveSession(session, Date.now()) };
 }
 
 async function readInteractiveSessionLogBundle(
@@ -13822,12 +13795,6 @@ function canControlInteractiveSession(
     typeof session.controlExpiresAt === "number" &&
     session.controlExpiresAt > now
   );
-}
-
-function activeDelegatedController(session: InteractiveSession, now: number): string | null {
-  if (!session.controller) return null;
-  if (typeof session.controlExpiresAt !== "number" || session.controlExpiresAt <= now) return null;
-  return session.controller;
 }
 
 async function canControlInteractiveSessionById(

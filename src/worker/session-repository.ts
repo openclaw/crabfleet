@@ -157,6 +157,21 @@ export async function readVisibleInteractiveSessionRow(
   );
 }
 
+export async function readSharedInteractiveSessionRow(
+  env: RuntimeEnv,
+  id: string,
+): Promise<InteractiveSessionRow | null> {
+  return (
+    (await database(env)
+      .selectFrom("interactive_sessions")
+      .selectAll()
+      .where("id", "=", id)
+      .where("preparation_pending", "=", 0)
+      .where("share_mode", "=", "link_read")
+      .executeTakeFirst()) ?? null
+  );
+}
+
 export async function readInteractiveSessionLogs(
   env: RuntimeEnv,
   ids: string[],

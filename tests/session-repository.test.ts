@@ -11,6 +11,7 @@ import {
   readInteractiveSessionEventRows,
   readInteractiveSessionLogArchives,
   readInteractiveSessionLogs,
+  readSharedInteractiveSessionRow,
   readVisibleInteractiveSessionRow,
   readVisibleInteractiveSessionRows,
 } from "../src/worker/session-repository.ts";
@@ -141,6 +142,25 @@ test("visible session reads exclude preparation reservations and stay bounded", 
     ["IS-2"],
   );
   assert.equal(calls, 2);
+});
+
+test("shared session reads require visible link-read rows", async () => {
+  const row = sessionRow({
+    id: "IS-2",
+    preparation_pending: 0,
+    share_mode: "link_read",
+    share_token_hash: "hash",
+  });
+  const env = runtimeEnv((sql, parameters, kind) => {
+    assert.equal(kind, "all");
+    assert.match(sql, /from "interactive_sessions"/i);
+    assert.match(sql, /"preparation_pending" =/i);
+    assert.match(sql, /"share_mode" =/i);
+    assert.deepEqual(parameters, ["IS-2", 0, "link_read"]);
+    return { results: [row] };
+  });
+
+  assert.equal((await readSharedInteractiveSessionRow(env, "IS-2"))?.share_token_hash, "hash");
 });
 
 test("session log reads keep the newest bounded window in chronological order", async () => {

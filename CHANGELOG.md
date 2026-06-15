@@ -15,6 +15,7 @@
 - Centralize interactive-session reservation tokens, sandbox lease ownership, and runtime-adapter create identity.
 - Extract superseded runtime-adapter and Sandbox provision recovery from session creation.
 - Move bounded interactive-session logs, event pagination/counts, and archive reads into the session repository.
+- Centralize shared-session visibility and redaction of provider, terminal, lease, reconciliation, and control authority.
 - Centralize OpenClaw room visibility, log-free summaries, and bounded transcript sentinel/truncation policy behind direct query tests.
 - Isolate OpenClaw recursive root-stop admission, reservation cleanup, lifecycle retries, reconciliation, and stable-completion polling behind a directly tested service.
 - Extract OpenClaw root-scoped authorization, lineage supervision, reservation outcomes, rollback, and activation orchestration into a directly tested service boundary.
