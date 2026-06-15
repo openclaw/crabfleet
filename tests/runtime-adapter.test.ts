@@ -1743,15 +1743,18 @@ test("terminal endpoints enforce current runtime capabilities", async () => {
     decorateStart,
   );
   const decorateSource = source.slice(decorateStart, decorateEnd);
+  const ptyStart = source.indexOf("function interactiveSessionPtyAvailable");
+  const ptySource = source.slice(ptyStart, decorateStart);
 
   assert.match(source, /type InteractiveSession = \{[\s\S]*ptyAvailable\?: boolean;/);
   assert.match(source, /if \(!session\.capabilities\.terminal\)/);
   assert.match(source, /runtimeCapabilities\(row\.runtime, row\.capabilities_json\)\.terminal/);
   assert.match(source, /runtimeAdapterTerminalFailureStatus\(existing\.adapter\) === "detached"/);
   assert.match(source, /attachUrl: capabilities\.terminal \? row\.attach_url : null/);
-  assert.match(decorateSource, /const routeKind = interactivePtyRouteKind\(env, session\)/);
-  assert.match(decorateSource, /interactiveTerminalTarget\(env, session, routeKind\)/);
-  assert.match(decorateSource, /routeAvailable/);
+  assert.match(ptySource, /const routeKind = interactivePtyRouteKind\(env, session\)/);
+  assert.match(ptySource, /interactiveTerminalTarget\(env, session, routeKind\)/);
+  assert.match(ptySource, /routeAvailable/);
+  assert.match(decorateSource, /interactiveSessionPtyAvailable\(env, session, canControl\)/);
   assert.match(decorateSource, /const attachUrl = ptyAvailable \? "\/api\/terminal\/ws" : null/);
   assert.match(decorateSource, /attachUrl,/);
   assert.doesNotMatch(
@@ -2151,8 +2154,11 @@ test("runtime adapter terminals use the server-side adapter bearer", async () =>
     decorateStart,
   );
   const decorateSource = source.slice(decorateStart, decorateEnd);
-  assert.match(decorateSource, /interactiveTerminalTarget\(env, session, routeKind\)/);
-  assert.match(decorateSource, /routeAvailable/);
+  const ptyStart = source.indexOf("function interactiveSessionPtyAvailable");
+  const ptySource = source.slice(ptyStart, decorateStart);
+  assert.match(ptySource, /interactiveTerminalTarget\(env, session, routeKind\)/);
+  assert.match(ptySource, /routeAvailable/);
+  assert.match(decorateSource, /interactiveSessionPtyAvailable\(env, session, canControl\)/);
 });
 
 test("runtime adapter terminal upgrades use the coordinator service binding", async () => {

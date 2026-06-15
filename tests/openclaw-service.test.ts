@@ -256,17 +256,32 @@ test("OpenClaw embed ticket minting stays root fenced and terminal scoped", asyn
 	const end = source.indexOf("async function openClawRootScopedCrabbox", start);
 	const mintSource = source.slice(start, end);
 	const inputStart = source.indexOf("function terminalInputGrant");
-	const inputEnd = source.indexOf("function terminalSubscriptionReconciler", inputStart);
+  const inputEnd = source.indexOf("function terminalSubscriptionReconciler", inputStart);
   const inputSource = source.slice(inputStart, inputEnd);
+  const sharedStart = source.indexOf("async function readSharedInteractiveSession");
+  const sharedEnd = source.indexOf("async function openClawReadSessionChain", sharedStart);
+  const sharedSource = source.slice(sharedStart, sharedEnd);
+  const ptyStart = source.indexOf("function interactiveSessionPtyAvailable");
+  const ptyEnd = source.indexOf("function decorateInteractiveSession", ptyStart);
+  const ptySource = source.slice(ptyStart, ptyEnd);
   const secretStart = source.indexOf("function openClawEmbedTicketSecret");
   const secretEnd = source.indexOf("function requireOpenClawServiceToken", secretStart);
   const secretSource = source.slice(secretStart, secretEnd);
 
   assert.match(mintSource, /requireOpenClawRoomService/);
 	assert.match(mintSource, /openClawRootScopedCrabbox\(request, env, id, body\.rootSessionId\)/);
-	assert.match(mintSource, /createOpenClawEmbedTicket/);
+  assert.match(mintSource, /createOpenClawEmbedTicket/);
   assert.match(mintSource, /session does not advertise terminal access/);
   assert.match(inputSource, /canControlEmbeddedTerminalRequest/);
+  assert.match(
+    sharedSource,
+    /ptyAvailable: interactiveSessionPtyAvailable\(env, session, embedded\)/,
+  );
+  assert.match(sharedSource, /canControl: embedded/);
+  assert.match(sharedSource, /sharedReadOnly: !embedded/);
+  assert.match(ptySource, /interactivePtyRouteKind/);
+  assert.match(ptySource, /interactiveTerminalTarget/);
+  assert.match(ptySource, /\["ready", "attached", "detached"\]\.includes\(session\.status\)/);
   assert.match(secretSource, /CRABBOX_EMBED_TICKET_SECRET/);
   assert.doesNotMatch(secretSource, /CRABBOX_MULTICODEX_TOKEN|CRABBOX_OPENCLAW_TOKEN/);
 });
