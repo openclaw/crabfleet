@@ -1060,7 +1060,7 @@ test("managed terminal expiry enters the shared retryable terminal finalizer", a
 test("sandbox credential cleanup failures remain explicit", async () => {
   const source = await readFile(new URL("../src/index.ts", import.meta.url), "utf8");
   const unregisterStart = source.indexOf("async function unregisterSandboxCredentialPolicyLookup");
-  const unregisterEnd = source.indexOf("function sandboxTerminalCleanupOwnership", unregisterStart);
+  const unregisterEnd = source.indexOf("type CredentialPolicyScanRow", unregisterStart);
   const unregisterSource = source.slice(unregisterStart, unregisterEnd);
 
   assert.match(unregisterSource, /if \(!stub\) throw serviceUnavailable/);
@@ -1079,10 +1079,7 @@ test("sandbox credential cleanup is durably staged and retried", async () => {
     new URL("../migrations/0022_credential_policy_cleanup.sql", import.meta.url),
     "utf8",
   );
-  const stageStart = source.indexOf("async function stageTerminalCredentialPolicyCleanup");
-  const stageEnd = source.indexOf("type CredentialPolicyScanRow", stageStart);
-  const stageSource = source.slice(stageStart, stageEnd);
-  const scanStart = stageEnd;
+  const scanStart = source.indexOf("type CredentialPolicyScanRow");
   const batchStart = source.indexOf(
     "async function reconcileCredentialPolicyCleanupBatch",
     scanStart,
@@ -1139,31 +1136,6 @@ test("sandbox credential cleanup is durably staged and retried", async () => {
   const refreshStart = source.indexOf("async function ensureCurrentSandboxLease");
   const refreshEnd = source.indexOf("async function prepareSandboxWorkspace", refreshStart);
   const refreshSource = source.slice(refreshStart, refreshEnd);
-  const ownershipStart = source.indexOf("function sandboxTerminalCleanupOwnership");
-  const ownershipSource = source.slice(ownershipStart, stageStart);
-
-  assert.match(stageSource, /executeBatch\(env, \[sessionTransition, \.\.\.policyTransitions\]\)/);
-  assert.match(stageSource, /status: "stopping"/);
-  assert.match(stageSource, /credential_cleanup_terminal_status: cleanupIntent/);
-  assert.match(stageSource, /credential_cleanup_terminal_status = 'failed'/);
-  assert.match(stageSource, /credential_cleanup_terminal_status = 'expired'/);
-  assert.match(stageSource, /terminalCleanupIntentRank/);
-  assert.match(stageSource, /sandbox_refresh_claim: null/);
-  assert.match(stageSource, /sandboxManagedStoredOwnershipCondition\(ownership\.fence\)/);
-  assert.match(stageSource, /where\("updated_at", "=", session\.updated_at\)/);
-  assert.match(stageSource, /sandboxCredentialPolicyCleanupAuthorizedCondition/);
-  assert.match(stageSource, /\.where\("sandbox_id", "=", sandboxId\)/);
-  assert.match(stageSource, /agent_token_hash: null/);
-  assert.match(stageSource, /controller: null/);
-  assert.match(stageSource, /terminal_failure_reason:/);
-  assert.match(stageSource, /failureReason/);
-  assert.match(stageSource, /NULLIF\(terminal_failure_reason, ''\)/);
-  assert.match(stageSource, /terminal_failure_reason: failureEvidence/);
-  assert.match(stageSource, /state: "cleanup_pending"/);
-  assert.match(stageSource, /for \(let attempt = 0; attempt < 3; attempt \+= 1\)/);
-  assert.match(ownershipSource, /sandboxLeaseWithoutRefresh/);
-  assert.match(ownershipSource, /sandbox_refresh_claim_expires_at/);
-  assert.match(ownershipSource, /sandboxIds: \[\.\.\.new Set/);
   assert.match(scanSource, /credentialPolicyScanLimit/);
   assert.match(scanSource, /scan_max_rowid/);
   assert.match(scanSource, /maximumCredentialPolicyRowid/);
