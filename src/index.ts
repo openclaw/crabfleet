@@ -39,9 +39,8 @@ import {
   type CompilableQuery,
   type Database,
   type InteractiveSessionRow,
-  type RepoWorkflowTable,
 } from "./worker/database";
-import { type Role, type User, type WorkflowStatus } from "./worker/models";
+import { type Role, type User } from "./worker/models";
 import {
   badRequest,
   conflict,
@@ -94,13 +93,9 @@ import {
   type InteractiveSessionEvent,
   type InteractiveSessionLogArchive,
 } from "./worker/session-model";
-import {
-  cardRuntimeOptions as runtimeOptions,
-  mergePolicyOptions,
-  type WorkflowConfig,
-} from "./worker/card-model";
 import { CardLifecycleService, type CardCreateInput } from "./worker/card-lifecycle-service";
 import { CardRepository } from "./worker/card-repository";
+import { createWorkflowService, type WorkflowService } from "./worker/workflow-service";
 import { normalizeRepo } from "./worker/repositories";
 import { handlePublicAuthRoute, handleSessionAuthRoute } from "./worker/routes/auth";
 import {
@@ -341,25 +336,6 @@ type GitHubReference = {
   body: string;
 };
 
-type GitHubContentPayload = {
-  content?: string;
-  encoding?: string;
-  sha?: string;
-};
-
-type RepoWorkflow = {
-  repo: string;
-  status: WorkflowStatus;
-  sourcePath: string;
-  sourceSha: string | null;
-  config: WorkflowConfig;
-  prompt: string;
-  error: string | null;
-  evaluatedAt: number;
-  updatedAt: number;
-};
-
-const workflowCacheMs = 60 * 60 * 1000;
 const runtimeAdapterReconcileIntervalMs = 15_000;
 const runtimeAdapterReconcileLimit = 3;
 const runtimeAdapterReconcileConcurrency = 3;
@@ -720,9 +696,13 @@ function cardLifecycleService(env: RuntimeEnv): CardLifecycleService {
     now: Date.now,
     requireRepo: (repo) => requireRepo(env, repo),
     readSettings: () => readSettings(env),
-    ensureWorkflow: (repo, now) => ensureWorkflowForRepo(env, repo, now),
+    ensureWorkflow: (repo, now) => workflowService(env).ensure(repo, now),
     isConstraintError,
   });
+}
+
+function workflowService(env: RuntimeEnv): WorkflowService {
+  return createWorkflowService(env);
 }
 
 function sshGateway(env: RuntimeEnv): SshGateway {
@@ -1188,7 +1168,7 @@ async function readState(
     db.selectFrom("repos").select("repo").where("enabled", "=", 1).orderBy("repo").execute(),
     cardLifecycleService(env).list(),
     readInteractiveSessions(env, user),
-    user.role === "owner" ? readWorkflowSummaries(env) : Promise.resolve([]),
+    user.role === "owner" ? workflowService(env).summaries() : Promise.resolve([]),
   ]);
   const repoNames = sortRepos(
     repos.map((row) => row.repo),
@@ -2048,7 +2028,7 @@ async function evaluateWorkflow(
   const body = await readJson<{ repo?: string }>(request);
   const repo = normalizeRepo(body.repo) || deploymentConfig(env).preferredRepo;
   await requireRepo(env, repo);
-  const workflow = await refreshWorkflowForRepo(env, repo, Date.now());
+  const workflow = await workflowService(env).refresh(repo, Date.now());
   await audit(env, user, `workflow evaluated ${repo} status=${workflow.status}`, Date.now());
   return readState(request, env, user);
 }
@@ -2236,134 +2216,6 @@ async function fetchGitHubReference(
     updatedAt: item.updated_at,
     body: item.body ?? "",
   };
-}
-
-async function ensureWorkflowForRepo(
-  env: RuntimeEnv,
-  repo: string,
-  now: number,
-): Promise<RepoWorkflow | null> {
-  const existing = await readWorkflowForRepo(env, repo);
-  if (existing && now - existing.evaluatedAt < workflowCacheMs) return existing;
-  try {
-    return await refreshWorkflowForRepo(env, repo, now);
-  } catch {
-    return existing;
-  }
-}
-
-async function refreshWorkflowForRepo(
-  env: RuntimeEnv,
-  repo: string,
-  now: number,
-): Promise<RepoWorkflow> {
-  const response = await fetch(`https://api.github.com/repos/${repo}/contents/CRABBOX.md`, {
-    headers: githubHeaders(env),
-  });
-  if (response.status === 404) {
-    return writeWorkflowRow(env, {
-      repo,
-      status: "missing",
-      sourcePath: "CRABBOX.md",
-      sourceSha: null,
-      config: {},
-      prompt: "",
-      error: "CRABBOX.md not found",
-      evaluatedAt: now,
-      updatedAt: now,
-    });
-  }
-  if (response.status === 403 || response.status === 429) {
-    throw serviceUnavailable("GitHub workflow lookup rate limited; retry later");
-  }
-  if (!response.ok) throw serviceUnavailable("GitHub workflow lookup failed; retry later");
-
-  const payload = await response.json<GitHubContentPayload>();
-  if (payload.encoding !== "base64" || !payload.content) {
-    return writeWorkflowRow(env, {
-      repo,
-      status: "invalid",
-      sourcePath: "CRABBOX.md",
-      sourceSha: payload.sha ?? null,
-      config: {},
-      prompt: "",
-      error: "unsupported CRABBOX.md encoding",
-      evaluatedAt: now,
-      updatedAt: now,
-    });
-  }
-
-  const decoded = decodeBase64Text(payload.content);
-  const parsed = parseWorkflowMarkdown(decoded);
-  return writeWorkflowRow(env, {
-    repo,
-    status: parsed.error ? "invalid" : "ok",
-    sourcePath: "CRABBOX.md",
-    sourceSha: payload.sha ?? null,
-    config: parsed.error ? {} : parsed.config,
-    prompt: parsed.prompt,
-    error: parsed.error,
-    evaluatedAt: now,
-    updatedAt: now,
-  });
-}
-
-async function readWorkflowForRepo(env: RuntimeEnv, repo: string): Promise<RepoWorkflow | null> {
-  const row = await database(env)
-    .selectFrom("repo_workflows")
-    .selectAll()
-    .where("repo", "=", repo)
-    .executeTakeFirst();
-  return row ? repoWorkflow(row) : null;
-}
-
-async function readWorkflowSummaries(env: RuntimeEnv): Promise<RepoWorkflow[]> {
-  const rows = await database(env)
-    .selectFrom("repo_workflows")
-    .select([
-      "repo",
-      "status",
-      "source_path",
-      "source_sha",
-      "config_json",
-      "error",
-      "evaluated_at",
-      "updated_at",
-    ])
-    .orderBy("updated_at", "desc")
-    .limit(80)
-    .execute();
-  return rows.map((row) => repoWorkflow({ ...row, prompt: "" }));
-}
-
-async function writeWorkflowRow(env: RuntimeEnv, workflow: RepoWorkflow): Promise<RepoWorkflow> {
-  await database(env)
-    .insertInto("repo_workflows")
-    .values({
-      repo: workflow.repo,
-      status: workflow.status,
-      source_path: workflow.sourcePath,
-      source_sha: workflow.sourceSha,
-      config_json: JSON.stringify(workflow.config),
-      prompt: workflow.prompt,
-      error: workflow.error,
-      evaluated_at: workflow.evaluatedAt,
-      updated_at: workflow.updatedAt,
-    })
-    .onConflict((oc) =>
-      oc.column("repo").doUpdateSet({
-        status: workflow.status,
-        source_path: workflow.sourcePath,
-        source_sha: workflow.sourceSha,
-        config_json: JSON.stringify(workflow.config),
-        prompt: workflow.prompt,
-        error: workflow.error,
-        evaluated_at: workflow.evaluatedAt,
-        updated_at: workflow.updatedAt,
-      }),
-    )
-    .execute();
-  return workflow;
 }
 
 function githubReferenceFromGraphql(repo: string, item: GitHubGraphqlRefPayload): GitHubReference {
@@ -2624,14 +2476,6 @@ async function audit(env: RuntimeEnv, user: User, message: string, now: number):
     .execute();
 }
 
-function parseJson<T>(value: string, fallback: T): T {
-  try {
-    return JSON.parse(value) as T;
-  } catch {
-    return fallback;
-  }
-}
-
 function decorateInteractiveSession(
   session: InteractiveSession,
   user: User,
@@ -2667,115 +2511,6 @@ function externalRequestOrigin(request: Request, env: RuntimeEnv): string {
   return trustedProxyPublicOrigin(env) ?? new URL(request.url).origin;
 }
 
-function repoWorkflow(row: RepoWorkflowTable): RepoWorkflow {
-  return {
-    repo: row.repo,
-    status: row.status,
-    sourcePath: row.source_path,
-    sourceSha: row.source_sha,
-    config: parseJson<WorkflowConfig>(row.config_json, {}),
-    prompt: row.prompt,
-    error: row.error,
-    evaluatedAt: row.evaluated_at,
-    updatedAt: row.updated_at,
-  };
-}
-
-function parseWorkflowMarkdown(markdown: string): {
-  config: WorkflowConfig;
-  prompt: string;
-  error: string | null;
-} {
-  const match = markdown.match(/^---\r?\n([\s\S]*?)\r?\n---\r?\n?([\s\S]*)$/);
-  if (!match) return { config: {}, prompt: markdown.trim().slice(0, 8000), error: null };
-  const raw = parseFrontmatter(match[1] ?? "");
-  const config: WorkflowConfig = {};
-  const runtime = optionalOneOf(
-    raw.runtime ?? raw.runtime_default ?? raw["runtime.default"],
-    runtimeOptions,
-  );
-  const policy = optionalOneOf(
-    raw.policy ??
-      raw.merge_policy ??
-      raw.merge_default_policy ??
-      raw["merge.default_policy"] ??
-      raw["merge.policy"],
-    mergePolicyOptions,
-  );
-  const stallMs = numberConfig(raw.stall_ms ?? raw.stallMs ?? raw["runtime.stall_ms"]);
-  const cap = numberConfig(raw.cap);
-  if (runtime) config.runtime = runtime;
-  if (policy) config.policy = policy;
-  if (stallMs) config.stallMs = stallMs;
-  if (cap) config.cap = cap;
-  if (raw.prompt_prefix) config.promptPrefix = clean(raw.prompt_prefix, 1000);
-  const errors = workflowConfigErrors(raw, { runtime, policy, stallMs, cap });
-  return {
-    config,
-    prompt: (match[2] ?? "").trim().slice(0, 8000),
-    error: errors.length ? errors.join("; ") : null,
-  };
-}
-
-function parseFrontmatter(value: string): Record<string, string> {
-  const result: Record<string, string> = {};
-  let section = "";
-  for (const line of value.split(/\r?\n/)) {
-    const match = line.match(/^(\s*)([A-Za-z][A-Za-z0-9_.-]*)\s*:\s*(.*?)\s*$/);
-    if (!match) continue;
-    const indent = match[1] ?? "";
-    const key = match[2] ?? "";
-    const value = scalar(match[3] ?? "");
-    if (!indent && !value) {
-      section = key;
-      continue;
-    }
-    const normalized = indent && section ? `${section}.${key}` : key;
-    result[normalized] = value;
-    if (!indent) section = "";
-  }
-  return result;
-}
-
-function scalar(value: string): string {
-  return value.trim().replace(/^['"]|['"]$/g, "");
-}
-
-function optionalOneOf<T extends string>(value: unknown, options: readonly T[]): T | undefined {
-  return options.includes(value as T) ? (value as T) : undefined;
-}
-
-function numberConfig(value: unknown): number | undefined {
-  const parsed = Number(value);
-  return Number.isFinite(parsed) && parsed > 0 ? parsed : undefined;
-}
-
-function workflowConfigErrors(
-  raw: Record<string, string>,
-  parsed: {
-    runtime: string | undefined;
-    policy: string | undefined;
-    stallMs: number | undefined;
-    cap: number | undefined;
-  },
-): string[] {
-  const errors: string[] = [];
-  const runtime = raw.runtime ?? raw.runtime_default ?? raw["runtime.default"];
-  const policy =
-    raw.policy ??
-    raw.merge_policy ??
-    raw.merge_default_policy ??
-    raw["merge.default_policy"] ??
-    raw["merge.policy"];
-  const stallMs = raw.stall_ms ?? raw.stallMs ?? raw["runtime.stall_ms"];
-  const cap = raw.cap;
-  if (runtime && !parsed.runtime) errors.push(`unsupported runtime ${runtime}`);
-  if (policy && !parsed.policy) errors.push(`unsupported merge policy ${policy}`);
-  if (stallMs && !parsed.stallMs) errors.push(`invalid stall_ms ${stallMs}`);
-  if (cap && !parsed.cap) errors.push(`invalid cap ${cap}`);
-  return errors;
-}
-
 function normalizeAllow(value: unknown): string {
   const raw = String(value ?? "").trim();
   if (!raw) return "";
@@ -2791,12 +2526,6 @@ function clean(value: unknown, max: number): string {
 
 function oneOf<T extends string>(value: unknown, options: readonly T[], fallback: T): T {
   return options.includes(value as T) ? (value as T) : fallback;
-}
-
-function decodeBase64Text(value: string): string {
-  const binary = atob(value.replace(/\s+/g, ""));
-  const bytes = Uint8Array.from(binary, (char) => char.charCodeAt(0));
-  return new TextDecoder().decode(bytes);
 }
 
 function numberSetting(value: string | undefined, fallback: number): number {
