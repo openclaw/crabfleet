@@ -24,6 +24,7 @@
 - Extract runtime-adapter stop claim, provider outcome, retry evidence, create-resolution, and confirmed-release orchestration into a directly tested service.
 - Move legacy and GitHub Actions stop transitions plus stop-state lookups into the session repository.
 - Extract interactive-session ownership, management, multiplayer, and delegated-control authorization into one directly tested policy module.
+- Move interactive-session archive cadence, D1 snapshots, R2 objects, cleanup, transcripts, and summaries into one archive module.
 - Centralize OpenClaw room visibility, log-free summaries, and bounded transcript sentinel/truncation policy behind direct query tests.
 - Isolate OpenClaw recursive root-stop admission, reservation cleanup, lifecycle retries, reconciliation, and stable-completion polling behind a directly tested service.
 - Extract OpenClaw root-scoped authorization, lineage supervision, reservation outcomes, rollback, and activation orchestration into a directly tested service boundary.

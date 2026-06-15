@@ -557,7 +557,7 @@ test("confirmed adapter failure release keeps the original failure evidence", as
   );
   const releaseSource = source.slice(releaseStart, releaseEnd);
   const finalizeStart = source.indexOf("async function finalizeTerminalInteractiveSession");
-  const finalizeEnd = source.indexOf("async function archiveInteractiveSessionLogs", finalizeStart);
+  const finalizeEnd = source.indexOf("async function readSettings", finalizeStart);
   const finalizeSource = source.slice(finalizeStart, finalizeEnd);
 
   assert.match(releaseSource, /"terminal_failure_reason"/);
@@ -576,6 +576,10 @@ test("confirmed adapter failure release keeps the original failure evidence", as
 
 test("terminal archive finalization remains durably retryable", async () => {
   const source = await readFile(new URL("../src/index.ts", import.meta.url), "utf8");
+  const archiveSource = await readFile(
+    new URL("../src/worker/session-log-archive.ts", import.meta.url),
+    "utf8",
+  );
   const migration = await readFile(
     new URL("../migrations/0021_runtime_adapter_hardening.sql", import.meta.url),
     "utf8",
@@ -587,7 +591,7 @@ test("terminal archive finalization remains durably retryable", async () => {
   );
   const appendSource = source.slice(appendStart, appendEnd);
   const finalizeStart = source.indexOf("async function finalizeTerminalInteractiveSession");
-  const finalizeEnd = source.indexOf("async function archiveInteractiveSessionLogs", finalizeStart);
+  const finalizeEnd = source.indexOf("async function readSettings", finalizeStart);
   const finalizeSource = source.slice(finalizeStart, finalizeEnd);
 
   assert.match(source, /expression\("terminal_finalize_pending", "=", 1\)/);
@@ -595,20 +599,20 @@ test("terminal archive finalization remains durably retryable", async () => {
   assert.match(source, /const terminalCleanupDeletePending = 2/);
   assert.match(source, /completeTerminalFinalization/);
   assert.match(source, /SET terminal_finalize_pending = 0/);
-  assert.match(source, /interactive_session_log_archives\.events_key IS NULL/);
-  assert.match(source, /interactive_session_log_archives\.transcript_key IS NULL/);
-  assert.match(source, /interactive_session_log_archives\.summary_key IS NULL/);
+  assert.match(archiveSource, /interactive_session_log_archives\.events_key IS NULL/);
+  assert.match(archiveSource, /interactive_session_log_archives\.transcript_key IS NULL/);
+  assert.match(archiveSource, /interactive_session_log_archives\.summary_key IS NULL/);
   assert.match(source, /archive\.session_updated_at = interactive_sessions\.updated_at/);
   assert.match(
-    source,
+    archiveSource,
     /excluded\.session_updated_at > interactive_session_log_archives\.session_updated_at/,
   );
   assert.match(
-    source,
+    archiveSource,
     /excluded\.session_updated_at IS interactive_session_log_archives\.session_updated_at/,
   );
   assert.doesNotMatch(
-    source,
+    archiveSource,
     /session_updated_at IS NOT excluded\.session_updated_at[\s\S]*excluded\.updated_at >=/,
   );
   assert.match(appendSource, /executeBatch\(env, \[/);
