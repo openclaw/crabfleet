@@ -52,6 +52,11 @@ Board and Fleet state use D1-backed REST responses and poll every 15 seconds whi
 
 `src/app/` contains the Preact UI. `cmd/crabfleet` is the Go CLI. `cmd/crabbox-ssh-gateway` terminates SSH and calls the Worker's scoped internal API.
 
+`src/worker/runtime-application.ts` is the request/scheduled-event composition
+owner for runtime reconciliation, adapter workspace release, and managed or
+standalone provisioning. It lazily shares one lifecycle graph per Worker
+request or scheduled event.
+
 ## Persistence
 
 ### D1
