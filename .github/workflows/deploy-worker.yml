@@ -83,6 +83,22 @@ jobs:
           printf '%s' "$CRABBOX_OPENCLAW_TOKEN" |
             pnpm exec wrangler secret put CRABBOX_OPENCLAW_TOKEN
 
+      - name: Sync Crabbox runtime adapter token
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CRABBOX_OPENCLAW_TOKEN: ${{ secrets.CRABBOX_OPENCLAW_TOKEN }}
+        run: |
+          node -e '
+            const { createHmac } = require("node:crypto");
+            const root = process.env.CRABBOX_OPENCLAW_TOKEN;
+            if (!root) process.exit(1);
+            process.stdout.write(
+              createHmac("sha256", root)
+                .update("openclaw/crabbox-runtime-adapter/v1")
+                .digest("base64url"),
+            );
+          ' | pnpm exec wrangler secret put CRABBOX_RUNTIME_ADAPTER_TOKEN
+
       - name: Deploy Worker
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
