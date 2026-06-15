@@ -128,7 +128,6 @@ import {
   openClawServiceAuthorized,
 } from "./openclaw-service";
 import {
-  inspectTrustedProxyAssertion,
   sanitizeTrustedProxyRequest,
   trustedProxyConfigured,
   trustedProxyPublicOrigin,
@@ -198,6 +197,7 @@ import {
   unauthorized,
   wantsMarkdown,
 } from "./worker/http";
+import { enforceWorkerIngressAuth, prepareWorkerIngress } from "./worker/ingress";
 
 const defaultInteractiveCommand = "codex --yolo";
 
@@ -1401,15 +1401,9 @@ export default {
     const url = new URL(request.url);
 
     try {
-      const trustedProxy = inspectTrustedProxyAssertion(request, env);
-      if (trustedProxy.kind === "rejected") throw unauthorized();
-      request = sanitizeTrustedProxyRequest(request, env);
-      if (trustedProxy.kind === "authenticated") {
-        const headers = new Headers(request.headers);
-        if (!usesIndependentServiceAuth(request)) headers.delete("authorization");
-        headers.delete("cookie");
-        request = new Request(request, { headers });
-      }
+      const ingress = prepareWorkerIngress(request, env);
+      request = ingress.request;
+      const { trustedProxy } = ingress;
 
       const productResponse = await productHostResponse(request);
       if (productResponse) return productResponse;
@@ -1420,9 +1414,7 @@ export default {
         return text("ok\n", "text/plain; charset=utf-8");
       }
 
-      if (trustedProxy.kind === "missing" && !usesIndependentServiceAuth(request)) {
-        throw unauthorized();
-      }
+      enforceWorkerIngressAuth(ingress);
       if (trustedProxy.kind !== "authenticated") {
         const canonicalRedirect = canonicalAppRedirect(url);
         if (canonicalRedirect) return canonicalRedirect;
@@ -2117,24 +2109,6 @@ async function api(
   }
 
   return json({ error: "not found" }, { status: 404 });
-}
-
-function usesIndependentServiceAuth(request: Request): boolean {
-  const pathname = new URL(request.url).pathname;
-  if (pathname === "/api/terminal/ws") {
-    const headers = request.headers;
-    const hasAuthorization = Boolean(headers.get("authorization"));
-    const hasSshIdentity = Boolean(
-      headers.get("x-crabfleet-ssh-fingerprint") || headers.get("x-crabbox-ssh-fingerprint"),
-    );
-    const hasAgentIdentity = Boolean(
-      headers.get("x-crabfleet-session-id") || headers.get("x-crabbox-session-id"),
-    );
-    return hasAuthorization && (hasSshIdentity || hasAgentIdentity);
-  }
-  return ["/api/ssh/", "/api/agent/", "/api/openclaw/", "/api/provision/"].some((prefix) =>
-    pathname.startsWith(prefix),
-  );
 }
 
 async function tokenLogin(request: Request, env: RuntimeEnv): Promise<Response> {
