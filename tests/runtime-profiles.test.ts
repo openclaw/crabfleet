@@ -185,7 +185,7 @@ test("runtime profiles resolve bounded Codex SSH handoff data", () => {
   assert.equal(client.runtimeProfiles[0]?.codexSsh, undefined);
 });
 
-test("profile allowlisting and capability withdrawals stay enforced at provisioning", async () => {
+test("profile allowlisting stays enforced before provisioning", async () => {
   const source = await readFile(new URL("../src/index.ts", import.meta.url), "utf8");
   const selectionStart = source.indexOf("const profile = clean(body.profile");
   assert.equal(selectionStart, -1);
@@ -196,15 +196,4 @@ test("profile allowlisting and capability withdrawals stay enforced at provision
   assert.equal(selectedRuntimeProfile(deployment, "linux").descriptor?.id, "linux");
   assert.throws(() => selectedRuntimeProfile(deployment, "unknown"), /profile is not configured/);
   assert.ok(source.indexOf("selectedRuntimeProfile(deploymentConfig(env), session.profile)") > 0);
-
-  const resultStart = source.indexOf("function runtimeAdapterProvisionResult");
-  const resultEnd = source.indexOf(
-    "async function reconcileStoppingRuntimeAdapterWorkspace",
-    resultStart,
-  );
-  const result = source.slice(resultStart, resultEnd);
-  assert.match(
-    result,
-    /session\.adapterRequestedCapabilities \?\?[\s\S]*session\.capabilities_json/,
-  );
 });

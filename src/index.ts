@@ -49,19 +49,12 @@ import {
 } from "./generated";
 import { appCanonicalOrigin, canonicalAppRedirect, productHostResponse } from "./canonical-host";
 import {
-  adapterFailureReleaseState,
   adapterWorkspaceIdMatches,
-  definitiveRuntimeAdapterCreateFailure,
-  effectiveAdapterCapabilities,
   currentAdapterDesktopConnection,
   legacyLeaseIdForAdapter,
-  namespacedAdapterWorkspaceId,
-  normalizeAdapterNamespace,
-  normalizeAdapterWorkspaceId,
   parseAdapterWorkspaceResult,
   redactedAdapterMessage,
   redactedAdapterResponseMessage,
-  runtimeAdapterCreatePayload,
   runtimeAdapterCollectionUrl,
   runtimeAdapterBrowserVncUrl,
   runtimeAdapterDesktopUrl,
@@ -77,7 +70,6 @@ import {
   shouldReplayRuntimeAdapterCreate,
   validatedRuntimeAdapterCreatePayloadJson,
   type AdapterProvisionRecord,
-  type AdapterWorkspaceResult,
 } from "./runtime-adapter";
 import { allocateInteractiveSessionIdSql, formatInteractiveSessionId } from "./session-id";
 import { preferredEnabledRepo } from "./repo-selection";
@@ -317,6 +309,17 @@ import {
 } from "./worker/session-runtime-adapter-stop";
 import { sharedInteractiveSession } from "./worker/session-sharing";
 import { InteractiveProvisioningService } from "./worker/provisioning/service";
+import {
+  persistedRuntimeAdapterSeconds,
+  RuntimeAdapterProvisioningService,
+  runtimeAdapterProvisionResult,
+} from "./worker/provisioning/runtime-adapter";
+import {
+  failRuntimeAdapterWorkspaceIdConflict,
+  persistRuntimeAdapterStopEvidence,
+  stageFailedRuntimeAdapterRelease,
+  stageRuntimeAdapterProvision,
+} from "./worker/provisioning/runtime-adapter-repository";
 import type {
   InteractiveProvisionRequest,
   InteractiveProvisionResult,
@@ -6532,13 +6535,45 @@ async function readInteractiveSessionMultiplayerMode(
 }
 
 function interactiveProvisioningService(env: RuntimeEnv): InteractiveProvisioningService {
+  const runtimeAdapter = runtimeAdapterProvisioningService(env);
   return new InteractiveProvisioningService({
     sandboxAvailable: Boolean(env.SANDBOX),
     runtimeAdapterAvailable: runtimeAdapterConfigurationPresent(env),
     provisionSandbox: (session, agentToken, sandbox) =>
       provisionWithSandbox(env, session, agentToken, sandbox.lease, sandbox.ownership),
-    provisionRuntimeAdapter: (session, agentToken) =>
-      provisionWithRuntimeAdapter(env, session, agentToken),
+    provisionRuntimeAdapter: (session) => runtimeAdapter.provision(session),
+  });
+}
+
+function runtimeAdapterProvisioningService(env: RuntimeEnv): RuntimeAdapterProvisioningService {
+  return new RuntimeAdapterProvisioningService({
+    namespace: env.CRABBOX_RUNTIME_ADAPTER_NAMESPACE ?? "",
+    now: Date.now,
+    resolveControlPlane: (profile, registeredControlPlane) =>
+      requireRegisteredRuntimeAdapterControlPlane(env, profile, registeredControlPlane),
+    stageProvision: (input) => stageRuntimeAdapterProvision(env, input),
+    createWorkspace: async ({ url, adapterWorkspaceId, createPayloadJson }) => {
+      const response = await runtimeAdapterFetch(env, url, {
+        method: "POST",
+        headers: { "idempotency-key": adapterWorkspaceId },
+        body: createPayloadJson,
+      });
+      return {
+        ok: response.ok,
+        status: response.status,
+        body: await readRuntimeAdapterResponseBody(response),
+      };
+    },
+    failWorkspaceIdConflict: (input) => failRuntimeAdapterWorkspaceIdConflict(env, input),
+    stageFailedRelease: (sessionId, adapterWorkspaceId, message, now) =>
+      stageFailedRuntimeAdapterRelease(env, sessionId, adapterWorkspaceId, message, now),
+    stopWorkspaceForSession: (sessionId, adapterWorkspaceId) =>
+      stopRuntimeAdapterWorkspaceForSession(env, sessionId, adapterWorkspaceId),
+    recordConfirmedRelease: async (sessionId, adapterWorkspaceId, now, message) => {
+      await recordConfirmedRuntimeAdapterRelease(env, sessionId, adapterWorkspaceId, now, message);
+    },
+    persistStopEvidence: (sessionId, adapterWorkspaceId, message, now) =>
+      persistRuntimeAdapterStopEvidence(env, sessionId, adapterWorkspaceId, message, now),
   });
 }
 
@@ -8999,686 +9034,6 @@ function sandboxHasGitHubCredential(env: RuntimeEnv, session: SandboxRuntimeSess
   return Boolean(("githubToken" in session && session.githubToken) || env.GITHUB_TOKEN);
 }
 
-async function provisionWithRuntimeAdapter(
-  env: RuntimeEnv,
-  session: InteractiveProvisionRequest,
-  _agentToken?: string,
-  reconciliationOwner?: RuntimeAdapterCreateAttemptFence,
-): Promise<InteractiveProvisionResult> {
-  const replayingPendingCreate = reconciliationOwner !== undefined;
-  const namespace = normalizeAdapterNamespace(env.CRABBOX_RUNTIME_ADAPTER_NAMESPACE ?? "");
-  const adapterWorkspaceId = session.adapterWorkspaceId
-    ? normalizeAdapterWorkspaceId(session.adapterWorkspaceId) === session.adapterWorkspaceId
-      ? session.adapterWorkspaceId
-      : null
-    : namespace
-      ? namespacedAdapterWorkspaceId(namespace, session.id)
-      : null;
-  if (!adapterWorkspaceId) {
-    if (replayingPendingCreate) {
-      throw new Error("runtime adapter create replay blocked: persisted workspace id is invalid");
-    }
-    return failedProvision(
-      "runtime adapter provision failed: persisted workspace id or valid namespace is required",
-    );
-  }
-  const fallbackCapabilities =
-    session.runtime === "crabbox" ? crabboxCapabilities : containerCapabilities;
-  let baseUrl: string;
-  try {
-    baseUrl = requireRegisteredRuntimeAdapterControlPlane(
-      env,
-      session.profile,
-      session.adapterControlPlane,
-    );
-  } catch (error) {
-    return unresolvedRuntimeAdapterProvision(
-      session,
-      adapterWorkspaceId,
-      fallbackCapabilities,
-      clean(error instanceof Error ? error.message : String(error), 240),
-    );
-  }
-  const requestedCapabilities = session.adapterRequestedCapabilities;
-  const ttlSeconds = persistedRuntimeAdapterSeconds(session.adapterTtlSeconds);
-  const idleTimeoutSeconds = persistedRuntimeAdapterSeconds(session.adapterIdleTimeoutSeconds);
-  if (!requestedCapabilities || !ttlSeconds || !idleTimeoutSeconds) {
-    if (replayingPendingCreate) {
-      return ambiguousRuntimeAdapterProvision(
-        session,
-        adapterWorkspaceId,
-        requestedCapabilities ?? fallbackCapabilities,
-        "runtime adapter create replay blocked: persisted create settings are incomplete",
-      );
-    }
-    return releaseFailedRuntimeAdapterProvision(
-      env,
-      session.id,
-      runtimeAdapterFailureProvision(
-        session,
-        adapterWorkspaceId,
-        requestedCapabilities ?? fallbackCapabilities,
-        "runtime adapter provision failed: persisted create settings are incomplete",
-      ),
-    );
-  }
-  const generatedPayload = session.adapterCreatePayloadJson
-    ? null
-    : runtimeAdapterCreatePayload(
-        {
-          namespace: namespace ?? "",
-          id: session.id,
-          parentSessionId: session.parentSessionId,
-          rootSessionId: session.rootSessionId,
-          repo: session.repo,
-          branch: session.branch,
-          runtime: session.runtime,
-          profile: session.profile,
-          command: session.command,
-          prompt: session.prompt,
-          purpose: session.purpose,
-          summary: session.summary,
-          owner: session.owner,
-          createdBy: session.createdBy,
-          ttlSeconds,
-          idleTimeoutSeconds,
-          desktop: requestedCapabilities.desktop,
-        },
-        adapterWorkspaceId,
-      );
-  const createPayloadJson = validatedRuntimeAdapterCreatePayloadJson(
-    session.adapterCreatePayloadJson ?? (generatedPayload ? JSON.stringify(generatedPayload) : ""),
-    {
-      workspaceId: adapterWorkspaceId,
-      ttlSeconds,
-      idleTimeoutSeconds,
-      desktop: requestedCapabilities.desktop,
-    },
-  );
-  if (!createPayloadJson) {
-    if (replayingPendingCreate) {
-      return ambiguousRuntimeAdapterProvision(
-        session,
-        adapterWorkspaceId,
-        requestedCapabilities,
-        "runtime adapter create replay blocked: persisted create payload is invalid",
-      );
-    }
-    return releaseFailedRuntimeAdapterProvision(
-      env,
-      session.id,
-      runtimeAdapterFailureProvision(
-        session,
-        adapterWorkspaceId,
-        requestedCapabilities,
-        "runtime adapter provision failed: persisted create payload is invalid",
-      ),
-    );
-  }
-  const createAttempt = await stageRuntimeAdapterProvision(
-    env,
-    session,
-    baseUrl,
-    adapterWorkspaceId,
-    requestedCapabilities,
-    ttlSeconds,
-    idleTimeoutSeconds,
-    createPayloadJson,
-    reconciliationOwner,
-  );
-  if (!createAttempt) {
-    return unresolvedRuntimeAdapterProvision(
-      session,
-      adapterWorkspaceId,
-      requestedCapabilities,
-      "runtime adapter control-plane registration changed before create",
-    );
-  }
-  let response: Response;
-  try {
-    response = await runtimeAdapterFetch(env, runtimeAdapterCollectionUrl(baseUrl), {
-      method: "POST",
-      headers: { "idempotency-key": adapterWorkspaceId },
-      body: createPayloadJson,
-    });
-  } catch (error) {
-    return ambiguousRuntimeAdapterProvision(
-      session,
-      adapterWorkspaceId,
-      requestedCapabilities,
-      `runtime adapter create outcome unknown: ${safeProviderError(error, [adapterWorkspaceId])}`,
-    );
-  }
-  let responseBody: unknown;
-  try {
-    responseBody = await readRuntimeAdapterResponseBody(response);
-  } catch (error) {
-    return ambiguousRuntimeAdapterProvision(
-      session,
-      adapterWorkspaceId,
-      requestedCapabilities,
-      `runtime adapter create outcome unknown: ${safeProviderError(error, [adapterWorkspaceId])}`,
-    );
-  }
-  if (!response.ok) {
-    const responseMessage = redactedAdapterResponseMessage(
-      responseBody,
-      `HTTP ${response.status}`,
-      [adapterWorkspaceId],
-    );
-    if (runtimeAdapterWorkspaceIdConflict(response.status, responseBody)) {
-      const conflictResult = await failRuntimeAdapterWorkspaceIdConflict(
-        env,
-        session,
-        baseUrl,
-        adapterWorkspaceId,
-        createPayloadJson,
-        requestedCapabilities,
-        createAttempt,
-        `runtime adapter provision failed: ${responseMessage}`,
-      );
-      if (conflictResult) return conflictResult;
-      throw conflict("runtime adapter workspace conflict response is stale");
-    }
-    if (!replayingPendingCreate && definitiveRuntimeAdapterCreateFailure(response.status)) {
-      return releaseFailedRuntimeAdapterProvision(
-        env,
-        session.id,
-        runtimeAdapterFailureProvision(
-          session,
-          adapterWorkspaceId,
-          requestedCapabilities,
-          `runtime adapter provision failed: ${responseMessage}`,
-        ),
-      );
-    }
-    const messagePrefix = replayingPendingCreate
-      ? "runtime adapter create replay pending"
-      : "runtime adapter create outcome unknown";
-    return ambiguousRuntimeAdapterProvision(
-      session,
-      adapterWorkspaceId,
-      requestedCapabilities,
-      `${messagePrefix}: ${responseMessage}`,
-    );
-  }
-  const parsed = parseAdapterWorkspaceResult(responseBody, {
-    workspaceId: adapterWorkspaceId,
-    profile: session.profile,
-  });
-  if (!parsed) {
-    return ambiguousRuntimeAdapterProvision(
-      session,
-      adapterWorkspaceId,
-      requestedCapabilities,
-      "runtime adapter create outcome unknown: invalid workspace response",
-    );
-  }
-  if (!adapterWorkspaceIdMatches(parsed, adapterWorkspaceId)) {
-    return ambiguousRuntimeAdapterProvision(
-      session,
-      adapterWorkspaceId,
-      requestedCapabilities,
-      "runtime adapter create outcome unknown: workspace identity mismatch",
-    );
-  }
-  if (parsed.profile !== session.profile) {
-    return ambiguousRuntimeAdapterProvision(
-      session,
-      adapterWorkspaceId,
-      requestedCapabilities,
-      "runtime adapter create outcome unknown: workspace profile mismatch",
-    );
-  }
-  const result = runtimeAdapterProvisionResult(
-    parsed,
-    session,
-    Date.now(),
-    adapterWorkspaceId,
-    true,
-  );
-  return result.status === "failed"
-    ? releaseFailedRuntimeAdapterProvision(env, session.id, result)
-    : result;
-}
-
-function persistedRuntimeAdapterSeconds(value: number | null | undefined): number | null {
-  return typeof value === "number" && Number.isInteger(value) && value > 0 ? value : null;
-}
-
-type RuntimeAdapterCreateAttemptFence = {
-  status: InteractiveSessionStatus;
-  updatedAt: number;
-  lastReconciledAt: number | null;
-  terminalStatus: "failed" | null;
-};
-
-async function stageRuntimeAdapterProvision(
-  env: RuntimeEnv,
-  session: InteractiveProvisionRequest,
-  adapterControlPlane: string,
-  adapterWorkspaceId: string,
-  capabilities: RuntimeCapabilities,
-  ttlSeconds: number,
-  idleTimeoutSeconds: number,
-  createPayloadJson: string,
-  reconciliationOwner?: RuntimeAdapterCreateAttemptFence,
-): Promise<RuntimeAdapterCreateAttemptFence | null> {
-  const stageAt = Date.now();
-  let stage = database(env)
-    .updateTable("interactive_sessions")
-    .set({
-      adapter: runtimeAdapterName,
-      profile: session.profile,
-      adapter_workspace_id: adapterWorkspaceId,
-      capabilities_json: JSON.stringify(capabilities),
-      adapter_ttl_seconds: ttlSeconds,
-      adapter_idle_timeout_seconds: idleTimeoutSeconds,
-      adapter_requested_capabilities_json: JSON.stringify(capabilities),
-      adapter_create_payload_json: createPayloadJson,
-      adapter_create_pending: 1,
-      reconcile_error: "runtime adapter create pending",
-      ...(reconciliationOwner ? {} : { updated_at: sql<number>`MAX(updated_at + 1, ${stageAt})` }),
-    })
-    .where("id", "=", session.id)
-    .where("adapter_control_plane", "=", adapterControlPlane)
-    .where("adapter_workspace_id", "=", adapterWorkspaceId);
-  if (reconciliationOwner) {
-    stage = stage
-      .where("status", "=", reconciliationOwner.status)
-      .where("updated_at", "=", reconciliationOwner.updatedAt);
-    stage =
-      reconciliationOwner.lastReconciledAt === null
-        ? stage.where("last_reconciled_at", "is", null)
-        : stage.where("last_reconciled_at", "=", reconciliationOwner.lastReconciledAt);
-    stage =
-      reconciliationOwner.terminalStatus === null
-        ? stage.where("terminal_status", "is", null)
-        : stage.where("terminal_status", "=", reconciliationOwner.terminalStatus);
-  } else {
-    stage = stage.where("status", "in", ["provisioning", "pending_adapter"]);
-  }
-  const staged = await stage
-    .returning(["status", "updated_at", "last_reconciled_at", "terminal_status"])
-    .executeTakeFirst();
-  return staged
-    ? {
-        status: staged.status,
-        updatedAt: staged.updated_at,
-        lastReconciledAt: staged.last_reconciled_at,
-        terminalStatus: staged.terminal_status,
-      }
-    : null;
-}
-
-function ambiguousRuntimeAdapterProvision(
-  session: Pick<InteractiveProvisionRequest, "runtime" | "profile">,
-  adapterWorkspaceId: string,
-  capabilities: RuntimeCapabilities,
-  message: string,
-): InteractiveProvisionResult {
-  return {
-    status: "provisioning",
-    leaseId: null,
-    attachUrl: null,
-    attachUrlPresent: true,
-    vncUrl: null,
-    message,
-    adapter: runtimeAdapterName,
-    profile: session.profile,
-    adapterWorkspaceId,
-    providerResourceId: null,
-    capabilities,
-    capabilitiesPresent: true,
-    expiresAt: null,
-    expiresAtPresent: false,
-    reconciledAt: Date.now(),
-    reconcileError: message,
-    terminalStatus: null,
-    createPending: true,
-  };
-}
-
-function runtimeAdapterFailureProvision(
-  session: Pick<InteractiveProvisionRequest, "runtime" | "profile">,
-  adapterWorkspaceId: string,
-  capabilities: RuntimeCapabilities,
-  message: string,
-): InteractiveProvisionResult {
-  return {
-    ...ambiguousRuntimeAdapterProvision(session, adapterWorkspaceId, capabilities, message),
-    status: "failed",
-    terminalStatus: null,
-    createPending: false,
-  };
-}
-
-function unresolvedRuntimeAdapterProvision(
-  session: Pick<InteractiveProvisionRequest, "runtime" | "profile">,
-  adapterWorkspaceId: string,
-  capabilities: RuntimeCapabilities,
-  message: string,
-): InteractiveProvisionResult {
-  return {
-    ...runtimeAdapterFailureProvision(session, adapterWorkspaceId, capabilities, message),
-    status: "stopping",
-    message: `${message}; runtime workspace outcome unresolved`,
-    reconcileError: message,
-    terminalStatus: "failed",
-    createPending: true,
-  };
-}
-
-async function failRuntimeAdapterWorkspaceIdConflict(
-  env: RuntimeEnv,
-  session: Pick<InteractiveProvisionRequest, "id" | "profile">,
-  adapterControlPlane: string,
-  adapterWorkspaceId: string,
-  createPayloadJson: string,
-  capabilities: RuntimeCapabilities,
-  createAttempt: RuntimeAdapterCreateAttemptFence,
-  message: string,
-): Promise<InteractiveProvisionResult | null> {
-  const now = Date.now();
-  const failureMessage = clean(message, 500);
-  const lastReconciledOwner =
-    createAttempt.lastReconciledAt === null
-      ? sql<boolean>`last_reconciled_at IS NULL`
-      : sql<boolean>`last_reconciled_at = ${createAttempt.lastReconciledAt}`;
-  const terminalStatusOwner =
-    createAttempt.terminalStatus === null
-      ? sql<boolean>`terminal_status IS NULL`
-      : sql<boolean>`terminal_status = ${createAttempt.terminalStatus}`;
-  const expectedOwner = sql<boolean>`
-    id = ${session.id}
-    AND adapter = ${runtimeAdapterName}
-    AND adapter_workspace_id = ${adapterWorkspaceId}
-    AND adapter_control_plane = ${adapterControlPlane}
-    AND adapter_create_payload_json = ${createPayloadJson}
-    AND adapter_requested_capabilities_json = ${JSON.stringify(capabilities)}
-    AND adapter_create_pending = 1
-    AND status = ${createAttempt.status}
-    AND updated_at = ${createAttempt.updatedAt}
-    AND ${lastReconciledOwner}
-    AND ${terminalStatusOwner}
-  `;
-  const db = database(env);
-  const event = sql`
-    INSERT INTO interactive_session_events (session_id, actor, message, created_at)
-    SELECT ${session.id}, 'system', ${failureMessage}, ${now}
-    FROM interactive_sessions
-    WHERE ${expectedOwner}
-  `;
-  const detach = db
-    .updateTable("interactive_sessions")
-    .set({
-      status: "failed",
-      adapter: null,
-      adapter_workspace_id: null,
-      adapter_control_plane: null,
-      provider_resource_id: null,
-      adapter_ttl_seconds: null,
-      adapter_idle_timeout_seconds: null,
-      adapter_requested_capabilities_json: null,
-      adapter_create_payload_json: null,
-      adapter_create_pending: 0,
-      lease_id: null,
-      attach_url: null,
-      vnc_url: null,
-      expires_at: null,
-      last_reconciled_at: now,
-      reconcile_error: failureMessage,
-      terminal_status: null,
-      terminal_failure_reason: failureMessage,
-      terminal_finalize_pending: 1,
-      stopped_at: now,
-      agent_token_hash: null,
-      controller: null,
-      control_requested_by: null,
-      control_requested_at: null,
-      control_granted_at: null,
-      control_expires_at: null,
-      last_event: failureMessage,
-      updated_at: sql<number>`MAX(updated_at + 1, ${now})`,
-    })
-    .where(expectedOwner)
-    .returning("updated_at");
-  const results = await env.DB.batch<{ updated_at: number }>(
-    [event, detach].map((query) => {
-      const compiled = query.compile(db);
-      return env.DB.prepare(compiled.sql).bind(...compiled.parameters);
-    }),
-  );
-  if (!results.at(-1)?.results.length) return null;
-  await archiveInteractiveSessionLogs(env, session.id, now).catch(() => undefined);
-  await finalizeTerminalInteractiveSession(env, session.id, "failed", now).catch(() => undefined);
-  return {
-    status: "failed",
-    leaseId: null,
-    attachUrl: null,
-    attachUrlPresent: true,
-    vncUrl: null,
-    message: failureMessage,
-    adapter: null,
-    profile: session.profile,
-    adapterWorkspaceId: null,
-    providerResourceId: null,
-    capabilities,
-    capabilitiesPresent: true,
-    expiresAt: null,
-    expiresAtPresent: true,
-    reconciledAt: now,
-    reconcileError: failureMessage,
-    terminalStatus: null,
-    createPending: false,
-  };
-}
-
-async function releaseFailedRuntimeAdapterProvision(
-  env: RuntimeEnv,
-  sessionId: string,
-  result: InteractiveProvisionResult,
-): Promise<InteractiveProvisionResult> {
-  const adapterWorkspaceId = result.adapterWorkspaceId;
-  if (!adapterWorkspaceId) return result;
-  await stageFailedRuntimeAdapterRelease(env, sessionId, adapterWorkspaceId, result.message);
-  try {
-    const release = await stopRuntimeAdapterWorkspaceForSession(env, sessionId, adapterWorkspaceId);
-    const releaseState = adapterFailureReleaseState(release.status);
-    if (release.status === "stopped") {
-      await recordConfirmedRuntimeAdapterRelease(
-        env,
-        sessionId,
-        adapterWorkspaceId,
-        Date.now(),
-        release.message,
-      );
-    }
-    const releaseMessage = `${result.message}; ${release.message}`;
-    if (release.status === "stopping") {
-      await persistRuntimeAdapterStopEvidence(
-        env,
-        sessionId,
-        adapterWorkspaceId,
-        releaseMessage,
-        Date.now(),
-      );
-    }
-    return {
-      ...result,
-      status: releaseState.status,
-      attachUrl: null,
-      vncUrl: null,
-      message: releaseMessage,
-      reconcileError: release.status === "stopping" ? releaseMessage : result.message,
-      terminalStatus: releaseState.terminalStatus,
-    };
-  } catch (error) {
-    const releaseError = safeProviderError(
-      error,
-      [adapterWorkspaceId, result.providerResourceId ?? null],
-      [result.attachUrl],
-    );
-    const releaseState = adapterFailureReleaseState("stopping");
-    const pendingMessage = `${result.message}; ${releaseState.message}: ${releaseError}`;
-    await persistRuntimeAdapterStopEvidence(
-      env,
-      sessionId,
-      adapterWorkspaceId,
-      pendingMessage,
-      Date.now(),
-    );
-    return {
-      ...result,
-      status: releaseState.status,
-      attachUrl: null,
-      vncUrl: null,
-      message: pendingMessage,
-      reconcileError: pendingMessage,
-      terminalStatus: releaseState.terminalStatus,
-    };
-  }
-}
-
-async function persistRuntimeAdapterStopEvidence(
-  env: RuntimeEnv,
-  sessionId: string,
-  adapterWorkspaceId: string,
-  message: string,
-  now: number,
-  reconcileError: string | null = message,
-  eventActor = "system",
-): Promise<void> {
-  const evidence = clean(message, 500);
-  const errorEvidence = reconcileError ? clean(reconcileError, 500) : null;
-  const actorName = clean(eventActor, 120) || "system";
-  const reconcileErrorOwner = errorEvidence
-    ? sql<boolean>`reconcile_error = ${errorEvidence}`
-    : sql<boolean>`reconcile_error IS NULL`;
-  const db = database(env);
-  await executeBatch(env, [
-    db
-      .updateTable("interactive_sessions")
-      .set({
-        last_reconciled_at: now,
-        reconcile_error: errorEvidence,
-        last_event: evidence,
-        updated_at: sql<number>`MAX(updated_at + 1, ${now})`,
-      })
-      .where("id", "=", sessionId)
-      .where("adapter", "=", runtimeAdapterName)
-      .where("adapter_workspace_id", "=", adapterWorkspaceId)
-      .where("status", "=", "stopping").where(sql<boolean>`
-        COALESCE(last_event, '') != ${evidence}
-        OR COALESCE(reconcile_error, '') != ${errorEvidence ?? ""}
-      `),
-    sql`
-      INSERT INTO interactive_session_events (session_id, actor, message, created_at)
-      SELECT ${sessionId}, ${actorName}, ${evidence}, ${now}
-      WHERE EXISTS (
-        SELECT 1
-        FROM interactive_sessions
-        WHERE id = ${sessionId}
-          AND adapter = ${runtimeAdapterName}
-          AND adapter_workspace_id = ${adapterWorkspaceId}
-          AND status = 'stopping'
-          AND last_event = ${evidence}
-          AND ${reconcileErrorOwner}
-      )
-      AND NOT EXISTS (
-        SELECT 1
-        FROM interactive_session_events
-        WHERE session_id = ${sessionId}
-          AND actor = ${actorName}
-          AND message = ${evidence}
-      )
-    `,
-  ]);
-  await archiveInteractiveSessionLogs(env, sessionId, now).catch(() => undefined);
-}
-
-async function stageFailedRuntimeAdapterRelease(
-  env: RuntimeEnv,
-  sessionId: string,
-  adapterWorkspaceId: string,
-  message: string,
-): Promise<void> {
-  const now = Date.now();
-  await database(env)
-    .updateTable("interactive_sessions")
-    .set({
-      status: "stopping",
-      lease_id: null,
-      attach_url: null,
-      vnc_url: null,
-      terminal_status: "failed",
-      terminal_failure_reason: message,
-      adapter_create_pending: 0,
-      last_reconciled_at: now,
-      reconcile_error: message,
-      agent_token_hash: null,
-      controller: null,
-      control_requested_by: null,
-      control_requested_at: null,
-      control_granted_at: null,
-      control_expires_at: null,
-      updated_at: sql<number>`MAX(updated_at + 1, ${now})`,
-      last_event: `${message}; runtime workspace release pending`,
-    })
-    .where("id", "=", sessionId)
-    .where("adapter", "=", runtimeAdapterName)
-    .where("adapter_workspace_id", "=", adapterWorkspaceId)
-    .where("status", "in", [
-      "provisioning",
-      "pending_adapter",
-      "ready",
-      "attached",
-      "detached",
-      "stopping",
-    ])
-    .execute();
-}
-
-function runtimeAdapterProvisionResult(
-  result: AdapterWorkspaceResult,
-  session: Pick<InteractiveProvisionRequest, "runtime" | "profile"> & {
-    adapterRequestedCapabilities?: RuntimeCapabilities | null;
-    capabilities_json?: string;
-  },
-  reconciledAt: number,
-  adapterWorkspaceId: string,
-  initialCreate: boolean,
-): InteractiveProvisionResult {
-  const defaultCapabilities =
-    session.adapterRequestedCapabilities ??
-    (session.capabilities_json
-      ? runtimeCapabilities(session.runtime, session.capabilities_json)
-      : session.runtime === "crabbox"
-        ? crabboxCapabilities
-        : containerCapabilities);
-  const capabilities = effectiveAdapterCapabilities(result, defaultCapabilities, initialCreate);
-  return {
-    status: result.status,
-    leaseId: null,
-    attachUrl: result.terminalUrl,
-    attachUrlPresent: initialCreate || result.terminalUrlPresent,
-    // Desktop access is minted only after Crabfleet authenticates the viewer.
-    vncUrl: null,
-    message: result.message,
-    adapter: runtimeAdapterName,
-    profile: session.profile,
-    adapterWorkspaceId,
-    providerResourceId: result.providerResourceId,
-    ...(capabilities === undefined ? {} : { capabilities, capabilitiesPresent: true }),
-    ...(initialCreate || result.expiresAtPresent
-      ? { expiresAt: result.expiresAt, expiresAtPresent: true }
-      : {}),
-    reconciledAt,
-    reconcileError: null,
-    createPending: false,
-  };
-}
-
 function runtimeAdapterRecord(session: InteractiveSessionRow): AdapterProvisionRecord {
   if (session.runtime === githubActionsRuntime) {
     throw new Error("GitHub Actions sessions cannot use the runtime adapter");
@@ -9705,10 +9060,8 @@ async function inspectRuntimeAdapterWorkspace(
     return reconcileStoppingRuntimeAdapterWorkspace(env, session, reconciliationClaimAt);
   }
   if (shouldReplayRuntimeAdapterCreate(session.status, session.adapter_create_pending === 1)) {
-    return provisionWithRuntimeAdapter(
-      env,
+    return runtimeAdapterProvisioningService(env).provision(
       runtimeAdapterReplayRequest(runtimeAdapterRecord(session)),
-      undefined,
       {
         status: session.status,
         updatedAt: session.updated_at,
@@ -9769,7 +9122,7 @@ async function inspectRuntimeAdapterWorkspace(
     false,
   );
   return result.status === "failed"
-    ? releaseFailedRuntimeAdapterProvision(env, session.id, result)
+    ? runtimeAdapterProvisioningService(env).releaseFailed(session.id, result)
     : result;
 }
 
@@ -9991,21 +9344,21 @@ async function replayStoppingRuntimeAdapterCreate(
       [adapterWorkspaceId],
     );
     if (runtimeAdapterWorkspaceIdConflict(response.status, responseBody)) {
-      const terminalResult = await failRuntimeAdapterWorkspaceIdConflict(
-        env,
+      const terminalResult = await failRuntimeAdapterWorkspaceIdConflict(env, {
         session,
-        controlPlane,
+        now: Date.now(),
+        adapterControlPlane: controlPlane,
         adapterWorkspaceId,
         createPayloadJson,
-        requestedCapabilities,
-        {
+        capabilities: requestedCapabilities,
+        createAttempt: {
           status: "stopping",
           updatedAt: session.updated_at,
           lastReconciledAt: reconciliationClaimAt,
           terminalStatus: session.terminal_status,
         },
-        `runtime adapter create replay failed: ${responseMessage}`,
-      );
+        message: `runtime adapter create replay failed: ${responseMessage}`,
+      });
       if (!terminalResult) {
         return {
           message: "runtime adapter create replay deferred: conflict response is stale",

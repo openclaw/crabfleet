@@ -113,38 +113,6 @@ test("adapter create payload matches the strict controller contract", () => {
   );
 });
 
-test("configured profiles fence every adapter runtime and preserve requested capabilities", async () => {
-  const source = await readFile(new URL("../src/index.ts", import.meta.url), "utf8");
-  const resultStart = source.indexOf("function runtimeAdapterProvisionResult");
-  const resultEnd = source.indexOf(
-    "async function reconcileStoppingRuntimeAdapterWorkspace",
-    resultStart,
-  );
-  const resultSource = source.slice(resultStart, resultEnd);
-
-  assert.match(resultSource, /session\.adapterRequestedCapabilities \?\?/);
-  assert.match(resultSource, /profile: session\.profile/);
-  assert.doesNotMatch(resultSource, /profile: result\.profile/);
-});
-
-test("profile-routed adapter responses cannot rewrite their lifecycle route", async () => {
-  const source = await readFile(new URL("../src/index.ts", import.meta.url), "utf8");
-  const createStart = source.indexOf("async function provisionWithRuntimeAdapter");
-  const createEnd = source.indexOf("function persistedRuntimeAdapterSeconds", createStart);
-  const createSource = source.slice(createStart, createEnd);
-  const inspectStart = source.indexOf("async function inspectRuntimeAdapterWorkspace");
-  const inspectEnd = source.indexOf(
-    "async function reconcileStoppingRuntimeAdapterWorkspace",
-    inspectStart,
-  );
-  const inspectSource = source.slice(inspectStart, inspectEnd);
-
-  assert.match(createSource, /parsed\.profile !== session\.profile/);
-  assert.match(createSource, /workspace profile mismatch/);
-  assert.match(inspectSource, /parsed\.profile !== session\.profile/);
-  assert.match(inspectSource, /different workspace profile/);
-});
-
 test("adapter workspace id stays distinct from provider resource id", () => {
   const result = parseAdapterWorkspaceResult({
     id: "fleet-a-is-101",
@@ -501,9 +469,6 @@ test("runtime adapter lifecycle cannot escape durable session ownership", async 
   const stopStart = source.indexOf("async function stopSupersededRuntimeAdapterProvision");
   const stopEnd = source.indexOf("async function resolveInteractiveSessionLineage", stopStart);
   const stopSource = source.slice(stopStart, stopEnd);
-  const releaseStart = source.indexOf("async function releaseFailedRuntimeAdapterProvision");
-  const releaseEnd = source.indexOf("function runtimeAdapterProvisionResult", releaseStart);
-  const releaseSource = source.slice(releaseStart, releaseEnd);
 
   assert.match(stopSource, /recordConfirmedRuntimeAdapterRelease/);
   assert.match(stopSource, /select\(\[[\s\S]*"adapter_create_pending"[\s\S]*"terminal_status"/);
@@ -519,15 +484,6 @@ test("runtime adapter lifecycle cannot escape durable session ownership", async 
     stopSource.indexOf("clearRuntimeAdapterCreatePending") <
       stopSource.indexOf("const release = await stopRuntimeAdapterWorkspaceForSession"),
   );
-  assert.ok(
-    releaseSource.indexOf("stageFailedRuntimeAdapterRelease") <
-      releaseSource.indexOf("stopRuntimeAdapterWorkspace"),
-  );
-  assert.match(releaseSource, /status: "stopping"/);
-  assert.match(releaseSource, /release\.message/);
-  assert.match(releaseSource, /pendingMessage/);
-  assert.match(releaseSource, /terminal_status: "failed"/);
-  assert.match(releaseSource, /adapter_create_pending: 0/);
   assert.match(source, /AND NOT EXISTS \(/);
   assert.match(
     finalizationSource,
@@ -758,9 +714,6 @@ test("runtime adapter operations stay bound to the registered control plane", as
     new URL("../migrations/0020_runtime_adapter_lifecycle.sql", import.meta.url),
     "utf8",
   );
-  const provisionStart = source.indexOf("async function provisionWithRuntimeAdapter");
-  const provisionEnd = source.indexOf("function persistedRuntimeAdapterSeconds", provisionStart);
-  const provisionSource = source.slice(provisionStart, provisionEnd);
   const inspectStart = source.indexOf("async function inspectRuntimeAdapterWorkspace");
   const inspectEnd = source.indexOf(
     "async function reconcileStoppingRuntimeAdapterWorkspace",
@@ -803,8 +756,6 @@ test("runtime adapter operations stay bound to the registered control plane", as
       message: "runtime adapter control plane differs from workspace registration",
     },
   );
-  assert.match(provisionSource, /requireRegisteredRuntimeAdapterControlPlane/);
-  assert.match(provisionSource, /runtimeAdapterCollectionUrl\(baseUrl\)/);
   assert.match(inspectSource, /session\.adapter_control_plane/);
   assert.match(inspectSource, /runtimeAdapterWorkspaceUrl\(controlPlane, adapterWorkspaceId\)/);
   assert.match(stopSource, /requireRegisteredRuntimeAdapterControlPlane/);
@@ -824,9 +775,6 @@ test("pending runtime adapter creates replay before any inspect", async () => {
     inspectStart,
   );
   const inspectSource = source.slice(inspectStart, inspectEnd);
-  const provisionStart = source.indexOf("async function provisionWithRuntimeAdapter");
-  const provisionEnd = source.indexOf("function persistedRuntimeAdapterSeconds", provisionStart);
-  const provisionSource = source.slice(provisionStart, provisionEnd);
   const replayIndex = inspectSource.indexOf(
     "shouldReplayRuntimeAdapterCreate(session.status, session.adapter_create_pending === 1)",
   );
@@ -840,12 +788,6 @@ test("pending runtime adapter creates replay before any inspect", async () => {
   assert.match(inspectSource, /runtimeAdapterReplayRequest\(runtimeAdapterRecord\(session\)\)/);
   assert.ok(missingIndex >= 0);
   assert.doesNotMatch(missingSource, /provisionWithRuntimeAdapter/);
-  assert.match(provisionSource, /const replayingPendingCreate = reconciliationOwner !== undefined/);
-  assert.match(
-    provisionSource,
-    /!replayingPendingCreate && definitiveRuntimeAdapterCreateFailure\(response\.status\)/,
-  );
-  assert.match(provisionSource, /runtime adapter create replay blocked/);
 });
 
 test("stopping create replay owns the exact persisted lifecycle", async () => {
@@ -1527,96 +1469,17 @@ test("explicit workspace id conflicts are distinct from retryable 409 responses"
   );
 });
 
-test("workspace id conflicts detach without adopting or deleting the existing workspace", async () => {
+test("stopping create replay retains a redacted provider reason", async () => {
   const source = await readFile(new URL("../src/index.ts", import.meta.url), "utf8");
-  const createStart = source.indexOf("async function provisionWithRuntimeAdapter");
-  const createEnd = source.indexOf("function persistedRuntimeAdapterSeconds", createStart);
-  const createSource = source.slice(createStart, createEnd);
-  const conflictStart = source.indexOf("async function failRuntimeAdapterWorkspaceIdConflict");
-  const conflictEnd = source.indexOf(
-    "async function releaseFailedRuntimeAdapterProvision",
-    conflictStart,
-  );
-  const conflictSource = source.slice(conflictStart, conflictEnd);
-  const stageStart = source.indexOf("async function stageRuntimeAdapterProvision");
-  const stageEnd = source.indexOf("function ambiguousRuntimeAdapterProvision", stageStart);
-  const stageSource = source.slice(stageStart, stageEnd);
-  const stoppingReplayStart = source.indexOf("async function replayStoppingRuntimeAdapterCreate");
-  const stoppingReplayEnd = source.indexOf(
-    "async function stopRuntimeAdapterWorkspace(",
-    stoppingReplayStart,
-  );
-  const stoppingReplaySource = source.slice(stoppingReplayStart, stoppingReplayEnd);
-
-  assert.ok(
-    createSource.indexOf("runtimeAdapterWorkspaceIdConflict") <
-      createSource.indexOf("definitiveRuntimeAdapterCreateFailure"),
-  );
-  assert.match(createSource, /failRuntimeAdapterWorkspaceIdConflict/);
-  assert.match(
-    createSource,
-    /throw conflict\("runtime adapter workspace conflict response is stale"\)/,
-  );
-  assert.match(stageSource, /updated_at: sql<number>`MAX\(updated_at \+ 1, \$\{stageAt\}\)`/);
-  assert.match(
-    stageSource,
-    /returning\(\["status", "updated_at", "last_reconciled_at", "terminal_status"\]\)/,
-  );
-  assert.match(stageSource, /last_reconciled_at", "=", reconciliationOwner\.lastReconciledAt/);
-  assert.match(conflictSource, /adapter: null/);
-  assert.match(conflictSource, /adapter_workspace_id: null/);
-  assert.match(conflictSource, /adapter_control_plane: null/);
-  assert.match(conflictSource, /adapter_create_payload_json: null/);
-  assert.match(conflictSource, /adapter_create_pending: 0/);
-  assert.match(conflictSource, /AND adapter_create_pending = 1/);
-  assert.match(conflictSource, /AND status = \$\{createAttempt\.status\}/);
-  assert.match(conflictSource, /AND updated_at = \$\{createAttempt\.updatedAt\}/);
-  assert.match(conflictSource, /AND \$\{lastReconciledOwner\}/);
-  assert.match(conflictSource, /AND \$\{terminalStatusOwner\}/);
-  assert.match(conflictSource, /if \(!results\.at\(-1\)\?\.results\.length\) return null/);
-  assert.match(conflictSource, /terminal_finalize_pending: 1/);
-  assert.match(conflictSource, /env\.DB\.batch/);
-  assert.match(
-    conflictSource,
-    /finalizeTerminalInteractiveSession\(env, session\.id, "failed", now\)/,
-  );
-  assert.doesNotMatch(conflictSource, /stopRuntimeAdapterWorkspace/);
-  assert.match(stoppingReplaySource, /runtimeAdapterWorkspaceIdConflict/);
-  assert.match(stoppingReplaySource, /terminalResult/);
-  assert.doesNotMatch(stoppingReplaySource, /definitiveRuntimeAdapterCreateFailure/);
-});
-
-test("definitive adapter create errors retain a redacted provider reason before release", async () => {
-  const source = await readFile(new URL("../src/index.ts", import.meta.url), "utf8");
-  const createStart = source.indexOf("async function provisionWithRuntimeAdapter");
-  const createEnd = source.indexOf("function persistedRuntimeAdapterSeconds", createStart);
-  const createSource = source.slice(createStart, createEnd);
   const replayStart = source.indexOf("async function replayStoppingRuntimeAdapterCreate");
   const replayEnd = source.indexOf("async function stopRuntimeAdapterWorkspace", replayStart);
   const replaySource = source.slice(replayStart, replayEnd);
-  const releaseStart = source.indexOf("async function releaseFailedRuntimeAdapterProvision");
-  const releaseEnd = source.indexOf(
-    "async function persistRuntimeAdapterStopEvidence",
-    releaseStart,
-  );
-  const releaseSource = source.slice(releaseStart, releaseEnd);
-  const bodyReadIndex = createSource.indexOf(
-    "responseBody = await readRuntimeAdapterResponseBody(response)",
-  );
-  assert.ok(bodyReadIndex >= 0 && bodyReadIndex < createSource.indexOf("if (!response.ok)"));
-  assert.match(createSource, /redactedAdapterResponseMessage/);
-  assert.match(createSource, /runtime adapter provision failed: \$\{responseMessage\}/);
-  assert.match(createSource, /releaseFailedRuntimeAdapterProvision/);
-  assert.doesNotMatch(createSource, /response\.json/);
+
   assert.match(replaySource, /readRuntimeAdapterResponseBody\(response\)/);
   assert.match(replaySource, /redactedAdapterResponseMessage/);
   assert.match(replaySource, /reconcile_error: message/);
   assert.match(replaySource, /INSERT INTO interactive_session_events/);
   assert.doesNotMatch(replaySource, /response\.json/);
-  assert.ok(
-    releaseSource.indexOf("stageFailedRuntimeAdapterRelease") <
-      releaseSource.indexOf("stopRuntimeAdapterWorkspaceForSession"),
-  );
   assert.equal(
     redactedAdapterResponseMessage(
       { detail: "capacity unavailable; token=private-value" },
@@ -1668,12 +1531,6 @@ test("adapter DELETE evidence survives pending and confirmed release", async () 
     releaseStart,
   );
   const releaseSource = source.slice(releaseStart, releaseEnd);
-  const failedReleaseStart = source.indexOf("async function releaseFailedRuntimeAdapterProvision");
-  const failedReleaseEnd = source.indexOf(
-    "async function stageFailedRuntimeAdapterRelease",
-    failedReleaseStart,
-  );
-  const failedReleaseSource = source.slice(failedReleaseStart, failedReleaseEnd);
 
   assert.match(deleteSource, /await readRuntimeAdapterResponseBody\(response\)/);
   assert.doesNotMatch(deleteSource, /response\.json/);
@@ -1687,10 +1544,6 @@ test("adapter DELETE evidence survives pending and confirmed release", async () 
   assert.match(releaseSource, /env\.DB\.batch/);
   assert.match(releaseSource, /INSERT INTO interactive_session_events/);
   assert.match(releaseSource, /terminal_finalize_pending: 1/);
-  assert.match(failedReleaseSource, /persistRuntimeAdapterStopEvidence/);
-  assert.match(failedReleaseSource, /await executeBatch\(env, \[/);
-  assert.match(failedReleaseSource, /INSERT INTO interactive_session_events/);
-  assert.match(failedReleaseSource, /AND NOT EXISTS/);
 });
 
 test("adapter workspace paths use the controller id and encode it", () => {
@@ -1804,10 +1657,9 @@ test("runtime adapter profile routes expand one allowlisted path segment", () =>
   );
 });
 
-test("adapter operations share the bounded response parser", async () => {
+test("adapter inspect, replay, stop, and desktop operations share the bounded parser", async () => {
   const source = await readFile(new URL("../src/index.ts", import.meta.url), "utf8");
   const ranges = [
-    ["async function provisionWithRuntimeAdapter", "function persistedRuntimeAdapterSeconds"],
     [
       "async function inspectRuntimeAdapterWorkspace",
       "async function reconcileStoppingRuntimeAdapterWorkspace",
