@@ -129,11 +129,7 @@ import {
   type CredentialPolicyGenerationTombstone,
   type CredentialPolicyLegacyMigration,
 } from "./credential-policy-fence";
-import {
-  resolveRuntimeProfileCodexSsh,
-  runtimeProfileByID,
-  runtimeProfileCapabilities,
-} from "./runtime-profiles";
+import { resolveRuntimeProfileCodexSsh, runtimeProfileByID } from "./runtime-profiles";
 import {
   browserAppOrigin,
   clientDeploymentConfig,
@@ -267,13 +263,17 @@ import {
 } from "./worker/session-repository";
 import type { InteractiveProvisionResult } from "./worker/session-provisioning";
 import {
+  interactiveCommand,
+  interactiveSessionPurpose,
+  interactiveSessionSummary,
+  resolveInteractiveSessionCreateRequest,
+  type InteractiveSessionCreateRequest,
+} from "./worker/session-create-request";
+import {
   configuredRuntimeAdapterControlPlane,
-  requireRuntimeAdapterCreatePreflight,
   runtimeAdapterConfigurationPresent,
   runtimeAdapterToken,
 } from "./worker/runtime-adapter-preflight";
-
-const defaultInteractiveCommand = "codex --yolo";
 
 const sandboxPlaceholderOpenAIKey = "crabfleet-worker-injected";
 const sandboxPlaceholderGitHubToken = "crabfleet-worker-injected";
@@ -3649,18 +3649,7 @@ async function createInteractiveSession(
 async function createInteractiveSessionFromInput(
   env: RuntimeEnv,
   user: User,
-  body: {
-    repo?: string;
-    branch?: string;
-    runtime?: string;
-    profile?: string;
-    command?: string;
-    prompt?: string;
-    parentSessionId?: string;
-    rootSessionId?: string;
-    purpose?: string;
-    summary?: string;
-  },
+  body: InteractiveSessionCreateRequest,
   githubToken?: string,
   options: {
     createdBy?: string;
@@ -3672,26 +3661,24 @@ async function createInteractiveSessionFromInput(
     afterReserve?: () => Promise<void>;
   } = {},
 ): Promise<{ session: InteractiveSession }> {
-  const repo = normalizeRepo(body.repo);
-  if (!repo) throw badRequest("repo is required");
+  const request = resolveInteractiveSessionCreateRequest(env, body, {
+    owner: options.owner || actor(user),
+    createdBy: options.createdBy || actor(user),
+  });
+  const {
+    repo,
+    branch,
+    runtime,
+    profile,
+    requestedCapabilities,
+    command,
+    prompt,
+    purpose,
+    summary,
+    owner,
+    createdBy,
+  } = request;
   await requireRepo(env, repo);
-  const branch = clean(body.branch, 120) || "main";
-  const deployment = deploymentConfig(env);
-  const runtime = oneOf(body.runtime, ["crabbox", "container"], deployment.defaultRuntime) as
-    | "crabbox"
-    | "container";
-  const { profile, descriptor: runtimeProfile } = selectedRuntimeProfile(deployment, body.profile);
-  requireRuntimeAdapterCreatePreflight(env, runtime, profile);
-  const requestedCapabilities = runtimeProfileCapabilities(
-    runtime === "crabbox" ? runtimeProfile : undefined,
-    runtime === "crabbox" ? crabboxCapabilities : containerCapabilities,
-  );
-  const command = interactiveCommand(body.command);
-  const prompt = clean(body.prompt, 4000);
-  const purpose = interactiveSessionPurpose(body.purpose, prompt, repo, branch, command);
-  const summary = interactiveSessionSummary(body.summary, purpose, prompt);
-  const owner = options.owner || actor(user);
-  const createdBy = options.createdBy || actor(user);
   const lineage = await interactiveSessionLineageService(env).resolve(
     user,
     options.parentSessionId ?? (clean(body.parentSessionId, 120) || null),
@@ -4190,25 +4177,6 @@ function interactiveSessionCreationService(
       finalizeTerminalInteractiveSession(env, sessionId, status, now),
   };
   return new InteractiveSessionCreationService(store);
-}
-
-function interactiveSessionPurpose(
-  value: unknown,
-  prompt: string,
-  repo: string,
-  branch: string,
-  command: string,
-): string {
-  const explicit = clean(value, 500);
-  if (explicit) return explicit;
-  if (prompt) return clean(prompt, 500);
-  return clean(`${command} in ${repo}@${branch}`, 500);
-}
-
-function interactiveSessionSummary(value: unknown, purpose: string, prompt: string): string {
-  const explicit = clean(value, 500);
-  if (explicit) return explicit;
-  return clean(purpose || prompt || "interactive Codex session", 500);
 }
 
 function newAgentToken(): string {
@@ -14553,15 +14521,6 @@ async function runSandboxSetupStep(step: string, operation: () => Promise<unknow
     const message = clean(error instanceof Error ? error.message : String(error), 500);
     throw new Error(`${step}: ${message || "failed"}`);
   }
-}
-
-function interactiveCommand(value: unknown): string {
-  return (
-    clean(value, 240)
-      .replace(/\s+/g, " ")
-      .replace(/--yolosandbox\b/g, "--yolo")
-      .trim() || defaultInteractiveCommand
-  );
 }
 
 function directPortUrl(base: string, port: unknown, path: string): string | null {

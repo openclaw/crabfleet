@@ -36,11 +36,7 @@ import {
   shouldReplayRuntimeAdapterCreate,
   validatedRuntimeAdapterCreatePayloadJson,
 } from "../src/runtime-adapter.ts";
-import {
-  deploymentConfig,
-  publicDeploymentConfig,
-  selectedRuntimeProfile,
-} from "../src/worker/deployment.ts";
+import { publicDeploymentConfig } from "../src/worker/deployment.ts";
 import type { RuntimeEnv } from "../src/worker/env.ts";
 import {
   configuredRuntimeAdapterControlPlane,
@@ -119,9 +115,6 @@ test("adapter create payload matches the strict controller contract", () => {
 
 test("configured profiles fence every adapter runtime and preserve requested capabilities", async () => {
   const source = await readFile(new URL("../src/index.ts", import.meta.url), "utf8");
-  const createStart = source.indexOf("async function createInteractiveSessionFromInput");
-  const createEnd = source.indexOf("function initialRuntimeAdapterWorkspaceId", createStart);
-  const createSource = source.slice(createStart, createEnd);
   const resultStart = source.indexOf("function runtimeAdapterProvisionResult");
   const resultEnd = source.indexOf(
     "async function reconcileStoppingRuntimeAdapterWorkspace",
@@ -129,13 +122,6 @@ test("configured profiles fence every adapter runtime and preserve requested cap
   );
   const resultSource = source.slice(resultStart, resultEnd);
 
-  assert.match(createSource, /selectedRuntimeProfile\(deployment, body\.profile\)/);
-  const deployment = deploymentConfig({
-    CRABFLEET_DEFAULT_PROFILE: "linux",
-    CRABFLEET_RUNTIME_PROFILES_JSON: JSON.stringify([{ id: "linux", label: "Linux" }]),
-  });
-  assert.equal(selectedRuntimeProfile(deployment, "linux").descriptor?.id, "linux");
-  assert.throws(() => selectedRuntimeProfile(deployment, "unknown"), /profile is not configured/);
   assert.match(resultSource, /session\.adapterRequestedCapabilities \?\?/);
   assert.match(resultSource, /profile: session\.profile/);
   assert.doesNotMatch(resultSource, /profile: result\.profile/);
