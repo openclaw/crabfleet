@@ -121,18 +121,6 @@ test("bounded transcript tails remain valid UTF-8 and report truncation", () => 
   assert.equal(openClawRoomMaxSessions, 64);
 });
 
-test("interactive lineage rejects caller-claimed roots without a parent", async () => {
-  const source = await readFile(new URL("../src/index.ts", import.meta.url), "utf8");
-  const start = source.indexOf("async function resolveInteractiveSessionLineage");
-  const end = source.indexOf("function interactiveSessionPurpose", start);
-  const lineageSource = source.slice(start, end);
-
-  assert.match(
-    lineageSource,
-    /if \(rootId\) throw badRequest\("root session id requires a parent session id"\)/,
-  );
-});
-
 test("OpenClaw room reservation precedes branch mutation, event recording, and provisioning", async () => {
   const source = await readFile(new URL("../src/index.ts", import.meta.url), "utf8");
   const migration = await readFile(

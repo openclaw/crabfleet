@@ -250,6 +250,10 @@ import {
   type OpenClawCreateStore,
   type OpenClawCreateInput,
 } from "./worker/openclaw-create";
+import {
+  InteractiveSessionLineageService,
+  type InteractiveSessionLineageStore,
+} from "./worker/session-lineage";
 
 const defaultInteractiveCommand = "codex --yolo";
 
@@ -3691,8 +3695,7 @@ async function createInteractiveSessionFromInput(
   const summary = interactiveSessionSummary(body.summary, purpose, prompt);
   const owner = options.owner || actor(user);
   const createdBy = options.createdBy || actor(user);
-  const lineage = await resolveInteractiveSessionLineage(
-    env,
+  const lineage = await interactiveSessionLineageService(env).resolve(
     user,
     options.parentSessionId ?? (clean(body.parentSessionId, 120) || null),
     options.rootSessionId ?? (clean(body.rootSessionId, 120) || null),
@@ -4294,26 +4297,12 @@ async function clearRuntimeAdapterCreatePending(
     .execute();
 }
 
-async function resolveInteractiveSessionLineage(
-  env: RuntimeEnv,
-  user: User,
-  parentSessionId: string | null,
-  rootSessionId: string | null,
-): Promise<{ parentSessionId: string | null; rootSessionId: string | null }> {
-  const parentId = clean(parentSessionId, 120) || null;
-  const rootId = clean(rootSessionId, 120) || null;
-  if (!parentId) {
-    if (rootId) throw badRequest("root session id requires a parent session id");
-    return { parentSessionId: null, rootSessionId: null };
-  }
-
-  const parent = await readInteractiveSession(env, parentId);
-  if (!parent) throw badRequest("parent session not found");
-  if (!canManageInteractiveSession(user, parent)) throw forbidden("parent session is not visible");
-  return {
-    parentSessionId: parent.id,
-    rootSessionId: parent.rootSessionId || parent.id,
+function interactiveSessionLineageService(env: RuntimeEnv): InteractiveSessionLineageService {
+  const store: InteractiveSessionLineageStore = {
+    readSession: (id) => readInteractiveSession(env, id),
+    canManage: canManageInteractiveSession,
   };
+  return new InteractiveSessionLineageService(store);
 }
 
 function interactiveSessionPurpose(
