@@ -36,7 +36,6 @@ import {
   resolveCreateAfterStopRace,
   safeDesktopUrl,
   terminalFailureStatusForAdapter,
-  workerOwnedLeaseId,
 } from "./runtime-adapter";
 import { allocateInteractiveSessionIdSql, formatInteractiveSessionId } from "./session-id";
 import { cachedBooleanGrant } from "./terminal-authorization";
@@ -142,15 +141,9 @@ import {
   type ServiceSessionRouteDependencies,
 } from "./worker/routes/service-sessions";
 import {
-  isCurrentSandboxLease,
-  newSandboxLease,
-  sandboxLeaseId,
+  isSandboxInteractiveSession,
   sandboxLeaseInfo,
   sandboxLeasePrefix,
-  sandboxLeaseRefreshStartedAt,
-  sandboxLeaseWithoutRefresh,
-  type SandboxLease,
-  type SandboxLeaseRefreshFence,
 } from "./worker/sandbox-lease";
 import { readOpenClawRequestSession } from "./worker/openclaw-request";
 import {
@@ -248,11 +241,7 @@ import {
 import { sharedInteractiveSession } from "./worker/session-sharing";
 import { InteractiveProvisioningService } from "./worker/provisioning/service";
 import { RuntimeAdapterProvisioningService } from "./worker/provisioning/runtime-adapter";
-import {
-  InteractiveProvisioningEndpoints,
-  standaloneSandboxAttachUrl,
-  standaloneSandboxProvisionTtlMs,
-} from "./worker/provisioning/endpoints";
+import { InteractiveProvisioningEndpoints } from "./worker/provisioning/endpoints";
 import { safeProviderError } from "./worker/provisioning/result";
 import {
   failRuntimeAdapterWorkspaceIdConflict,
@@ -260,12 +249,9 @@ import {
   stageFailedRuntimeAdapterRelease,
   stageRuntimeAdapterProvision,
 } from "./worker/provisioning/runtime-adapter-repository";
-import { ManagedSandboxProvisioningService } from "./worker/provisioning/sandbox";
+import { SandboxLifecycleService } from "./worker/provisioning/sandbox-lifecycle";
 import {
-  claimManagedSandboxProvision,
-  commitManagedSandboxProvision,
-} from "./worker/provisioning/sandbox-repository";
-import {
+  standaloneSandboxProvisionTtlMs,
   standaloneSandboxProvisionRequestHashInput,
   StandaloneSandboxProvisioningService,
 } from "./worker/provisioning/standalone-sandbox";
@@ -276,28 +262,15 @@ import {
   stageStandaloneSandboxClaimCleanup,
   stageStandaloneSandboxProvisionCleanup,
 } from "./worker/provisioning/standalone-sandbox-repository";
-import type {
-  InteractiveProvisionRequest,
-  InteractiveProvisionResult,
-} from "./worker/provisioning/types";
-import {
-  queueSandboxCredentialPolicyCleanup,
-  type SandboxCredentialPolicyOwnershipFence,
-} from "./worker/sandbox-credential-policy-repository";
+import { queueSandboxCredentialPolicyCleanup } from "./worker/sandbox-credential-policy-repository";
 import { stageTerminalCredentialPolicyCleanupById } from "./worker/sandbox-credential-policy-cleanup";
 import { reconcileSandboxCredentialPolicyCleanupBatch as reconcileCredentialPolicyCleanupBatch } from "./worker/sandbox-credential-policy-cleanup-service";
-import {
-  ensureSandboxCredentialPolicy,
-  registerSandboxCredentialPolicy,
-} from "./worker/sandbox-credential-policy-registration-service";
 import { credentialPolicyProvisioningStaleMs } from "./worker/sandbox-credential-policy-scanner";
 import {
   createSandboxSession,
   openSandboxTerminalResponse,
   sandboxSetupSessionId,
   sandboxWorkdir,
-  setupSandboxTerminalSession,
-  type SandboxRuntimeSession,
 } from "./worker/sandbox-runtime";
 import {
   resolveInteractiveSessionCreateRequest,
@@ -2033,18 +2006,6 @@ async function mutateInteractiveSession(
   throw badRequest("unknown action");
 }
 
-function managedSandboxLeaseId(
-  session: Pick<InteractiveSession, "adapter" | "leaseId">,
-): string | null {
-  return workerOwnedLeaseId(session.adapter, session.leaseId);
-}
-
-function isSandboxInteractiveSession(
-  session: Pick<InteractiveSession, "adapter" | "leaseId">,
-): boolean {
-  return managedSandboxLeaseId(session)?.startsWith(sandboxLeasePrefix) === true;
-}
-
 async function disconnectGitHubActionsRunner(env: RuntimeEnv, id: string): Promise<void> {
   const stub = githubActionsRelayStub(env, id);
   if (!stub) return;
@@ -2169,7 +2130,11 @@ async function openInteractiveTerminalUpstream(
   const routeKind = interactivePtyRouteKind(env, session);
   if (routeKind === "sandbox" && env.SANDBOX) {
     const runtimeSession = await sandboxSessionWithGitHubToken(request, env, user, session);
-    const sandboxSession = await ensureCurrentSandboxLease(request, env, user, runtimeSession);
+    const sandboxSession = await new SandboxLifecycleService(env).ensureCurrentLease(
+      request,
+      user,
+      runtimeSession,
+    );
     const lease = sandboxLeaseInfo(sandboxSession);
     const sandbox = getSandbox(env.SANDBOX, lease.sandboxId);
     const upstreamResponse = await openSandboxTerminalResponse(
@@ -2908,11 +2873,12 @@ async function readInteractiveSessionMultiplayerMode(
 
 function interactiveProvisioningService(env: RuntimeEnv): InteractiveProvisioningService {
   const runtimeAdapter = runtimeAdapterProvisioningService(env);
+  const sandbox = new SandboxLifecycleService(env);
   return new InteractiveProvisioningService({
     sandboxAvailable: Boolean(env.SANDBOX),
     runtimeAdapterAvailable: runtimeAdapterConfigurationPresent(env),
-    provisionSandbox: (session, agentToken, sandbox) =>
-      provisionWithSandbox(env, session, agentToken, sandbox.lease, sandbox.ownership),
+    provisionSandbox: (session, agentToken, ownership) =>
+      sandbox.provisionReservation(session, agentToken, ownership.lease, ownership.ownership),
     provisionRuntimeAdapter: (session) => runtimeAdapter.provision(session),
   });
 }
@@ -2949,27 +2915,10 @@ function runtimeAdapterProvisioningService(env: RuntimeEnv): RuntimeAdapterProvi
   });
 }
 
-function managedSandboxProvisioningService(env: RuntimeEnv): ManagedSandboxProvisioningService {
-  return new ManagedSandboxProvisioningService({
-    now: Date.now,
-    preflight: (session) => sandboxProvisionPreflightError(env, session),
-    claim: (session, owner, now) =>
-      claimManagedSandboxProvision(env, session, owner, now, credentialPolicyProvisioningStaleMs),
-    provision: (session, claim) =>
-      provisionWithSandbox(env, session, claim.agentToken, claim.lease, claim.fence),
-    stageFailure: (sessionId, fence, message, now) =>
-      stageFailedManagedSandboxProvision(env, sessionId, fence, message, now),
-    commit: (sessionId, claim, result, now) =>
-      commitManagedSandboxProvision(env, sessionId, claim, result, now),
-    reconcileCleanup: (sessionId, now) =>
-      reconcileCredentialPolicyCleanupBatch(env, now, sessionId),
-    providerError: safeProviderError,
-  });
-}
-
 function standaloneSandboxProvisioningService(
   env: RuntimeEnv,
 ): StandaloneSandboxProvisioningService {
+  const sandbox = new SandboxLifecycleService(env);
   const provisionTtlMs = standaloneSandboxProvisionTtlMs(env);
   return new StandaloneSandboxProvisioningService({
     now: Date.now,
@@ -2990,7 +2939,7 @@ function standaloneSandboxProvisioningService(
         provisionTtlMs,
       ),
     provision: (session, claim) =>
-      provisionWithSandbox(env, session, undefined, claim.lease, claim.fence),
+      sandbox.provisionClaim(session, undefined, claim.lease, claim.fence),
     stageClaimCleanup: (claim, message, now) =>
       stageStandaloneSandboxClaimCleanup(env, claim, message, now),
     queuePolicyCleanup: (provisionId, sandboxId, now) =>
@@ -3003,333 +2952,12 @@ function standaloneSandboxProvisioningService(
 
 function interactiveProvisioningEndpoints(env: RuntimeEnv): InteractiveProvisioningEndpoints {
   const interactive = interactiveProvisioningService(env);
+  const sandbox = new SandboxLifecycleService(env);
   return new InteractiveProvisioningEndpoints(env, {
-    provisionManaged: (session, owner) =>
-      managedSandboxProvisioningService(env).provision(session, owner),
+    provisionManaged: (session, owner) => sandbox.provisionManaged(session, owner),
     provisionStandalone: (session) => standaloneSandboxProvisioningService(env).provision(session),
     supportsStandalone: (runtime) => interactive.supportsStandalone(runtime),
   });
-}
-
-function sandboxProvisionPreflightError(
-  env: RuntimeEnv,
-  session: SandboxRuntimeSession,
-): string | null {
-  if (!env.SANDBOX) return "Cloudflare Sandbox binding is not configured";
-  if (!env.SESSION_CONTROL) return "SESSION_CONTROL Durable Object is not configured";
-  if (!env.OPENAI_API_KEY) {
-    return "OPENAI_API_KEY is not configured for Cloudflare Sandbox Codex";
-  }
-  if (session.githubToken && !env.CRABBOX_TOKEN_ENCRYPTION_KEY && !env.GITHUB_CLIENT_SECRET) {
-    return "CRABBOX_TOKEN_ENCRYPTION_KEY or GITHUB_CLIENT_SECRET is required for user GitHub tokens";
-  }
-  return null;
-}
-
-async function stageFailedManagedSandboxProvision(
-  env: RuntimeEnv,
-  sessionId: string,
-  ownershipFence: SandboxLeaseRefreshFence,
-  message: string,
-  now: number,
-): Promise<boolean> {
-  const staged = await stageTerminalCredentialPolicyCleanupById(
-    env,
-    sessionId,
-    "failed",
-    message,
-    now,
-    message,
-    ownershipFence,
-  );
-  await reconcileCredentialPolicyCleanupBatch(env, now, sessionId);
-  return staged;
-}
-
-async function provisionWithSandbox(
-  env: RuntimeEnv,
-  session: InteractiveProvisionRequest,
-  agentToken: string | undefined,
-  lease: SandboxLease,
-  ownershipFence: SandboxCredentialPolicyOwnershipFence,
-): Promise<InteractiveProvisionResult> {
-  try {
-    const preflightError = sandboxProvisionPreflightError(env, session);
-    if (preflightError) throw new Error(preflightError);
-    const workdir = sandboxWorkdir(session.id);
-    const sandbox = getSandbox(env.SANDBOX!, lease.sandboxId);
-    if (!("provisionId" in ownershipFence) && !agentToken) {
-      throw new Error("managed Sandbox agent token is unavailable");
-    }
-    await registerSandboxCredentialPolicy(env, session, lease.sandboxId, ownershipFence);
-    await setupSandboxTerminalSession(
-      sandbox,
-      env,
-      session,
-      workdir,
-      lease.terminalSessionId,
-      agentToken,
-    );
-  } catch (error) {
-    const message = safeProviderError(error);
-    const cleanupMessage = `Cloudflare Sandbox provision failed: ${message}`;
-    const failureAt = Date.now();
-    if ("provisionId" in ownershipFence) {
-      await queueSandboxCredentialPolicyCleanup(env, session.id, lease.sandboxId, failureAt);
-    } else {
-      await stageTerminalCredentialPolicyCleanupById(
-        env,
-        session.id,
-        "failed",
-        cleanupMessage,
-        failureAt,
-        cleanupMessage,
-        ownershipFence,
-      );
-    }
-    await reconcileCredentialPolicyCleanupBatch(env, Date.now(), session.id);
-    return {
-      status: "stopping",
-      leaseId: sandboxLeaseId(lease),
-      attachUrl: null,
-      vncUrl: null,
-      message: `${cleanupMessage}; credential cleanup pending`,
-      terminalStatus: "failed",
-      createPending: false,
-    };
-  }
-
-  return {
-    status: "ready",
-    leaseId: sandboxLeaseId(lease),
-    attachUrl:
-      "provisionId" in ownershipFence
-        ? standaloneSandboxAttachUrl(env, session.id)
-        : "/api/terminal/ws",
-    vncUrl: null,
-    message: `Cloudflare Sandbox ready for ${session.repo}`,
-  };
-}
-
-async function ensureCurrentSandboxLease(
-  request: Request,
-  env: RuntimeEnv,
-  user: User | null,
-  session: InteractiveSession & { githubToken?: string },
-): Promise<InteractiveSession & { githubToken?: string }> {
-  if (!env.SANDBOX) return session;
-  if (!isSandboxInteractiveSession(session)) {
-    throw serviceUnavailable("session is not backed by a Cloudflare Sandbox lease");
-  }
-  if (session.runtime === githubActionsRuntime) {
-    throw badRequest("GitHub Actions sessions do not use Cloudflare Sandbox leases");
-  }
-  if (isCurrentSandboxLease(session.leaseId)) {
-    await ensureSandboxCredentialPolicy(env, session, sandboxLeaseInfo(session).sandboxId);
-    return session;
-  }
-  const originalLeaseId = session.leaseId;
-  if (!originalLeaseId) {
-    throw serviceUnavailable("Cloudflare Sandbox lease refresh is already in progress");
-  }
-  const refreshStartedAt = sandboxLeaseRefreshStartedAt(originalLeaseId);
-  const now = Date.now();
-  if (refreshStartedAt && now - refreshStartedAt < 2 * 60_000) {
-    throw serviceUnavailable("Cloudflare Sandbox lease refresh is already in progress");
-  }
-  if (!user || actor(user) !== session.owner) {
-    throw serviceUnavailable("session owner must reconnect to refresh Cloudflare Sandbox lease");
-  }
-  const githubToken = user?.subject.startsWith("github:")
-    ? (session.githubToken ?? (await sessionGitHubToken(request, env, user.subject)))
-    : undefined;
-  if (user.subject.startsWith("github:") && !githubToken) {
-    throw forbidden("GitHub PR credentials are not connected; sign in with GitHub again");
-  }
-  const refreshPayload: InteractiveProvisionRequest = {
-    id: session.id,
-    parentSessionId: session.parentSessionId,
-    rootSessionId: session.rootSessionId ?? session.id,
-    repo: session.repo,
-    branch: session.branch,
-    runtime: session.runtime,
-    profile: session.profile,
-    command: session.command,
-    prompt: session.prompt,
-    purpose: session.purpose,
-    summary: session.summary,
-    owner: session.owner,
-    createdBy: session.createdBy,
-    ...(githubToken ? { githubToken } : {}),
-  };
-  const preflightError = sandboxProvisionPreflightError(env, refreshPayload);
-  if (preflightError) throw serviceUnavailable(preflightError);
-  const fallbackLeaseId = sandboxLeaseWithoutRefresh(originalLeaseId);
-  const oldSandboxId = originalLeaseId.startsWith(sandboxLeasePrefix)
-    ? sandboxLeaseInfo({ id: session.id, leaseId: fallbackLeaseId }).sandboxId
-    : null;
-  const refreshLeaseId = `${fallbackLeaseId}:refreshing-${now}-${crypto.randomUUID().slice(0, 8)}`;
-  const refreshLease = newSandboxLease(session.id);
-  const agentToken = newAgentToken();
-  const agentTokenHash = await sha256(agentToken);
-  const refreshFence: SandboxLeaseRefreshFence = {
-    claim: `refresh:${crypto.randomUUID()}`,
-    expiresAt: now + credentialPolicyProvisioningStaleMs,
-    refreshLeaseId,
-    sandboxId: refreshLease.sandboxId,
-  };
-  const claim = await database(env)
-    .updateTable("interactive_sessions")
-    .set({
-      lease_id: refreshLeaseId,
-      sandbox_refresh_sandbox_id: refreshFence.sandboxId,
-      sandbox_refresh_claim: refreshFence.claim,
-      sandbox_refresh_claim_expires_at: refreshFence.expiresAt,
-      agent_token_hash: agentTokenHash,
-      last_event: "Cloudflare Sandbox lease refresh started",
-      updated_at: sql<number>`MAX(updated_at + 1, ${now})`,
-    })
-    .where("id", "=", session.id)
-    .where("lease_id", "=", originalLeaseId)
-    .where("status", "in", ["ready", "attached", "detached"])
-    .executeTakeFirst();
-  if ((claim.numUpdatedRows ?? 0n) === 0n) {
-    const current = await readInteractiveSession(env, session.id);
-    if (current && isSandboxInteractiveSession(current) && isCurrentSandboxLease(current.leaseId)) {
-      return current;
-    }
-    throw serviceUnavailable("Cloudflare Sandbox lease refresh is already in progress");
-  }
-  let provisioned: InteractiveProvisionResult;
-  try {
-    provisioned = await provisionWithSandbox(
-      env,
-      refreshPayload,
-      agentToken,
-      refreshLease,
-      refreshFence,
-    );
-  } catch (error) {
-    const message = `Cloudflare Sandbox lease refresh failed: ${safeProviderError(error)}`;
-    await stageFailedManagedSandboxProvision(env, session.id, refreshFence, message, Date.now());
-    throw serviceUnavailable(message);
-  }
-  if (provisioned.status !== "ready") {
-    await stageFailedManagedSandboxProvision(
-      env,
-      session.id,
-      refreshFence,
-      provisioned.message,
-      Date.now(),
-    );
-    throw serviceUnavailable(provisioned.message);
-  }
-  const refreshedAt = Date.now();
-  const expectedLeaseId = sandboxLeaseId(refreshLease);
-  if (provisioned.leaseId !== expectedLeaseId) {
-    await stageFailedManagedSandboxProvision(
-      env,
-      session.id,
-      refreshFence,
-      "Cloudflare Sandbox lease refresh returned an unexpected lease",
-      refreshedAt,
-    );
-    throw serviceUnavailable("Cloudflare Sandbox lease refresh returned an unexpected lease");
-  }
-  const db = database(env);
-  const commitQueries: CompilableQuery[] = [
-    db
-      .updateTable("interactive_sessions")
-      .set({
-        status: provisioned.status,
-        lease_id: provisioned.leaseId,
-        attach_url: provisioned.attachUrl,
-        vnc_url: provisioned.vncUrl,
-        sandbox_refresh_sandbox_id: null,
-        sandbox_refresh_claim: null,
-        sandbox_refresh_claim_expires_at: null,
-        last_event: "Cloudflare Sandbox lease refreshed",
-        updated_at: sql<number>`MAX(updated_at + 1, ${refreshedAt})`,
-      })
-      .where("id", "=", session.id)
-      .where(sql<boolean>`lease_id IS ${refreshFence.refreshLeaseId}`)
-      .where("sandbox_refresh_sandbox_id", "=", refreshFence.sandboxId)
-      .where("sandbox_refresh_claim", "=", refreshFence.claim)
-      .where("sandbox_refresh_claim_expires_at", "=", refreshFence.expiresAt)
-      .where("sandbox_refresh_claim_expires_at", ">", refreshedAt)
-      .where("agent_token_hash", "=", agentTokenHash)
-      .where("status", "in", ["ready", "attached", "detached"]),
-  ];
-  if (oldSandboxId && oldSandboxId !== refreshLease.sandboxId) {
-    commitQueries.push(
-      db
-        .updateTable("interactive_session_credential_policies")
-        .set({
-          state: "cleanup_pending",
-          cleanup_claim: null,
-          cleanup_claim_expires_at: null,
-          updated_at: refreshedAt,
-        })
-        .where("session_id", "=", session.id)
-        .where("sandbox_id", "=", oldSandboxId).where(sql<boolean>`
-          EXISTS (
-            SELECT 1
-            FROM interactive_sessions AS session
-            WHERE session.id = ${session.id}
-              AND session.lease_id = ${provisioned.leaseId}
-              AND session.sandbox_refresh_claim IS NULL
-          )
-        `),
-    );
-  }
-  await executeBatch(env, commitQueries);
-  const committed = await db
-    .selectFrom("interactive_sessions")
-    .select(["lease_id", "status", "credential_cleanup_terminal_status", "agent_token_hash"])
-    .where("id", "=", session.id)
-    .executeTakeFirst();
-  if (
-    committed?.lease_id !== provisioned.leaseId ||
-    committed.agent_token_hash !== agentTokenHash ||
-    committed.credential_cleanup_terminal_status !== null ||
-    !["ready", "attached", "detached"].includes(committed.status)
-  ) {
-    await stageFailedManagedSandboxProvision(
-      env,
-      session.id,
-      refreshFence,
-      "Cloudflare Sandbox lease refresh ownership changed",
-      refreshedAt,
-    );
-    throw serviceUnavailable("Cloudflare Sandbox lease refresh is already in progress");
-  }
-  if (oldSandboxId && oldSandboxId !== refreshLease.sandboxId) {
-    await reconcileCredentialPolicyCleanupBatch(env, refreshedAt, session.id);
-  }
-  const current = await readInteractiveSession(env, session.id);
-  if (
-    !current ||
-    current.leaseId !== provisioned.leaseId ||
-    !["ready", "attached", "detached"].includes(current.status)
-  ) {
-    throw serviceUnavailable("previous Cloudflare Sandbox credential cleanup stopped the session");
-  }
-  await appendInteractiveSessionLog(
-    env,
-    session.id,
-    user,
-    "Cloudflare Sandbox lease refreshed",
-    refreshedAt,
-  );
-  const latest = await readInteractiveSession(env, session.id);
-  if (
-    !latest ||
-    latest.leaseId !== provisioned.leaseId ||
-    !["ready", "attached", "detached"].includes(latest.status)
-  ) {
-    throw serviceUnavailable("previous Cloudflare Sandbox credential cleanup stopped the session");
-  }
-  return { ...latest, ...(githubToken ? { githubToken } : {}) };
 }
 
 async function createCard(request: Request, env: RuntimeEnv, user: User): Promise<{ card: Card }> {

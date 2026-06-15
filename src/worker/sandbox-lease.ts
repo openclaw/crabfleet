@@ -56,6 +56,18 @@ export function isCurrentSandboxLease(leaseId: string | null | undefined): boole
   );
 }
 
+export function managedSandboxLeaseId(
+  source: Pick<SandboxLeaseSource, "adapter" | "leaseId">,
+): string | null {
+  return workerOwnedLeaseId(source.adapter ?? null, source.leaseId ?? null);
+}
+
+export function isSandboxInteractiveSession(
+  source: Pick<SandboxLeaseSource, "adapter" | "leaseId">,
+): boolean {
+  return managedSandboxLeaseId(source)?.startsWith(sandboxLeasePrefix) === true;
+}
+
 export function sandboxLeaseRefreshStartedAt(leaseId: string): number | null {
   const match = /:refreshing-(\d+)-[a-f0-9]+$/.exec(leaseId);
   return match ? Number(match[1]) : null;

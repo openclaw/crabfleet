@@ -11,6 +11,21 @@ export function failedProvision(message: string): InteractiveProvisionResult {
   };
 }
 
+export function cleanupPendingProvision(
+  leaseId: string,
+  message: string,
+): InteractiveProvisionResult {
+  return {
+    status: "stopping",
+    leaseId,
+    attachUrl: null,
+    vncUrl: null,
+    message: `${message}; credential cleanup pending`,
+    terminalStatus: "failed",
+    createPending: false,
+  };
+}
+
 export function safeProviderError(
   error: unknown,
   identifiers: Array<string | null> = [],

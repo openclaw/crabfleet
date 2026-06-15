@@ -17,6 +17,7 @@ import {
   type SandboxLeaseRefreshFence,
 } from "../sandbox-lease.ts";
 import { newAgentToken } from "../session-reservation-context.ts";
+import type { InteractiveSession } from "../session-model.ts";
 import type { ManagedSandboxProvisionClaim, ManagedSandboxProvisionCommit } from "./sandbox.ts";
 import type { InteractiveProvisionRequest, InteractiveProvisionResult } from "./types.ts";
 
@@ -167,6 +168,134 @@ export async function commitManagedSandboxProvision(
       current?.lease_id === expectedLeaseId &&
       current.sandbox_refresh_claim === null &&
       current.agent_token_hash === claim.agentTokenHash &&
+      ["ready", "attached", "detached"].includes(current.status),
+    ),
+    cleanupPending,
+    commitRevision,
+  };
+}
+
+export async function claimManagedSandboxLeaseRefresh(
+  env: RuntimeEnv,
+  session: InteractiveSession,
+  now: number,
+  claimTtlMs: number,
+): Promise<ManagedSandboxProvisionClaim | null> {
+  if (!session.leaseId) return null;
+  const fallbackLeaseId = sandboxLeaseWithoutRefresh(session.leaseId);
+  const previousSandboxId = session.leaseId.startsWith(sandboxLeasePrefix)
+    ? sandboxLeaseInfo({ id: session.id, leaseId: fallbackLeaseId }).sandboxId
+    : null;
+  const refreshLeaseId = `${fallbackLeaseId}:refreshing-${now}-${crypto.randomUUID().slice(0, 8)}`;
+  const lease = newSandboxLease(session.id);
+  const agentToken = newAgentToken();
+  const agentTokenHash = await sha256(agentToken);
+  const claimRevision = Math.max(now, session.updatedAt + 1);
+  const fence: SandboxLeaseRefreshFence = {
+    claim: `refresh:${crypto.randomUUID()}`,
+    expiresAt: now + claimTtlMs,
+    refreshLeaseId,
+    sandboxId: lease.sandboxId,
+  };
+  const claimed = await database(env)
+    .updateTable("interactive_sessions")
+    .set({
+      lease_id: refreshLeaseId,
+      sandbox_refresh_sandbox_id: fence.sandboxId,
+      sandbox_refresh_claim: fence.claim,
+      sandbox_refresh_claim_expires_at: fence.expiresAt,
+      agent_token_hash: agentTokenHash,
+      last_event: "Cloudflare Sandbox lease refresh started",
+      updated_at: sql<number>`MAX(updated_at + 1, ${claimRevision})`,
+    })
+    .where("id", "=", session.id)
+    .where("lease_id", "=", session.leaseId)
+    .where("status", "in", ["ready", "attached", "detached"])
+    .executeTakeFirst();
+  if ((claimed.numUpdatedRows ?? 0n) === 0n) return null;
+  return {
+    agentToken,
+    agentTokenHash,
+    lease,
+    fence,
+    previousSandboxId,
+    claimRevision,
+  };
+}
+
+export async function commitManagedSandboxLeaseRefresh(
+  env: RuntimeEnv,
+  sessionId: string,
+  claim: ManagedSandboxProvisionClaim,
+  provisioned: InteractiveProvisionResult,
+  refreshedAt: number,
+): Promise<ManagedSandboxProvisionCommit> {
+  const expectedLeaseId = sandboxLeaseId(claim.lease);
+  const commitRevision = Math.max(refreshedAt, claim.claimRevision + 1);
+  const db = database(env);
+  const commitQueries: CompilableQuery[] = [
+    db
+      .updateTable("interactive_sessions")
+      .set({
+        status: provisioned.status,
+        lease_id: provisioned.leaseId,
+        attach_url: provisioned.attachUrl,
+        vnc_url: provisioned.vncUrl,
+        sandbox_refresh_sandbox_id: null,
+        sandbox_refresh_claim: null,
+        sandbox_refresh_claim_expires_at: null,
+        last_event: "Cloudflare Sandbox lease refreshed",
+        updated_at: sql<number>`MAX(updated_at + 1, ${commitRevision})`,
+      })
+      .where("id", "=", sessionId)
+      .where(sql<boolean>`lease_id IS ${claim.fence.refreshLeaseId}`)
+      .where("sandbox_refresh_sandbox_id", "=", claim.fence.sandboxId)
+      .where("sandbox_refresh_claim", "=", claim.fence.claim)
+      .where("sandbox_refresh_claim_expires_at", "=", claim.fence.expiresAt)
+      .where("sandbox_refresh_claim_expires_at", ">", refreshedAt)
+      .where("agent_token_hash", "=", claim.agentTokenHash)
+      .where("status", "in", ["ready", "attached", "detached"]),
+  ];
+  const cleanupPending = Boolean(
+    claim.previousSandboxId && claim.previousSandboxId !== claim.lease.sandboxId,
+  );
+  if (cleanupPending) {
+    commitQueries.push(
+      db
+        .updateTable("interactive_session_credential_policies")
+        .set({
+          state: "cleanup_pending",
+          cleanup_claim: null,
+          cleanup_claim_expires_at: null,
+          updated_at: commitRevision,
+        })
+        .where("session_id", "=", sessionId)
+        .where("sandbox_id", "=", claim.previousSandboxId!).where(sql<boolean>`
+          EXISTS (
+            SELECT 1
+            FROM interactive_sessions AS owner
+            WHERE owner.id = ${sessionId}
+              AND owner.lease_id = ${expectedLeaseId}
+              AND owner.agent_token_hash = ${claim.agentTokenHash}
+              AND owner.credential_cleanup_terminal_status IS NULL
+              AND owner.sandbox_refresh_sandbox_id IS NULL
+              AND owner.sandbox_refresh_claim IS NULL
+              AND owner.sandbox_refresh_claim_expires_at IS NULL
+          )
+        `),
+    );
+  }
+  await executeBatch(env, commitQueries);
+  const current = await db
+    .selectFrom("interactive_sessions")
+    .select(["lease_id", "status", "credential_cleanup_terminal_status", "agent_token_hash"])
+    .where("id", "=", sessionId)
+    .executeTakeFirst();
+  return {
+    committed: Boolean(
+      current?.lease_id === expectedLeaseId &&
+      current.agent_token_hash === claim.agentTokenHash &&
+      current.credential_cleanup_terminal_status === null &&
       ["ready", "attached", "detached"].includes(current.status),
     ),
     cleanupPending,

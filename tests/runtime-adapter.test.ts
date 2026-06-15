@@ -753,6 +753,14 @@ test("stateless Sandbox provision hook acquires durable standalone ownership", a
     new URL("../src/worker/provisioning/endpoints.ts", import.meta.url),
     "utf8",
   );
+  const sandboxLifecycleSource = await readFile(
+    new URL("../src/worker/provisioning/sandbox-lifecycle.ts", import.meta.url),
+    "utf8",
+  );
+  const standaloneServiceSource = await readFile(
+    new URL("../src/worker/provisioning/standalone-sandbox.ts", import.meta.url),
+    "utf8",
+  );
   const policyRepositorySource = await readFile(
     new URL("../src/worker/sandbox-credential-policy-repository.ts", import.meta.url),
     "utf8",
@@ -785,14 +793,13 @@ test("stateless Sandbox provision hook acquires durable standalone ownership", a
   );
   const ownershipSource = policyRepositorySource.slice(ownershipStart, ownershipEnd);
   const ptyStart = endpointServiceSource.indexOf("async openPty(");
-  const ptyEnd = endpointServiceSource.indexOf(
-    "export function standaloneSandboxAttachUrl",
-    ptyStart,
-  );
+  const ptyEnd = endpointServiceSource.indexOf("private authorize(", ptyStart);
   const ptySource = endpointServiceSource.slice(ptyStart, ptyEnd);
-  const sandboxStart = source.indexOf("async function provisionWithSandbox");
-  const sandboxEnd = source.indexOf("async function registerSandboxCredentialPolicy", sandboxStart);
-  const sandboxSource = source.slice(sandboxStart, sandboxEnd);
+  const terminalGrantStart = endpointServiceSource.indexOf("private terminalGrant(", ptyEnd);
+  const terminalGrantSource = endpointServiceSource.slice(terminalGrantStart);
+  const sandboxStart = sandboxLifecycleSource.indexOf("async provisionClaim(");
+  const sandboxEnd = sandboxLifecycleSource.indexOf("async ensureCurrentLease(", sandboxStart);
+  const sandboxSource = sandboxLifecycleSource.slice(sandboxStart, sandboxEnd);
   const stopStart = endpointServiceSource.indexOf("async stop(");
   const stopEnd = endpointServiceSource.indexOf("async openPty(", stopStart);
   const stopSource = endpointServiceSource.slice(stopStart, stopEnd);
@@ -837,11 +844,11 @@ test("stateless Sandbox provision hook acquires durable standalone ownership", a
   assert.match(ptySource, /response\.webSocket\.accept\(\)/);
   assert.match(ptySource, /bridgeWebSockets\(/);
   assert.match(ptySource, /this\.terminalGrant/);
-  assert.match(ptySource, /cachedBooleanGrant/);
-  assert.match(ptySource, /where\("request_hash", "=", ownership\.requestHash\)/);
-  assert.match(ptySource, /where\("expires_at", ">", now\)/);
-  assert.match(ptySource, /where\("updated_at", "=", ownership\.updatedAt\)/);
-  assert.match(ptySource, /activeSandboxCredentialPolicyCondition/);
+  assert.match(terminalGrantSource, /cachedBooleanGrant/);
+  assert.match(terminalGrantSource, /where\("request_hash", "=", ownership\.requestHash\)/);
+  assert.match(terminalGrantSource, /where\("expires_at", ">", now\)/);
+  assert.match(terminalGrantSource, /where\("updated_at", "=", ownership\.updatedAt\)/);
+  assert.match(terminalGrantSource, /activeSandboxCredentialPolicyCondition/);
   assert.match(ptySource, /return new Response\(null, \{ status: 101, webSocket: client \}\)/);
   assert.doesNotMatch(ptySource, /return response;/);
   assert.match(standaloneCleanupSource, /deleteSession\(lease\.terminalSessionId\)/);
@@ -851,7 +858,7 @@ test("stateless Sandbox provision hook acquires durable standalone ownership", a
       standaloneCleanupSource.indexOf('.deleteFrom("standalone_sandbox_provisions")'),
   );
   assert.match(standaloneCleanupSource, /where\("updated_at", "=", owner\.updated_at\)/);
-  assert.match(sandboxSource, /standaloneSandboxAttachUrl\(env, session\.id\)/);
+  assert.match(sandboxSource, /standaloneSandboxAttachUrl\(this\.env, session\.id\)/);
   assert.match(migration, /CREATE TABLE IF NOT EXISTS standalone_sandbox_provisions/);
   assert.match(migration, /request_hash TEXT NOT NULL/);
   assert.match(migration, /sandbox_id TEXT NOT NULL UNIQUE/);
@@ -868,7 +875,7 @@ test("stateless Sandbox provision hook acquires durable standalone ownership", a
   assert.match(stopSource, /stageStandaloneSandboxProvisionCleanup/);
   assert.match(stopSource, /reconcileSandboxCredentialPolicyCleanupBatch/);
   assert.match(stopSource, /status: remaining \? "stopping" : "stopped"/);
-  assert.match(endpointServiceSource, /CRABBOX_STANDALONE_SANDBOX_TTL_SECONDS/);
+  assert.match(standaloneServiceSource, /CRABBOX_STANDALONE_SANDBOX_TTL_SECONDS/);
   assert.match(endpointServiceSource, /async stop\(/);
   assert.match(
     sandboxOutboundSource,
@@ -1125,6 +1132,18 @@ test("sandbox credential cleanup failures remain explicit", async () => {
 
 test("sandbox credential cleanup is durably staged and retried", async () => {
   const source = await readFile(new URL("../src/index.ts", import.meta.url), "utf8");
+  const sandboxLifecycleSource = await readFile(
+    new URL("../src/worker/provisioning/sandbox-lifecycle.ts", import.meta.url),
+    "utf8",
+  );
+  const sandboxServiceSource = await readFile(
+    new URL("../src/worker/provisioning/sandbox.ts", import.meta.url),
+    "utf8",
+  );
+  const sandboxRepositorySource = await readFile(
+    new URL("../src/worker/provisioning/sandbox-repository.ts", import.meta.url),
+    "utf8",
+  );
   const cleanupServiceSource = await readFile(
     new URL("../src/worker/sandbox-credential-policy-cleanup-service.ts", import.meta.url),
     "utf8",
@@ -1167,9 +1186,15 @@ test("sandbox credential cleanup is durably staged and retried", async () => {
   const cleanupSource = cleanupServiceSource.slice(cleanupStart, cleanupEnd);
   const completionEnd = cleanupServiceSource.indexOf("function clean", cleanupEnd);
   const completionSource = cleanupServiceSource.slice(cleanupEnd, completionEnd);
-  const provisionStart = source.indexOf("async function provisionWithSandbox");
-  const provisionEnd = source.indexOf("async function ensureCurrentSandboxLease", provisionStart);
-  const provisionSource = source.slice(provisionStart, provisionEnd);
+  const provisionStart = sandboxLifecycleSource.indexOf("async provisionReservation(");
+  const provisionEnd = sandboxLifecycleSource.indexOf("async provisionClaim(", provisionStart);
+  const provisionSource = sandboxLifecycleSource.slice(provisionStart, provisionEnd);
+  const claimProvisionStart = provisionEnd;
+  const claimProvisionEnd = sandboxLifecycleSource.indexOf(
+    "async ensureCurrentLease(",
+    claimProvisionStart,
+  );
+  const claimProvisionSource = sandboxLifecycleSource.slice(claimProvisionStart, claimProvisionEnd);
   const registerStart = registrationServiceSource.indexOf(
     "async function registerSandboxCredentialPolicy",
   );
@@ -1203,9 +1228,21 @@ test("sandbox credential cleanup is durably staged and retried", async () => {
       readFile(new URL("../src/worker/session-control-policy.ts", import.meta.url), "utf8"),
     ])
   ).join("\n");
-  const refreshStart = source.indexOf("async function ensureCurrentSandboxLease");
-  const refreshEnd = source.indexOf("async function createCard", refreshStart);
-  const refreshSource = source.slice(refreshStart, refreshEnd);
+  const refreshStart = sandboxServiceSource.indexOf("async ensureCurrent(");
+  const refreshEnd = sandboxServiceSource.indexOf(
+    "export function managedSandboxProvisionPayloadMatches",
+    refreshStart,
+  );
+  const refreshSource = sandboxServiceSource.slice(refreshStart, refreshEnd);
+  const refreshClaimStart = sandboxRepositorySource.indexOf(
+    "export async function claimManagedSandboxLeaseRefresh",
+  );
+  const refreshCommitStart = sandboxRepositorySource.indexOf(
+    "export async function commitManagedSandboxLeaseRefresh",
+    refreshClaimStart,
+  );
+  const refreshClaimSource = sandboxRepositorySource.slice(refreshClaimStart, refreshCommitStart);
+  const refreshCommitSource = sandboxRepositorySource.slice(refreshCommitStart);
   assert.match(scanSource, /credentialPolicyScanLimit/);
   assert.match(scanSource, /scan_max_rowid/);
   assert.match(scanSource, /maximumCredentialPolicyRowid/);
@@ -1267,12 +1304,13 @@ test("sandbox credential cleanup is durably staged and retried", async () => {
   assert.match(batchSource, /completeCredentialPolicyCleanupSession\(env, session\.id/);
   assert.ok(
     provisionSource.indexOf("stageTerminalCredentialPolicyCleanupById") <
-      provisionSource.indexOf("reconcileCredentialPolicyCleanupBatch"),
+      provisionSource.indexOf("reconcileSandboxCredentialPolicyCleanupBatch"),
   );
   assert.match(provisionSource, /failureAt,\s*cleanupMessage,\s*ownershipFence/);
-  assert.match(provisionSource, /try \{[\s\S]*sandboxProvisionPreflightError\(env, session\)/);
-  assert.match(provisionSource, /!agentToken/);
-  assert.match(provisionSource, /managed Sandbox agent token is unavailable/);
+  assert.match(provisionSource, /try \{[\s\S]*this\.provisionClaim/);
+  assert.match(claimProvisionSource, /this\.preflightError\(session\)/);
+  assert.match(claimProvisionSource, /!agentToken/);
+  assert.match(claimProvisionSource, /managed Sandbox agent token is unavailable/);
   assert.match(registrationLifecycleSource, /registration_generation/);
   assert.match(registrationLifecycleSource, /registration_claim/);
   assert.match(registrationLifecycleSource, /registration_claim_expires_at/);
@@ -1332,30 +1370,31 @@ test("sandbox credential cleanup is durably staged and retried", async () => {
   assert.match(migration, /terminal_finalize_pending = 0/);
   assert.match(migration, /agent_token_hash = NULL/);
   assert.match(migration, /SET\s+status = 'stopping'/);
-  assert.match(refreshSource, /sandbox_refresh_sandbox_id: refreshFence\.sandboxId/);
-  assert.match(refreshSource, /sandbox_refresh_claim: refreshFence\.claim/);
-  assert.match(refreshSource, /sandbox_refresh_claim_expires_at: refreshFence\.expiresAt/);
-  assert.match(refreshSource, /const agentToken = newAgentToken\(\)/);
+  assert.match(refreshClaimSource, /sandbox_refresh_sandbox_id: fence\.sandboxId/);
+  assert.match(refreshClaimSource, /sandbox_refresh_claim: fence\.claim/);
+  assert.match(refreshClaimSource, /sandbox_refresh_claim_expires_at: fence\.expiresAt/);
+  assert.match(refreshClaimSource, /const agentToken = newAgentToken\(\)/);
   assert.ok(
-    refreshSource.indexOf("sandboxProvisionPreflightError(env, refreshPayload)") <
-      refreshSource.indexOf("const agentToken = newAgentToken()"),
+    refreshSource.indexOf("this.dependencies.preflight(refreshPayload)") <
+      refreshSource.indexOf("this.dependencies.claim(session, now)"),
   );
-  assert.match(refreshSource, /agent_token_hash: agentTokenHash/);
-  assert.match(refreshSource, /provisionWithSandbox\([\s\S]*?agentToken,[\s\S]*?refreshLease/);
-  assert.match(refreshSource, /where\("agent_token_hash", "=", agentTokenHash\)/);
-  assert.match(refreshSource, /sandbox_refresh_claim_expires_at", "=", refreshFence\.expiresAt/);
-  assert.match(refreshSource, /executeBatch\(env, commitQueries\)/);
-  assert.match(refreshSource, /state: "cleanup_pending"/);
-  assert.match(refreshSource, /stageFailedManagedSandboxProvision/);
-  assert.ok(
-    refreshSource.indexOf("sandbox_refresh_claim: null") <
-      refreshSource.lastIndexOf("reconcileCredentialPolicyCleanupBatch"),
+  assert.match(refreshClaimSource, /agent_token_hash: agentTokenHash/);
+  assert.match(refreshSource, /this\.dependencies\.provision\(refreshPayload, claim\)/);
+  assert.match(refreshCommitSource, /where\("agent_token_hash", "=", claim\.agentTokenHash\)/);
+  assert.match(
+    refreshCommitSource,
+    /sandbox_refresh_claim_expires_at", "=", claim\.fence\.expiresAt/,
   );
+  assert.match(refreshCommitSource, /executeBatch\(env, commitQueries\)/);
+  assert.match(refreshCommitSource, /state: "cleanup_pending"/);
+  assert.match(refreshSource, /this\.dependencies\.stageFailure/);
+  assert.match(refreshCommitSource, /sandbox_refresh_claim: null/);
+  assert.match(refreshSource, /this\.dependencies\.reconcileCleanup/);
   assert.doesNotMatch(
-    refreshSource,
+    refreshCommitSource,
     /queueSandboxCredentialPolicyCleanup\(env, session\.id, oldSandboxId, refreshedAt\)/,
   );
-  assert.match(refreshSource, /const current = await readInteractiveSession/);
+  assert.match(refreshSource, /const current = await this\.dependencies\.readSession/);
 });
 
 test("terminal endpoints enforce current runtime capabilities", async () => {

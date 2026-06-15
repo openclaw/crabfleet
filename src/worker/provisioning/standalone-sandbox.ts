@@ -1,10 +1,13 @@
 import type { StandaloneSandboxProvisionRow } from "../database.ts";
+import { deploymentConfig } from "../deployment.ts";
+import { clampedSeconds } from "../duration.ts";
+import type { RuntimeEnv } from "../env.ts";
 import {
   sandboxLeaseId,
   type SandboxLease,
   type StandaloneSandboxProvisionFence,
 } from "../sandbox-lease.ts";
-import { failedProvision } from "./result.ts";
+import { cleanupPendingProvision, failedProvision } from "./result.ts";
 import type { InteractiveProvisionRequest, InteractiveProvisionResult } from "./types.ts";
 
 export const standaloneSandboxDefaultTtlSeconds = 14_400;
@@ -116,7 +119,7 @@ export class StandaloneSandboxProvisioningService {
     } catch (error) {
       const message = `Cloudflare Sandbox provision failed: ${this.dependencies.providerError(error)}`;
       await this.cleanupClaim(session.id, claim, message, this.dependencies.now());
-      return failedProvision(message);
+      return cleanupPendingProvision(sandboxLeaseId(claim.lease), message);
     }
     if (result.status !== "ready") {
       await this.cleanupClaim(session.id, claim, result.message, this.dependencies.now());
@@ -180,6 +183,22 @@ export function standaloneSandboxProvisionRequestHashInput(
 
 export function isManagedInteractiveSessionId(id: string): boolean {
   return /^is-[0-9]+$/i.test(id);
+}
+
+export function standaloneSandboxAttachUrl(env: RuntimeEnv, provisionId: string): string {
+  const url = new URL(
+    `/api/provision/interactive/${encodeURIComponent(provisionId)}/pty`,
+    deploymentConfig(env).canonicalUrl,
+  );
+  url.protocol = url.protocol === "http:" ? "ws:" : "wss:";
+  return url.toString();
+}
+
+export function standaloneSandboxProvisionTtlMs(env: RuntimeEnv): number {
+  return (
+    clampedSeconds(env.CRABBOX_STANDALONE_SANDBOX_TTL_SECONDS, standaloneSandboxDefaultTtlSeconds) *
+    1000
+  );
 }
 
 function activeProvisionResult(owner: StandaloneSandboxProvisionRow): InteractiveProvisionResult {

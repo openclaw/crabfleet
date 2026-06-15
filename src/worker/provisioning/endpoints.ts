@@ -2,7 +2,6 @@ import { getSandbox } from "@cloudflare/sandbox";
 
 import { cachedBooleanGrant } from "../../terminal-authorization.ts";
 import { sanitizeTrustedProxyRequest } from "../../trusted-proxy-auth.ts";
-import { clampedSeconds } from "../duration.ts";
 import { database, type InteractiveSessionRow } from "../database.ts";
 import { deploymentConfig, selectedRuntimeProfile } from "../deployment.ts";
 import type { RuntimeEnv } from "../env.ts";
@@ -28,10 +27,7 @@ import {
   interactiveSessionSummary,
 } from "../session-create-request.ts";
 import { bridgeWebSockets } from "../terminal-websocket-bridge.ts";
-import {
-  isManagedInteractiveSessionId,
-  standaloneSandboxDefaultTtlSeconds,
-} from "./standalone-sandbox.ts";
+import { isManagedInteractiveSessionId } from "./standalone-sandbox.ts";
 import { stageStandaloneSandboxProvisionCleanup } from "./standalone-sandbox-repository.ts";
 import { failedProvision, safeProviderError } from "./result.ts";
 import type {
@@ -288,22 +284,6 @@ export class InteractiveProvisioningEndpoints {
       return Boolean(owner);
     });
   }
-}
-
-export function standaloneSandboxAttachUrl(env: RuntimeEnv, provisionId: string): string {
-  const url = new URL(
-    `/api/provision/interactive/${encodeURIComponent(provisionId)}/pty`,
-    deploymentConfig(env).canonicalUrl,
-  );
-  url.protocol = url.protocol === "http:" ? "ws:" : "wss:";
-  return url.toString();
-}
-
-export function standaloneSandboxProvisionTtlMs(env: RuntimeEnv): number {
-  return (
-    clampedSeconds(env.CRABBOX_STANDALONE_SANDBOX_TTL_SECONDS, standaloneSandboxDefaultTtlSeconds) *
-    1000
-  );
 }
 
 function clean(value: unknown, maximum: number): string {

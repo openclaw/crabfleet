@@ -315,8 +315,11 @@ test("standalone Sandbox failures stage owner and policy cleanup", async () => {
 
   const result = await service.provision(request);
 
-  assert.equal(result.status, "failed");
-  assert.equal(result.message, "Cloudflare Sandbox provision failed: [credential]");
+  assert.equal(result.status, "stopping");
+  assert.equal(
+    result.message,
+    "Cloudflare Sandbox provision failed: [credential]; credential cleanup pending",
+  );
   assert.deepEqual(messages, [
     "owner:Cloudflare Sandbox provision failed: [credential]",
     "policy:200",
