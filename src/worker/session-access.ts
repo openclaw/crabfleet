@@ -1,5 +1,6 @@
 import { actor } from "./auth.ts";
 import type { User } from "./models.ts";
+import { isSandboxInteractiveSession } from "./sandbox-lease.ts";
 import type { InteractiveSession } from "./session-model.ts";
 
 export function canChangeInteractiveSessionMultiplayer(
@@ -30,6 +31,13 @@ export function canControlInteractiveSession(
     typeof session.controlExpiresAt === "number" &&
     session.controlExpiresAt > now
   );
+}
+
+export function delegatedInteractiveSessionControlAvailable(
+  sandboxAvailable: boolean,
+  session: InteractiveSession,
+): boolean {
+  return sandboxAvailable || !isSandboxInteractiveSession(session);
 }
 
 export function interactiveSessionActorCandidates(user: User): Set<string> {

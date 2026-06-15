@@ -949,18 +949,22 @@ test("Sandbox credential registration always proves exact durable ownership", as
 });
 
 test("managed terminal expiry enters the shared retryable terminal finalizer", async () => {
-  const source = await readFile(
+  const serviceSource = await readFile(
     new URL("../src/worker/interactive-terminal-service.ts", import.meta.url),
     "utf8",
   );
-  const expiryStart = source.indexOf("async function markInteractiveTerminalUnavailable");
-  const expiryEnd = source.indexOf("function terminalInputGrant", expiryStart);
-  const expirySource = source.slice(expiryStart, expiryEnd);
+  const repositorySource = await readFile(
+    new URL("../src/worker/interactive-terminal-repository.ts", import.meta.url),
+    "utf8",
+  );
+  const expiryStart = serviceSource.indexOf("async function markInteractiveTerminalUnavailable");
+  const expiryEnd = serviceSource.indexOf("function terminalInputGrant", expiryStart);
+  const expirySource = serviceSource.slice(expiryStart, expiryEnd);
 
-  assert.match(expirySource, /status: "expired"/);
-  assert.match(expirySource, /MAX\(updated_at \+ 1, \$\{now\}\)/);
-  assert.match(expirySource, /where\("updated_at", "=", existing\.updated_at\)/);
-  assert.match(expirySource, /terminal_finalize_pending: 1/);
+  assert.match(repositorySource, /status: "expired"/);
+  assert.match(repositorySource, /MAX\(updated_at \+ 1, \$\{now\}\)/);
+  assert.match(repositorySource, /where\("updated_at", "=", session\.updatedAt\)/);
+  assert.match(repositorySource, /terminal_finalize_pending: 1/);
   assert.match(
     expirySource,
     /finalizeTerminalInteractiveSession\(env, sessionId, "expired", now\)/,

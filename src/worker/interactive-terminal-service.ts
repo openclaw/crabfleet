@@ -1,5 +1,4 @@
 import { getSandbox } from "@cloudflare/sandbox";
-import { sql } from "kysely";
 
 import {
   attributedTerminalInputPayloads,
@@ -12,7 +11,6 @@ import { terminalFailureStatusForAdapter } from "../runtime-adapter.ts";
 import { cachedBooleanGrant } from "../terminal-authorization.ts";
 import { actor, requireRole } from "./auth.ts";
 import { base64FromBytes, sha256 } from "./crypto.ts";
-import { database } from "./database.ts";
 import type { RuntimeEnv } from "./env.ts";
 import { badRequest, forbidden, notFound, serviceUnavailable } from "./http.ts";
 import type { User } from "./models.ts";
@@ -27,19 +25,18 @@ import {
   terminalClipboardLimitMessage,
   terminalClipboardMaxBytes,
 } from "./interactive-terminal.ts";
+import { InteractiveTerminalRepository } from "./interactive-terminal-repository.ts";
 import { reconcileSandboxCredentialPolicyCleanupBatch } from "./sandbox-credential-policy-cleanup-service.ts";
 import { stageTerminalCredentialPolicyCleanupById } from "./sandbox-credential-policy-cleanup.ts";
 import { isSandboxInteractiveSession, sandboxLeaseInfo } from "./sandbox-lease.ts";
 import { openSandboxTerminalResponse, sandboxWorkdir } from "./sandbox-runtime.ts";
-import { canControlInteractiveSession } from "./session-access.ts";
+import {
+  canControlInteractiveSession,
+  delegatedInteractiveSessionControlAvailable,
+} from "./session-access.ts";
 import { githubActionsRelayStub } from "./session-control-do.ts";
 import { appendInteractiveSessionEventRecord } from "./session-events.ts";
-import {
-  interactiveSession,
-  runtimeCapabilities,
-  type InteractiveSession,
-} from "./session-model.ts";
-import { readInteractiveSessionRecord } from "./session-repository.ts";
+import type { InteractiveSession } from "./session-model.ts";
 import { finalizeTerminalInteractiveSession } from "./session-terminal-finalization.ts";
 import {
   interactivePtyRouteKind,
@@ -70,10 +67,12 @@ export type InteractiveTerminalServiceDependencies = {
 export class InteractiveTerminalService {
   private readonly env: RuntimeEnv;
   private readonly dependencies: InteractiveTerminalServiceDependencies;
+  private readonly repository: InteractiveTerminalRepository;
 
   constructor(env: RuntimeEnv, dependencies: InteractiveTerminalServiceDependencies) {
     this.env = env;
     this.dependencies = dependencies;
+    this.repository = new InteractiveTerminalRepository(env);
   }
 
   open(request: Request, user: User | null): Promise<Response> {
@@ -108,6 +107,7 @@ export class InteractiveTerminalService {
         outputAcknowledgements: false,
         markConnected: () =>
           markInteractiveTerminalConnected(
+            this.repository,
             this.env,
             user,
             session.id,
@@ -144,6 +144,7 @@ export class InteractiveTerminalService {
         outputAcknowledgements: false,
         markConnected: () =>
           markInteractiveTerminalConnected(
+            this.repository,
             this.env,
             user,
             sandboxSession.id,
@@ -170,7 +171,14 @@ export class InteractiveTerminalService {
       socket: upstream,
       outputAcknowledgements: terminalOutputAcknowledgements(target.url),
       markConnected: () =>
-        markInteractiveTerminalConnected(this.env, user, session.id, now, "PTY terminal connected"),
+        markInteractiveTerminalConnected(
+          this.repository,
+          this.env,
+          user,
+          session.id,
+          now,
+          "PTY terminal connected",
+        ),
     };
   }
 
@@ -179,10 +187,10 @@ export class InteractiveTerminalService {
     user: User,
     sessionId: string,
   ): Promise<{ path: string; name: string; mediaType: string; byteCount: number }> {
-    if (!(await canControlInteractiveSessionById(this.env, user, sessionId))) {
+    if (!(await canControlInteractiveSessionById(this.repository, this.env, user, sessionId))) {
       throw forbidden("terminal control has not been granted");
     }
-    const session = await readInteractiveSessionRecord(this.env, sessionId);
+    const session = await this.repository.readSession(sessionId);
     if (!session) throw notFound("interactive session not found");
     if (["stopping", "expired", "failed", "stopped"].includes(session.status)) {
       throw badRequest(`session is ${session.status}`);
@@ -205,30 +213,40 @@ export class InteractiveTerminalService {
         return { client: pair[0], server: pair[1] };
       },
       upgradeResponse: (client) => new Response(null, { status: 101, webSocket: client }),
-      canOpenAnonymous: (request) => canOpenAnonymousTerminalHub(request, this.env),
+      canOpenAnonymous: (request) =>
+        canOpenAnonymousTerminalHub(request, this.env, this.repository),
       canViewShared: (request, sessionId) =>
-        canViewSharedTerminalRequest(request, this.env, sessionId),
+        canViewSharedTerminalRequest(request, this.env, this.repository, sessionId),
       readSession: (sessionId) => this.dependencies.readFreshSession(sessionId),
       canViewSession: (request, user, session) =>
-        canViewTerminalSession(request, this.env, user, session),
-      inputGrant: (request, user, session) => terminalInputGrant(request, this.env, user, session),
-      viewGrant: (request, user, session) => terminalViewGrant(request, this.env, user, session),
+        canViewTerminalSession(request, this.env, this.repository, user, session),
+      inputGrant: (request, user, session) =>
+        terminalInputGrant(request, this.env, this.repository, user, session),
+      viewGrant: (request, user, session) =>
+        terminalViewGrant(request, this.env, this.repository, user, session),
       reconcileSubscription: (sessionId) =>
         terminalSubscriptionReconciler(this.dependencies, sessionId),
       openUpstream: (request, user, session, cols, rows) =>
         this.openUpstream(request, user, session, cols, rows),
       inputPayloads: (subscription, user, payload) =>
-        multiplayerTerminalInputPayloads(this.env, subscription, user, payload),
+        multiplayerTerminalInputPayloads(this.repository, subscription, user, payload),
       markConnectionFailure: async (user, session, message) => {
         const markTerminal =
           session.runtime === githubActionsRuntime ||
           (isSandboxInteractiveSession(session) && this.env.SANDBOX)
             ? markInteractiveTerminalDetached
             : markInteractiveTerminalUnavailable;
-        await markTerminal(this.env, user, session.id, Date.now(), message);
+        await markTerminal(this.repository, this.env, user, session.id, Date.now(), message);
       },
       markDetached: (user, sessionId, message) =>
-        markInteractiveTerminalDetached(this.env, user, sessionId, Date.now(), message),
+        markInteractiveTerminalDetached(
+          this.repository,
+          this.env,
+          user,
+          sessionId,
+          Date.now(),
+          message,
+        ),
     });
   }
 }
@@ -260,84 +278,56 @@ async function writeTerminalClipboardFile(
 }
 
 async function markInteractiveTerminalConnected(
+  repository: InteractiveTerminalRepository,
   env: RuntimeEnv,
   user: User | null,
   sessionId: string,
   now: number,
   message: string,
 ): Promise<void> {
-  const previous = await database(env)
-    .selectFrom("interactive_sessions")
-    .select(["status", "last_event", "last_seen_at"])
-    .where("id", "=", sessionId)
-    .executeTakeFirst();
-  await database(env)
-    .updateTable("interactive_sessions")
-    .set({
-      status: "attached",
-      last_seen_at: now,
-      last_event: message,
-    })
-    .where("id", "=", sessionId)
-    .where("status", "in", ["ready", "attached", "detached"])
-    .execute();
+  const previous = await repository.readConnectionState(sessionId);
+  await repository.markConnected(sessionId, message, now);
   if (
     previous &&
     (previous.status !== "attached" ||
-      previous.last_event !== message ||
-      now - previous.last_seen_at > 5 * 60_000)
+      previous.lastEvent !== message ||
+      now - previous.lastSeenAt > 5 * 60_000)
   ) {
     await appendTerminalLog(env, sessionId, user, message, now);
   }
 }
 
 async function markInteractiveTerminalDetached(
+  repository: InteractiveTerminalRepository,
   env: RuntimeEnv,
   user: User | null,
   sessionId: string,
   now: number,
   message: string,
 ): Promise<void> {
-  const existing = await database(env)
-    .selectFrom("interactive_sessions")
-    .select("status")
-    .where("id", "=", sessionId)
-    .executeTakeFirst();
-  if (!existing || ["stopping", "expired", "failed", "stopped"].includes(existing.status)) return;
-  await database(env)
-    .updateTable("interactive_sessions")
-    .set({
-      status: "detached",
-      last_event: message,
-    })
-    .where("id", "=", sessionId)
-    .where("status", "in", ["ready", "attached", "detached"])
-    .execute();
+  if (!(await repository.markDetached(sessionId, message))) return;
   await appendTerminalLog(env, sessionId, user, message, now);
 }
 
 async function markInteractiveTerminalUnavailable(
+  repository: InteractiveTerminalRepository,
   env: RuntimeEnv,
   user: User | null,
   sessionId: string,
   now: number,
   message: string,
 ): Promise<void> {
-  const existing = await database(env)
-    .selectFrom("interactive_sessions")
-    .selectAll()
-    .where("id", "=", sessionId)
-    .executeTakeFirst();
+  const existing = await repository.readSession(sessionId);
   if (!existing || ["expired", "failed", "stopped"].includes(existing.status)) return;
   if (terminalFailureStatusForAdapter(existing.adapter) === "detached") {
     if (existing.status === "stopping") return;
-    await markInteractiveTerminalDetached(env, user, sessionId, now, message);
+    await markInteractiveTerminalDetached(repository, env, user, sessionId, now, message);
     return;
   }
   if (
     isSandboxInteractiveSession({
       adapter: existing.adapter,
-      leaseId: existing.lease_id,
+      leaseId: existing.leaseId,
     })
   ) {
     const staged = await stageTerminalCredentialPolicyCleanupById(
@@ -354,28 +344,7 @@ async function markInteractiveTerminalUnavailable(
     return;
   }
   if (existing.status === "stopping") return;
-  const update = await database(env)
-    .updateTable("interactive_sessions")
-    .set({
-      status: "expired",
-      agent_token_hash: null,
-      attach_url: null,
-      vnc_url: null,
-      controller: null,
-      control_requested_by: null,
-      control_requested_at: null,
-      control_granted_at: null,
-      control_expires_at: null,
-      updated_at: sql<number>`MAX(updated_at + 1, ${now})`,
-      stopped_at: now,
-      terminal_finalize_pending: 1,
-      last_event: message,
-    })
-    .where("id", "=", sessionId)
-    .where("status", "=", existing.status)
-    .where("updated_at", "=", existing.updated_at)
-    .executeTakeFirst();
-  if ((update.numUpdatedRows ?? 0n) > 0n) {
+  if (await repository.markExpired(existing, message, now)) {
     await appendTerminalLog(env, sessionId, user, message, now);
     await finalizeTerminalInteractiveSession(env, sessionId, "expired", now).catch(() => undefined);
   }
@@ -384,13 +353,14 @@ async function markInteractiveTerminalUnavailable(
 function terminalInputGrant(
   request: Request,
   env: RuntimeEnv,
+  repository: InteractiveTerminalRepository,
   user: User | null,
   session: InteractiveSession,
 ): () => Promise<boolean> {
   if (!session.capabilities.terminal) return async () => false;
   return cachedBooleanGrant(() =>
     user
-      ? canControlInteractiveSessionById(env, user, session.id)
+      ? canControlInteractiveSessionById(repository, env, user, session.id)
       : canControlOpenClawEmbeddedTerminalRequest(request, env, session.id),
   );
 }
@@ -420,17 +390,19 @@ function terminalSubscriptionReconciler(
 function terminalViewGrant(
   request: Request,
   env: RuntimeEnv,
+  repository: InteractiveTerminalRepository,
   user: User | null,
   session: InteractiveSession,
 ): () => Promise<boolean> {
   return async () =>
-    Boolean(user && (await canControlInteractiveSessionById(env, user, session.id))) ||
-    (await canViewSharedTerminalRequest(request, env, session.id));
+    Boolean(user && (await canControlInteractiveSessionById(repository, env, user, session.id))) ||
+    (await canViewSharedTerminalRequest(request, env, repository, session.id));
 }
 
 async function canViewSharedTerminalRequest(
   request: Request,
   env: RuntimeEnv,
+  repository: InteractiveTerminalRepository,
   sessionId: string,
 ): Promise<boolean> {
   const url = new URL(request.url);
@@ -438,75 +410,74 @@ async function canViewSharedTerminalRequest(
   const token = url.searchParams.get("token") ?? "";
   return (
     (!shareSession || shareSession === sessionId) &&
-    (await isSharedSessionToken(env, sessionId, token))
+    (await isSharedSessionToken(env, repository, sessionId, token))
   );
 }
 
-async function canOpenAnonymousTerminalHub(request: Request, env: RuntimeEnv): Promise<boolean> {
+async function canOpenAnonymousTerminalHub(
+  request: Request,
+  env: RuntimeEnv,
+  repository: InteractiveTerminalRepository,
+): Promise<boolean> {
   const url = new URL(request.url);
   const shareSession = url.searchParams.get("shareSession") ?? "";
   const token = url.searchParams.get("token") ?? "";
-  return Boolean(shareSession && token && (await isSharedSessionToken(env, shareSession, token)));
+  return Boolean(
+    shareSession && token && (await isSharedSessionToken(env, repository, shareSession, token)),
+  );
 }
 
 async function canViewTerminalSession(
   request: Request,
   env: RuntimeEnv,
+  repository: InteractiveTerminalRepository,
   user: User | null,
   session: InteractiveSession,
 ): Promise<boolean> {
   if (user) {
     requireRole(user, "viewer");
-    if (await canControlInteractiveSessionById(env, user, session.id)) return true;
+    if (await canControlInteractiveSessionById(repository, env, user, session.id)) return true;
   }
-  return canViewSharedTerminalRequest(request, env, session.id);
+  return canViewSharedTerminalRequest(request, env, repository, session.id);
 }
 
 async function isSharedSessionToken(
   env: RuntimeEnv,
+  repository: InteractiveTerminalRepository,
   sessionId: string,
   token: string,
 ): Promise<boolean> {
   if (!token) return false;
   if (await isOpenClawEmbedSessionToken(env, sessionId, token)) return true;
-  const row = await database(env)
-    .selectFrom("interactive_sessions")
-    .select(["share_token_hash", "share_mode", "status", "runtime", "capabilities_json"])
-    .where("id", "=", sessionId)
-    .where("share_mode", "=", "link_read")
-    .executeTakeFirst();
+  const credential = await repository.readShareCredential(sessionId);
   return Boolean(
-    row?.share_token_hash &&
-    !["stopping", "expired", "failed", "stopped"].includes(row.status) &&
-    runtimeCapabilities(row.runtime, row.capabilities_json).terminal &&
-    (await sha256(token)) === row.share_token_hash,
+    credential?.tokenHash &&
+    !["stopping", "expired", "failed", "stopped"].includes(credential.status) &&
+    credential.terminalAvailable &&
+    (await sha256(token)) === credential.tokenHash,
   );
 }
 
 async function canControlInteractiveSessionById(
+  repository: InteractiveTerminalRepository,
   env: RuntimeEnv,
   user: User,
   sessionId: string,
 ): Promise<boolean> {
-  const row = await database(env)
-    .selectFrom("interactive_sessions")
-    .selectAll()
-    .where("id", "=", sessionId)
-    .executeTakeFirst();
-  if (!row) return false;
-  const session = interactiveSession(row, []);
+  const session = await repository.readSession(sessionId);
+  if (!session) return false;
   if (!session.capabilities.terminal) return false;
   if (["stopping", "expired", "failed", "stopped"].includes(session.status)) return false;
   return canControlInteractiveSession(
     user,
     session,
     Date.now(),
-    delegatedControlAvailable(env, session),
+    delegatedInteractiveSessionControlAvailable(Boolean(env.SANDBOX), session),
   );
 }
 
 async function multiplayerTerminalInputPayloads(
-  env: RuntimeEnv,
+  repository: InteractiveTerminalRepository,
   subscription: TerminalHubSubscription,
   user: User | null,
   payload: Uint8Array,
@@ -514,7 +485,7 @@ async function multiplayerTerminalInputPayloads(
   const submitted = terminalSubmittedLine(terminalInputState(subscription.session.id), payload);
   if (!user || !submitted || !submitted.text.trim()) return [payload];
   const enabled = await readInteractiveSessionMultiplayerMode(
-    env,
+    repository,
     subscription.session.id,
     subscription.session.multiplayerMode,
   );
@@ -531,17 +502,12 @@ function terminalInputState(sessionId: string): TerminalInputState {
 }
 
 async function readInteractiveSessionMultiplayerMode(
-  env: RuntimeEnv,
+  repository: InteractiveTerminalRepository,
   sessionId: string,
   fallback: boolean,
 ): Promise<boolean> {
   try {
-    const row = await database(env)
-      .selectFrom("interactive_sessions")
-      .select("multiplayer_mode")
-      .where("id", "=", sessionId)
-      .executeTakeFirst();
-    return row ? row.multiplayer_mode === 1 : fallback;
+    return (await repository.readMultiplayerMode(sessionId)) ?? fallback;
   } catch {
     return fallback;
   }
@@ -575,10 +541,6 @@ async function appendTerminalLog(
     message,
     now,
   });
-}
-
-function delegatedControlAvailable(env: RuntimeEnv, session: InteractiveSession): boolean {
-  return Boolean(env.SANDBOX || !isSandboxInteractiveSession(session));
 }
 
 function decodedHeaderValue(value: string | null): string {

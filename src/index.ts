@@ -182,6 +182,7 @@ import {
   canChangeInteractiveSessionMultiplayer,
   canControlInteractiveSession,
   canManageInteractiveSession,
+  delegatedInteractiveSessionControlAvailable,
 } from "./worker/session-access";
 import { presentInteractiveSession } from "./worker/session-presentation";
 import {
@@ -1792,8 +1793,7 @@ function decorateInteractiveSession(
 }
 
 function canGrantDelegatedControl(env: RuntimeEnv, session: InteractiveSession): boolean {
-  if (!env.SANDBOX && isSandboxInteractiveSession(session)) return false;
-  return true;
+  return delegatedInteractiveSessionControlAvailable(Boolean(env.SANDBOX), session);
 }
 
 function clean(value: unknown, max: number): string {

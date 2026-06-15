@@ -6,6 +6,7 @@ import {
   canChangeInteractiveSessionMultiplayer,
   canControlInteractiveSession,
   canManageInteractiveSession,
+  delegatedInteractiveSessionControlAvailable,
   interactiveSessionActorCandidates,
 } from "../src/worker/session-access.ts";
 import { interactiveSession } from "../src/worker/session-model.ts";
@@ -80,4 +81,15 @@ test("delegated terminal control requires the canonical actor and a live lease",
     [],
   );
   assert.equal(canControlInteractiveSession(user(), emailController, 100, true), false);
+});
+
+test("delegated terminal control requires a configured Sandbox for Sandbox sessions", () => {
+  const sandbox = interactiveSession(sessionRow({ lease_id: "sandbox:box-1:terminal-1" }), []);
+  const adapter = interactiveSession(
+    sessionRow({ adapter: "runtime-v1", adapter_workspace_id: "workspace-1" }),
+    [],
+  );
+  assert.equal(delegatedInteractiveSessionControlAvailable(false, sandbox), false);
+  assert.equal(delegatedInteractiveSessionControlAvailable(true, sandbox), true);
+  assert.equal(delegatedInteractiveSessionControlAvailable(false, adapter), true);
 });
