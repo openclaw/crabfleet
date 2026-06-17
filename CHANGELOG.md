@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Reuse `@openclaw/libterminal` for terminal protocol codecs, Worker relays, Ghostty assets, and browser lifecycle while keeping Crabfleet authorization and session policy local.
 - Fix automated Worker deployments by converging the app Custom Domain with the DNS-scoped deployment token instead of requiring zone-route access from the Worker token.
 
 ## 0.2.0 - 2026-06-15
