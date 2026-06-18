@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -90,6 +91,32 @@ func TestMutatingAPIFailureDoesNotFallbackToSSH(t *testing.T) {
 	}
 	if got := err.Error(); !strings.Contains(got, "not retrying through SSH") {
 		t.Fatalf("error = %q", got)
+	}
+}
+
+func TestPreRequestAPIFailureStillFallsBackToSSH(t *testing.T) {
+	argsPath := installFakeSSH(t)
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	apiURL := "http://" + listener.Addr().String()
+	if err := listener.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	app := &cli{
+		API:         apiURL,
+		SSHHost:     "crabd.test",
+		Token:       "gateway-token",
+		Fingerprint: "SHA256:test",
+	}
+	if err := (newCmd{Branch: "main", Command: "codex --yolo", Repo: "openclaw/crabfleet"}).Run(app, app.apiClient()); err != nil {
+		t.Fatal(err)
+	}
+	output := readFakeSSHArgs(t, argsPath)
+	if !strings.Contains(output, "crabd.test\n") || !strings.Contains(output, "new --branch main --repo openclaw/crabfleet") {
+		t.Fatalf("ssh args = %q", output)
 	}
 }
 
