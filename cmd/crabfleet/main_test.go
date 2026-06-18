@@ -432,7 +432,7 @@ func TestValidateWebVNCURL(t *testing.T) {
 }
 
 func TestNewVNCFallbackValidatesCapturedURL(t *testing.T) {
-	installOutputSSH(t, "vnc: http://example.test/not-webvnc\n")
+	installOutputSSH(t, "\x1b]52;c;secret\x07\nvnc: http://example.test/not-webvnc\n")
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
@@ -448,9 +448,19 @@ func TestNewVNCFallbackValidatesCapturedURL(t *testing.T) {
 		Token:       "gateway-token",
 		Fingerprint: "SHA256:test",
 	}
-	err = (newCmd{Branch: "main", Command: "codex --yolo", Repo: "openclaw/crabfleet", VNC: true}).Run(app, app.apiClient())
+	var runErr error
+	output := captureStdout(t, func() {
+		runErr = (newCmd{Branch: "main", Command: "codex --yolo", Repo: "openclaw/crabfleet", VNC: true}).Run(app, app.apiClient())
+	})
+	err = runErr
 	if err == nil || !strings.Contains(err.Error(), "invalid WebVNC URL scheme") {
 		t.Fatalf("error = %v", err)
+	}
+	if strings.ContainsAny(output, "\x1b\x07") {
+		t.Fatalf("fallback output retained terminal controls: %q", output)
+	}
+	if !strings.Contains(output, "vnc: http://example.test/not-webvnc") {
+		t.Fatalf("fallback output = %q", output)
 	}
 }
 

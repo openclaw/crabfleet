@@ -514,6 +514,29 @@ func TestIdleSessionChannelClosesWithoutCommand(t *testing.T) {
 	}
 }
 
+func TestMalformedExecRequestIsRejected(t *testing.T) {
+	addr, cleanup := serveTestSSHGateway(t, testSSHServerConfig(t), nil)
+	defer cleanup()
+	client, err := ssh.Dial("tcp", addr, testSSHClientConfig())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+	channel, _, err := client.OpenChannel("session", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer channel.Close()
+
+	ok, err := channel.SendRequest("exec", true, []byte{0, 0, 0, 8, 'h', 'e', 'l', 'p'})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ok {
+		t.Fatal("malformed exec request was accepted")
+	}
+}
+
 func TestRunCommandCancelsControlPlaneRequest(t *testing.T) {
 	entered := make(chan struct{})
 	cancelled := make(chan struct{})
