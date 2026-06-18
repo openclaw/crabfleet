@@ -517,8 +517,9 @@ func (cmd transcriptCmd) Run(app *cli, api *fleetapi.Client) error {
 			"transcript": transcript,
 		})
 	}
-	fmt.Fprint(os.Stdout, transcript)
-	if !strings.HasSuffix(transcript, "\n") {
+	safeTranscript := fleettext.SafeMultiline(transcript)
+	fmt.Fprint(os.Stdout, safeTranscript)
+	if !strings.HasSuffix(safeTranscript, "\n") {
 		fmt.Fprintln(os.Stdout)
 	}
 	return nil
