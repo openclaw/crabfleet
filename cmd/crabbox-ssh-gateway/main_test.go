@@ -116,6 +116,14 @@ func TestParseMessageKeepsNoEnterAndText(t *testing.T) {
 	if got, want := message.text, "--help is terminal text"; got != want {
 		t.Fatalf("text = %q, want %q", got, want)
 	}
+
+	message, err = parseMessage([]string{"--no-enter=true", "hello"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !message.noEnter || message.text != "hello" {
+		t.Fatalf("message = %#v", message)
+	}
 }
 
 func TestParseSummaryKeepsDashPrefixedText(t *testing.T) {
@@ -135,6 +143,28 @@ func TestParseSummaryKeepsDashPrefixedText(t *testing.T) {
 		t.Fatalf("purpose = %q, want %q", got, want)
 	}
 	if got, want := summary.summary, "--summary-start"; got != want {
+		t.Fatalf("summary = %q, want %q", got, want)
+	}
+
+	summary, err = parseSummary([]string{"--purpose=handoff", "done"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := summary.purpose, "handoff"; got != want {
+		t.Fatalf("purpose = %q, want %q", got, want)
+	}
+	if got, want := summary.summary, "done"; got != want {
+		t.Fatalf("summary = %q, want %q", got, want)
+	}
+
+	summary, err = parseSummary([]string{"-purpose", "handoff", "done"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := summary.purpose, "handoff"; got != want {
+		t.Fatalf("purpose = %q, want %q", got, want)
+	}
+	if got, want := summary.summary, "done"; got != want {
 		t.Fatalf("summary = %q, want %q", got, want)
 	}
 }

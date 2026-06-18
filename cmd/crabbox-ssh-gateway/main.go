@@ -14,6 +14,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -636,9 +637,21 @@ type messageInput struct {
 func parseMessage(args []string) (messageInput, error) {
 	var input messageInput
 	remaining := args
-	if len(remaining) > 0 && remaining[0] == "--no-enter" {
+	if len(remaining) > 0 && (remaining[0] == "--no-enter" || remaining[0] == "-no-enter") {
 		input.noEnter = true
 		remaining = remaining[1:]
+	} else if len(remaining) > 0 {
+		for _, prefix := range []string{"--no-enter=", "-no-enter="} {
+			if value, ok := strings.CutPrefix(remaining[0], prefix); ok {
+				parsed, err := strconv.ParseBool(value)
+				if err != nil {
+					return messageInput{}, err
+				}
+				input.noEnter = parsed
+				remaining = remaining[1:]
+				break
+			}
+		}
 	}
 	if len(remaining) > 0 && remaining[0] == "--" {
 		remaining = remaining[1:]
@@ -650,12 +663,20 @@ func parseMessage(args []string) (messageInput, error) {
 func parseSummary(args []string) (summaryUpdate, error) {
 	var update summaryUpdate
 	remaining := args
-	if len(remaining) > 0 && remaining[0] == "--purpose" {
+	if len(remaining) > 0 && (remaining[0] == "--purpose" || remaining[0] == "-purpose") {
 		if len(remaining) < 2 {
 			return summaryUpdate{}, errors.New("flag needs an argument: -purpose")
 		}
 		update.purpose = remaining[1]
 		remaining = remaining[2:]
+	} else if len(remaining) > 0 {
+		for _, prefix := range []string{"--purpose=", "-purpose="} {
+			if value, ok := strings.CutPrefix(remaining[0], prefix); ok {
+				update.purpose = value
+				remaining = remaining[1:]
+				break
+			}
+		}
 	}
 	if len(remaining) > 0 && remaining[0] == "--" {
 		remaining = remaining[1:]
