@@ -10,6 +10,7 @@ Crabfleet gives OpenClaw maintainers a fleet dashboard where every Codex crabbox
 
 - **Fleet-first workflow.** Create repo-ready Crabboxes from the app, SSH, or the Go CLI and see org Codex instances grouped by person.
 - **Board-based workflow.** Create cards from prompts, GitHub issues, or PRs. Track them through Todo, Running, Human Review, and Done lanes.
+- **Recurring cards.** Give API-created cards a bounded interval schedule; due occurrences use the normal run-attempt path and coalesce while a run or capacity limit blocks dispatch.
 - **Issue/PR lookup.** Type `#123` in search to preview matching GitHub issues or PRs across enabled OpenClaw repos and create a card from the match.
 - **Codex run control.** Start durable run attempts, track heartbeats, watch the Ghostty WASM session grid, and take over only when the selected runtime advertises that capability.
 - **Interactive Crabboxes.** Start a standalone Codex CLI workspace for manual cloud work and attach it in the same fullscreen Ghostty grid or WebVNC.

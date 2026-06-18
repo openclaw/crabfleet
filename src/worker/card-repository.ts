@@ -5,8 +5,10 @@ import {
   type Card,
   type CardChanges,
   type ChangedFile,
+  type DueRecurringCard,
   type RunAttempt,
 } from "./card-model.ts";
+import { parseStoredCardSchedule } from "./card-schedule.ts";
 import type { CardLifecycleStore, CardRunClaimInput } from "./card-lifecycle-service.ts";
 import {
   database,
@@ -45,6 +47,9 @@ export class CardRepository implements CardLifecycleStore {
         "created_at",
         "changed_files",
         "active_run_id",
+        "schedule_json",
+        "next_run_at",
+        "last_scheduled_run_at",
       ])
       .orderBy("updated_at", "desc")
       .orderBy("created_at", "desc")
@@ -81,6 +86,9 @@ export class CardRepository implements CardLifecycleStore {
       owner: card.owner,
       startedAt: card.started_at,
       createdAt: card.created_at,
+      schedule: storedCardSchedule(card.schedule_json),
+      nextRunAt: card.next_run_at,
+      lastScheduledRunAt: card.last_scheduled_run_at,
       logs: logs.get(card.id) ?? [],
       changes: cardChanges(card.changed_files, ""),
       run: card.active_run_id ? (runs.get(card.active_run_id) ?? null) : null,
@@ -106,6 +114,9 @@ export class CardRepository implements CardLifecycleStore {
         "changed_files",
         "diff_patch",
         "active_run_id",
+        "schedule_json",
+        "next_run_at",
+        "last_scheduled_run_at",
       ])
       .where("id", "=", cardId)
       .executeTakeFirst();
@@ -136,6 +147,9 @@ export class CardRepository implements CardLifecycleStore {
       owner: card.owner,
       startedAt: card.started_at,
       createdAt: card.created_at,
+      schedule: storedCardSchedule(card.schedule_json),
+      nextRunAt: card.next_run_at,
+      lastScheduledRunAt: card.last_scheduled_run_at,
       logs: eventRows.map(
         (row) => `${new Date(row.created_at).toLocaleTimeString("en-GB")} ${row.message}`,
       ),
@@ -186,6 +200,10 @@ export class CardRepository implements CardLifecycleStore {
         changed_files: "[]",
         diff_patch: "",
         active_run_id: null,
+        schedule_json: input.schedule ? JSON.stringify(input.schedule) : "",
+        next_run_at: input.nextRunAt,
+        last_scheduled_run_at: input.lastScheduledRunAt,
+        schedule_claimed_at: null,
       })
       .execute();
     await db
@@ -214,6 +232,89 @@ export class CardRepository implements CardLifecycleStore {
       .where("card_id", "=", cardId)
       .executeTakeFirst();
     return (row?.max_attempt ?? 0) + 1;
+  }
+
+  async readDueRecurringCards(
+    now: number,
+    staleBefore: number,
+    limit: number,
+  ): Promise<DueRecurringCard[]> {
+    const rows = await database(this.env)
+      .selectFrom("cards")
+      .select(["id", "schedule_json", "next_run_at"])
+      .where("schedule_json", "!=", "")
+      .where("next_run_at", "is not", null)
+      .where("next_run_at", "<=", now)
+      .where((expressions) =>
+        expressions.or([
+          expressions("schedule_claimed_at", "is", null),
+          expressions("schedule_claimed_at", "<=", staleBefore),
+        ]),
+      )
+      .orderBy("next_run_at", "asc")
+      .limit(limit)
+      .execute();
+    return rows.map((row) => ({
+      id: row.id,
+      scheduleJson: row.schedule_json,
+      dueAt: row.next_run_at as number,
+    }));
+  }
+
+  async claimRecurringOccurrence(
+    cardId: string,
+    dueAt: number,
+    claimedAt: number,
+    staleBefore: number,
+  ): Promise<boolean> {
+    const result = await database(this.env)
+      .updateTable("cards")
+      .set({ schedule_claimed_at: claimedAt })
+      .where("id", "=", cardId)
+      .where("next_run_at", "=", dueAt)
+      .where((expressions) =>
+        expressions.or([
+          expressions("schedule_claimed_at", "is", null),
+          expressions("schedule_claimed_at", "<=", staleBefore),
+        ]),
+      )
+      .executeTakeFirst();
+    return (result.numUpdatedRows ?? 0n) === 1n;
+  }
+
+  async completeRecurringOccurrence(
+    cardId: string,
+    dueAt: number,
+    claimedAt: number,
+    nextRunAt: number,
+  ): Promise<boolean> {
+    const result = await database(this.env)
+      .updateTable("cards")
+      .set({
+        last_scheduled_run_at: dueAt,
+        next_run_at: nextRunAt,
+        schedule_claimed_at: null,
+      })
+      .where("id", "=", cardId)
+      .where("next_run_at", "=", dueAt)
+      .where("schedule_claimed_at", "=", claimedAt)
+      .executeTakeFirst();
+    return (result.numUpdatedRows ?? 0n) === 1n;
+  }
+
+  async disableRecurringSchedule(
+    cardId: string,
+    dueAt: number,
+    claimedAt: number,
+  ): Promise<boolean> {
+    const result = await database(this.env)
+      .updateTable("cards")
+      .set({ schedule_json: "", next_run_at: null, schedule_claimed_at: null })
+      .where("id", "=", cardId)
+      .where("next_run_at", "=", dueAt)
+      .where("schedule_claimed_at", "=", claimedAt)
+      .executeTakeFirst();
+    return (result.numUpdatedRows ?? 0n) === 1n;
   }
 
   async claimRun(input: CardRunClaimInput): Promise<"claimed" | "capacity" | "active"> {
@@ -525,5 +626,13 @@ function parseJson<T>(value: string, fallback: T): T {
     return JSON.parse(value) as T;
   } catch {
     return fallback;
+  }
+}
+
+function storedCardSchedule(value: string) {
+  try {
+    return parseStoredCardSchedule(value);
+  } catch {
+    return null;
   }
 }

@@ -15,6 +15,7 @@ export type ControlPlaneRouteDependencies = {
   createCard(request: Request, user: User): Promise<unknown>;
   readCardRuns(cardId: string): Promise<unknown[] | null>;
   mutateCard(user: User, cardId: string, action: string): Promise<unknown>;
+  runRecurringCardScheduler(): Promise<unknown>;
   updatePolicy(input: AdminPolicyInput, user: User): Promise<void>;
   evaluateWorkflow(input: AdminWorkflowInput, user: User): Promise<void>;
   addAllowEntry(input: AdminAllowEntryInput, user: User): Promise<void>;
@@ -43,6 +44,10 @@ export async function handleControlPlaneRoute(
   if (request.method === "POST" && url.pathname === "/api/cards") {
     requireRole(user, "maintainer");
     return json(await dependencies.createCard(request, user), { status: 201 });
+  }
+  if (request.method === "POST" && url.pathname === "/api/admin/scheduler/tick") {
+    requireRole(user, "owner");
+    return json(await dependencies.runRecurringCardScheduler());
   }
 
   const runsMatch = url.pathname.match(/^\/api\/cards\/([^/]+)\/runs$/);

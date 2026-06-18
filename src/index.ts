@@ -169,7 +169,7 @@ export default {
     env: RuntimeEnv,
     context: ExecutionContext,
   ): Promise<void> {
-    new WorkerApplication(env).runtime.schedule(context);
+    new WorkerApplication(env).schedule(context);
   },
 } satisfies ExportedHandler<RuntimeEnv>;
 

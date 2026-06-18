@@ -57,6 +57,10 @@ function dependencies(calls: string[]): ControlPlaneRouteDependencies {
       calls.push(`card:mutate:${user.login}:${cardId}:${action}`);
       return { handler: "card:mutate" };
     },
+    async runRecurringCardScheduler() {
+      calls.push("scheduler:tick");
+      return { status: "ok" };
+    },
     async updatePolicy(input, user) {
       calls.push(`policy:${user.login}:${input.cap}`);
     },
@@ -164,6 +168,7 @@ test("card actions derive viewer or maintainer authorization from the action", a
 
 test("control-plane admin routes are owner-only and decode path identities", async () => {
   const cases: Array<[Request, number, string[]]> = [
+    [request("POST", "/api/admin/scheduler/tick"), 200, ["scheduler:tick"]],
     [request("PUT", "/api/admin/policy", { cap: 42 }), 200, ["policy:owner:42", "state:owner"]],
     [
       request("POST", "/api/admin/workflows/evaluate", { repo: "openclaw/crabfleet" }),
@@ -200,6 +205,13 @@ test("control-plane admin routes are owner-only and decode path identities", asy
 
   await assert.rejects(
     dispatch(request("PUT", "/api/admin/policy", {}), maintainer, []),
+    (error) => {
+      assert.equal(status(error), 403);
+      return true;
+    },
+  );
+  await assert.rejects(
+    dispatch(request("POST", "/api/admin/scheduler/tick"), maintainer, []),
     (error) => {
       assert.equal(status(error), 403);
       return true;

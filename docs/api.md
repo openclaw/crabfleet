@@ -113,6 +113,7 @@ Every card may include:
 - `changes`: changed file summary; list responses omit diff patches
 - `run`: active run attempt, including `selectionReason` and `capabilities`
 - `logs`: last 80 events
+- `schedule`, `nextRunAt`, and `lastScheduledRunAt`: recurring cadence and persisted scheduler evidence
 
 ## GitHub Lookup
 
@@ -152,7 +153,8 @@ Maintainer+. Creates a card.
   "repo": "openclaw/crabfleet",
   "source": "Prompt",
   "runtime": "auto",
-  "policy": ""
+  "policy": "",
+  "schedule": { "kind": "interval", "everyMs": 86400000 }
 }
 ```
 
@@ -164,8 +166,27 @@ Fields:
 - `source`: optional `Prompt`, `Issue`, or `PR`.
 - `runtime`: optional `auto`, `container`, or `crabbox`.
 - `policy`: optional. Blank, `default`, or `repo_default` uses a valid repo workflow policy, then `open_pr`.
+- `schedule`: optional interval schedule. `everyMs` must be an integer from 60000 through 2678400000. Optional `startAt` is a non-negative Unix epoch millisecond timestamp. The first occurrence is the first cadence-aligned timestamp after creation unless `startAt` is in the future.
 
-Invalid explicit merge policies return `400`.
+Invalid explicit merge policies or schedules return `400`.
+
+Scheduled cards include `schedule`, `nextRunAt`, and `lastScheduledRunAt` in card responses. Due occurrences are atomically claimed and advanced. If an active run or capacity limit prevents dispatch, the occurrence is recorded as skipped and the next cadence remains aligned.
+
+### POST /api/admin/scheduler/tick
+
+Owner only. Runs one recurring-card scheduler tick and returns bounded counters:
+
+```json
+{
+  "status": "ok",
+  "now": 1779000000000,
+  "scanned": 1,
+  "claimed": 1,
+  "queued": 1,
+  "skipped": 0,
+  "invalid": 0
+}
+```
 
 ### POST /api/cards/:id/actions
 

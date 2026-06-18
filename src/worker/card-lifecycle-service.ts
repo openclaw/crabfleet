@@ -5,9 +5,18 @@ import {
   cardRuntimeOptions,
   mergePolicyOptions,
   type Card,
+  type DueRecurringCard,
+  type RecurringSchedulerTickResult,
   type RunAttempt,
   type WorkflowConfig,
 } from "./card-model.ts";
+import {
+  cardScheduleSummary,
+  initialRecurringRunAt,
+  nextRecurringRunAt,
+  normalizeCardSchedule,
+  parseStoredCardSchedule,
+} from "./card-schedule.ts";
 import { badRequest, notFound } from "./http.ts";
 import type { User } from "./models.ts";
 import { normalizeRepo } from "./repositories.ts";
@@ -20,6 +29,7 @@ export type CardCreateInput = {
   source?: unknown;
   runtime?: unknown;
   policy?: unknown;
+  schedule?: unknown;
 };
 
 export type CardRuntimeDescriptor = {
@@ -51,6 +61,24 @@ export type CardLifecycleStore = {
     input: Omit<Card, "logs" | "changes" | "run"> & { actor: string; updatedAt: number },
   ): Promise<void>;
   nextRunAttempt(cardId: string): Promise<number>;
+  readDueRecurringCards(
+    now: number,
+    staleBefore: number,
+    limit: number,
+  ): Promise<DueRecurringCard[]>;
+  claimRecurringOccurrence(
+    cardId: string,
+    dueAt: number,
+    claimedAt: number,
+    staleBefore: number,
+  ): Promise<boolean>;
+  completeRecurringOccurrence(
+    cardId: string,
+    dueAt: number,
+    claimedAt: number,
+    nextRunAt: number,
+  ): Promise<boolean>;
+  disableRecurringSchedule(cardId: string, dueAt: number, claimedAt: number): Promise<boolean>;
   claimRun(input: CardRunClaimInput): Promise<"claimed" | "capacity" | "active">;
   heartbeatRun(runId: string, actorName: string, now: number, message: string): Promise<void>;
   moveCard(cardId: string, lane: string, startedAt: number | null, now: number): Promise<void>;
@@ -69,6 +97,9 @@ export type CardLifecycleServiceDependencies = {
   ensureWorkflow(repo: string, now: number): Promise<CardWorkflow | null>;
   isConstraintError(error: unknown): boolean;
 };
+
+const recurringSchedulerBatchSize = 25;
+const recurringSchedulerClaimLeaseMs = 5 * 60_000;
 
 export class CardLifecycleService {
   private readonly dependencies: CardLifecycleServiceDependencies;
@@ -100,6 +131,7 @@ export class CardLifecycleService {
     const source = oneOf(input.source, ["Prompt", "Issue", "PR"], "Prompt");
     const runtime = oneOf(input.runtime, cardRuntimeOptions, "auto");
     const policy = resolveCardPolicy(input.policy, workflowConfig);
+    const schedule = createCardSchedule(input.schedule);
     const owner = user.login ?? user.email ?? user.subject;
     for (let attempt = 0; attempt < 3; attempt += 1) {
       const id = await this.dependencies.store.nextCardId();
@@ -116,6 +148,9 @@ export class CardLifecycleService {
           owner,
           startedAt: null,
           createdAt: now,
+          schedule,
+          nextRunAt: schedule ? initialRecurringRunAt(schedule, now) : null,
+          lastScheduledRunAt: null,
           updatedAt: now,
           actor: actor(user),
         });
@@ -136,11 +171,11 @@ export class CardLifecycleService {
     if (action === "start" || action === "pulse") {
       const wasRunning = card.lane === "Running";
       if (!wasRunning) {
-        if (!(await this.claimRunning(user, card, now))) return this.result(cardId);
+        if ((await this.claimRunning(user, card, now)) !== "claimed") return this.result(cardId);
       } else if (card.run && activeRunStatuses.includes(card.run.status)) {
         await this.dependencies.store.heartbeatRun(card.run.id, actorName, now + 2, "heartbeat ok");
         return this.result(cardId);
-      } else if (!(await this.claimRunning(user, card, now))) {
+      } else if ((await this.claimRunning(user, card, now)) !== "claimed") {
         return this.result(cardId);
       }
       await this.dependencies.store.appendEvent(card.id, actorName, "heartbeat ok", now + 3);
@@ -202,8 +237,110 @@ export class CardLifecycleService {
     await this.dependencies.store.reconcileStalledRuns(now, threshold, actor(systemUser()));
   }
 
-  private async claimRunning(user: User, card: Card, now: number): Promise<boolean> {
+  async runRecurringScheduler(
+    now = this.dependencies.now(),
+  ): Promise<RecurringSchedulerTickResult> {
     await this.reconcileStalledRuns(now);
+    const staleBefore = now - recurringSchedulerClaimLeaseMs;
+    const dueCards = await this.dependencies.store.readDueRecurringCards(
+      now,
+      staleBefore,
+      recurringSchedulerBatchSize,
+    );
+    const result: RecurringSchedulerTickResult = {
+      status: "ok",
+      now,
+      scanned: dueCards.length,
+      claimed: 0,
+      queued: 0,
+      skipped: 0,
+      invalid: 0,
+    };
+    const system = systemUser();
+    const actorName = actor(system);
+
+    for (const due of dueCards) {
+      let schedule;
+      let nextRunAt: number | null = null;
+      try {
+        schedule = parseStoredCardSchedule(due.scheduleJson);
+        nextRunAt = schedule ? nextRecurringRunAt(schedule, due.dueAt, now) : null;
+      } catch {
+        schedule = null;
+      }
+      const claimed = await this.dependencies.store.claimRecurringOccurrence(
+        due.id,
+        due.dueAt,
+        now,
+        staleBefore,
+      );
+      if (!claimed) continue;
+      result.claimed += 1;
+
+      if (!schedule || nextRunAt === null) {
+        if (await this.dependencies.store.disableRecurringSchedule(due.id, due.dueAt, now)) {
+          result.invalid += 1;
+          await this.dependencies.store.appendEvent(
+            due.id,
+            actorName,
+            "recurring schedule invalid; disabled pending maintainer review",
+            now,
+          );
+        }
+        continue;
+      }
+
+      const card = await this.dependencies.store.readCard(due.id);
+      let runResult: "claimed" | "capacity" | "active" | "failed" = "active";
+      try {
+        if (card) {
+          runResult = await this.claimRunning(system, card, now, {
+            pulseExisting: false,
+            reconcileStalled: false,
+          });
+        }
+      } catch {
+        // A repo can be disabled after card creation. Advance this occurrence so it
+        // cannot poison every scheduler batch until a maintainer fixes the card.
+        runResult = "failed";
+      }
+      const completed = await this.dependencies.store.completeRecurringOccurrence(
+        due.id,
+        due.dueAt,
+        now,
+        nextRunAt,
+      );
+      if (!completed) continue;
+
+      if (runResult === "claimed") {
+        result.queued += 1;
+        await this.dependencies.store.appendEvent(
+          due.id,
+          actorName,
+          `recurring schedule queued (${cardScheduleSummary(schedule)}); next ${new Date(nextRunAt).toISOString()}`,
+          now + 4,
+        );
+      } else {
+        result.skipped += 1;
+        await this.dependencies.store.appendEvent(
+          due.id,
+          actorName,
+          `recurring occurrence skipped (${runResult === "failed" ? "dispatch failed" : runResult}); next ${new Date(nextRunAt).toISOString()}`,
+          now + 4,
+        );
+      }
+    }
+
+    return result;
+  }
+
+  private async claimRunning(
+    user: User,
+    card: Card,
+    now: number,
+    options: { pulseExisting?: boolean; reconcileStalled?: boolean } = {},
+  ): Promise<"claimed" | "capacity" | "active"> {
+    if (options.reconcileStalled !== false) await this.reconcileStalledRuns(now);
     const currentCard = (await this.dependencies.store.readCard(card.id)) ?? card;
     await this.dependencies.requireRepo(currentCard.repo);
     const settings = await this.dependencies.readSettings();
@@ -213,8 +350,15 @@ export class CardLifecycleService {
         ? currentCard.run
         : null;
     if (existingRun) {
-      await this.dependencies.store.heartbeatRun(existingRun.id, actor(user), now, "heartbeat ok");
-      return true;
+      if (options.pulseExisting !== false) {
+        await this.dependencies.store.heartbeatRun(
+          existingRun.id,
+          actor(user),
+          now,
+          "heartbeat ok",
+        );
+      }
+      return "active";
     }
 
     const workflow = await this.dependencies.ensureWorkflow(currentCard.repo, now);
@@ -234,7 +378,7 @@ export class CardLifecycleService {
       const message =
         claimed === "capacity" ? `capacity blocked at cap ${cap}` : "run already active";
       await this.dependencies.store.appendEvent(currentCard.id, actor(user), message, now);
-      return false;
+      return claimed;
     }
     await this.dependencies.store.appendEvent(
       currentCard.id,
@@ -248,7 +392,7 @@ export class CardLifecycleService {
       `runtime=${descriptor.runtime} policy=${currentCard.policy} workflow=${workflow?.status ?? "unseen"} reason=${descriptor.reason}`,
       now + 2,
     );
-    return true;
+    return "claimed";
   }
 
   private async result(cardId: string): Promise<{ card: Card }> {
@@ -305,6 +449,14 @@ function runtimeDescriptor(
 function stallThresholdMs(settings: Record<string, string>): number {
   const parsed = Number(settings.stall_ms);
   return Number.isFinite(parsed) && parsed >= 60_000 ? parsed : 5 * 60 * 1000;
+}
+
+function createCardSchedule(input: unknown) {
+  try {
+    return normalizeCardSchedule(input);
+  } catch (error) {
+    throw badRequest(error instanceof Error ? error.message : "invalid schedule");
+  }
 }
 
 function systemUser(): User {
