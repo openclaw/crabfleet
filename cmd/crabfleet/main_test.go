@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -237,6 +238,18 @@ func installOutputSSH(t *testing.T, output string) {
 	t.Setenv("SSH_OUTPUT", output)
 }
 
+func installLargeOutputSSH(t *testing.T, bytes int) {
+	t.Helper()
+	dir := t.TempDir()
+	sshPath := filepath.Join(dir, "ssh")
+	script := "#!/bin/sh\nyes x | tr -d '\\n' | head -c \"$SSH_OUTPUT_BYTES\"\n"
+	if err := os.WriteFile(sshPath, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("SSH_OUTPUT_BYTES", fmt.Sprintf("%d", bytes))
+}
+
 func readFakeSSHArgs(t *testing.T, argsPath string) string {
 	t.Helper()
 	data, err := os.ReadFile(argsPath)
@@ -461,6 +474,18 @@ func TestNewVNCFallbackValidatesCapturedURL(t *testing.T) {
 	}
 	if !strings.Contains(output, "vnc: http://example.test/not-webvnc") {
 		t.Fatalf("fallback output = %q", output)
+	}
+}
+
+func TestVNCFallbackRejectsOversizedCapturedSSHOutput(t *testing.T) {
+	installLargeOutputSSH(t, maxSSHOutputBytes+1)
+	app := &cli{SSHHost: "crabd.test"}
+	output, err := runSSHOutput(app, "vnc", "IS-7")
+	if err == nil || !strings.Contains(err.Error(), "ssh output exceeds") {
+		t.Fatalf("output length=%d error=%v", len(output), err)
+	}
+	if output != "" {
+		t.Fatalf("output length=%d, want empty", len(output))
 	}
 }
 

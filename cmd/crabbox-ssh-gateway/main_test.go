@@ -720,6 +720,28 @@ func TestRunCommandSanitizesControlPlaneErrors(t *testing.T) {
 	}
 }
 
+func TestRunCommandSanitizesUnknownCommand(t *testing.T) {
+	permissions := &ssh.Permissions{Extensions: map[string]string{
+		"authorized":  "true",
+		"fingerprint": "SHA256:test",
+		"login":       "operator",
+		"role":        "owner",
+	}}
+	client := &apiClient{baseURL: "https://example.test", token: "gateway-token", client: http.DefaultClient}
+	var output bytes.Buffer
+	exit := runCommand(context.Background(), &output, permissions, client, "bad\x1b]52;c;secret\x07cmd", sessionPTY{})
+	if exit != 2 {
+		t.Fatalf("exit=%d output=%q", exit, output.String())
+	}
+	got := output.String()
+	if strings.ContainsAny(got, "\x1b\x07") || strings.Contains(got, "secret") || strings.Contains(got, "]52") {
+		t.Fatalf("unknown command retained terminal controls: %q", got)
+	}
+	if !strings.HasPrefix(got, "unknown command: badcmd\n") {
+		t.Fatalf("output=%q", got)
+	}
+}
+
 func TestAttachSanitizesTerminalErrors(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/api/terminal/ws" {
