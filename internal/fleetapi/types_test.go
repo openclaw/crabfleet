@@ -25,12 +25,11 @@ func TestSessionAttachableRequiresAuthoritativePTYAvailability(t *testing.T) {
 }
 
 func TestSessionLifecycleStopNote(t *testing.T) {
-	if got := (Session{Status: "stopped"}).LifecycleStopNote(); !strings.Contains(got, "provider deletion") {
-		t.Fatalf("legacy stop note = %q", got)
-	}
 	for _, session := range []Session{
 		{Status: "failed"},
-		{Status: "stopped", Adapter: "runtime-v1"},
+		{Status: "stopping"},
+		{Status: "stopped"},
+		{Status: "expired"},
 	} {
 		if got := session.LifecycleStopNote(); got != "" {
 			t.Fatalf("session %#v note = %q", session, got)

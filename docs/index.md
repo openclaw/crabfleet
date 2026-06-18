@@ -32,7 +32,7 @@ The web app at [crabfleet.openclaw.ai/app](https://crabfleet.openclaw.ai/app/) e
 ## What Crabfleet Does
 
 - **SSH-first onboarding.** Connect through `ssh link@crabd.sh`, complete GitHub sign-in, then use linked-key auth.
-- **Crabbox control.** Create, attach, share, open WebVNC, delete provider-backed runtime workspaces, stop legacy sessions locally, and clean up retained Codex session history.
+- **Crabbox control.** Create, attach, share, open WebVNC, delete provider-backed runtime workspaces, and clean up retained Codex session history.
 - **Fleet visibility.** The app groups all org Codex instances by person so OpenClaw can supervise live work.
 - **Repo-gated cards.** Prompt cards and GitHub issue/PR previews stay scoped to enabled OpenClaw repos.
 - **Runtime policy.** Crabfleet records runtime selection, capabilities, heartbeat, stall state, and operator intent.
@@ -93,7 +93,7 @@ Cards represent task intent and policy:
 
 ### Runs
 
-When a card enters Running, Crabfleet creates a `run_attempts` row, selects a runtime descriptor, records the selection reason and capabilities, and starts heartbeat/stall tracking. This is durable scheduling/control evidence, not an autonomous process launch. Live work is represented by interactive sessions, including built-in Sandbox, versioned Crabbox, legacy adapter, ClawFleet, and GitHub Actions-backed sessions.
+When a card enters Running, Crabfleet creates a `run_attempts` row, selects a runtime descriptor, records the selection reason and capabilities, and starts heartbeat/stall tracking. This is durable scheduling/control evidence, not an autonomous process launch. Live work is represented by interactive sessions, including built-in Sandbox, versioned Crabbox, and GitHub Actions-backed sessions.
 
 ### Repo Workflows
 

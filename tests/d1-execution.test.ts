@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { D1Connection, executeD1Statement } from "../src/d1-execution.ts";
+import { database, executeBatch } from "../src/worker/database.ts";
 
 test("D1 connection executes INSERT RETURNING through all and preserves rows", async () => {
   let allCalls = 0;
@@ -67,4 +68,38 @@ test("D1 executes non-returning mutations through run", async () => {
   assert.equal(runCalls, 1);
   assert.deepEqual(result.rows, []);
   assert.equal(result.changes, 2);
+});
+
+test("database batches compile Kysely queries into bound D1 statements", async () => {
+  const prepared: Array<{ sql: string; parameters: unknown[] }> = [];
+  let batchSize = 0;
+  const env = {
+    DB: {
+      prepare(sql: string) {
+        return {
+          bind(...parameters: unknown[]) {
+            const statement = { sql, parameters };
+            prepared.push(statement);
+            return statement;
+          },
+        };
+      },
+      async batch(statements: unknown[]) {
+        batchSize = statements.length;
+        return [];
+      },
+    } as unknown as D1Database,
+  };
+  const db = database(env);
+
+  await executeBatch(env, [
+    db.insertInto("id_sequences").values({ name: "interactive_sessions", last_id: 41 }),
+    db.updateTable("id_sequences").set({ last_id: 42 }).where("name", "=", "interactive_sessions"),
+  ]);
+
+  assert.equal(batchSize, 2);
+  assert.match(prepared[0]?.sql ?? "", /^insert into "id_sequences"/i);
+  assert.deepEqual(prepared[0]?.parameters, ["interactive_sessions", 41]);
+  assert.match(prepared[1]?.sql ?? "", /^update "id_sequences"/i);
+  assert.deepEqual(prepared[1]?.parameters, [42, "interactive_sessions"]);
 });

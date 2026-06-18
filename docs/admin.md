@@ -198,8 +198,9 @@ Proxy-only identity cannot link SSH keys. Use a separate OAuth-capable origin th
 
 ### Scoped Service Auth
 
-- SSH gateway: `CRABFLEET_SSH_GATEWAY_TOKEN` or `CRABBOX_SSH_GATEWAY_TOKEN`.
+- SSH gateway: `CRABFLEET_SSH_GATEWAY_TOKEN`.
 - OpenClaw service: `CRABBOX_OPENCLAW_TOKEN`.
+- OpenClaw terminal embeds: `CRABBOX_EMBED_TICKET_SECRET`, retained only by Crabfleet.
 - Session agent: `CRABFLEET_AGENT_TOKEN` plus session ID.
 - Stateless provision hook: `CRABBOX_INTERACTIVE_PROVISION_TOKEN`.
 - Runtime adapter: `CRABBOX_RUNTIME_ADAPTER_TOKEN`.
@@ -212,7 +213,7 @@ Worker secrets live in Cloudflare bindings, not D1/R2:
 
 - GitHub OAuth/client and optional deployment token.
 - Bootstrap token.
-- Runtime adapter/provision/runner/ClawFleet tokens.
+- Runtime adapter and standalone Sandbox provision tokens.
 - OpenClaw and SSH gateway service tokens.
 - OpenAI API key.
 - token-encryption key.
@@ -347,7 +348,6 @@ Check the selected runtime and deployment backend:
 
 - built-in `SANDBOX` binding for Container;
 - `CRABBOX_RUNTIME_ADAPTER_URL` or `CRABBOX_RUNTIME_ADAPTER_URL_TEMPLATE`, plus token and namespace, for versioned Crabbox;
-- legacy provision/runner/ClawFleet settings only when intentionally used.
 
 ### Delete Remains `stopping`
 

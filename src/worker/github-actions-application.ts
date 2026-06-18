@@ -1,0 +1,172 @@
+import type { GitHubActionsSessionRegistrationInput } from "./github-actions-session-registration.ts";
+import { AdminRepository } from "./admin-repository.ts";
+import {
+  GitHubActionsSessionRegistrationService,
+  type GitHubActionsSessionRegistrationStore,
+} from "./github-actions-session-registration.ts";
+import {
+  GitHubActionsRunnerConnectionService,
+  type GitHubActionsRunnerConnectionStore,
+} from "./github-actions-runner-connection.ts";
+import { GitHubActionsRepository } from "./github-actions-repository.ts";
+import {
+  GitHubActionsWorkStateService,
+  type GitHubActionsWorkStateInput,
+  type GitHubActionsWorkStateStore,
+} from "./github-actions-session-work-state.ts";
+import { actor } from "./auth.ts";
+import { sha256 } from "./crypto.ts";
+import type { RuntimeEnv } from "./env.ts";
+import { badRequest, readJson, serviceUnavailable } from "./http.ts";
+import type { User } from "./models.ts";
+import {
+  AgentSessionAuthenticator,
+  agentSessionId,
+  type AgentSessionAuthenticationOptions,
+  type AgentSessionAuthenticationStore,
+} from "./session-agent-auth.ts";
+import { appendInteractiveSessionEventRecord } from "./session-events.ts";
+import { nextInteractiveSessionId } from "./session-id-repository.ts";
+import type { InteractiveSession } from "./session-model.ts";
+import { readAgentSessionCredential, readInteractiveSessionRecord } from "./session-repository.ts";
+import { newAgentToken } from "./session-reservation-context.ts";
+import { githubActionsRelayStub } from "./session-control-do.ts";
+import { ServiceRegistry } from "./service-registry.ts";
+
+const services = {
+  adminRepository: Symbol("admin-repository"),
+  authenticator: Symbol("authenticator"),
+  repository: Symbol("repository"),
+};
+
+export type GitHubActionsApplicationDependencies = {
+  audit(user: User, message: string, now: number): Promise<void>;
+};
+
+export class GitHubActionsApplication {
+  private readonly env: RuntimeEnv;
+  private readonly dependencies: GitHubActionsApplicationDependencies;
+  private readonly registry = new ServiceRegistry();
+
+  constructor(env: RuntimeEnv, dependencies: GitHubActionsApplicationDependencies) {
+    this.env = env;
+    this.dependencies = dependencies;
+  }
+
+  isAgentRequest(request: Request): boolean {
+    return Boolean(agentSessionId(request));
+  }
+
+  authenticate(
+    request: Request,
+    expectedId?: string,
+    options: AgentSessionAuthenticationOptions = {},
+  ): Promise<{ session: InteractiveSession; user: User }> {
+    return this.authenticator().require(request, expectedId, options);
+  }
+
+  async register(input: GitHubActionsSessionRegistrationInput, user: User) {
+    const repository = this.repository();
+    const store: GitHubActionsSessionRegistrationStore = {
+      now: () => Date.now(),
+      newAgentToken,
+      hashToken: sha256,
+      requireRepo: (repo) => this.adminRepository().requireRepo(repo),
+      readByWorkKey: (workKey) => repository.readByWorkKey(workKey),
+      nextSessionId: () => nextInteractiveSessionId(this.env),
+      insertSession: (values) => repository.insertSession(values),
+      readById: (id) => repository.readById(id),
+      updateSession: (id, values) => repository.updateSession(id, values),
+      isConstraintError,
+      disconnectRunner: (id) => this.disconnectRunner(id),
+      appendEvent: (id, message, now) => this.appendEvent(id, user, message, now),
+      audit: (message, now) => this.dependencies.audit(user, message, now),
+      readSession: (id) => readInteractiveSessionRecord(this.env, id),
+    };
+    return new GitHubActionsSessionRegistrationService(store).register(input);
+  }
+
+  async updateWorkState(
+    request: Request,
+    id: string,
+  ): Promise<{ session: InteractiveSession; user: User }> {
+    const { session, user } = await this.authenticate(request, id);
+    const body = await readJson<GitHubActionsWorkStateInput>(request);
+    const repository = this.repository();
+    const store: GitHubActionsWorkStateStore = {
+      now: () => Date.now(),
+      readRow: (sessionId) => repository.readById(sessionId),
+      persist: (sessionId, values) => repository.updateSession(sessionId, values),
+      appendEvent: (sessionId, message, now) => this.appendEvent(sessionId, user, message, now),
+      disconnectRunner: (sessionId) => this.disconnectRunner(sessionId),
+      readSession: (sessionId) => readInteractiveSessionRecord(this.env, sessionId),
+    };
+    return {
+      session: await new GitHubActionsWorkStateService(store).update(session, body),
+      user,
+    };
+  }
+
+  async openRunnerPty(request: Request, id: string): Promise<Response> {
+    if (request.headers.get("upgrade")?.toLowerCase() !== "websocket") {
+      throw badRequest("websocket upgrade required");
+    }
+    const { session, user } = await this.authenticate(request, id, {
+      allowQueryToken: true,
+    });
+    const stub = githubActionsRelayStub(this.env, id);
+    if (!stub) throw serviceUnavailable("SESSION_CONTROL Durable Object is not configured");
+    const repository = this.repository();
+    const store: GitHubActionsRunnerConnectionStore = {
+      now: () => Date.now(),
+      persist: (sessionId, values) => repository.updateSession(sessionId, values),
+      appendEvent: (sessionId, message, now) => this.appendEvent(sessionId, user, message, now),
+    };
+    await new GitHubActionsRunnerConnectionService(store).connect(session);
+    return stub.fetch("https://crabfleet.internal/api/session-control/github-actions/runner", {
+      headers: { upgrade: "websocket" },
+    });
+  }
+
+  async disconnectRunner(id: string): Promise<void> {
+    const stub = githubActionsRelayStub(this.env, id);
+    if (!stub) return;
+    const response = await stub.fetch(
+      "https://crabfleet.internal/api/session-control/github-actions/disconnect-runner",
+      { method: "POST" },
+    );
+    if (!response.ok) throw serviceUnavailable("GitHub Actions relay is unavailable");
+  }
+
+  private authenticator(): AgentSessionAuthenticator {
+    return this.registry.get(
+      services.authenticator,
+      () =>
+        new AgentSessionAuthenticator({
+          readCredential: (id) => readAgentSessionCredential(this.env, id),
+          hashToken: sha256,
+        } satisfies AgentSessionAuthenticationStore),
+    );
+  }
+
+  private adminRepository(): AdminRepository {
+    return this.registry.get(services.adminRepository, () => new AdminRepository(this.env));
+  }
+
+  private repository(): GitHubActionsRepository {
+    return this.registry.get(services.repository, () => new GitHubActionsRepository(this.env));
+  }
+
+  private appendEvent(id: string, user: User, message: string, now: number): Promise<void> {
+    return appendInteractiveSessionEventRecord(this.env, {
+      sessionId: id,
+      actor: actor(user),
+      message,
+      now,
+    });
+  }
+}
+
+function isConstraintError(error: unknown): boolean {
+  return error instanceof Error && /constraint|unique/i.test(error.message);
+}

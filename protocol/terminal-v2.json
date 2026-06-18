@@ -1,0 +1,38 @@
+{
+  "magic": 22851,
+  "version": 2,
+  "messages": {
+    "Hello": 1,
+    "Welcome": 2,
+    "Subscribe": 10,
+    "Unsubscribe": 11,
+    "Output": 20,
+    "Snapshot": 21,
+    "Event": 22,
+    "Error": 23,
+    "Input": 30,
+    "Key": 31,
+    "Resize": 32,
+    "Stop": 33,
+    "ControlRequest": 50,
+    "ControlDecision": 51,
+    "ControlGranted": 52,
+    "ControlRevoked": 53,
+    "Ping": 60,
+    "Pong": 61,
+    "Ack": 62
+  },
+  "subscribeFlags": {
+    "Output": 1,
+    "Snapshot": 2,
+    "Events": 4,
+    "OutputAcknowledgements": 8
+  },
+  "vectors": {
+    "outputFrame": "435902140600000049532d31323304000000000102ff",
+    "pingFrame": "4359023c0000000000000000",
+    "subscribe": "0d00000000000000000000009000000029000000",
+    "resize": "840000002b000000",
+    "ack": "ffff0000"
+  }
+}

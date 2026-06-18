@@ -8,6 +8,7 @@ import {
   encodeSubscribePayload,
   encodeTerminalFrame,
 } from "../terminal-protocol.ts";
+import { createGhosttyTerminal, loadGhosttyRuntime } from "@openclaw/libterminal/browser";
 import { clipboardName, isTerminalReadyInteractiveSession, terminalText } from "./utils.js";
 
 const terminalTheme = {
@@ -34,7 +35,7 @@ const terminalTheme = {
   brightWhite: "#ffffff",
 };
 
-let ghosttyModulePromise = null;
+const ghosttyWasmPath = "__GHOSTTY_WASM_PATH__";
 let terminalEpoch = 0;
 let terminalHubSocket = null;
 let terminalHubReconnectTimer = null;
@@ -75,7 +76,7 @@ export async function mountTerminal(session, mount, options = {}) {
           ? previous.canInput
             ? "Live PTY"
             : "Read-only PTY"
-          : "PTY bridge",
+          : "Connecting",
       );
       return;
     }
@@ -90,20 +91,27 @@ export async function mountTerminal(session, mount, options = {}) {
   disposeTerminal(session.id);
   const mountEpoch = terminalEpoch;
   try {
-    const module = await loadGhosttyModule();
-    if (isStaleTerminalMount(session, mount, mountEpoch)) return;
-    if (!module?.Terminal) throw new Error("Ghostty module missing Terminal");
     mount.innerHTML = "";
-    const term = new module.Terminal({
-      disableStdin: !canInput,
-      fontSize: options.focused ? 14 : 13,
-      theme: terminalTheme,
-    });
-    const fit = module.FitAddon ? new module.FitAddon() : null;
-    if (fit) term.loadAddon(fit);
     const restoreOpenScroll = preserveScrollPosition(mount);
     const previousActive = document.activeElement;
-    term.open(mount);
+    let host = null;
+    const controller = await createGhosttyTerminal({
+      parent: mount,
+      runtimeOptions: { wasmUrl: ghosttyWasmPath },
+      readOnly: !canInput,
+      terminalOptions: {
+        fontSize: options.focused ? 14 : 13,
+        theme: terminalTheme,
+      },
+      onData: (bytes) => {
+        if (host) sendTerminalInput(host, bytes);
+      },
+    });
+    if (isStaleTerminalMount(session, mount, mountEpoch)) {
+      controller.dispose();
+      return;
+    }
+    const term = controller.terminal;
     if (!options.focused) releaseTerminalFocus(mount, previousActive);
     restoreOpenScroll();
     if (!options.focused)
@@ -111,30 +119,22 @@ export async function mountTerminal(session, mount, options = {}) {
         releaseTerminalFocus(mount, previousActive);
         restoreOpenScroll();
       });
-    if (fit) {
-      fit.fit();
-      if (typeof fit.observeResize === "function") fit.observeResize();
-    }
     const pasteHandler = (event) => handleTerminalPasteEvent(session.id, event);
     mount.addEventListener("paste", pasteHandler, { capture: true });
-    if (!live) term.write(text);
-    const host = {
+    if (!live) controller.write(new TextEncoder().encode(text));
+    host = {
       mount,
+      controller,
       term,
-      fit,
       text,
       live,
       canInput,
       sessionId: session.id,
       focused: Boolean(options.focused),
       subscribed: false,
-      dataSub: null,
       pasteHandler,
       colorQueryBuffer: "",
     };
-    if (canInput && typeof term.onData === "function") {
-      host.dataSub = term.onData((data) => sendTerminalInput(host, data));
-    }
     terminalHosts.set(session.id, host);
     if (live) connectTerminalSocket(session, host, term);
     else setTerminalStatus(session.id, "Ghostty WASM");
@@ -229,10 +229,9 @@ export function disposeTerminal(id) {
   }
   if (host.pasteHandler)
     host.mount?.removeEventListener("paste", host.pasteHandler, { capture: true });
-  if (host.dataSub && typeof host.dataSub.dispose === "function") host.dataSub.dispose();
-  if (host.fit && typeof host.fit.dispose === "function") host.fit.dispose();
   try {
-    host.term?.dispose?.();
+    if (host.controller) host.controller.dispose();
+    else host.term?.dispose?.();
   } catch {}
   terminalHosts.delete(id);
   if (![...terminalHosts.values()].some((item) => item.live)) {
@@ -283,14 +282,8 @@ function connectTerminalSocket(session, host, term) {
 function syncTerminalInputState(session, host, term) {
   const canInput = canSendTerminalInput(session);
   host.canInput = canInput;
-  if (term?.options) term.options.disableStdin = !canInput;
-  if (canInput && !host.dataSub && typeof term?.onData === "function") {
-    host.dataSub = term.onData((data) => sendTerminalInput(host, data));
-  }
-  if (!canInput && host.dataSub) {
-    if (typeof host.dataSub.dispose === "function") host.dataSub.dispose();
-    host.dataSub = null;
-  }
+  if (host.controller) host.controller.setReadOnly(!canInput);
+  else if (term?.options) term.options.disableStdin = !canInput;
 }
 
 function ensureTerminalHub() {
@@ -352,7 +345,7 @@ function subscribeTerminalHost(session, host, term) {
   sendTerminalFrame(
     session.id,
     TerminalMessageType.Subscribe,
-    encodeSubscribePayload({ flags, cols: term?.cols, rows: term?.rows }),
+    encodeSubscribePayload({ flags, cols: term?.cols ?? 0, rows: term?.rows ?? 0 }),
   );
   setTerminalStatus(session.id, "Connecting PTY");
 }
@@ -370,7 +363,8 @@ function handleTerminalHubFrame(frame) {
   if (!host) return;
   if (frame.type === TerminalMessageType.Output) {
     sendTerminalColorQueryResponses(host, frame.payload);
-    host.term?.write(frame.payload);
+    if (host.controller) host.controller.write(frame.payload);
+    else host.term?.write(frame.payload);
     sendTerminalFrame(
       frame.sessionId,
       TerminalMessageType.Ack,
@@ -610,9 +604,9 @@ function isTerminalFinalError(message) {
     text.includes("session is expired") ||
     text.includes("session is failed") ||
     text.includes("upstream terminal error") ||
+    text.includes("terminal upstream") ||
     text.includes("terminal unavailable") ||
     text.includes("sandbox terminal") ||
-    text.includes("pty bridge") ||
     text.includes("not configured")
   );
 }
@@ -689,7 +683,10 @@ function updateMountedTerminal(host, text) {
     const delta = text.startsWith(host.text)
       ? text.slice(host.text.length)
       : `\x1b[2J\x1b[H${text}`;
-    if (delta) host.term.write(delta);
+    if (delta) {
+      if (host.controller) host.controller.write(new TextEncoder().encode(delta));
+      else host.term.write(delta);
+    }
     return;
   }
   const fallback = host.mount.querySelector(".terminal-fallback");
@@ -702,11 +699,7 @@ function updateMountedTerminal(host, text) {
 }
 
 function loadGhosttyModule() {
-  ghosttyModulePromise ||= import("/vendor/ghostty-web.js").then(async (module) => {
-    if (typeof module.init === "function") await module.init();
-    return module;
-  });
-  return ghosttyModulePromise;
+  return loadGhosttyRuntime({ wasmUrl: ghosttyWasmPath });
 }
 
 function setTerminalStatus(id, label) {

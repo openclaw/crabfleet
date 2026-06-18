@@ -2,6 +2,84 @@
 
 ## Unreleased
 
+- Reuse `@openclaw/libterminal` for terminal protocol codecs, Worker relays, Ghostty assets, and browser lifecycle while keeping Crabfleet authorization and session policy local.
+- Fix automated Worker deployments by converging the app Custom Domain with the DNS-scoped deployment token instead of requiring zone-route access from the Worker token.
+
+## 0.2.0 - 2026-06-15
+
+- Add session-scoped OpenClaw terminal embed tickets, deployment-configured interactive runtime choices, explicit Ghostty WASM delivery, and shared embedded PTY readiness without restoring provider or protocol compatibility paths.
+- Keep SSH terminal dimensions synchronized after attach and verify the TypeScript and Go multiplex clients against shared protocol vectors.
+- Remove the configurable PTY bridge so managed terminal upstreams are limited to built-in Sandbox, versioned runtime-adapter attach, and GitHub Actions relay behind the multiplex terminal protocol.
+- Remove generic create-only provisioning, the external Cloudflare runner, and the ClawFleet compatibility provider so managed workspaces use only built-in Sandbox or the versioned runtime adapter.
+- Extract SSH gateway authentication, key linking, and session creation; remove the old Crabbox SSH environment and fingerprint-header aliases plus the `stop` CLI alias.
+- Remove unsupported provider stop/recovery compatibility so live lifecycle mutations are limited to Sandbox, runtime-v1, and GitHub Actions.
+- Remove legacy app/product hosts, product path rewrites, Workers.dev exposure, the `ls` CLI alias, and obsolete provider cleanup warnings.
+- Remove legacy Sandbox credential-policy storage migration, repair claims, and read retries; reject old generations, rotate stale SQL references on registration, and purge unreadable stored credentials during fenced cleanup.
+- Extract terminal multiplex composition, upstream routing, lifecycle transitions, sharing authorization, multiplayer input, and clipboard uploads into one service; harden pasted filenames against dot-prefixed path-like input.
+- Extract runtime-adapter desktop connection minting and durable access revalidation into one service; remove the live legacy `vncUrl` redirect fallback.
+- Extract Sandbox diagnostics and checkpoint authorization, orchestration, backup/restore, and registry access into a directly tested session-resource service.
+- Extract card creation, run claims, heartbeat/stall transitions, actions, projections, and SQL persistence into a directly tested lifecycle service and repository.
+- Extract CRABBOX.md parsing, fetch/cache policy, failure fallback, summaries, and SQL persistence into a directly tested workflow service and repository.
+- Extract control-plane policy, allowlist, repository administration, validation, audit ordering, and SQL persistence into a directly tested admin service and repository.
+- Extract GitHub issue/PR reference validation, repository selection, GraphQL batching, public fallback, mapping, and rate-limit handling into a directly tested service.
+- Extract superseded runtime-adapter stop recovery and confirmed-release CAS persistence into a directly tested release service and repository.
+- Move interactive-session normalization, reservation retries, provisioning, recovery, audit, and durable result assembly into the creation service.
+- Move GitHub Actions registration, work-state, and runner-connection persistence into one repository with shared service composition.
+- Move OpenClaw stop eligibility, agent credential reads, session ID allocation, and audit persistence out of the Worker entry point into their owning repositories.
+- Extract OpenClaw GitHub branch validation, lookup, creation, and concurrent-create recovery into a directly tested service.
+- Move interactive-session summary and purpose authorization, validation, fenced persistence, archive refresh, and reread into the metadata service.
+- Extract GitHub Actions stop persistence, runner disconnect, archive refresh, and terminal finalization ordering into a directly tested service.
+- Extract browser session credential policy and browser-visible link origins into directly tested Worker services.
+- Centralize failed provisioning results and provider-error redaction across managed Sandbox, standalone Sandbox, and runtime-adapter lifecycle paths.
+- Extract OpenClaw nudge and stop validation, audit ordering, terminal delivery, and best-effort delivery records into a directly tested mutation service.
+- Extract OpenClaw crabbox normalization, replay handling, branch preparation, timeout policy, and creation audit into a directly tested service.
+- Extract interactive-session lineage normalization, parent visibility, and canonical root derivation into a directly tested service.
+- Extract interactive-session reservation supervision, preparation rollback, activation, request evidence, and provisioning order into a directly tested service.
+- Extract visible interactive-session reads and atomic session/replay reservation inserts into a directly tested repository.
+- Move interactive-session reservation retry and idempotent replay recovery into the creation service.
+- Extract runtime-adapter configuration, control-plane, token, and create-preflight policy into a directly tested module.
+- Extract provisioning-result compare-and-set persistence, pending-adapter fallback, event recording, and terminal finalization ordering.
+- Centralize interactive-session reservation row defaults, adapter preparation state, replay identity, and sandbox lease ownership.
+- Centralize interactive-session create request defaults, profile policy, capability selection, and descriptive fields.
+- Centralize interactive-session reservation tokens, sandbox lease ownership, and runtime-adapter create identity.
+- Extract superseded runtime-adapter and Sandbox provision recovery from session creation.
+- Move bounded interactive-session logs, event pagination/counts, and archive reads into the session repository.
+- Centralize shared-session visibility and redaction of provider, terminal, lease, reconciliation, and control authority.
+- Assemble visible interactive-session rows, recent logs, and archive metadata in the session repository.
+- Move atomic interactive-session metadata/event persistence and terminal snapshot invalidation into the session repository.
+- Extract sharing, multiplayer, and delegated-control mutations into a directly tested session metadata service.
+- Extract terminal attach policy into a directly tested service and persist attach state plus evidence atomically.
+- Extract interactive-session stop authorization, runtime routing, idempotency, cleanup sequencing, conflicts, and audits into a directly tested service.
+- Extract runtime-adapter stop claim, provider outcome, retry evidence, create-resolution, and confirmed-release orchestration into a directly tested service.
+- Move GitHub Actions stop transitions plus stop-state lookups into the session repository.
+- Extract interactive-session ownership, management, multiplayer, and delegated-control authorization into one directly tested policy module.
+- Move interactive-session archive cadence, D1 snapshots, R2 objects, cleanup, transcripts, and summaries into one archive module.
+- Extract interactive-session capability, control, provider redaction, desktop, and Codex SSH presentation policy behind direct tests.
+- Move terminal completion evidence, archive freshness checks, and finalization-marker persistence into one lifecycle module.
+- Unify session event batching, message bounds, finalization invalidation, and best-effort archive refresh behind one service.
+- Extract finalized-session admission, fenced transactional deletion, authorization filtering, and archive-object cleanup behind one service.
+- Extract runtime-adapter reconciliation claims, transition projection, atomic evidence persistence, race recovery, and terminal finalization behind one service.
+- Extract scheduled and targeted reconciliation admission, cadence limits, and terminal archive backfill behind one scheduler.
+- Replace duplicate bounded-concurrency loops with one directly tested worker utility.
+- Extract agent-session authentication and remove the legacy `X-Crabbox-Session-ID` alias.
+- Extract GitHub Actions session validation, idempotent registration, token rotation, resume reset, runner replacement, and evidence ordering.
+- Extract GitHub Actions work-state projection, heartbeat persistence, event suppression, terminal mapping, runner disconnect, and reread.
+- Extract GitHub Actions runner-connect validation, lifecycle projection, heartbeat persistence, and durable connection evidence.
+- Extract interactive terminal route selection, signed attach preservation, adapter authorization, and headers.
+- Extract terminal WebSocket relay queues, output acknowledgements, message normalization, authorization polling, and peer close handling.
+- Extract runtime-adapter lifecycle and terminal transport, coordinator binding selection, redirect refusal, and bounded response parsing.
+- Centralize OpenClaw room visibility, log-free summaries, and bounded transcript sentinel/truncation policy behind direct query tests.
+- Isolate OpenClaw recursive root-stop admission, reservation cleanup, lifecycle retries, reconciliation, and stable-completion polling behind a directly tested service.
+- Extract OpenClaw root-scoped authorization, lineage supervision, reservation outcomes, rollback, and activation orchestration into a directly tested service boundary.
+- Move OpenClaw room reads, reservation fencing, activation, rollback, cleanup polling, admission state, completion counts, and lineage reads into a directly tested repository boundary.
+- Centralize repository normalization and OpenClaw request identity, semantic hashing, and durable replay lookup behind direct behavior tests.
+- Centralize interactive-session types, capability defaults, hidden adapter identity, and database row/event/archive mapping in a directly tested model module.
+- Give Worker users, allowlist roles, cookie sessions, trusted-proxy identities, GitHub OAuth/API membership, session-owned credentials, and secret encryption dedicated auth modules with behavioral coverage.
+- Isolate Worker ingress authentication, trusted-proxy credential stripping, and independent service-route policy behind direct behavioral tests.
+- Centralize Worker HTTP responses, security headers, status errors, JSON parsing, bearer authentication, and cookie handling behind a directly tested module.
+- Give shared Worker models and the complete Kysely/D1 schema, dialect, factory, and batch execution dedicated foundation modules.
+- Extract Worker environment and deployment/profile policy into testable foundation modules, replacing source inspection with behavioral coverage for public and client configuration.
+- Centralize secure URL, origin, and literal-loopback validation across OAuth, trusted proxy, runtime adapter, and Fleet routing.
 - De-duplicate the Go CLI and SSH gateway around shared control-plane models, authentication, lifecycle semantics, API calls, terminal operations, and terminal-safe session rendering.
 - Unify managed terminal clients on the multiplex `/api/terminal/ws` protocol, remove direct PTY routes, and share one framed Go transport across the CLI and SSH gateway.
 - Connect Crabfleet lifecycle and terminal traffic to Crabbox through a Cloudflare service binding and deploy an identical route-scoped credential atomically across both coordinators.
@@ -23,12 +101,12 @@
 - Bound Crabbox terminal output with negotiated acknowledgements on the multiplex terminal hub.
 - Enable the OpenClaw deployment's versioned Crabbox runtime adapter with a stable tenant namespace.
 - Add comprehensive documentation for durable GitHub Actions sessions, including registration, runner and viewer relay, work-state heartbeats, Codex steering, resumption, completion, cancellation, authentication, archives, and troubleshooting.
-- Name versioned provider-backed workspace lifecycle actions Delete across Fleet, the Go CLI, and SSH while retaining explicit Stop wording for legacy sessions and `stop` as a CLI compatibility alias; keep the provider stop wire action internal; and fail closed without adopting or deleting a pre-existing adapter workspace on an explicit ID conflict.
+- Name versioned provider-backed workspace lifecycle actions Delete across Fleet, the Go CLI, and SSH; keep the provider stop wire action internal; and fail closed without adopting or deleting a pre-existing adapter workspace on an explicit ID conflict.
 - Keep GitHub Actions sessions out of legacy workspace-stop reconciliation and let operators end their Crabfleet terminal session without claiming to cancel the underlying workflow run.
 - Add durable steerable GitHub Actions sessions with service registration, scoped runner URLs, work-state heartbeats, Fleet metadata, and a SessionControlDO PTY relay.
 - Add a tenant-namespaced versioned runtime lifecycle adapter with replayable idempotent create, monotonic workspace identities, CAS reconciliation, durable terminal finalization, confirmed provider release before failure/stop, presence-aware capability/expiry tracking, authenticated transient VNC redirects, and deployment-neutral configuration.
 - Reconcile runtime lifecycles and every adapter's terminal archives on cron and direct access, preserve partial capability-object defaults while honoring authoritative lists and explicit terminal withdrawal, make PTY availability server-authoritative, preserve opaque signed terminal and desktop URLs byte-for-byte, retain adapter failure evidence through confirmed release and exact session-version archive finalization, preflight adapter credentials before session allocation, bind every external lifecycle to its immutable registered control plane, generation-fence managed and standalone Sandbox credential ownership across crashes and late requests, repair incomplete equal-count archives, run teardown only after an exact cleanup CAS, use unique concurrent archive attempts, and transactionally remove D1 archive pointers before best-effort R2 object cleanup.
-- Harden adapter and terminal boundaries by redacting connection credentials from durable messages, requiring byte-exact grammar-valid workspace identity echoes, rejecting malformed non-null expiries and create-only `stopping` results, keeping recurring WebSocket authorization provider-free, and paging credential cleanup with durable fair-progress cursors while retaining Sandbox failure evidence.
+- Harden adapter and terminal boundaries by redacting connection credentials from durable messages, requiring byte-exact grammar-valid workspace identity echoes, rejecting malformed non-null expiries, keeping recurring WebSocket authorization provider-free, and paging credential cleanup with durable fair-progress cursors while retaining Sandbox failure evidence.
 - Fence ambiguous create replay during stop to the exact registered lifecycle, require immutable-request ownership claims before the stateless hook can provision a managed session ID, expose standalone Sandbox terminals through their own bearer-authenticated WebSocket route, atomically pair terminal events with archive-finalization markers, and prevent older equal-count session snapshots from replacing newer archive pointers.
 - Require an exact durable lease or provision/refresh claim for every Sandbox credential-policy transition, atomically activate standalone owners with their matching policy generation, redact structured and header-form provider credentials, fence slow reconciliation by the original session revision and completion time, and reject adapter base URLs containing raw query or fragment delimiters.
 - Atomically fence credential-policy cleanup against its durable owner and revalidate ownership before unregistering, keep versioned-adapter terminal credentials behind Worker-owned PTY routes, and rotate a fresh agent token into every managed Sandbox provision claim.
@@ -37,9 +115,9 @@
 - Reject stale same-generation credential-policy registrations, preflight and atomically stage failed managed Sandbox claims, require the provision bearer for standalone stop after backend removal, and backfill D1-only terminal archives when R2 is enabled later.
 - Proactively generation-wrap migrated legacy Sandbox credential policies under a live durable lease before cleanup, preserve live pre-token sessions, and use crash-safe cron retries that retain unattended session credentials.
 - Bound every runtime-adapter response stream, revalidate desktop authorization after minting, make legacy local stops atomic with scheduled crash recovery, and redact credentials before opaque provider identifiers.
-- Recover active credential policies after a post-registration crash, redact provider identities from structured adapter errors, and propagate terminal dimensions through configured bridge and runner PTY routes without rewriting opaque adapter URLs.
+- Recover active credential policies after a post-registration crash and redact provider identities from structured adapter errors.
 - Support an optional authoritative `GITHUB_REDIRECT_URI` deployment binding with strict HTTPS callback validation, canonical-origin login handoff, and callback host/path enforcement while retaining safe request-origin defaults.
-- Replace native browser confirms and prompts with accessible Crabfleet dialogs for session cleanup, shutdown, and share-link fallback.
+- Replace native browser confirms and prompts with accessible Crabfleet dialogs for session cleanup, shutdown, and share links; keep dialogs above drawer navigation on Escape.
 - Sharpen the app visual system with flatter controls, tighter surfaces, and restrained overlay elevation.
 - Add Crabfleet session supervision metadata, owner/session tree listing, transcript retrieval, PTY messaging, and summary updates for Codex-spawned Codex sessions.
 - Redesign Fleet as an operational command view with real readiness data, compact connection paths, clearer operator groups, and denser session cards.
@@ -118,8 +196,7 @@
 - Keep Escape routed to focused Codex terminals instead of closing the session drawer.
 - Enable the experimental Codex goals feature in provisioned interactive sessions.
 - Fix interactive Codex session provisioning to show the terminal immediately and stream live PTY bytes into Ghostty.
-- Add a Cloudflare container runner backend for standalone interactive session provisioning.
-- Add a built-in interactive provision endpoint with generic runtime and ClawFleet adapter backends.
+- Add a built-in interactive provision endpoint with durable standalone Sandbox ownership.
 - Add standalone interactive Codex CLI sessions with Ghostty grid attach and an external runtime provision hook.
 - Document the real deployed control-plane status, runtime adapter boundary, workflow config, and test stack.
 - Close open side drawers with Escape.

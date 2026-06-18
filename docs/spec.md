@@ -11,7 +11,7 @@ Status: living specification of the deployed product.
 
 Canonical OpenClaw app/API: <https://crabfleet.openclaw.ai>
 
-Public product/docs hosts: <https://crabfleet.ai> and <https://www.crabfleet.ai>
+Public product/docs host: <https://crabfleet.ai>
 
 SSH onboarding and CLI gateway: `crabd.sh`
 
@@ -146,6 +146,8 @@ Crabfleet persists the canonical adapter identity, namespaced workspace ID, immu
 
 Deployments may expose a bounded allowlist of generic runtime profiles through `CRABFLEET_RUNTIME_PROFILES_JSON`. Authenticated users see those labels when creating Crabbox sessions. The selected opaque profile ID is validated server-side, included in the immutable adapter request, and can seed the requested capability preview. The adapter remains responsible for mapping the profile to a provider and enforcing actual capabilities. Profiles may define a generic `codexSsh` alias and setup-command template. Crabfleet resolves only bounded non-secret identifiers, returns the handoff only to managers of ready versioned-adapter sessions, and leaves provider-specific alias installation outside the public control plane.
 
+`CRABFLEET_INTERACTIVE_RUNTIMES` limits manual session creation to `container`, `crabbox`, or both. The authenticated deployment metadata drives the create drawer, and the API enforces the same allowlist. A deployment with only one enabled runtime omits the selector; `crabbox`-only deployments therefore expose profiles without advertising an unavailable built-in container runtime.
+
 Required properties:
 
 - adapter base URL uses HTTPS, except literal loopback HTTP;
@@ -159,17 +161,9 @@ Required properties:
 
 Ambiguous creates are replayed only with the original payload and key. A `workspace_id_conflict` proves non-ownership and never causes Crabfleet to adopt or delete the pre-existing workspace.
 
-### Legacy Backends
+### Provision Hook
 
-Compatibility paths remain for:
-
-- create-only `CRABBOX_INTERACTIVE_PROVISION_URL`;
-- `CRABBOX_RUNTIME_PROVISION_URL`;
-- `CRABBOX_CLOUDFLARE_RUNNER_URL`;
-- `CRABBOX_CLAWFLEET_URL`;
-- explicit `CRABBOX_PTY_BRIDGE_URL`.
-
-These paths do not gain lifecycle guarantees they do not implement. Legacy sessions may stop only inside Crabfleet when the backend has no delete/release contract.
+`POST /api/provision/interactive` provisions only built-in Cloudflare Sandbox workspaces. External workspaces use the versioned runtime-adapter lifecycle through managed interactive sessions.
 
 ### GitHub Actions
 
@@ -206,7 +200,7 @@ Terminal attachability requires:
 
 - active lifecycle status;
 - current `terminal` capability;
-- a resolvable built-in Sandbox, bridge, runner, or provider terminal;
+- a resolvable built-in Sandbox or provider terminal;
 - current viewer authorization and control state.
 
 `ptyAvailable` is the Worker-authoritative result. Raw provider terminal credentials are never returned to clients.
@@ -217,7 +211,7 @@ Scheduled reconciliation and foreground reads advance bounded lifecycle batches.
 
 ## Terminal And Control
 
-The browser, CLI, session agents, and SSH gateway use one multiplex WebSocket protocol at `/api/terminal/ws`. Frames support subscribe, unsubscribe, input, resize, stop, ping, output, events, errors, control revocation, acknowledgements, and pong.
+The browser, CLI, session agents, and SSH gateway use one multiplex WebSocket protocol at `/api/terminal/ws`. Wire version 2 is the only accepted version. Frames support subscribe, unsubscribe, input, resize, stop, ping, output, events, errors, control revocation, acknowledgements, and pong.
 
 Control rules:
 
@@ -242,7 +236,7 @@ For versioned adapters, Crabfleet:
 4. re-reads lifecycle, capability, control, and adapter identity;
 5. redirects with `cache-control: no-store`.
 
-The signed provider URL is not stored in D1 or returned through Fleet. Legacy backends may retain validated persisted VNC URLs.
+The signed provider URL is not stored in D1 or returned through Fleet.
 
 ## Sharing And Supervision
 
@@ -283,7 +277,7 @@ D1 is the source of truth for current app state.
 - Sandbox credential-policy registry;
 - checkpoint registry.
 
-The Worker owns the general multiplex terminal hub and connects each subscription to its Sandbox, bridge, runner, or adapter backend. There is no `BoardDO` or `RunDO`. Board and Fleet state use D1 plus REST polling. The browser refreshes general state every 15 seconds; terminal bytes use WebSockets.
+The Worker owns the general multiplex terminal hub and connects each subscription to its Sandbox, adapter, or GitHub Actions backend. There is no `BoardDO` or `RunDO`. Board and Fleet state use D1 plus REST polling. The browser refreshes general state every 15 seconds; terminal bytes use WebSockets.
 
 ### R2
 
@@ -353,7 +347,7 @@ The Worker serves a server-rendered TypeScript app shell with D1-backed REST sta
 The `crabfleet` CLI supports:
 
 - SSH linking and session creation;
-- session listing/status/attach/stop/delete;
+- session listing/status/attach/delete;
 - logs and transcripts;
 - supervision tree, message, and summary operations;
 - diagnostics;
@@ -382,7 +376,7 @@ The repository contains:
 OpenClaw production uses:
 
 - canonical app/API/OAuth host `crabfleet.openclaw.ai`;
-- public docs/product redirects on `crabfleet.ai` and aliases;
+- public docs/product redirects on `crabfleet.ai`;
 - built-in Sandbox for container sessions;
 - the versioned Crabbox adapter with namespace `openclaw`;
 - D1, R2, and `SessionControlDO`;

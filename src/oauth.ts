@@ -1,3 +1,5 @@
+import { isLiteralLoopbackHostname } from "./url-security.ts";
+
 export const githubOAuthCallbackPath = "/auth/github/callback";
 export const githubOAuthLoginPath = "/login/github";
 
@@ -107,13 +109,4 @@ function configuredGitHubOAuthRedirectUri(configured: string): string {
     throw new Error("GITHUB_REDIRECT_URI cannot include a fragment");
   }
   return `${url.origin}${githubOAuthCallbackPath}`;
-}
-
-function isLiteralLoopbackHostname(hostname: string): boolean {
-  return (
-    hostname === "localhost" ||
-    hostname === "127.0.0.1" ||
-    hostname === "::1" ||
-    hostname === "[::1]"
-  );
 }

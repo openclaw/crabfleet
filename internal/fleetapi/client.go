@@ -14,6 +14,8 @@ import (
 	"github.com/openclaw/crabfleet/internal/terminalws"
 )
 
+type TerminalSize = terminalws.Size
+
 const maxResponseBytes = 4 * 1024 * 1024
 const maxErrorBytes = 512
 
@@ -191,13 +193,14 @@ func (c *Client) Attach(
 	terminal io.ReadWriter,
 	cols uint32,
 	rows uint32,
+	resizes <-chan TerminalSize,
 ) error {
 	client, err := c.terminal(ctx, id, cols, rows)
 	if err != nil {
 		return err
 	}
 	defer client.Close()
-	return client.Attach(ctx, terminal)
+	return client.Attach(ctx, terminal, resizes)
 }
 
 func (c *Client) terminal(ctx context.Context, id string, cols uint32, rows uint32) (*terminalws.Client, error) {

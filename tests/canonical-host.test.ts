@@ -1,67 +1,41 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import { test } from "node:test";
-import {
-  canonicalAppRedirect,
-  productHostResponse,
-  routeProductRequest,
-} from "../src/canonical-host.ts";
 
-test("product apex redirects to the canonical docs host", () => {
-  const response = productHostResponse(new Request("https://crabfleet.ai/quickstart?mode=full"));
+import { routeProductRequest } from "../src/canonical-host.ts";
 
-  assert.equal(response?.status, 308);
-  assert.equal(response?.headers.get("location"), "https://docs.crabfleet.ai/quickstart?mode=full");
-});
-
-test("product www host redirects to the canonical docs host", () => {
-  const response = productHostResponse(new Request("https://www.crabfleet.ai/docs?mode=full"));
-
-  assert.equal(response?.status, 308);
-  assert.equal(response?.headers.get("location"), "https://docs.crabfleet.ai/?mode=full");
-});
-
-test("legacy product docs paths map to generated docs routes", () => {
-  const response = productHostResponse(new Request("https://crabfleet.ai/docs/spec-v2?mode=full"));
-
-  assert.equal(response?.status, 308);
-  assert.equal(response?.headers.get("location"), "https://docs.crabfleet.ai/spec-v2?mode=full");
-});
-
-test("legacy Markdown docs paths map to existing HTML routes", () => {
-  const spec = productHostResponse(new Request("https://crabfleet.ai/docs/spec.md"));
-  const specV2 = routeProductRequest(new Request("https://crabfleet.app/docs/spec-v2.md"));
-
-  assert.equal(spec?.headers.get("location"), "https://docs.crabfleet.ai/spec");
-  assert.equal(specV2.headers.get("location"), "https://docs.crabfleet.ai/spec-v2");
-});
-
-test("product hosts reject methods whose bodies a 308 would replay", () => {
-  const response = productHostResponse(
-    new Request("https://crabfleet.ai/webhook", { method: "POST", body: "private" }),
-  );
-
-  assert.equal(response?.status, 405);
-  assert.equal(response?.headers.get("allow"), "GET, HEAD");
-});
-
-test("product aliases redirect to the canonical docs host", () => {
-  const response = routeProductRequest(new Request("https://crabfleet.app/docs?mode=full"));
+test("product apex redirects the exact path to the canonical docs host", () => {
+  const response = routeProductRequest(new Request("https://crabfleet.ai/quickstart?mode=full"));
 
   assert.equal(response.status, 308);
-  assert.equal(response.headers.get("location"), "https://docs.crabfleet.ai/?mode=full");
+  assert.equal(response.headers.get("location"), "https://docs.crabfleet.ai/quickstart?mode=full");
 });
 
-test("product aliases reject methods whose bodies a 308 would replay", () => {
+test("product routing does not translate obsolete docs paths", () => {
+  const response = routeProductRequest(new Request("https://crabfleet.ai/docs/spec.md"));
+
+  assert.equal(response.status, 308);
+  assert.equal(response.headers.get("location"), "https://docs.crabfleet.ai/docs/spec.md");
+});
+
+test("product routing rejects noncanonical hosts", () => {
+  for (const host of ["www.crabfleet.ai", "crabfleet.app"]) {
+    const response = routeProductRequest(new Request(`https://${host}/`));
+    assert.equal(response.status, 404);
+    assert.equal(response.headers.has("location"), false);
+  }
+});
+
+test("product routing rejects methods whose bodies a redirect would replay", () => {
   const response = routeProductRequest(
-    new Request("https://crabfleet.app/webhook", { method: "POST", body: "private" }),
+    new Request("https://crabfleet.ai/webhook", { method: "POST", body: "private" }),
   );
 
   assert.equal(response.status, 405);
   assert.equal(response.headers.get("allow"), "GET, HEAD");
 });
 
-test("product redirects never forward credentials to GitHub Pages", () => {
+test("product routing never forwards credentials to the docs host", () => {
   for (const header of ["authorization", "proxy-authorization", "cookie"]) {
     const response = routeProductRequest(
       new Request("https://crabfleet.ai/docs", { headers: { [header]: "private" } }),
@@ -72,53 +46,48 @@ test("product redirects never forward credentials to GitHub Pages", () => {
   }
 });
 
-test("product deployment converges its hosts as Worker Custom Domains", async () => {
-  const config = await readFile(new URL("../wrangler.product.jsonc", import.meta.url), "utf8");
+test("deployment exposes only canonical app and product hosts", async () => {
+  const appConfig = await readFile(new URL("../wrangler.jsonc", import.meta.url), "utf8");
+  const productConfig = await readFile(
+    new URL("../wrangler.product.jsonc", import.meta.url),
+    "utf8",
+  );
   const convergence = await readFile(
     new URL("../scripts/ensure-cloudflare-domains.mjs", import.meta.url),
     "utf8",
   );
-  const productStart = convergence.indexOf("async function ensureProductHosts");
-  const productEnd = convergence.indexOf("async function ensureCrabfleetDocsRecord", productStart);
-  const productSource = convergence.slice(productStart, productEnd);
+  const workflow = await readFile(
+    new URL("../.github/workflows/deploy-worker.yml", import.meta.url),
+    "utf8",
+  );
+  const hostStart = convergence.indexOf("async function ensureWorkerHosts");
+  const hostEnd = convergence.indexOf("async function ensureCrabfleetDocsRecord", hostStart);
+  const hostSource = convergence.slice(hostStart, hostEnd);
 
-  assert.doesNotMatch(config, /"routes"/);
+  assert.match(appConfig, /"workers_dev": false/);
+  assert.doesNotMatch(appConfig, /"routes"/);
+  assert.doesNotMatch(appConfig, /clawfleet\.openclaw\.ai|crabyard\.openclaw\.ai/);
+  assert.doesNotMatch(productConfig, /"routes"/);
   assert.match(
-    productSource,
-    /\/accounts\/\$\{cloudflareAccountId\}\/workers\/scripts\/\$\{productWorkerScript\}\/domains\/records/,
+    hostSource,
+    /\/accounts\/\$\{cloudflareAccountId\}\/workers\/scripts\/\$\{workerScript\}\/domains\/records/,
   );
-  assert.match(productSource, /method: "PUT"/);
-  assert.match(productSource, /override_existing_origin: true/);
-  assert.match(productSource, /override_existing_dns_record: true/);
-  assert.match(productSource, /origins: hosts\.map/);
-  assert.ok(
-    productSource.indexOf('console.log(`set ${hosts.join(", ")} Worker Custom Domains`)') <
-      productSource.indexOf("workers/routes"),
+  assert.match(hostSource, /method: "PUT"/);
+  assert.match(hostSource, /override_existing_origin: true/);
+  assert.match(hostSource, /override_existing_dns_record: true/);
+  assert.match(hostSource, /origins: hosts\.map/);
+  assert.match(
+    convergence,
+    /ensureWorkerHosts\(appWorkerScript, "openclaw\.ai", \["crabfleet\.openclaw\.ai"\]\)/,
   );
-  assert.match(productSource, /workers\/routes\/\$\{route\.id\}/);
-  assert.doesNotMatch(productSource, /192\.0\.2\.1|method: "POST"/);
-  assert.match(convergence, /await ensureCrabfleetDocsRecord\(\);\nif \(!productOnly\)/);
-});
-
-test("legacy app pages redirect to the canonical host", () => {
-  const response = canonicalAppRedirect(
-    new URL("https://clawfleet.openclaw.ai/app/sessions/IS-1?view=grid"),
+  assert.match(
+    convergence,
+    /ensureWorkerHosts\(productWorkerScript, "crabfleet\.ai", \["crabfleet\.ai"\]\)/,
   );
-
-  assert.equal(response?.status, 308);
-  assert.equal(
-    response?.headers.get("location"),
-    "https://crabfleet.openclaw.ai/app/sessions/IS-1?view=grid",
-  );
-});
-
-test("legacy API requests stay on-host so authorization survives", () => {
-  assert.equal(
-    canonicalAppRedirect(new URL("https://clawfleet.openclaw.ai/api/ssh/sessions")),
-    null,
-  );
-  assert.equal(
-    canonicalAppRedirect(new URL("https://clawfleet.openclaw.ai/api/terminal/ws")),
-    null,
+  assert.match(workflow, /node scripts\/ensure-cloudflare-domains\.mjs\s*$/m);
+  assert.doesNotMatch(workflow, /ensure-cloudflare-domains\.mjs --product-only/);
+  assert.doesNotMatch(
+    convergence,
+    /www\.crabfleet\.ai|clawfleet\.openclaw\.ai|crabyard\.openclaw\.ai/,
   );
 });
