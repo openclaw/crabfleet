@@ -66,7 +66,7 @@ func TestClientRejectsIncompleteAuthentication(t *testing.T) {
 	}
 }
 
-func TestClientStreamsLargeJSONResponses(t *testing.T) {
+func TestClientRejectsOversizedJSONResponses(t *testing.T) {
 	largeLogin := strings.Repeat("a", maxResponseBytes+1)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = w.Write([]byte(`{"user":{"login":"`))
@@ -77,11 +77,8 @@ func TestClientStreamsLargeJSONResponses(t *testing.T) {
 
 	client := NewClient(server.URL, server.Client(), SSHAuth("gateway-token", "SHA256:test"))
 	state, err := client.State(context.Background())
-	if err != nil {
-		t.Fatal(err)
-	}
-	if state.User.Login != largeLogin {
-		t.Fatalf("login length = %d, want %d", len(state.User.Login), len(largeLogin))
+	if err == nil || !strings.Contains(err.Error(), "response exceeds") {
+		t.Fatalf("state=%#v error=%v", state, err)
 	}
 }
 

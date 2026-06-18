@@ -622,6 +622,42 @@ func TestRunCommandCancelsDefaultRepoLookup(t *testing.T) {
 	}
 }
 
+func TestRunCommandStopsAfterDefaultRepoLookupFailure(t *testing.T) {
+	createCalled := false
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/ssh/state":
+			w.WriteHeader(http.StatusInternalServerError)
+			_, _ = w.Write([]byte("state unavailable"))
+		case "/api/ssh/interactive-sessions":
+			createCalled = true
+			w.WriteHeader(http.StatusCreated)
+		default:
+			t.Errorf("path = %q", r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+
+	client := &apiClient{baseURL: server.URL, token: "gateway-token", client: server.Client()}
+	permissions := &ssh.Permissions{Extensions: map[string]string{
+		"authorized":  "true",
+		"fingerprint": "SHA256:test",
+		"login":       "operator",
+		"role":        "owner",
+	}}
+	var output bytes.Buffer
+	if exit := runCommand(context.Background(), &output, permissions, client, "new fix it", sessionPTY{}); exit != 2 {
+		t.Fatalf("exit=%d output=%q", exit, output.String())
+	}
+	if createCalled {
+		t.Fatal("create session was called after default repo lookup failed")
+	}
+	if !strings.Contains(output.String(), "state unavailable") {
+		t.Fatalf("output = %q", output.String())
+	}
+}
+
 func TestTranscriptCommandSanitizesTerminalControls(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/api/ssh/interactive-sessions/IS-7/transcript" {
