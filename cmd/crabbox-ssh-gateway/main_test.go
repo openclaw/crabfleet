@@ -653,6 +653,45 @@ func TestTranscriptCommandSanitizesTerminalControls(t *testing.T) {
 	}
 }
 
+func TestNewCommandSanitizesTerminalControls(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/api/ssh/interactive-sessions" {
+			t.Errorf("request = %s %s", r.Method, r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"session":{"id":"IS-7\u001b]52;c;bad\u0007","repo":"openclaw/crabfleet\u001b[31m","status":"ready","ptyAvailable":true}}`))
+	}))
+	defer server.Close()
+
+	client := &apiClient{baseURL: server.URL, token: "gateway-token", client: server.Client()}
+	permissions := &ssh.Permissions{Extensions: map[string]string{
+		"authorized":  "true",
+		"fingerprint": "SHA256:test",
+		"login":       "operator",
+		"role":        "owner",
+	}}
+	var output bytes.Buffer
+	if exit := runCommand(context.Background(), &output, permissions, client, "new --detach --repo openclaw/crabfleet fix", sessionPTY{}); exit != 0 {
+		t.Fatalf("exit=%d output=%q", exit, output.String())
+	}
+	got := output.String()
+	if strings.ContainsAny(got, "\x1b\x07\r") {
+		t.Fatalf("new output retained terminal controls: %q", got)
+	}
+	for _, want := range []string{
+		"session: IS-7]52;c;bad\n",
+		"repo: openclaw/crabfleet[31m\n",
+		"status: ready\n",
+		"attach: ssh crabfleet attach IS-7]52;c;bad\n",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("new output missing %q:\n%s", want, got)
+		}
+	}
+}
+
 func TestHelpNamesDeleteAsCanonicalCommand(t *testing.T) {
 	var output bytes.Buffer
 	printHelp(&output, fleetapi.User{Login: "operator", Role: "owner"})

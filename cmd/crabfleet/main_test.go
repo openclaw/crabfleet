@@ -77,8 +77,17 @@ func TestRunSSHQuotesRemoteCommandArguments(t *testing.T) {
 		t.Fatal(err)
 	}
 	output := readFakeSSHArgs(t, argsPath)
-	if got, want := output, "crabd.test\nattach 'IS-1; touch /tmp/pwned'\n"; got != want {
+	if got, want := output, "--\ncrabd.test\nattach 'IS-1; touch /tmp/pwned'\n"; got != want {
 		t.Fatalf("ssh args = %q, want %q", got, want)
+	}
+}
+
+func TestRunSSHRejectsOptionLikeHost(t *testing.T) {
+	installFakeSSH(t)
+	app := &cli{SSHHost: "-oProxyCommand=bad"}
+	err := runSSH(app, "whoami")
+	if err == nil || !strings.Contains(err.Error(), "invalid SSH host") {
+		t.Fatalf("error = %v", err)
 	}
 }
 
@@ -217,6 +226,17 @@ func installFakeSSH(t *testing.T) string {
 	return argsPath
 }
 
+func installOutputSSH(t *testing.T, output string) {
+	t.Helper()
+	dir := t.TempDir()
+	sshPath := filepath.Join(dir, "ssh")
+	if err := os.WriteFile(sshPath, []byte("#!/bin/sh\nprintf '%s' \"$SSH_OUTPUT\"\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("SSH_OUTPUT", output)
+}
+
 func readFakeSSHArgs(t *testing.T, argsPath string) string {
 	t.Helper()
 	data, err := os.ReadFile(argsPath)
@@ -247,6 +267,31 @@ func TestNewCommandSanitizesControlPlaneOutput(t *testing.T) {
 	}
 }
 
+func TestDoctorSanitizesControlPlaneErrors(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/healthz" {
+			_, _ = w.Write([]byte("ok"))
+			return
+		}
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write([]byte("bad\x1b]52;c;secret\x07state"))
+	}))
+	defer server.Close()
+
+	app := &cli{API: server.URL, Token: "gateway-token", Fingerprint: "SHA256:test"}
+	output := captureStdout(t, func() {
+		if err := (doctorCmd{}).Run(app, app.apiClient()); err != nil {
+			t.Fatal(err)
+		}
+	})
+	if strings.ContainsAny(output, "\x1b\x07") {
+		t.Fatalf("doctor output contains terminal controls: %q", output)
+	}
+	if !strings.Contains(output, "auth: failed: crabfleet API 500 Internal Server Error: bad]52;c;secretstate") {
+		t.Fatalf("doctor output = %q", output)
+	}
+}
+
 func TestTranscriptCommandSanitizesControlPlaneOutput(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/api/ssh/interactive-sessions/IS-7/transcript" {
@@ -269,6 +314,87 @@ func TestTranscriptCommandSanitizesControlPlaneOutput(t *testing.T) {
 	}
 	if output != "hello\nworld!\n" {
 		t.Fatalf("output = %q", output)
+	}
+}
+
+func TestMessageRejectsOversizedPipedInput(t *testing.T) {
+	calls := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer server.Close()
+
+	previousStdin := os.Stdin
+	reader, writer, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	os.Stdin = reader
+	defer func() {
+		os.Stdin = previousStdin
+		reader.Close()
+	}()
+	go func() {
+		_, _ = writer.Write([]byte(strings.Repeat("a", maxMessageBytes+1)))
+		_ = writer.Close()
+	}()
+
+	app := &cli{API: server.URL, Token: "gateway-token", Fingerprint: "SHA256:test", NoInput: true}
+	err = (messageCmd{ID: "IS-7"}).Run(app, app.apiClient())
+	if err == nil || !strings.Contains(err.Error(), "message exceeds") {
+		t.Fatalf("error = %v", err)
+	}
+	if calls != 0 {
+		t.Fatalf("message request calls = %d, want 0", calls)
+	}
+}
+
+func TestValidateWebVNCURL(t *testing.T) {
+	tests := []struct {
+		raw     string
+		allowed bool
+	}{
+		{raw: "https://example.test/vnc", allowed: true},
+		{raw: "http://localhost:6080/vnc", allowed: true},
+		{raw: "http://127.0.0.1:6080/vnc", allowed: true},
+		{raw: "http://example.test/vnc", allowed: false},
+		{raw: "file:///tmp/vnc", allowed: false},
+		{raw: "custom:vnc", allowed: false},
+		{raw: "/relative/vnc", allowed: false},
+		{raw: "https://user@example.test/vnc", allowed: false},
+	}
+	for _, tt := range tests {
+		_, err := validateWebVNCURL(tt.raw)
+		if tt.allowed && err != nil {
+			t.Fatalf("validateWebVNCURL(%q) = %v", tt.raw, err)
+		}
+		if !tt.allowed && err == nil {
+			t.Fatalf("validateWebVNCURL(%q) unexpectedly succeeded", tt.raw)
+		}
+	}
+}
+
+func TestNewVNCFallbackValidatesCapturedURL(t *testing.T) {
+	installOutputSSH(t, "vnc: http://example.test/not-webvnc\n")
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	apiURL := "http://" + listener.Addr().String()
+	if err := listener.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	app := &cli{
+		API:         apiURL,
+		SSHHost:     "crabd.test",
+		Token:       "gateway-token",
+		Fingerprint: "SHA256:test",
+	}
+	err = (newCmd{Branch: "main", Command: "codex --yolo", Repo: "openclaw/crabfleet", VNC: true}).Run(app, app.apiClient())
+	if err == nil || !strings.Contains(err.Error(), "invalid WebVNC URL scheme") {
+		t.Fatalf("error = %v", err)
 	}
 }
 
