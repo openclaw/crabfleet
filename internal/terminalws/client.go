@@ -90,6 +90,10 @@ type eventPayload struct {
 	CanInput bool   `json:"canInput"`
 }
 
+type readCanceler interface {
+	CancelRead() error
+}
+
 func Endpoint(baseURL string) (string, error) {
 	target, err := url.Parse(baseURL)
 	if err != nil {
@@ -208,11 +212,11 @@ func (c *Client) Attach(ctx context.Context, terminal io.ReadWriter, resizes <-c
 	defer cancel()
 
 	var wg sync.WaitGroup
-	closer, closeable := terminal.(io.Closer)
-	closeTerminal := func() {
+	canceler, cancelableRead := terminal.(readCanceler)
+	cancelRead := func() {
 		cancel()
-		if closeable {
-			_ = closer.Close()
+		if cancelableRead {
+			_ = canceler.CancelRead()
 		}
 	}
 
@@ -298,8 +302,8 @@ func (c *Client) Attach(ctx context.Context, terminal io.ReadWriter, resizes <-c
 	}()
 
 	err := <-errCh
-	closeTerminal()
-	if closeable {
+	cancelRead()
+	if cancelableRead {
 		wg.Wait()
 	}
 	return normalizeCloseError(err)

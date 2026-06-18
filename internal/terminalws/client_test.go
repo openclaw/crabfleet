@@ -338,7 +338,7 @@ func (rw *readWriter) Read(payload []byte) (int, error) {
 	return rw.reader.Read(payload)
 }
 
-func (rw *readWriter) Close() error {
+func (rw *readWriter) CancelRead() error {
 	if rw.closer == nil {
 		return nil
 	}
@@ -360,7 +360,7 @@ func (terminal *blockingTerminal) Read(_ []byte) (int, error) {
 	return 0, io.ErrClosedPipe
 }
 
-func (terminal *blockingTerminal) Close() error {
+func (terminal *blockingTerminal) CancelRead() error {
 	terminal.once.Do(func() {
 		close(terminal.closed)
 	})
