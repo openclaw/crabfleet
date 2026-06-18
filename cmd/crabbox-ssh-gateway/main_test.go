@@ -658,6 +658,56 @@ func TestRunCommandStopsAfterDefaultRepoLookupFailure(t *testing.T) {
 	}
 }
 
+func TestRunCommandSanitizesControlPlaneErrors(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/ssh/state" {
+			t.Errorf("path = %q", r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write([]byte("bad\x1b]52;c;secret\x07state"))
+	}))
+	defer server.Close()
+
+	client := &apiClient{baseURL: server.URL, token: "gateway-token", client: server.Client()}
+	permissions := &ssh.Permissions{Extensions: map[string]string{
+		"authorized":  "true",
+		"fingerprint": "SHA256:test",
+		"login":       "operator",
+		"role":        "owner",
+	}}
+	var output bytes.Buffer
+	if exit := runCommand(context.Background(), &output, permissions, client, "whoami", sessionPTY{}); exit != 1 {
+		t.Fatalf("exit=%d output=%q", exit, output.String())
+	}
+	got := output.String()
+	if strings.ContainsAny(got, "\x1b\x07") {
+		t.Fatalf("error output retained terminal controls: %q", got)
+	}
+	if !strings.Contains(got, "bad]52;c;secretstate") {
+		t.Fatalf("error output = %q", got)
+	}
+}
+
+func TestRunCommandSanitizesLinkURL(t *testing.T) {
+	permissions := &ssh.Permissions{Extensions: map[string]string{
+		"authorized": "false",
+		"link_url":   "https://example.test/link\x1b]52;c;secret\x07",
+	}}
+	var output bytes.Buffer
+	if exit := runCommand(context.Background(), &output, permissions, nil, "whoami", sessionPTY{}); exit != 1 {
+		t.Fatalf("exit=%d output=%q", exit, output.String())
+	}
+	got := output.String()
+	if strings.ContainsAny(got, "\x1b\x07") {
+		t.Fatalf("link output retained terminal controls: %q", got)
+	}
+	if !strings.Contains(got, "https://example.test/link]52;c;secret") {
+		t.Fatalf("link output = %q", got)
+	}
+}
+
 func TestTranscriptCommandSanitizesTerminalControls(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/api/ssh/interactive-sessions/IS-7/transcript" {
