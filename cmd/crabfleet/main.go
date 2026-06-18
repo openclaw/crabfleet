@@ -23,6 +23,7 @@ import (
 
 const defaultAPIURL = "https://crabfleet.openclaw.ai"
 const defaultSSHHost = "crabd.sh"
+const maxMessageBytes = 64 * 1024
 
 var version = "dev"
 
@@ -209,7 +210,7 @@ func (cmd newCmd) Run(app *cli, api *fleetapi.Client) error {
 					return captureErr
 				}
 				if url := vncURLFromOutput(output); url != "" {
-					return openURL(url)
+					return openWebVNCURL(url)
 				}
 				return nil
 			}
@@ -243,7 +244,7 @@ func (cmd newCmd) Run(app *cli, api *fleetapi.Client) error {
 		fmt.Fprintf(os.Stdout, "vnc: %s\n", fleettext.Safe(session.VNCURL))
 	}
 	if cmd.VNC && session.VNCURL != "" {
-		return openURL(session.VNCURL)
+		return openWebVNCURL(session.VNCURL)
 	}
 	if !cmd.Detach && !app.NoInput && isTerminal(os.Stdin) && isTerminal(os.Stdout) && session.Attachable() {
 		return runSSH(app, "attach", session.ID)
@@ -379,7 +380,7 @@ func (doctorCmd) Run(app *cli, api *fleetapi.Client) error {
 	keys := []string{"api", "auth", "user", "role", "sessions"}
 	for _, key := range keys {
 		if value := result[key]; value != "" {
-			fmt.Fprintf(os.Stdout, "%s: %s\n", key, value)
+			fmt.Fprintf(os.Stdout, "%s: %s\n", key, fleettext.Safe(value))
 		}
 	}
 	return nil
@@ -468,7 +469,7 @@ func (cmd vncCmd) Run(app *cli, api *fleetapi.Client) error {
 			if url == "" {
 				return errors.New("ssh gateway did not return a WebVNC URL")
 			}
-			return openURL(url)
+			return openWebVNCURL(url)
 		}
 		return runSSH(app, "vnc", cmd.ID)
 	}
@@ -480,7 +481,7 @@ func (cmd vncCmd) Run(app *cli, api *fleetapi.Client) error {
 			return fmt.Errorf("session %s has no WebVNC URL yet", cmd.ID)
 		}
 		if cmd.Open {
-			return openURL(session.VNCURL)
+			return openWebVNCURL(session.VNCURL)
 		}
 		fmt.Fprintln(os.Stdout, fleettext.Safe(session.VNCURL))
 		return nil
@@ -528,9 +529,12 @@ func (cmd transcriptCmd) Run(app *cli, api *fleetapi.Client) error {
 func (cmd messageCmd) Run(app *cli, api *fleetapi.Client) error {
 	message := strings.Join(cmd.Text, " ")
 	if message == "" && !isTerminal(os.Stdin) {
-		data, err := io.ReadAll(io.LimitReader(os.Stdin, 64*1024))
+		data, err := io.ReadAll(io.LimitReader(os.Stdin, maxMessageBytes+1))
 		if err != nil {
 			return err
+		}
+		if len(data) > maxMessageBytes {
+			return fmt.Errorf("message exceeds %d bytes", maxMessageBytes)
 		}
 		message = strings.TrimRight(string(data), "\r\n")
 	}
@@ -600,9 +604,9 @@ func (openCmd) Run(app *cli, _ *fleetapi.Client) error {
 }
 
 func runSSH(app *cli, args ...string) error {
-	sshArgs := []string{app.SSHHost}
-	if command := sshRemoteCommand(args...); command != "" {
-		sshArgs = append(sshArgs, command)
+	sshArgs, err := sshInvocationArgs(app, args...)
+	if err != nil {
+		return err
 	}
 	cmd := exec.Command("ssh", sshArgs...)
 	cmd.Stdin = os.Stdin
@@ -620,14 +624,26 @@ func runSSHCommandOutput(app *cli, args ...string) (string, error) {
 }
 
 func runSSHOutput(app *cli, args ...string) (string, error) {
-	sshArgs := []string{app.SSHHost}
-	if command := sshRemoteCommand(args...); command != "" {
-		sshArgs = append(sshArgs, command)
+	sshArgs, err := sshInvocationArgs(app, args...)
+	if err != nil {
+		return "", err
 	}
 	cmd := exec.Command("ssh", sshArgs...)
 	cmd.Stderr = os.Stderr
 	output, err := cmd.Output()
 	return string(output), err
+}
+
+func sshInvocationArgs(app *cli, args ...string) ([]string, error) {
+	host := strings.TrimSpace(app.SSHHost)
+	if host == "" || strings.HasPrefix(host, "-") {
+		return nil, fmt.Errorf("invalid SSH host: %q", app.SSHHost)
+	}
+	sshArgs := []string{"--", host}
+	if command := sshRemoteCommand(args...); command != "" {
+		sshArgs = append(sshArgs, command)
+	}
+	return sshArgs, nil
 }
 
 func sshRemoteCommand(args ...string) string {
@@ -724,6 +740,41 @@ func openURL(url string) error {
 		cmd = exec.Command("xdg-open", url)
 	}
 	return cmd.Run()
+}
+
+func openWebVNCURL(raw string) error {
+	safeURL, err := validateWebVNCURL(raw)
+	if err != nil {
+		return err
+	}
+	return openURL(safeURL)
+}
+
+func validateWebVNCURL(raw string) (string, error) {
+	parsed, err := url.Parse(raw)
+	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
+		return "", fmt.Errorf("invalid WebVNC URL: %q", raw)
+	}
+	if parsed.User != nil {
+		return "", errors.New("invalid WebVNC URL: credentials are not allowed")
+	}
+	switch parsed.Scheme {
+	case "https":
+		return parsed.String(), nil
+	case "http":
+		if isLoopbackHost(parsed.Hostname()) {
+			return parsed.String(), nil
+		}
+	}
+	return "", fmt.Errorf("invalid WebVNC URL scheme: %s", parsed.Scheme)
+}
+
+func isLoopbackHost(host string) bool {
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
 }
 
 func firstLine(value string) string {

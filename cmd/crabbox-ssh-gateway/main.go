@@ -503,9 +503,15 @@ func runCommand(ctx context.Context, out io.ReadWriter, perms *ssh.Permissions, 
 			fmt.Fprintf(out, "error: %v\n", err)
 			return 1
 		}
-		fmt.Fprintf(out, "session: %s\nrepo: %s\nstatus: %s\n", session.ID, session.Repo, session.Status)
+		fmt.Fprintf(
+			out,
+			"session: %s\nrepo: %s\nstatus: %s\n",
+			fleettext.Safe(session.ID),
+			fleettext.Safe(session.Repo),
+			fleettext.Safe(session.Status),
+		)
 		if session.Attachable() {
-			fmt.Fprintf(out, "attach: ssh crabfleet attach %s\n", session.ID)
+			fmt.Fprintf(out, "attach: ssh crabfleet attach %s\n", fleettext.Safe(session.ID))
 		}
 		if session.VNCURL != "" {
 			fmt.Fprintf(out, "vnc: %s\n", fleettext.Safe(session.VNCURL))
