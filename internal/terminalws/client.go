@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"strings"
 	"sync"
 
 	"github.com/coder/websocket"
@@ -18,6 +19,7 @@ const (
 	magic         = 0x5943
 	version       = 2
 	maxFrameBytes = 16 * 1024 * 1024
+	maxErrorBytes = 512
 
 	messageHello           = 1
 	messageWelcome         = 2
@@ -49,6 +51,19 @@ type Options struct {
 	Header http.Header
 	Cols   uint32
 	Rows   uint32
+}
+
+type HandshakeStatusError struct {
+	StatusCode int
+	Status     string
+	Body       string
+}
+
+func (e *HandshakeStatusError) Error() string {
+	if e.Body == "" {
+		return fmt.Sprintf("terminal websocket %s", e.Status)
+	}
+	return fmt.Sprintf("terminal websocket %s: %s", e.Status, e.Body)
 }
 
 type Size struct {
@@ -100,10 +115,19 @@ func Dial(ctx context.Context, endpoint string, sessionID string, options Option
 	if sessionID == "" {
 		return nil, errors.New("terminal session id is required")
 	}
-	conn, _, err := websocket.Dial(ctx, endpoint, &websocket.DialOptions{
+	conn, resp, err := websocket.Dial(ctx, endpoint, &websocket.DialOptions{
 		HTTPHeader: options.Header,
 	})
 	if err != nil {
+		if resp != nil {
+			body := ""
+			if resp.Body != nil {
+				data, _ := io.ReadAll(io.LimitReader(resp.Body, maxErrorBytes))
+				_ = resp.Body.Close()
+				body = strings.TrimSpace(string(data))
+			}
+			return nil, &HandshakeStatusError{StatusCode: resp.StatusCode, Status: resp.Status, Body: body}
+		}
 		return nil, err
 	}
 	conn.SetReadLimit(maxFrameBytes)
