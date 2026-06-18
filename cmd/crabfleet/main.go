@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"crypto/x509"
 	"encoding/json"
@@ -24,6 +25,7 @@ import (
 const defaultAPIURL = "https://crabfleet.openclaw.ai"
 const defaultSSHHost = "crabd.sh"
 const maxMessageBytes = 64 * 1024
+const maxSSHOutputBytes = 64 * 1024
 
 var version = "dev"
 
@@ -635,10 +637,67 @@ func runSSHOutput(app *cli, args ...string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	cmd := exec.Command("ssh", sshArgs...)
-	cmd.Stderr = os.Stderr
-	output, err := cmd.Output()
-	return string(output), err
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "ssh", sshArgs...)
+	stdout := newLimitedSSHOutput("ssh output", cancel)
+	stderr := newLimitedSSHOutput("ssh stderr", cancel)
+	cmd.Stdout = stdout
+	cmd.Stderr = stderr
+	err = cmd.Run()
+	if stderr.Len() > 0 {
+		fmt.Fprint(os.Stderr, fleettext.SafeMultiline(stderr.String()))
+	}
+	if stdout.Overflowed() {
+		return "", stdout.OverflowError()
+	}
+	if stderr.Overflowed() {
+		return "", stderr.OverflowError()
+	}
+	return stdout.String(), err
+}
+
+type limitedSSHOutput struct {
+	label    string
+	cancel   context.CancelFunc
+	buffer   bytes.Buffer
+	overflow bool
+}
+
+func newLimitedSSHOutput(label string, cancel context.CancelFunc) *limitedSSHOutput {
+	return &limitedSSHOutput{label: label, cancel: cancel}
+}
+
+func (o *limitedSSHOutput) Write(data []byte) (int, error) {
+	if o.overflow {
+		return 0, o.OverflowError()
+	}
+	remaining := maxSSHOutputBytes - o.buffer.Len()
+	if len(data) > remaining {
+		if remaining > 0 {
+			_, _ = o.buffer.Write(data[:remaining])
+		}
+		o.overflow = true
+		o.cancel()
+		return remaining, o.OverflowError()
+	}
+	return o.buffer.Write(data)
+}
+
+func (o *limitedSSHOutput) Len() int {
+	return o.buffer.Len()
+}
+
+func (o *limitedSSHOutput) String() string {
+	return o.buffer.String()
+}
+
+func (o *limitedSSHOutput) Overflowed() bool {
+	return o.overflow
+}
+
+func (o *limitedSSHOutput) OverflowError() error {
+	return fmt.Errorf("%s exceeds %d bytes", o.label, maxSSHOutputBytes)
 }
 
 func sshInvocationArgs(app *cli, args ...string) ([]string, error) {

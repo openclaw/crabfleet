@@ -669,7 +669,7 @@ func runCommand(ctx context.Context, out io.ReadWriter, perms *ssh.Permissions, 
 		fmt.Fprintf(out, "%s/app/\n", client.baseURL)
 		return 0
 	default:
-		fmt.Fprintf(out, "unknown command: %s\n\n", args[0])
+		fmt.Fprintf(out, "unknown command: %s\n\n", fleettext.Safe(fleettext.SafeMultiline(args[0])))
 		printHelp(out, auth.user)
 		return 2
 	}
