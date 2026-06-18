@@ -600,7 +600,10 @@ func (openCmd) Run(app *cli, _ *fleetapi.Client) error {
 }
 
 func runSSH(app *cli, args ...string) error {
-	sshArgs := append([]string{app.SSHHost}, args...)
+	sshArgs := []string{app.SSHHost}
+	if command := sshRemoteCommand(args...); command != "" {
+		sshArgs = append(sshArgs, command)
+	}
 	cmd := exec.Command("ssh", sshArgs...)
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
@@ -609,27 +612,33 @@ func runSSH(app *cli, args ...string) error {
 }
 
 func runSSHCommand(app *cli, args ...string) error {
-	parts := make([]string, len(args))
-	for i, arg := range args {
-		parts[i] = shellQuote(arg)
-	}
-	return runSSH(app, strings.Join(parts, " "))
+	return runSSH(app, args...)
 }
 
 func runSSHCommandOutput(app *cli, args ...string) (string, error) {
-	parts := make([]string, len(args))
-	for i, arg := range args {
-		parts[i] = shellQuote(arg)
-	}
-	return runSSHOutput(app, strings.Join(parts, " "))
+	return runSSHOutput(app, args...)
 }
 
 func runSSHOutput(app *cli, args ...string) (string, error) {
-	sshArgs := append([]string{app.SSHHost}, args...)
+	sshArgs := []string{app.SSHHost}
+	if command := sshRemoteCommand(args...); command != "" {
+		sshArgs = append(sshArgs, command)
+	}
 	cmd := exec.Command("ssh", sshArgs...)
 	cmd.Stderr = os.Stderr
 	output, err := cmd.Output()
 	return string(output), err
+}
+
+func sshRemoteCommand(args ...string) string {
+	if len(args) == 0 {
+		return ""
+	}
+	parts := make([]string, len(args))
+	for i, arg := range args {
+		parts[i] = shellQuote(arg)
+	}
+	return strings.Join(parts, " ")
 }
 
 func shellQuote(value string) string {
@@ -701,8 +710,7 @@ func isPreRequestNetworkFailure(err error) bool {
 		return true
 	}
 	lower := strings.ToLower(err.Error())
-	return strings.Contains(lower, "tls:") ||
-		strings.Contains(lower, "server gave http response to https client")
+	return strings.Contains(lower, "server gave http response to https client")
 }
 
 func openURL(url string) error {
