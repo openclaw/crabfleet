@@ -165,7 +165,10 @@ func (c *Client) Transcript(ctx context.Context, id string) (string, error) {
 	if err := responseError(resp); err != nil {
 		return "", err
 	}
-	data, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBytes))
+	data, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBytes+1))
+	if len(data) > maxResponseBytes {
+		return "", fmt.Errorf("crabfleet API response exceeds %d bytes", maxResponseBytes)
+	}
 	return string(data), err
 }
 

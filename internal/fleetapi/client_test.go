@@ -84,3 +84,23 @@ func TestClientStreamsLargeJSONResponses(t *testing.T) {
 		t.Fatalf("login length = %d, want %d", len(state.User.Login), len(largeLogin))
 	}
 }
+
+func TestClientRejectsOversizedTranscript(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/ssh/interactive-sessions/IS-7/transcript" {
+			t.Errorf("path = %q", r.URL.Path)
+		}
+		w.Header().Set("Content-Type", "text/markdown")
+		_, _ = w.Write([]byte(strings.Repeat("a", maxResponseBytes+1)))
+	}))
+	defer server.Close()
+
+	client := NewClient(server.URL, server.Client(), SSHAuth("gateway-token", "SHA256:test"))
+	transcript, err := client.Transcript(context.Background(), "IS-7")
+	if err == nil || !strings.Contains(err.Error(), "response exceeds") {
+		t.Fatalf("error = %v", err)
+	}
+	if transcript != "" {
+		t.Fatalf("transcript length = %d, want empty", len(transcript))
+	}
+}
