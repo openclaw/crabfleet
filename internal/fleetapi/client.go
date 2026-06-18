@@ -19,6 +19,8 @@ type TerminalSize = terminalws.Size
 const maxResponseBytes = 4 * 1024 * 1024
 const maxErrorBytes = 512
 
+var ErrMissingAuth = errors.New("API mode requires SSH gateway token + fingerprint or agent token + session ID")
+
 type authMode uint8
 
 const (
@@ -318,7 +320,7 @@ func (a Auth) validate() error {
 	if a.mode == authAgent && a.token != "" && a.principal != "" {
 		return nil
 	}
-	return errors.New("API mode requires SSH gateway token + fingerprint or agent token + session ID")
+	return ErrMissingAuth
 }
 
 func sessionPath(id string) string {

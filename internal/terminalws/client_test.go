@@ -10,7 +10,9 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/coder/websocket"
 )
@@ -21,11 +23,11 @@ type protocolFixture struct {
 	Messages       map[string]byte   `json:"messages"`
 	SubscribeFlags map[string]uint32 `json:"subscribeFlags"`
 	Vectors        struct {
-		OutputFrame    string `json:"outputFrame"`
-		PingFrame      string `json:"pingFrame"`
-		Subscribe      string `json:"subscribe"`
-		Resize         string `json:"resize"`
-		Ack            string `json:"ack"`
+		OutputFrame string `json:"outputFrame"`
+		PingFrame   string `json:"pingFrame"`
+		Subscribe   string `json:"subscribe"`
+		Resize      string `json:"resize"`
+		Ack         string `json:"ack"`
 	} `json:"vectors"`
 }
 
@@ -249,7 +251,7 @@ func TestClientSubscribesSendsInputAndAcknowledgesOutput(t *testing.T) {
 	inputReader, inputWriter := io.Pipe()
 	defer inputReader.Close()
 	defer inputWriter.Close()
-	terminal := &readWriter{reader: inputReader}
+	terminal := &readWriter{reader: inputReader, closer: inputReader}
 	go func() {
 		_, _ = inputWriter.Write([]byte("hello\n"))
 	}()
@@ -272,11 +274,95 @@ func TestClientSubscribesSendsInputAndAcknowledgesOutput(t *testing.T) {
 	}
 }
 
+func TestAttachClosesCloseableTerminalAfterRemoteClosure(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := websocket.Accept(w, r, nil)
+		if err != nil {
+			t.Error(err)
+			return
+		}
+		defer conn.Close(websocket.StatusNormalClosure, "")
+
+		for range 2 {
+			if _, _, err := conn.Read(r.Context()); err != nil {
+				t.Error(err)
+				return
+			}
+		}
+		subscribed, _ := json.Marshal(eventPayload{Type: "subscribed", CanInput: true})
+		if err := conn.Write(r.Context(), websocket.MessageBinary, encodeFrame(frame{
+			messageType: messageEvent,
+			sessionID:   "IS-1",
+			payload:     subscribed,
+		})); err != nil {
+			t.Error(err)
+			return
+		}
+		closed, _ := json.Marshal(eventPayload{Type: "closed"})
+		_ = conn.Write(r.Context(), websocket.MessageBinary, encodeFrame(frame{
+			messageType: messageEvent,
+			sessionID:   "IS-1",
+			payload:     closed,
+		}))
+	}))
+	defer server.Close()
+
+	endpoint, err := Endpoint(server.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	client, err := Dial(context.Background(), endpoint, "IS-1", Options{Cols: 120, Rows: 34})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+
+	terminal := newBlockingTerminal()
+	if err := client.Attach(context.Background(), terminal, nil); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-terminal.closed:
+	case <-time.After(time.Second):
+		t.Fatal("terminal was not closed")
+	}
+}
+
 type readWriter struct {
 	reader io.Reader
+	closer io.Closer
 	bytes.Buffer
 }
 
 func (rw *readWriter) Read(payload []byte) (int, error) {
 	return rw.reader.Read(payload)
+}
+
+func (rw *readWriter) Close() error {
+	if rw.closer == nil {
+		return nil
+	}
+	return rw.closer.Close()
+}
+
+type blockingTerminal struct {
+	closed chan struct{}
+	once   sync.Once
+	bytes.Buffer
+}
+
+func newBlockingTerminal() *blockingTerminal {
+	return &blockingTerminal{closed: make(chan struct{})}
+}
+
+func (terminal *blockingTerminal) Read(_ []byte) (int, error) {
+	<-terminal.closed
+	return 0, io.ErrClosedPipe
+}
+
+func (terminal *blockingTerminal) Close() error {
+	terminal.once.Do(func() {
+		close(terminal.closed)
+	})
+	return nil
 }

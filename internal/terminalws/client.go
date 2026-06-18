@@ -183,8 +183,19 @@ func (c *Client) Attach(ctx context.Context, terminal io.ReadWriter, resizes <-c
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
+	var wg sync.WaitGroup
+	closer, closeable := terminal.(io.Closer)
+	closeTerminal := func() {
+		cancel()
+		if closeable {
+			_ = closer.Close()
+		}
+	}
+
 	errCh := make(chan error, 3)
+	wg.Add(1)
 	go func() {
+		defer wg.Done()
 		buffer := make([]byte, 32*1024)
 		for {
 			count, err := terminal.Read(buffer)
@@ -204,7 +215,9 @@ func (c *Client) Attach(ctx context.Context, terminal io.ReadWriter, resizes <-c
 			}
 		}
 	}()
+	wg.Add(1)
 	go func() {
+		defer wg.Done()
 		for {
 			select {
 			case <-ctx.Done():
@@ -221,7 +234,9 @@ func (c *Client) Attach(ctx context.Context, terminal io.ReadWriter, resizes <-c
 			}
 		}
 	}()
+	wg.Add(1)
 	go func() {
+		defer wg.Done()
 		for {
 			current, err := c.read(ctx)
 			if err != nil {
@@ -259,7 +274,10 @@ func (c *Client) Attach(ctx context.Context, terminal io.ReadWriter, resizes <-c
 	}()
 
 	err := <-errCh
-	cancel()
+	closeTerminal()
+	if closeable {
+		wg.Wait()
+	}
 	return normalizeCloseError(err)
 }
 
