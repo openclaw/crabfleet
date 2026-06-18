@@ -94,6 +94,43 @@ func TestMutatingAPIFailureDoesNotFallbackToSSH(t *testing.T) {
 }
 
 func TestLocalAuthFailureStillFallsBackToSSH(t *testing.T) {
+	argsPath := installFakeSSH(t)
+
+	app := &cli{API: defaultAPIURL, SSHHost: "crabd.test"}
+	if err := (newCmd{Branch: "main", Command: "codex --yolo", Repo: "openclaw/crabfleet"}).Run(app, app.apiClient()); err != nil {
+		t.Fatal(err)
+	}
+	output := readFakeSSHArgs(t, argsPath)
+	if !strings.Contains(output, "crabd.test\n") || !strings.Contains(output, "new --branch main --repo openclaw/crabfleet") {
+		t.Fatalf("ssh args = %q", output)
+	}
+}
+
+func TestAPIAuthRejectionStillFallsBackToSSH(t *testing.T) {
+	argsPath := installFakeSSH(t)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusUnauthorized)
+		_, _ = w.Write([]byte("bad token"))
+	}))
+	defer server.Close()
+
+	app := &cli{
+		API:         server.URL,
+		SSHHost:     "crabd.test",
+		Token:       "stale-token",
+		Fingerprint: "SHA256:stale",
+	}
+	if err := (newCmd{Branch: "main", Command: "codex --yolo", Repo: "openclaw/crabfleet"}).Run(app, app.apiClient()); err != nil {
+		t.Fatal(err)
+	}
+	output := readFakeSSHArgs(t, argsPath)
+	if !strings.Contains(output, "crabd.test\n") || !strings.Contains(output, "new --branch main --repo openclaw/crabfleet") {
+		t.Fatalf("ssh args = %q", output)
+	}
+}
+
+func installFakeSSH(t *testing.T) string {
+	t.Helper()
 	dir := t.TempDir()
 	argsPath := filepath.Join(dir, "ssh-args")
 	sshPath := filepath.Join(dir, "ssh")
@@ -102,19 +139,16 @@ func TestLocalAuthFailureStillFallsBackToSSH(t *testing.T) {
 	}
 	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
 	t.Setenv("SSH_ARGS_PATH", argsPath)
+	return argsPath
+}
 
-	app := &cli{API: defaultAPIURL, SSHHost: "crabd.test"}
-	if err := (newCmd{Branch: "main", Command: "codex --yolo", Repo: "openclaw/crabfleet"}).Run(app, app.apiClient()); err != nil {
-		t.Fatal(err)
-	}
+func readFakeSSHArgs(t *testing.T, argsPath string) string {
+	t.Helper()
 	data, err := os.ReadFile(argsPath)
 	if err != nil {
 		t.Fatal(err)
 	}
-	output := string(data)
-	if !strings.Contains(output, "crabd.test\n") || !strings.Contains(output, "new --branch main --repo openclaw/crabfleet") {
-		t.Fatalf("ssh args = %q", output)
-	}
+	return string(data)
 }
 
 func TestNewCommandSanitizesControlPlaneOutput(t *testing.T) {

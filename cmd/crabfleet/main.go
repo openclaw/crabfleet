@@ -652,7 +652,17 @@ func ambiguousMutationError(operation string, err error) error {
 }
 
 func canFallbackToSSH(app *cli, err error) bool {
-	return !app.NoInput && !app.JSON && errors.Is(err, fleetapi.ErrMissingAuth)
+	if app.NoInput || app.JSON {
+		return false
+	}
+	if errors.Is(err, fleetapi.ErrMissingAuth) {
+		return true
+	}
+	var statusErr *fleetapi.StatusError
+	if errors.As(err, &statusErr) {
+		return statusErr.StatusCode == http.StatusUnauthorized || statusErr.StatusCode == http.StatusForbidden
+	}
+	return false
 }
 
 func openURL(url string) error {
