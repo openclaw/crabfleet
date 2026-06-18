@@ -129,6 +129,29 @@ func TestAPIAuthRejectionStillFallsBackToSSH(t *testing.T) {
 	}
 }
 
+func TestMessageWebSocketAuthRejectionStillFallsBackToSSH(t *testing.T) {
+	argsPath := installFakeSSH(t)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusForbidden)
+		_, _ = w.Write([]byte("bad websocket token"))
+	}))
+	defer server.Close()
+
+	app := &cli{
+		API:         server.URL,
+		SSHHost:     "crabd.test",
+		Token:       "stale-token",
+		Fingerprint: "SHA256:stale",
+	}
+	if err := (messageCmd{ID: "IS-1", Text: []string{"hello"}}).Run(app, app.apiClient()); err != nil {
+		t.Fatal(err)
+	}
+	output := readFakeSSHArgs(t, argsPath)
+	if !strings.Contains(output, "crabd.test\n") || !strings.Contains(output, "message IS-1 hello") {
+		t.Fatalf("ssh args = %q", output)
+	}
+}
+
 func installFakeSSH(t *testing.T) string {
 	t.Helper()
 	dir := t.TempDir()

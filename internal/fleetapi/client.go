@@ -224,11 +224,23 @@ func (c *Client) terminal(ctx context.Context, id string, cols uint32, rows uint
 	if err != nil {
 		return nil, err
 	}
-	return terminalws.Dial(ctx, endpoint, id, terminalws.Options{
+	client, err := terminalws.Dial(ctx, endpoint, id, terminalws.Options{
 		Header: headers,
 		Cols:   cols,
 		Rows:   rows,
 	})
+	if err != nil {
+		var statusErr *terminalws.HandshakeStatusError
+		if errors.As(err, &statusErr) {
+			return nil, &StatusError{
+				StatusCode: statusErr.StatusCode,
+				Status:     statusErr.Status,
+				Body:       statusErr.Body,
+			}
+		}
+		return nil, err
+	}
+	return client, nil
 }
 
 func (c *Client) doJSON(ctx context.Context, method string, path string, body any, out any) error {
