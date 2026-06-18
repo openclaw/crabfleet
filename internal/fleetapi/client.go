@@ -21,6 +21,16 @@ const maxErrorBytes = 512
 
 var ErrMissingAuth = errors.New("API mode requires SSH gateway token + fingerprint or agent token + session ID")
 
+type StatusError struct {
+	StatusCode int
+	Status     string
+	Body       string
+}
+
+func (e *StatusError) Error() string {
+	return fmt.Sprintf("crabfleet API %s: %s", e.Status, e.Body)
+}
+
 type authMode uint8
 
 const (
@@ -276,7 +286,11 @@ func (c *Client) open(
 func responseError(resp *http.Response) error {
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		data, _ := io.ReadAll(io.LimitReader(resp.Body, maxErrorBytes))
-		return fmt.Errorf("crabfleet API %s: %s", resp.Status, strings.TrimSpace(string(data)))
+		return &StatusError{
+			StatusCode: resp.StatusCode,
+			Status:     resp.Status,
+			Body:       strings.TrimSpace(string(data)),
+		}
 	}
 	return nil
 }
