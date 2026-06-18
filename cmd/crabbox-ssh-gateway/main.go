@@ -26,7 +26,11 @@ import (
 var (
 	sshHandshakeTimeout = 15 * time.Second
 	sshAuthTimeout      = 15 * time.Second
+	sshConnectionIdle   = 30 * time.Second
+	sshSessionIdleTimer = 30 * time.Second
 	sshHandshakeSlots   = newConnectionLimiter(64)
+	sshConnectionSlots  = newConnectionLimiter(256)
+	sshSessionChannels  = 8
 )
 
 type connectionLimiter struct {
@@ -172,28 +176,39 @@ func main() {
 }
 
 func acceptConn(raw net.Conn, config *ssh.ServerConfig, client *apiClient) {
-	if !sshHandshakeSlots.acquire() {
+	if !sshConnectionSlots.acquire() {
 		log.Printf("connection limit reached for %s", raw.RemoteAddr())
 		raw.Close()
 		return
 	}
-	go handleConnWithRelease(raw, config, client, sshHandshakeSlots.release)
+	if !sshHandshakeSlots.acquire() {
+		log.Printf("connection limit reached for %s", raw.RemoteAddr())
+		sshConnectionSlots.release()
+		raw.Close()
+		return
+	}
+	go handleConnWithRelease(raw, config, client, sshHandshakeSlots.release, sshConnectionSlots.release)
 }
 
 func handleConn(raw net.Conn, config *ssh.ServerConfig, client *apiClient) {
-	handleConnWithRelease(raw, config, client, nil)
+	handleConnWithRelease(raw, config, client, nil, nil)
 }
 
 func handleConnWithRelease(
 	raw net.Conn,
 	config *ssh.ServerConfig,
 	client *apiClient,
-	release func(),
+	releaseHandshake func(),
+	releaseConnection func(),
 ) {
-	releaseHandshake := release
 	defer func() {
 		if releaseHandshake != nil {
 			releaseHandshake()
+		}
+	}()
+	defer func() {
+		if releaseConnection != nil {
+			releaseConnection()
 		}
 	}()
 	defer raw.Close()
@@ -215,24 +230,84 @@ func handleConnWithRelease(
 	defer conn.Close()
 	go ssh.DiscardRequests(reqs)
 
-	for ch := range chans {
-		if ch.ChannelType() != "session" {
-			ch.Reject(ssh.UnknownChannelType, "session channels only")
-			continue
+	permissions := conn.Permissions
+	if permissions == nil {
+		permissions = &ssh.Permissions{Extensions: map[string]string{}}
+	}
+	sessionSlots := newConnectionLimiter(sshSessionChannels)
+	sessionDone := make(chan struct{})
+	connectionClosed := make(chan struct{})
+	defer close(connectionClosed)
+	activeSessions := 0
+	connectionIdleTimer, connectionIdle := newConnectionIdleTimer()
+	defer stopTimer(connectionIdleTimer)
+	for {
+		select {
+		case <-connectionIdle:
+			return
+		case <-sessionDone:
+			if activeSessions > 0 {
+				activeSessions--
+			}
+			if activeSessions == 0 {
+				stopTimer(connectionIdleTimer)
+				connectionIdleTimer, connectionIdle = newConnectionIdleTimer()
+			}
+		case ch, ok := <-chans:
+			if !ok {
+				return
+			}
+			if ch.ChannelType() != "session" {
+				ch.Reject(ssh.UnknownChannelType, "session channels only")
+				continue
+			}
+			if !sessionSlots.acquire() {
+				ch.Reject(ssh.ResourceShortage, "too many session channels")
+				continue
+			}
+			if activeSessions == 0 {
+				stopTimer(connectionIdleTimer)
+				connectionIdle = nil
+			}
+			activeSessions++
+			channel, requests, err := ch.Accept()
+			if err != nil {
+				sessionSlots.release()
+				if activeSessions > 0 {
+					activeSessions--
+				}
+				if activeSessions == 0 {
+					connectionIdleTimer, connectionIdle = newConnectionIdleTimer()
+				}
+				log.Printf("channel accept: %v", err)
+				continue
+			}
+			go handleSession(channel, requests, permissions, client, func() {
+				select {
+				case sessionDone <- struct{}{}:
+				case <-connectionClosed:
+				}
+				sessionSlots.release()
+			})
 		}
-		channel, requests, err := ch.Accept()
-		if err != nil {
-			log.Printf("channel accept: %v", err)
-			continue
-		}
-		go handleSession(channel, requests, conn.Permissions, client)
 	}
 }
 
-func handleSession(channel ssh.Channel, requests <-chan *ssh.Request, perms *ssh.Permissions, client *apiClient) {
+func handleSession(
+	channel ssh.Channel,
+	requests <-chan *ssh.Request,
+	perms *ssh.Permissions,
+	client *apiClient,
+	release func(),
+) {
+	if release != nil {
+		defer release()
+	}
 	defer channel.Close()
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
+	idleTimer, idle := newSessionIdleTimer()
+	defer stopTimer(idleTimer)
 	pty := sessionPTY{
 		cols:    120,
 		rows:    34,
@@ -275,6 +350,8 @@ func handleSession(channel ssh.Channel, requests <-chan *ssh.Request, perms *ssh
 					continue
 				}
 				commandStarted = true
+				stopTimer(idleTimer)
+				idle = nil
 				req.Reply(true, nil)
 				go func(current sessionPTY) {
 					exitCh <- runCommand(ctx, channel, perms, client, "", current)
@@ -287,6 +364,8 @@ func handleSession(channel ssh.Channel, requests <-chan *ssh.Request, perms *ssh
 				var payload struct{ Command string }
 				ssh.Unmarshal(req.Payload, &payload)
 				commandStarted = true
+				stopTimer(idleTimer)
+				idle = nil
 				req.Reply(true, nil)
 				go func(current sessionPTY, command string) {
 					exitCh <- runCommand(
@@ -305,6 +384,36 @@ func handleSession(channel ssh.Channel, requests <-chan *ssh.Request, perms *ssh
 			cancel()
 			replyExit(channel, exit)
 			return
+		case <-idle:
+			return
+		}
+	}
+}
+
+func newSessionIdleTimer() (*time.Timer, <-chan time.Time) {
+	if sshSessionIdleTimer <= 0 {
+		return nil, nil
+	}
+	timer := time.NewTimer(sshSessionIdleTimer)
+	return timer, timer.C
+}
+
+func newConnectionIdleTimer() (*time.Timer, <-chan time.Time) {
+	if sshConnectionIdle <= 0 {
+		return nil, nil
+	}
+	timer := time.NewTimer(sshConnectionIdle)
+	return timer, timer.C
+}
+
+func stopTimer(timer *time.Timer) {
+	if timer == nil {
+		return
+	}
+	if !timer.Stop() {
+		select {
+		case <-timer.C:
+		default:
 		}
 	}
 }

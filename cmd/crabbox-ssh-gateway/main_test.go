@@ -3,6 +3,8 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/ed25519"
+	"crypto/rand"
 	"encoding/json"
 	"net"
 	"net/http"
@@ -358,6 +360,160 @@ func TestAcceptConnRejectsWhenHandshakeSlotsFull(t *testing.T) {
 	}
 }
 
+func TestAcceptConnHoldsConnectionSlotUntilClose(t *testing.T) {
+	previousConnections := sshConnectionSlots
+	previousHandshakes := sshHandshakeSlots
+	sshConnectionSlots = newConnectionLimiter(1)
+	sshHandshakeSlots = newConnectionLimiter(1)
+	defer func() {
+		sshConnectionSlots = previousConnections
+		sshHandshakeSlots = previousHandshakes
+	}()
+
+	addr, cleanup := serveTestSSHGateway(t, testSSHServerConfig(t), nil)
+	defer cleanup()
+	clientConfig := testSSHClientConfig()
+	first, err := ssh.Dial("tcp", addr, clientConfig)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer first.Close()
+
+	if second, err := ssh.Dial("tcp", addr, clientConfig); err == nil {
+		second.Close()
+		t.Fatal("second connection succeeded while connection slot was occupied")
+	}
+
+	first.Close()
+	deadline := time.Now().Add(time.Second)
+	for {
+		third, err := ssh.Dial("tcp", addr, clientConfig)
+		if err == nil {
+			third.Close()
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("connection slot was not released after close: %v", err)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+func TestSessionChannelsAreBoundedPerConnection(t *testing.T) {
+	previousChannels := sshSessionChannels
+	previousIdle := sshSessionIdleTimer
+	sshSessionChannels = 1
+	sshSessionIdleTimer = time.Second
+	defer func() {
+		sshSessionChannels = previousChannels
+		sshSessionIdleTimer = previousIdle
+	}()
+
+	addr, cleanup := serveTestSSHGateway(t, testSSHServerConfig(t), nil)
+	defer cleanup()
+	client, err := ssh.Dial("tcp", addr, testSSHClientConfig())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+	first, err := client.NewSession()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer first.Close()
+	if second, err := client.NewSession(); err == nil {
+		second.Close()
+		t.Fatal("second session channel succeeded while per-connection slot was occupied")
+	}
+}
+
+func TestIdleConnectionClosesWithoutSessionChannel(t *testing.T) {
+	previousIdle := sshConnectionIdle
+	previousConnections := sshConnectionSlots
+	sshConnectionIdle = 20 * time.Millisecond
+	sshConnectionSlots = newConnectionLimiter(1)
+	defer func() {
+		sshConnectionIdle = previousIdle
+		sshConnectionSlots = previousConnections
+	}()
+
+	addr, cleanup := serveTestSSHGateway(t, testSSHServerConfig(t), nil)
+	defer cleanup()
+	clientConfig := testSSHClientConfig()
+	first, err := ssh.Dial("tcp", addr, clientConfig)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer first.Close()
+
+	time.Sleep(100 * time.Millisecond)
+	if session, err := first.NewSession(); err == nil {
+		session.Close()
+		t.Fatal("idle connection still accepted a session channel")
+	}
+	second, err := ssh.Dial("tcp", addr, clientConfig)
+	if err != nil {
+		t.Fatalf("connection slot was not released after idle close: %v", err)
+	}
+	second.Close()
+}
+
+func TestIdleConnectionClosesAfterLastSessionChannel(t *testing.T) {
+	previousIdle := sshConnectionIdle
+	previousSessionIdle := sshSessionIdleTimer
+	sshConnectionIdle = 20 * time.Millisecond
+	sshSessionIdleTimer = time.Second
+	defer func() {
+		sshConnectionIdle = previousIdle
+		sshSessionIdleTimer = previousSessionIdle
+	}()
+
+	addr, cleanup := serveTestSSHGateway(t, testSSHServerConfig(t), nil)
+	defer cleanup()
+	client, err := ssh.Dial("tcp", addr, testSSHClientConfig())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+	session, err := client.NewSession()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := session.Close(); err != nil && !strings.Contains(err.Error(), "EOF") {
+		t.Fatal(err)
+	}
+
+	time.Sleep(100 * time.Millisecond)
+	if next, err := client.NewSession(); err == nil {
+		next.Close()
+		t.Fatal("idle connection still accepted a session after the last channel closed")
+	}
+}
+
+func TestIdleSessionChannelClosesWithoutCommand(t *testing.T) {
+	previousIdle := sshSessionIdleTimer
+	sshSessionIdleTimer = 20 * time.Millisecond
+	defer func() { sshSessionIdleTimer = previousIdle }()
+
+	addr, cleanup := serveTestSSHGateway(t, testSSHServerConfig(t), nil)
+	defer cleanup()
+	client, err := ssh.Dial("tcp", addr, testSSHClientConfig())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+	session, err := client.NewSession()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer session.Close()
+
+	time.Sleep(100 * time.Millisecond)
+	if err := session.Shell(); err == nil {
+		t.Fatal("idle session channel still accepted a shell request")
+	}
+}
+
 func TestRunCommandCancelsControlPlaneRequest(t *testing.T) {
 	entered := make(chan struct{})
 	cancelled := make(chan struct{})
@@ -550,5 +706,51 @@ func TestPrintListShowsOwnersAndSessionTree(t *testing.T) {
 		if !strings.Contains(text, want) {
 			t.Fatalf("output missing %q:\n%s", want, text)
 		}
+	}
+}
+
+func testSSHServerConfig(t *testing.T) *ssh.ServerConfig {
+	t.Helper()
+	_, privateKey, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	signer, err := ssh.NewSignerFromKey(privateKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	config := &ssh.ServerConfig{NoClientAuth: true}
+	config.AddHostKey(signer)
+	return config
+}
+
+func testSSHClientConfig() *ssh.ClientConfig {
+	return &ssh.ClientConfig{
+		User:            "link",
+		HostKeyCallback: ssh.InsecureIgnoreHostKey(),
+		Timeout:         time.Second,
+	}
+}
+
+func serveTestSSHGateway(t *testing.T, config *ssh.ServerConfig, client *apiClient) (string, func()) {
+	t.Helper()
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for {
+			conn, err := listener.Accept()
+			if err != nil {
+				return
+			}
+			acceptConn(conn, config, client)
+		}
+	}()
+	return listener.Addr().String(), func() {
+		listener.Close()
+		<-done
 	}
 }

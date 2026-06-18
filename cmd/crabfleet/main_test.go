@@ -3,10 +3,12 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -68,6 +70,18 @@ func TestShellQuoteQuotesMetacharacters(t *testing.T) {
 	}
 }
 
+func TestRunSSHQuotesRemoteCommandArguments(t *testing.T) {
+	argsPath := installFakeSSH(t)
+	app := &cli{SSHHost: "crabd.test"}
+	if err := runSSH(app, "attach", "IS-1; touch /tmp/pwned"); err != nil {
+		t.Fatal(err)
+	}
+	output := readFakeSSHArgs(t, argsPath)
+	if got, want := output, "crabd.test\nattach 'IS-1; touch /tmp/pwned'\n"; got != want {
+		t.Fatalf("ssh args = %q, want %q", got, want)
+	}
+}
+
 func TestMutatingAPIFailureDoesNotFallbackToSSH(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost || r.URL.Path != "/api/ssh/interactive-sessions" {
@@ -117,6 +131,17 @@ func TestPreRequestAPIFailureStillFallsBackToSSH(t *testing.T) {
 	output := readFakeSSHArgs(t, argsPath)
 	if !strings.Contains(output, "crabd.test\n") || !strings.Contains(output, "new --branch main --repo openclaw/crabfleet") {
 		t.Fatalf("ssh args = %q", output)
+	}
+}
+
+func TestAmbiguousTLSMutationFailureDoesNotFallbackToSSH(t *testing.T) {
+	err := &url.Error{
+		Op:  "Post",
+		URL: "https://crabfleet.test/api/ssh/interactive-sessions",
+		Err: errors.New("tls: bad record MAC"),
+	}
+	if canFallbackToSSH(&cli{SSHHost: "crabd.test"}, err) {
+		t.Fatal("generic TLS failure was treated as safe to retry")
 	}
 }
 
