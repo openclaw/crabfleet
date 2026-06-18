@@ -232,7 +232,7 @@ func (c *Client) terminal(ctx context.Context, id string, cols uint32, rows uint
 			return nil, &StatusError{
 				StatusCode: statusErr.StatusCode,
 				Status:     statusErr.Status,
-				Body:       statusErr.Body,
+				Body:       sanitizeErrorBody(statusErr.Body),
 			}
 		}
 		return nil, err
@@ -302,10 +302,72 @@ func responseError(resp *http.Response) error {
 		return &StatusError{
 			StatusCode: resp.StatusCode,
 			Status:     resp.Status,
-			Body:       strings.TrimSpace(string(data)),
+			Body:       sanitizeErrorBody(string(data)),
 		}
 	}
 	return nil
+}
+
+func sanitizeErrorBody(value string) string {
+	var out strings.Builder
+	const (
+		stateText = iota
+		stateEscape
+		stateCSI
+		stateStringControl
+		stateStringControlEscape
+	)
+	state := stateText
+	for _, r := range value {
+		switch state {
+		case stateText:
+			switch {
+			case r == '\x1b':
+				state = stateEscape
+			case r == '\x9b':
+				state = stateCSI
+			case r == '\x90' || r == '\x9d' || r == '\x9e' || r == '\x9f':
+				state = stateStringControl
+			case r == '\n' || r == '\r' || r == '\t':
+				out.WriteRune(' ')
+			case isErrorControl(r):
+				continue
+			default:
+				out.WriteRune(r)
+			}
+		case stateEscape:
+			switch r {
+			case '[':
+				state = stateCSI
+			case ']', 'P', '^', '_':
+				state = stateStringControl
+			default:
+				state = stateText
+			}
+		case stateCSI:
+			if r >= 0x40 && r <= 0x7e {
+				state = stateText
+			}
+		case stateStringControl:
+			switch r {
+			case '\x07', '\x9c':
+				state = stateText
+			case '\x1b':
+				state = stateStringControlEscape
+			}
+		case stateStringControlEscape:
+			if r == '\\' {
+				state = stateText
+			} else if r != '\x1b' {
+				state = stateStringControl
+			}
+		}
+	}
+	return strings.TrimSpace(out.String())
+}
+
+func isErrorControl(r rune) bool {
+	return r < 0x20 || r == 0x7f || (r >= 0x80 && r <= 0x9f)
 }
 
 func readBoundedResponse(body io.Reader) ([]byte, error) {

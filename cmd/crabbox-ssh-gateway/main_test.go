@@ -708,7 +708,10 @@ func TestRunCommandSanitizesControlPlaneErrors(t *testing.T) {
 	if strings.ContainsAny(got, "\x1b\x07") {
 		t.Fatalf("error output retained terminal controls: %q", got)
 	}
-	if !strings.Contains(got, "bad]52;c;secretstate") {
+	if strings.Contains(got, "secret") || strings.Contains(got, "]52") {
+		t.Fatalf("error output retained terminal payload: %q", got)
+	}
+	if !strings.Contains(got, "badstate") {
 		t.Fatalf("error output = %q", got)
 	}
 }

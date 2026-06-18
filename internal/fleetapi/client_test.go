@@ -66,6 +66,48 @@ func TestClientRejectsIncompleteAuthentication(t *testing.T) {
 	}
 }
 
+func TestClientSanitizesStatusErrorBody(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write([]byte("bad\x1b]52;c;secret\x07state\x1b[31m!\nnext"))
+	}))
+	defer server.Close()
+
+	client := NewClient(server.URL, server.Client(), SSHAuth("gateway-token", "SHA256:test"))
+	_, err := client.State(context.Background())
+	if err == nil {
+		t.Fatal("expected status error")
+	}
+	message := err.Error()
+	if strings.ContainsAny(message, "\x1b\x07") || strings.Contains(message, "secret") || strings.Contains(message, "]52") {
+		t.Fatalf("error retained terminal controls: %q", message)
+	}
+	if !strings.Contains(message, "crabfleet API 500 Internal Server Error: badstate! next") {
+		t.Fatalf("error = %q", message)
+	}
+}
+
+func TestClientSanitizesTerminalHandshakeStatusErrorBody(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write([]byte("terminal\x1b]52;c;secret\x07failed\x1b[31m"))
+	}))
+	defer server.Close()
+
+	client := NewClient(server.URL, server.Client(), SSHAuth("gateway-token", "SHA256:test"))
+	err := client.Message(context.Background(), "IS-7", "hello", true, 80, 24)
+	if err == nil {
+		t.Fatal("expected terminal status error")
+	}
+	message := err.Error()
+	if strings.ContainsAny(message, "\x1b\x07") || strings.Contains(message, "secret") || strings.Contains(message, "]52") {
+		t.Fatalf("error retained terminal controls: %q", message)
+	}
+	if !strings.Contains(message, "crabfleet API 500 Internal Server Error: terminalfailed") {
+		t.Fatalf("error = %q", message)
+	}
+}
+
 func TestClientRejectsOversizedJSONResponses(t *testing.T) {
 	largeLogin := strings.Repeat("a", maxResponseBytes+1)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
