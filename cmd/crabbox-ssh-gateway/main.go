@@ -332,7 +332,10 @@ func handleSession(
 					Height uint32
 					Modes  string
 				}
-				ssh.Unmarshal(req.Payload, &payload)
+				if err := ssh.Unmarshal(req.Payload, &payload); err != nil {
+					req.Reply(false, nil)
+					continue
+				}
 				pty.resize(payload.Cols, payload.Rows, commandStarted)
 				req.Reply(true, nil)
 			case "window-change":
@@ -342,7 +345,9 @@ func handleSession(
 					Width  uint32
 					Height uint32
 				}
-				ssh.Unmarshal(req.Payload, &payload)
+				if err := ssh.Unmarshal(req.Payload, &payload); err != nil {
+					continue
+				}
 				pty.resize(payload.Cols, payload.Rows, commandStarted)
 			case "shell":
 				if commandStarted {
@@ -362,7 +367,10 @@ func handleSession(
 					continue
 				}
 				var payload struct{ Command string }
-				ssh.Unmarshal(req.Payload, &payload)
+				if err := ssh.Unmarshal(req.Payload, &payload); err != nil {
+					req.Reply(false, nil)
+					continue
+				}
 				commandStarted = true
 				stopTimer(idleTimer)
 				idle = nil

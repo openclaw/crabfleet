@@ -204,7 +204,7 @@ func (cmd newCmd) Run(app *cli, api *fleetapi.Client) error {
 			if cmd.VNC {
 				output, captureErr := runSSHCommandOutput(app, args...)
 				if output != "" {
-					fmt.Fprint(os.Stdout, output)
+					fmt.Fprint(os.Stdout, fleettext.SafeMultiline(output))
 				}
 				if captureErr != nil {
 					return captureErr
