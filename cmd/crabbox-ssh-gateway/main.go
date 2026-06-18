@@ -706,7 +706,7 @@ func safeError(err error) string {
 	if err == nil {
 		return ""
 	}
-	return fleettext.Safe(err.Error())
+	return fleettext.Safe(fleettext.SafeMultiline(err.Error()))
 }
 
 func printList(out io.Writer, state fleetapi.State) {
@@ -930,7 +930,7 @@ func attach(
 ) uint32 {
 	err := api.Attach(ctx, id, terminal, pty.cols, pty.rows, pty.resizes)
 	if err != nil && !errors.Is(err, net.ErrClosed) && !strings.Contains(err.Error(), "closed") {
-		fmt.Fprintf(terminal, "\nattach closed: %v\n", err)
+		fmt.Fprintf(terminal, "\nattach closed: %s\n", safeError(err))
 		return 1
 	}
 	return 0

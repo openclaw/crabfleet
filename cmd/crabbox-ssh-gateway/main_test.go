@@ -5,15 +5,19 @@ import (
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
+	"encoding/binary"
 	"encoding/json"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
+	"github.com/coder/websocket"
 	"github.com/openclaw/crabfleet/internal/fleetapi"
 	"golang.org/x/crypto/ssh"
 )
@@ -716,6 +720,51 @@ func TestRunCommandSanitizesControlPlaneErrors(t *testing.T) {
 	}
 }
 
+func TestAttachSanitizesTerminalErrors(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/terminal/ws" {
+			t.Errorf("path = %q", r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		conn, err := websocket.Accept(w, r, nil)
+		if err != nil {
+			t.Error(err)
+			return
+		}
+		defer conn.Close(websocket.StatusNormalClosure, "")
+
+		for range 2 {
+			if _, _, err := conn.Read(r.Context()); err != nil {
+				t.Error(err)
+				return
+			}
+		}
+		subscribed, _ := json.Marshal(map[string]any{"type": "subscribed", "canInput": true})
+		if err := conn.Write(r.Context(), websocket.MessageBinary, testTerminalFrame(22, "IS-7", subscribed)); err != nil {
+			t.Error(err)
+			return
+		}
+		failure, _ := json.Marshal(map[string]string{"error": "bad\x1b]52;c;secret\x07state\x1b[31m"})
+		_ = conn.Write(r.Context(), websocket.MessageBinary, testTerminalFrame(23, "IS-7", failure))
+	}))
+	defer server.Close()
+
+	client := fleetapi.NewClient(server.URL, server.Client(), fleetapi.SSHAuth("gateway-token", "SHA256:test"))
+	terminal := newBlockingTestTerminal()
+	exit := attach(context.Background(), terminal, client, "IS-7", sessionPTY{cols: 80, rows: 24})
+	if exit != 1 {
+		t.Fatalf("exit=%d output=%q", exit, terminal.String())
+	}
+	output := terminal.String()
+	if strings.ContainsAny(output, "\x1b\x07") || strings.Contains(output, "secret") || strings.Contains(output, "]52") {
+		t.Fatalf("attach output retained terminal controls: %q", output)
+	}
+	if !strings.Contains(output, "attach closed: badstate") {
+		t.Fatalf("attach output = %q", output)
+	}
+}
+
 func TestRunCommandSanitizesLinkURL(t *testing.T) {
 	permissions := &ssh.Permissions{Extensions: map[string]string{
 		"authorized": "false",
@@ -732,6 +781,52 @@ func TestRunCommandSanitizesLinkURL(t *testing.T) {
 	if !strings.Contains(got, "https://example.test/link]52;c;secret") {
 		t.Fatalf("link output = %q", got)
 	}
+}
+
+type blockingTestTerminal struct {
+	mu     sync.Mutex
+	output bytes.Buffer
+	done   chan struct{}
+}
+
+func newBlockingTestTerminal() *blockingTestTerminal {
+	return &blockingTestTerminal{done: make(chan struct{})}
+}
+
+func (t *blockingTestTerminal) Read(_ []byte) (int, error) {
+	<-t.done
+	return 0, io.EOF
+}
+
+func (t *blockingTestTerminal) Write(data []byte) (int, error) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.output.Write(data)
+}
+
+func (t *blockingTestTerminal) CancelRead() error {
+	close(t.done)
+	return nil
+}
+
+func (t *blockingTestTerminal) String() string {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.output.String()
+}
+
+func testTerminalFrame(messageType byte, sessionID string, data []byte) []byte {
+	session := []byte(sessionID)
+	payload := make([]byte, 12+len(session)+len(data))
+	binary.LittleEndian.PutUint16(payload[0:2], 0x5943)
+	payload[2] = 2
+	payload[3] = messageType
+	binary.LittleEndian.PutUint32(payload[4:8], uint32(len(session)))
+	copy(payload[8:], session)
+	offset := 8 + len(session)
+	binary.LittleEndian.PutUint32(payload[offset:offset+4], uint32(len(data)))
+	copy(payload[offset+4:], data)
+	return payload
 }
 
 func TestTranscriptCommandSanitizesTerminalControls(t *testing.T) {
