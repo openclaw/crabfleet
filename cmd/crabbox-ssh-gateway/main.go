@@ -384,7 +384,7 @@ func runCommand(ctx context.Context, out io.ReadWriter, perms *ssh.Permissions, 
 		printList(out, state)
 		return 0
 	case "new":
-		create, err := parseCreate(args[1:], api)
+		create, err := parseCreate(ctx, args[1:], api)
 		if err != nil {
 			fmt.Fprintf(out, "usage: new [--repo owner/repo] [--branch main] [--runtime crabbox|container] [--profile name] [prompt]\nerror: %v\n", err)
 			return 2
@@ -477,8 +477,9 @@ func runCommand(ctx context.Context, out io.ReadWriter, perms *ssh.Permissions, 
 			fmt.Fprintf(out, "error: %v\n", err)
 			return 1
 		}
-		fmt.Fprint(out, transcript)
-		if !strings.HasSuffix(transcript, "\n") {
+		safeTranscript := fleettext.SafeMultiline(transcript)
+		fmt.Fprint(out, safeTranscript)
+		if !strings.HasSuffix(safeTranscript, "\n") {
 			fmt.Fprintln(out)
 		}
 		return 0
@@ -661,7 +662,7 @@ func splitCommand(command string) ([]string, error) {
 	return args, nil
 }
 
-func parseCreate(args []string, api *fleetapi.Client) (createArgs, error) {
+func parseCreate(ctx context.Context, args []string, api *fleetapi.Client) (createArgs, error) {
 	fs := flag.NewFlagSet("new", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	var req fleetapi.CreateSessionRequest
@@ -683,7 +684,11 @@ func parseCreate(args []string, api *fleetapi.Client) (createArgs, error) {
 	}
 	req.Prompt = strings.Join(fs.Args(), " ")
 	if req.Repo == "" && api != nil {
-		if state, err := api.State(context.Background()); err == nil && len(state.Repos) > 0 {
+		state, err := api.State(ctx)
+		if err != nil && (ctx.Err() != nil || errors.Is(err, context.Canceled)) {
+			return createArgs{}, err
+		}
+		if err == nil && len(state.Repos) > 0 {
 			req.Repo = state.Repos[0]
 		}
 	}

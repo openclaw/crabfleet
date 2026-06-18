@@ -222,6 +222,31 @@ func TestNewCommandSanitizesControlPlaneOutput(t *testing.T) {
 	}
 }
 
+func TestTranscriptCommandSanitizesControlPlaneOutput(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/ssh/interactive-sessions/IS-7/transcript" {
+			t.Errorf("path = %q", r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		_, _ = w.Write([]byte("hello\n\x1b]52;c;bad\x07world\x1b[31m!\n"))
+	}))
+	defer server.Close()
+
+	app := &cli{API: server.URL, Token: "gateway-token", Fingerprint: "SHA256:test", NoInput: true}
+	output := captureStdout(t, func() {
+		if err := (transcriptCmd{ID: "IS-7"}).Run(app, app.apiClient()); err != nil {
+			t.Fatal(err)
+		}
+	})
+	if strings.ContainsAny(output, "\x1b\x07") || strings.Contains(output, "]52") {
+		t.Fatalf("output contains terminal controls: %q", output)
+	}
+	if output != "hello\nworld!\n" {
+		t.Fatalf("output = %q", output)
+	}
+}
+
 func TestFirstLineSkipsBlankLines(t *testing.T) {
 	if got, want := firstLine("\n\n https://example.com/vnc\nignored\n"), "https://example.com/vnc"; got != want {
 		t.Fatalf("firstLine = %q, want %q", got, want)

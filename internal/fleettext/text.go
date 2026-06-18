@@ -15,11 +15,75 @@ func Safe(value string) string {
 		if r == '\n' || r == '\r' || r == '\t' {
 			return ' '
 		}
-		if r < 0x20 || r == 0x7f || (r >= 0x80 && r <= 0x9f) {
+		if isControl(r) {
 			return -1
 		}
 		return r
 	}, value)
+}
+
+func SafeMultiline(value string) string {
+	var out strings.Builder
+	const (
+		stateText = iota
+		stateEscape
+		stateCSI
+		stateStringControl
+		stateStringControlEscape
+	)
+	state := stateText
+	for _, r := range value {
+		switch state {
+		case stateText:
+			switch {
+			case r == '\x1b':
+				state = stateEscape
+			case r == '\x9b':
+				state = stateCSI
+			case r == '\x90' || r == '\x9d' || r == '\x9e' || r == '\x9f':
+				state = stateStringControl
+			case r == '\n':
+				out.WriteRune(r)
+			case r == '\t':
+				out.WriteRune(' ')
+			case isControl(r):
+				continue
+			default:
+				out.WriteRune(r)
+			}
+		case stateEscape:
+			switch r {
+			case '[':
+				state = stateCSI
+			case ']', 'P', '^', '_':
+				state = stateStringControl
+			default:
+				state = stateText
+			}
+		case stateCSI:
+			if r >= 0x40 && r <= 0x7e {
+				state = stateText
+			}
+		case stateStringControl:
+			switch r {
+			case '\x07', '\x9c':
+				state = stateText
+			case '\x1b':
+				state = stateStringControlEscape
+			}
+		case stateStringControlEscape:
+			if r == '\\' {
+				state = stateText
+			} else if r != '\x1b' {
+				state = stateStringControl
+			}
+		}
+	}
+	return out.String()
+}
+
+func isControl(r rune) bool {
+	return r < 0x20 || r == 0x7f || (r >= 0x80 && r <= 0x9f)
 }
 
 func DisplayUser(user fleetapi.User) string {

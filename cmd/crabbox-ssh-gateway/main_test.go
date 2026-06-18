@@ -67,6 +67,7 @@ func TestSplitCommandPreservesBackslashesInSingleQuotes(t *testing.T) {
 
 func TestParseCreateKeepsLineageAndSummaryFlags(t *testing.T) {
 	create, err := parseCreate(
+		context.Background(),
 		[]string{
 			"--repo", "openclaw/crabfleet",
 			"--parent", "IS-1",
@@ -170,7 +171,7 @@ func TestParseSummaryKeepsDashPrefixedText(t *testing.T) {
 }
 
 func TestParseCreateLeavesRuntimeToDeploymentDefault(t *testing.T) {
-	create, err := parseCreate([]string{"--repo", "openclaw/crabfleet", "fix it"}, nil)
+	create, err := parseCreate(context.Background(), []string{"--repo", "openclaw/crabfleet", "fix it"}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -179,6 +180,7 @@ func TestParseCreateLeavesRuntimeToDeploymentDefault(t *testing.T) {
 	}
 
 	create, err = parseCreate(
+		context.Background(),
 		[]string{"--repo", "openclaw/crabfleet", "--runtime", "container", "fix it"},
 		nil,
 	)
@@ -192,6 +194,7 @@ func TestParseCreateLeavesRuntimeToDeploymentDefault(t *testing.T) {
 
 func TestParseCreateAcceptsProfileOverride(t *testing.T) {
 	create, err := parseCreate(
+		context.Background(),
 		[]string{"--repo", "openclaw/crabfleet", "--profile", "desktop-a", "fix it"},
 		nil,
 	)
@@ -406,6 +409,91 @@ func TestRunCommandCancelsControlPlaneRequest(t *testing.T) {
 		}
 	case <-time.After(time.Second):
 		t.Fatalf("runCommand did not return after cancellation; output=%q", output.String())
+	}
+}
+
+func TestRunCommandCancelsDefaultRepoLookup(t *testing.T) {
+	entered := make(chan struct{})
+	cancelled := make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/ssh/state" {
+			t.Errorf("path = %q", r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		close(entered)
+		select {
+		case <-r.Context().Done():
+			close(cancelled)
+		case <-time.After(time.Second):
+			t.Error("request context was not cancelled")
+		}
+	}))
+	defer server.Close()
+
+	client := &apiClient{baseURL: server.URL, token: "gateway-token", client: server.Client()}
+	permissions := &ssh.Permissions{Extensions: map[string]string{
+		"authorized":  "true",
+		"fingerprint": "SHA256:test",
+		"login":       "operator",
+		"role":        "owner",
+	}}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan uint32, 1)
+	var output bytes.Buffer
+	go func() {
+		done <- runCommand(ctx, &output, permissions, client, "new fix it", sessionPTY{})
+	}()
+
+	select {
+	case <-entered:
+	case <-time.After(time.Second):
+		t.Fatal("default repo lookup was not started")
+	}
+	cancel()
+	select {
+	case <-cancelled:
+	case <-time.After(time.Second):
+		t.Fatal("default repo lookup was not cancelled")
+	}
+	select {
+	case exit := <-done:
+		if exit != 2 {
+			t.Fatalf("exit = %d, want 2", exit)
+		}
+	case <-time.After(time.Second):
+		t.Fatalf("runCommand did not return after cancellation; output=%q", output.String())
+	}
+}
+
+func TestTranscriptCommandSanitizesTerminalControls(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/ssh/interactive-sessions/IS-7/transcript" {
+			t.Errorf("path = %q", r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		_, _ = w.Write([]byte("hello\n\x1b]52;c;bad\x07world\x1b[31m!\n"))
+	}))
+	defer server.Close()
+
+	client := &apiClient{baseURL: server.URL, token: "gateway-token", client: server.Client()}
+	permissions := &ssh.Permissions{Extensions: map[string]string{
+		"authorized":  "true",
+		"fingerprint": "SHA256:test",
+		"login":       "operator",
+		"role":        "owner",
+	}}
+	var output bytes.Buffer
+	if exit := runCommand(context.Background(), &output, permissions, client, "transcript IS-7", sessionPTY{}); exit != 0 {
+		t.Fatalf("exit=%d output=%q", exit, output.String())
+	}
+	got := output.String()
+	if strings.ContainsAny(got, "\x1b\x07") || strings.Contains(got, "]52") {
+		t.Fatalf("transcript retained terminal controls: %q", got)
+	}
+	if got != "hello\nworld!\n" {
+		t.Fatalf("transcript = %q", got)
 	}
 }
 

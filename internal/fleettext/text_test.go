@@ -48,3 +48,15 @@ func TestSafeRemovesTerminalControlCharacters(t *testing.T) {
 		t.Fatalf("safe = %q, want %q", got, want)
 	}
 }
+
+func TestSafeMultilineStripsTerminalSequences(t *testing.T) {
+	input := "hello\n\x1b]52;c;bad\x07world\x1b[31m!\x1b[0m\tok\rhidden"
+	got := SafeMultiline(input)
+	want := "hello\nworld! okhidden"
+	if got != want {
+		t.Fatalf("safe multiline = %q, want %q", got, want)
+	}
+	if strings.ContainsAny(got, "\x1b\x07\r") || strings.Contains(got, "]52") {
+		t.Fatalf("safe multiline retained terminal controls: %q", got)
+	}
+}
