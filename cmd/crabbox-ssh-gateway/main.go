@@ -452,14 +452,14 @@ func runCommand(ctx context.Context, out io.ReadWriter, perms *ssh.Permissions, 
 		},
 	}
 	if !auth.authorized {
-		fmt.Fprintf(out, "Crabfleet SSH key not linked.\n\nOpen this URL to connect it:\n%s\n\nThen run ssh again.\n", auth.linkURL)
+		fmt.Fprintf(out, "Crabfleet SSH key not linked.\n\nOpen this URL to connect it:\n%s\n\nThen run ssh again.\n", fleettext.Safe(auth.linkURL))
 		return 1
 	}
 	api := client.controlPlane(auth.fingerprint)
 
 	args, err := splitCommand(command)
 	if err != nil {
-		fmt.Fprintf(out, "error: %v\n", err)
+		writeError(out, err)
 		return 2
 	}
 	if len(args) == 0 {
@@ -473,7 +473,7 @@ func runCommand(ctx context.Context, out io.ReadWriter, perms *ssh.Permissions, 
 	case "whoami":
 		state, err := api.State(ctx)
 		if err != nil {
-			fmt.Fprintf(out, "error: %v\n", err)
+			writeError(out, err)
 			return 1
 		}
 		fmt.Fprintf(
@@ -487,7 +487,7 @@ func runCommand(ctx context.Context, out io.ReadWriter, perms *ssh.Permissions, 
 	case "list", "ls":
 		state, err := api.State(ctx)
 		if err != nil {
-			fmt.Fprintf(out, "error: %v\n", err)
+			writeError(out, err)
 			return 1
 		}
 		printList(out, state)
@@ -495,12 +495,12 @@ func runCommand(ctx context.Context, out io.ReadWriter, perms *ssh.Permissions, 
 	case "new":
 		create, err := parseCreate(ctx, args[1:], api)
 		if err != nil {
-			fmt.Fprintf(out, "usage: new [--repo owner/repo] [--branch main] [--runtime crabbox|container] [--profile name] [prompt]\nerror: %v\n", err)
+			fmt.Fprintf(out, "usage: new [--repo owner/repo] [--branch main] [--runtime crabbox|container] [--profile name] [prompt]\nerror: %s\n", safeError(err))
 			return 2
 		}
 		session, err := api.CreateSession(ctx, create.request)
 		if err != nil {
-			fmt.Fprintf(out, "error: %v\n", err)
+			writeError(out, err)
 			return 1
 		}
 		fmt.Fprintf(
@@ -539,7 +539,7 @@ func runCommand(ctx context.Context, out io.ReadWriter, perms *ssh.Permissions, 
 		}
 		state, err := api.State(ctx)
 		if err != nil {
-			fmt.Fprintf(out, "error: %v\n", err)
+			writeError(out, err)
 			return 1
 		}
 		for _, session := range state.InteractiveSessions {
@@ -562,12 +562,12 @@ func runCommand(ctx context.Context, out io.ReadWriter, perms *ssh.Permissions, 
 		}
 		session, err := api.Action(ctx, args[1], "stop")
 		if err != nil {
-			fmt.Fprintf(out, "error: %v\n", err)
+			writeError(out, err)
 			return 1
 		}
 		fmt.Fprintf(out, "session: %s\nstatus: %s\n", fleettext.Safe(session.ID), fleettext.Safe(session.Status))
 		if note := session.LifecycleStopNote(); note != "" {
-			fmt.Fprintf(out, "note: %s\n", note)
+			fmt.Fprintf(out, "note: %s\n", fleettext.Safe(note))
 		}
 		return 0
 	case "logs":
@@ -577,7 +577,7 @@ func runCommand(ctx context.Context, out io.ReadWriter, perms *ssh.Permissions, 
 		}
 		logs, err := api.Logs(ctx, args[1])
 		if err != nil {
-			fmt.Fprintf(out, "error: %v\n", err)
+			writeError(out, err)
 			return 1
 		}
 		fleettext.WriteSessionLogs(out, logs)
@@ -589,7 +589,7 @@ func runCommand(ctx context.Context, out io.ReadWriter, perms *ssh.Permissions, 
 		}
 		transcript, err := api.Transcript(ctx, args[1])
 		if err != nil {
-			fmt.Fprintf(out, "error: %v\n", err)
+			writeError(out, err)
 			return 1
 		}
 		safeTranscript := fleettext.SafeMultiline(transcript)
@@ -605,7 +605,7 @@ func runCommand(ctx context.Context, out io.ReadWriter, perms *ssh.Permissions, 
 		}
 		message, err := parseMessage(args[2:])
 		if err != nil {
-			fmt.Fprintf(out, "usage: message SESSION_ID [--no-enter] TEXT\nerror: %v\n", err)
+			fmt.Fprintf(out, "usage: message SESSION_ID [--no-enter] TEXT\nerror: %s\n", safeError(err))
 			return 2
 		}
 		if message.text == "" {
@@ -613,7 +613,7 @@ func runCommand(ctx context.Context, out io.ReadWriter, perms *ssh.Permissions, 
 			return 2
 		}
 		if err := api.Message(ctx, args[1], message.text, !message.noEnter, pty.cols, pty.rows); err != nil {
-			fmt.Fprintf(out, "error: %v\n", err)
+			writeError(out, err)
 			return 1
 		}
 		fmt.Fprintf(out, "sent: %s\n", fleettext.Safe(args[1]))
@@ -625,13 +625,13 @@ func runCommand(ctx context.Context, out io.ReadWriter, perms *ssh.Permissions, 
 		}
 		update, err := parseSummary(args[2:])
 		if err != nil {
-			fmt.Fprintf(out, "usage: summary SESSION_ID [--purpose text] [summary text]\nerror: %v\n", err)
+			fmt.Fprintf(out, "usage: summary SESSION_ID [--purpose text] [summary text]\nerror: %s\n", safeError(err))
 			return 2
 		}
 		if update.summary == "" && update.purpose == "" {
 			state, err := api.State(ctx)
 			if err != nil {
-				fmt.Fprintf(out, "error: %v\n", err)
+				writeError(out, err)
 				return 1
 			}
 			for _, session := range state.InteractiveSessions {
@@ -652,7 +652,7 @@ func runCommand(ctx context.Context, out io.ReadWriter, perms *ssh.Permissions, 
 		}
 		session, err := api.UpdateSummary(ctx, args[1], fields)
 		if err != nil {
-			fmt.Fprintf(out, "error: %v\n", err)
+			writeError(out, err)
 			return 1
 		}
 		fleettext.WriteSessionSummary(out, session)
@@ -688,6 +688,17 @@ func printHelp(out io.Writer, user fleetapi.User) {
 	fmt.Fprintln(out, "  message SESSION_ID [--no-enter] TEXT")
 	fmt.Fprintln(out, "  summary SESSION_ID [--purpose text] [summary text]")
 	fmt.Fprintln(out, "  open")
+}
+
+func writeError(out io.Writer, err error) {
+	fmt.Fprintf(out, "error: %s\n", safeError(err))
+}
+
+func safeError(err error) string {
+	if err == nil {
+		return ""
+	}
+	return fleettext.Safe(err.Error())
 }
 
 func printList(out io.Writer, state fleetapi.State) {
