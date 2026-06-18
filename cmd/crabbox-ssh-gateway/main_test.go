@@ -324,6 +324,91 @@ func TestHandleConnClosesStalledHandshake(t *testing.T) {
 	}
 }
 
+func TestAcceptConnRejectsWhenHandshakeSlotsFull(t *testing.T) {
+	previous := sshHandshakeSlots
+	sshHandshakeSlots = newConnectionLimiter(1)
+	if !sshHandshakeSlots.acquire() {
+		t.Fatal("failed to occupy handshake slot")
+	}
+	defer func() {
+		sshHandshakeSlots.release()
+		sshHandshakeSlots = previous
+	}()
+
+	server, client := net.Pipe()
+	defer client.Close()
+	acceptConn(server, &ssh.ServerConfig{}, nil)
+
+	done := make(chan error, 1)
+	go func() {
+		var buf [1]byte
+		_, err := client.Read(buf[:])
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("connection remained open after handshake slot exhaustion")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("connection remained open after handshake slot exhaustion")
+	}
+}
+
+func TestRunCommandCancelsControlPlaneRequest(t *testing.T) {
+	entered := make(chan struct{})
+	cancelled := make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/ssh/state" {
+			t.Errorf("path = %q", r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		close(entered)
+		select {
+		case <-r.Context().Done():
+			close(cancelled)
+		case <-time.After(time.Second):
+			t.Error("request context was not cancelled")
+		}
+	}))
+	defer server.Close()
+
+	client := &apiClient{baseURL: server.URL, token: "gateway-token", client: server.Client()}
+	permissions := &ssh.Permissions{Extensions: map[string]string{
+		"authorized":  "true",
+		"fingerprint": "SHA256:test",
+		"login":       "operator",
+		"role":        "owner",
+	}}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan uint32, 1)
+	var output bytes.Buffer
+	go func() {
+		done <- runCommand(ctx, &output, permissions, client, "whoami", sessionPTY{})
+	}()
+
+	select {
+	case <-entered:
+	case <-time.After(time.Second):
+		t.Fatal("control-plane request was not started")
+	}
+	cancel()
+	select {
+	case <-cancelled:
+	case <-time.After(time.Second):
+		t.Fatal("control-plane request was not cancelled")
+	}
+	select {
+	case exit := <-done:
+		if exit != 1 {
+			t.Fatalf("exit = %d, want 1", exit)
+		}
+	case <-time.After(time.Second):
+		t.Fatalf("runCommand did not return after cancellation; output=%q", output.String())
+	}
+}
+
 func TestHelpNamesDeleteAsCanonicalCommand(t *testing.T) {
 	var output bytes.Buffer
 	printHelp(&output, fleetapi.User{Login: "operator", Role: "owner"})
