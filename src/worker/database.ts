@@ -79,6 +79,10 @@ export type CardTable = {
   changed_files: string;
   diff_patch: string;
   active_run_id: string | null;
+  schedule_json: string;
+  next_run_at: number | null;
+  last_scheduled_run_at: number | null;
+  schedule_claimed_at: number | null;
 };
 
 export type RunAttemptTable = {

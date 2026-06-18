@@ -417,6 +417,6 @@ MVP schedule shape:
 
     { "kind": "interval", "everyMs": 86400000 }
 
-When `nextRunAt` is due, the scheduler queues a normal run attempt for the card and computes the next due timestamp. Active runs are not duplicated; a due card with an active run is skipped until the next tick.
+When `nextRunAt` is due, the scheduler claims that exact occurrence with a five-minute recovery lease, queues a normal run attempt when capacity allows, and advances to the first cadence-aligned timestamp after the tick. Catch-up is constant-time. Concurrent ticks cannot claim the same occurrence, and an interrupted claim becomes retryable after its lease expires. Active runs and capacity blocks coalesce the current occurrence instead of causing per-minute retries.
 
 This allows daily operational sweeps, maintenance checks, and recurring repair jobs to remain visible in the normal card/run history.

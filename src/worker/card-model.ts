@@ -1,5 +1,6 @@
 import type { RunStatus } from "./models.ts";
 import type { RuntimeCapabilities } from "./session-model.ts";
+import type { CardSchedule } from "./card-schedule.ts";
 
 export type WorkflowConfig = {
   runtime?: string;
@@ -21,9 +22,28 @@ export type Card = {
   owner: string;
   startedAt: number | null;
   createdAt: number;
+  schedule: CardSchedule | null;
+  nextRunAt: number | null;
+  lastScheduledRunAt: number | null;
   logs: string[];
   changes: CardChanges;
   run: RunAttempt | null;
+};
+
+export type DueRecurringCard = {
+  id: string;
+  scheduleJson: string;
+  dueAt: number;
+};
+
+export type RecurringSchedulerTickResult = {
+  status: "ok";
+  now: number;
+  scanned: number;
+  claimed: number;
+  queued: number;
+  skipped: number;
+  invalid: number;
 };
 
 export type RunAttempt = {

@@ -119,10 +119,10 @@ Owners can evaluate `CRABBOX.md` for enabled repos. Valid workflow config sets r
 
 Deployed and actively used by OpenClaw. See [Current Boundaries](#current-boundaries) for the remaining deliberately unimplemented product behaviors.
 
-## Recurring cards
+## Recurring Cards
 
 Crabfleet supports recurring cards for operational jobs that should run on a cadence without a human repeatedly pressing Start. A card can include a schedule object such as:
 
     { "kind": "interval", "everyMs": 86400000 }
 
-The Worker scheduled handler and the owner-only `/api/admin/scheduler/tick` endpoint both scan due cards, call the existing run scheduler, create a run attempt, and advance `nextRunAt`. This keeps recurrence at the card/run layer instead of using long-running loops.
+The Worker scheduled handler and owner-only `/api/admin/scheduler/tick` endpoint atomically claim due occurrences, use the existing run scheduler, and advance `nextRunAt` with constant-time catch-up. Concurrent ticks cannot dispatch the same occurrence twice. If a card already has an active run or the fleet is at capacity, that occurrence is recorded as skipped and the cadence advances instead of retrying every minute.

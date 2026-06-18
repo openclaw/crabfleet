@@ -3,6 +3,7 @@ import test from "node:test";
 
 import {
   scheduleInteractiveSessionReconciliation,
+  scheduleRecurringCardTick,
   type ScheduledExecutionContext,
 } from "../src/worker/scheduled.ts";
 
@@ -44,6 +45,47 @@ test("scheduled reconciliation reports task failures without rejecting waitUntil
   scheduleInteractiveSessionReconciliation(context(tasks), {
     now: () => 456,
     reconcile: async () => {
+      throw failure;
+    },
+    reportError: (error) => {
+      reported.push(error);
+    },
+  });
+
+  await assert.doesNotReject(tasks[0]);
+  assert.deepEqual(reported, [failure]);
+});
+
+test("scheduled recurring cards capture one clock and register their task", async () => {
+  const tasks: Promise<unknown>[] = [];
+  const calls: string[] = [];
+
+  scheduleRecurringCardTick(context(tasks), {
+    now: () => {
+      calls.push("now");
+      return 789;
+    },
+    run: async (now) => {
+      calls.push(`run:${now}`);
+    },
+    reportError: () => {
+      calls.push("error");
+    },
+  });
+
+  assert.equal(tasks.length, 1);
+  await tasks[0];
+  assert.deepEqual(calls, ["now", "run:789"]);
+});
+
+test("scheduled recurring cards report failures without rejecting waitUntil", async () => {
+  const tasks: Promise<unknown>[] = [];
+  const failure = new Error("failed");
+  const reported: unknown[] = [];
+
+  scheduleRecurringCardTick(context(tasks), {
+    now: () => 789,
+    run: async () => {
       throw failure;
     },
     reportError: (error) => {

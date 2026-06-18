@@ -28,6 +28,7 @@ import type { SessionIngressRouteDependencies } from "./routes/session-ingress.t
 import type { ServiceSessionRouteDependencies } from "./routes/service-sessions.ts";
 import { RuntimeApplication, runtimeAdapterReconcileIntervalMs } from "./runtime-application.ts";
 import { defaultSandboxEgressHosts } from "./sandbox-outbound.ts";
+import { scheduleRecurringCardTick } from "./scheduled.ts";
 import { createSandboxSessionResourceService } from "./sandbox-session-resources.ts";
 import { ServiceRegistry } from "./service-registry.ts";
 import type { InteractiveSession } from "./session-model.ts";
@@ -100,6 +101,17 @@ export class WorkerApplication {
     this.openClaw = openClaw;
   }
 
+  schedule(context: ExecutionContext): void {
+    this.runtime.schedule(context);
+    scheduleRecurringCardTick(context, {
+      now: Date.now,
+      run: (now) => this.cardLifecycleService().runRecurringScheduler(now),
+      reportError: (error) => {
+        console.error("scheduled recurring card tick failed", error);
+      },
+    });
+  }
+
   provisioningRoutes(): ProvisioningRouteDependencies {
     const endpoints = this.runtime.endpoints();
     return {
@@ -128,6 +140,7 @@ export class WorkerApplication {
       readCardRuns: (cardId) => this.cardLifecycleService().runs(cardId),
       mutateCard: (user, cardId, action) =>
         this.cardLifecycleService().mutate(user, cardId, action),
+      runRecurringCardScheduler: () => this.cardLifecycleService().runRecurringScheduler(),
       updatePolicy: async (input, user) => {
         await admin.updatePolicy(input, user);
       },

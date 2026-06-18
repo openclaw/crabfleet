@@ -1,12 +1,5 @@
 import { ContainerProxy, Sandbox as CloudflareSandboxBase } from "@cloudflare/sandbox";
 import {
-  cardScheduleSummary,
-  nextRecurringRunAt,
-  normalizeCardSchedule,
-  parseStoredCardSchedule,
-  type CardSchedule,
-} from "./recurring-cards";
-import {
   APP_HTML,
   LOGO_PNG_BASE64,
   OG_IMAGE_PNG_BASE64,
@@ -176,7 +169,7 @@ export default {
     env: RuntimeEnv,
     context: ExecutionContext,
   ): Promise<void> {
-    new WorkerApplication(env).runtime.schedule(context);
+    new WorkerApplication(env).schedule(context);
   },
 } satisfies ExportedHandler<RuntimeEnv>;
 
