@@ -287,7 +287,7 @@ func TestDoctorSanitizesControlPlaneErrors(t *testing.T) {
 	if strings.ContainsAny(output, "\x1b\x07") {
 		t.Fatalf("doctor output contains terminal controls: %q", output)
 	}
-	if !strings.Contains(output, "auth: failed: crabfleet API 500 Internal Server Error: bad]52;c;secretstate") {
+	if !strings.Contains(output, "auth: failed: crabfleet API 500 Internal Server Error: badstate") {
 		t.Fatalf("doctor output = %q", output)
 	}
 }
