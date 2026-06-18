@@ -643,7 +643,14 @@ func runCommand(ctx context.Context, out io.ReadWriter, perms *ssh.Permissions, 
 			fmt.Fprintf(out, "session %s not found\n", fleettext.Safe(args[1]))
 			return 1
 		}
-		session, err := api.UpdateSummary(ctx, args[1], update.summary, update.purpose)
+		fields := map[string]string{}
+		if update.summary != "" {
+			fields["summary"] = update.summary
+		}
+		if update.purpose != "" {
+			fields["purpose"] = update.purpose
+		}
+		session, err := api.UpdateSummary(ctx, args[1], fields)
 		if err != nil {
 			fmt.Fprintf(out, "error: %v\n", err)
 			return 1
@@ -800,7 +807,7 @@ func parseCreate(ctx context.Context, args []string, api *fleetapi.Client) (crea
 	req.Prompt = strings.Join(fs.Args(), " ")
 	if req.Repo == "" && api != nil {
 		state, err := api.State(ctx)
-		if err != nil && (ctx.Err() != nil || errors.Is(err, context.Canceled)) {
+		if err != nil {
 			return createArgs{}, err
 		}
 		if err == nil && len(state.Repos) > 0 {

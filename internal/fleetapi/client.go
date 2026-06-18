@@ -165,21 +165,15 @@ func (c *Client) Transcript(ctx context.Context, id string) (string, error) {
 	if err := responseError(resp); err != nil {
 		return "", err
 	}
-	data, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBytes+1))
-	if len(data) > maxResponseBytes {
-		return "", fmt.Errorf("crabfleet API response exceeds %d bytes", maxResponseBytes)
-	}
+	data, err := readBoundedResponse(resp.Body)
 	return string(data), err
 }
 
-func (c *Client) UpdateSummary(ctx context.Context, id string, summary string, purpose string) (Session, error) {
+func (c *Client) UpdateSummary(ctx context.Context, id string, fields map[string]string) (Session, error) {
 	var out struct {
 		Session Session `json:"session"`
 	}
-	err := c.doJSON(ctx, http.MethodPost, sessionPath(id)+"/summary", map[string]string{
-		"summary": summary,
-		"purpose": purpose,
-	}, &out)
+	err := c.doJSON(ctx, http.MethodPost, sessionPath(id)+"/summary", fields, &out)
 	return out.Session, err
 }
 
@@ -258,7 +252,11 @@ func (c *Client) doJSON(ctx context.Context, method string, path string, body an
 	if out == nil {
 		return nil
 	}
-	return json.NewDecoder(resp.Body).Decode(out)
+	data, err := readBoundedResponse(resp.Body)
+	if err != nil {
+		return err
+	}
+	return json.Unmarshal(data, out)
 }
 
 func (c *Client) open(
@@ -308,6 +306,14 @@ func responseError(resp *http.Response) error {
 		}
 	}
 	return nil
+}
+
+func readBoundedResponse(body io.Reader) ([]byte, error) {
+	data, err := io.ReadAll(io.LimitReader(body, maxResponseBytes+1))
+	if len(data) > maxResponseBytes {
+		return nil, fmt.Errorf("crabfleet API response exceeds %d bytes", maxResponseBytes)
+	}
+	return data, err
 }
 
 func (a Auth) path(path string) (string, error) {

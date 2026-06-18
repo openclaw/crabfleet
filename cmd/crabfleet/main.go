@@ -578,7 +578,14 @@ func (cmd summaryCmd) Run(app *cli, api *fleetapi.Client) error {
 		fleettext.WriteSessionSummary(os.Stdout, session)
 		return nil
 	}
-	session, err := api.UpdateSummary(context.Background(), cmd.ID, summary, cmd.Purpose)
+	fields := map[string]string{}
+	if summary != "" {
+		fields["summary"] = summary
+	}
+	if cmd.Purpose != "" {
+		fields["purpose"] = cmd.Purpose
+	}
+	session, err := api.UpdateSummary(context.Background(), cmd.ID, fields)
 	if err != nil {
 		if canFallbackToSSH(app, err) {
 			args := []string{"summary", cmd.ID}

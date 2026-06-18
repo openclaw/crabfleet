@@ -350,6 +350,62 @@ func TestMessageRejectsOversizedPipedInput(t *testing.T) {
 	}
 }
 
+func TestSummaryUpdateOmitsUnchangedFields(t *testing.T) {
+	tests := []struct {
+		name      string
+		command   summaryCmd
+		wantField string
+		wantValue string
+		omitField string
+	}{
+		{
+			name:      "purpose only",
+			command:   summaryCmd{ID: "IS-7", Purpose: "new purpose"},
+			wantField: "purpose",
+			wantValue: "new purpose",
+			omitField: "summary",
+		},
+		{
+			name:      "summary only",
+			command:   summaryCmd{ID: "IS-7", Text: []string{"new", "summary"}},
+			wantField: "summary",
+			wantValue: "new summary",
+			omitField: "purpose",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var body map[string]string
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path != "/api/ssh/interactive-sessions/IS-7/summary" {
+					t.Errorf("path = %q", r.URL.Path)
+					w.WriteHeader(http.StatusNotFound)
+					return
+				}
+				if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+					t.Error(err)
+					w.WriteHeader(http.StatusBadRequest)
+					return
+				}
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(`{"session":{"id":"IS-7","status":"ready"}}`))
+			}))
+			defer server.Close()
+
+			app := &cli{API: server.URL, Token: "gateway-token", Fingerprint: "SHA256:test", NoInput: true}
+			if err := tt.command.Run(app, app.apiClient()); err != nil {
+				t.Fatal(err)
+			}
+			if got := body[tt.wantField]; got != tt.wantValue {
+				t.Fatalf("%s = %q, want %q in body %#v", tt.wantField, got, tt.wantValue, body)
+			}
+			if _, ok := body[tt.omitField]; ok {
+				t.Fatalf("%s was present in body %#v", tt.omitField, body)
+			}
+		})
+	}
+}
+
 func TestValidateWebVNCURL(t *testing.T) {
 	tests := []struct {
 		raw     string
