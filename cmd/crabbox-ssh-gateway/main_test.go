@@ -4,11 +4,13 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/openclaw/crabfleet/internal/fleetapi"
 	"golang.org/x/crypto/ssh"
@@ -64,7 +66,7 @@ func TestSplitCommandPreservesBackslashesInSingleQuotes(t *testing.T) {
 }
 
 func TestParseCreateKeepsLineageAndSummaryFlags(t *testing.T) {
-	create := parseCreate(
+	create, err := parseCreate(
 		[]string{
 			"--repo", "openclaw/crabfleet",
 			"--parent", "IS-1",
@@ -75,6 +77,9 @@ func TestParseCreateKeepsLineageAndSummaryFlags(t *testing.T) {
 		},
 		nil,
 	)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if got, want := create.request.ParentSessionID, "IS-1"; got != want {
 		t.Fatalf("parent = %q, want %q", got, want)
 	}
@@ -93,35 +98,76 @@ func TestParseCreateKeepsLineageAndSummaryFlags(t *testing.T) {
 }
 
 func TestParseMessageKeepsNoEnterAndText(t *testing.T) {
-	message := parseMessage([]string{"--no-enter", "hello", "child"})
+	message, err := parseMessage([]string{"--no-enter", "hello", "child"})
+	if err != nil {
+		t.Fatal(err)
+	}
 	if !message.noEnter {
 		t.Fatal("expected no-enter")
 	}
 	if got, want := message.text, "hello child"; got != want {
 		t.Fatalf("text = %q, want %q", got, want)
 	}
+
+	message, err = parseMessage([]string{"--help", "is", "terminal", "text"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := message.text, "--help is terminal text"; got != want {
+		t.Fatalf("text = %q, want %q", got, want)
+	}
+}
+
+func TestParseSummaryKeepsDashPrefixedText(t *testing.T) {
+	summary, err := parseSummary([]string{"--looks-like-flag", "but", "is", "text"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := summary.summary, "--looks-like-flag but is text"; got != want {
+		t.Fatalf("summary = %q, want %q", got, want)
+	}
+
+	summary, err = parseSummary([]string{"--purpose", "handoff", "--", "--summary-start"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := summary.purpose, "handoff"; got != want {
+		t.Fatalf("purpose = %q, want %q", got, want)
+	}
+	if got, want := summary.summary, "--summary-start"; got != want {
+		t.Fatalf("summary = %q, want %q", got, want)
+	}
 }
 
 func TestParseCreateLeavesRuntimeToDeploymentDefault(t *testing.T) {
-	create := parseCreate([]string{"--repo", "openclaw/crabfleet", "fix it"}, nil)
+	create, err := parseCreate([]string{"--repo", "openclaw/crabfleet", "fix it"}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if create.request.Runtime != "" {
 		t.Fatalf("runtime = %q, want deployment default", create.request.Runtime)
 	}
 
-	create = parseCreate(
+	create, err = parseCreate(
 		[]string{"--repo", "openclaw/crabfleet", "--runtime", "container", "fix it"},
 		nil,
 	)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if create.request.Runtime != "container" {
 		t.Fatalf("runtime = %q, want explicit override", create.request.Runtime)
 	}
 }
 
 func TestParseCreateAcceptsProfileOverride(t *testing.T) {
-	create := parseCreate(
+	create, err := parseCreate(
 		[]string{"--repo", "openclaw/crabfleet", "--profile", "desktop-a", "fix it"},
 		nil,
 	)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if create.request.Profile != "desktop-a" {
 		t.Fatalf("profile = %q, want explicit override", create.request.Profile)
 	}
@@ -191,6 +237,60 @@ func TestDeleteCommandUsesWorkspaceStopAction(t *testing.T) {
 	}
 	if got := stopOutput.String(); !strings.HasPrefix(got, "unknown command: stop\n") {
 		t.Fatalf("stop alias output=%q", got)
+	}
+}
+
+func TestInvalidSubcommandFlagsDoNotCallControlPlane(t *testing.T) {
+	calls := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer server.Close()
+
+	client := &apiClient{baseURL: server.URL, token: "gateway-token", client: server.Client()}
+	permissions := &ssh.Permissions{Extensions: map[string]string{
+		"authorized":  "true",
+		"fingerprint": "SHA256:test",
+		"login":       "operator",
+		"role":        "owner",
+	}}
+	for _, command := range []string{
+		"new --repo",
+		"new --bogus value",
+		"message IS-7 --no-enter",
+		"summary IS-7 --purpose",
+	} {
+		var output bytes.Buffer
+		if exit := runCommand(context.Background(), &output, permissions, client, command, sessionPTY{}); exit != 2 {
+			t.Fatalf("command=%q exit=%d output=%q", command, exit, output.String())
+		}
+		if !strings.Contains(output.String(), "usage:") {
+			t.Fatalf("command=%q output=%q", command, output.String())
+		}
+	}
+	if calls != 0 {
+		t.Fatalf("control plane calls = %d, want 0", calls)
+	}
+}
+
+func TestHandleConnClosesStalledHandshake(t *testing.T) {
+	previous := sshHandshakeTimeout
+	sshHandshakeTimeout = 20 * time.Millisecond
+	defer func() { sshHandshakeTimeout = previous }()
+
+	server, client := net.Pipe()
+	defer client.Close()
+	done := make(chan struct{})
+	go func() {
+		handleConn(server, &ssh.ServerConfig{}, nil)
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("stalled handshake was not closed")
 	}
 }
 

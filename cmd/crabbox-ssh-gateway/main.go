@@ -22,6 +22,11 @@ import (
 	"golang.org/x/crypto/ssh"
 )
 
+var (
+	sshHandshakeTimeout = 15 * time.Second
+	sshAuthTimeout      = 15 * time.Second
+)
+
 type apiClient struct {
 	baseURL string
 	token   string
@@ -86,8 +91,10 @@ func main() {
 		ServerVersion: "SSH-2.0-Crabfleet",
 		PublicKeyCallback: func(meta ssh.ConnMetadata, key ssh.PublicKey) (*ssh.Permissions, error) {
 			linkMode := meta.User() == "link" || meta.User() == "onboard"
+			authCtx, cancel := context.WithTimeout(context.Background(), sshAuthTimeout)
+			defer cancel()
 			auth, err := client.auth(
-				context.Background(),
+				authCtx,
 				key,
 				meta.User(),
 				remoteHost(meta.RemoteAddr()),
@@ -131,10 +138,16 @@ func main() {
 
 func handleConn(raw net.Conn, config *ssh.ServerConfig, client *apiClient) {
 	defer raw.Close()
+	if err := raw.SetDeadline(time.Now().Add(sshHandshakeTimeout)); err != nil {
+		log.Printf("handshake deadline %s: %v", raw.RemoteAddr(), err)
+	}
 	conn, chans, reqs, err := ssh.NewServerConn(raw, config)
 	if err != nil {
 		log.Printf("handshake %s: %v", raw.RemoteAddr(), err)
 		return
+	}
+	if err := raw.SetDeadline(time.Time{}); err != nil {
+		log.Printf("clear handshake deadline %s: %v", raw.RemoteAddr(), err)
 	}
 	defer conn.Close()
 	go ssh.DiscardRequests(reqs)
@@ -304,7 +317,11 @@ func runCommand(ctx context.Context, out io.ReadWriter, perms *ssh.Permissions, 
 		printList(out, state)
 		return 0
 	case "new":
-		create := parseCreate(args[1:], api)
+		create, err := parseCreate(args[1:], api)
+		if err != nil {
+			fmt.Fprintf(out, "usage: new [--repo owner/repo] [--branch main] [--runtime crabbox|container] [--profile name] [prompt]\nerror: %v\n", err)
+			return 2
+		}
 		session, err := api.CreateSession(ctx, create.request)
 		if err != nil {
 			fmt.Fprintf(out, "error: %v\n", err)
@@ -403,7 +420,11 @@ func runCommand(ctx context.Context, out io.ReadWriter, perms *ssh.Permissions, 
 			fmt.Fprintln(out, "usage: message SESSION_ID [--no-enter] TEXT")
 			return 2
 		}
-		message := parseMessage(args[2:])
+		message, err := parseMessage(args[2:])
+		if err != nil {
+			fmt.Fprintf(out, "usage: message SESSION_ID [--no-enter] TEXT\nerror: %v\n", err)
+			return 2
+		}
 		if message.text == "" {
 			fmt.Fprintln(out, "usage: message SESSION_ID [--no-enter] TEXT")
 			return 2
@@ -419,7 +440,11 @@ func runCommand(ctx context.Context, out io.ReadWriter, perms *ssh.Permissions, 
 			fmt.Fprintln(out, "usage: summary SESSION_ID [--purpose text] [summary text]")
 			return 2
 		}
-		update := parseSummary(args[2:])
+		update, err := parseSummary(args[2:])
+		if err != nil {
+			fmt.Fprintf(out, "usage: summary SESSION_ID [--purpose text] [summary text]\nerror: %v\n", err)
+			return 2
+		}
 		if update.summary == "" && update.purpose == "" {
 			state, err := api.State(ctx)
 			if err != nil {
@@ -569,7 +594,7 @@ func splitCommand(command string) ([]string, error) {
 	return args, nil
 }
 
-func parseCreate(args []string, api *fleetapi.Client) createArgs {
+func parseCreate(args []string, api *fleetapi.Client) (createArgs, error) {
 	fs := flag.NewFlagSet("new", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	var req fleetapi.CreateSessionRequest
@@ -586,14 +611,16 @@ func parseCreate(args []string, api *fleetapi.Client) createArgs {
 	fs.StringVar(&req.Summary, "summary", "", "summary")
 	fs.BoolVar(&detach, "detach", false, "do not attach after creating")
 	fs.BoolVar(&vnc, "vnc", false, "print vnc URL without attaching")
-	_ = fs.Parse(args)
+	if err := fs.Parse(args); err != nil {
+		return createArgs{}, err
+	}
 	req.Prompt = strings.Join(fs.Args(), " ")
 	if req.Repo == "" && api != nil {
 		if state, err := api.State(context.Background()); err == nil && len(state.Repos) > 0 {
 			req.Repo = state.Repos[0]
 		}
 	}
-	return createArgs{request: req, detach: detach, vnc: vnc}
+	return createArgs{request: req, detach: detach, vnc: vnc}, nil
 }
 
 type summaryUpdate struct {
@@ -606,24 +633,35 @@ type messageInput struct {
 	noEnter bool
 }
 
-func parseMessage(args []string) messageInput {
-	fs := flag.NewFlagSet("message", flag.ContinueOnError)
-	fs.SetOutput(io.Discard)
+func parseMessage(args []string) (messageInput, error) {
 	var input messageInput
-	fs.BoolVar(&input.noEnter, "no-enter", false, "do not append enter")
-	_ = fs.Parse(args)
-	input.text = strings.Join(fs.Args(), " ")
-	return input
+	remaining := args
+	if len(remaining) > 0 && remaining[0] == "--no-enter" {
+		input.noEnter = true
+		remaining = remaining[1:]
+	}
+	if len(remaining) > 0 && remaining[0] == "--" {
+		remaining = remaining[1:]
+	}
+	input.text = strings.Join(remaining, " ")
+	return input, nil
 }
 
-func parseSummary(args []string) summaryUpdate {
-	fs := flag.NewFlagSet("summary", flag.ContinueOnError)
-	fs.SetOutput(io.Discard)
+func parseSummary(args []string) (summaryUpdate, error) {
 	var update summaryUpdate
-	fs.StringVar(&update.purpose, "purpose", "", "purpose")
-	_ = fs.Parse(args)
-	update.summary = strings.Join(fs.Args(), " ")
-	return update
+	remaining := args
+	if len(remaining) > 0 && remaining[0] == "--purpose" {
+		if len(remaining) < 2 {
+			return summaryUpdate{}, errors.New("flag needs an argument: -purpose")
+		}
+		update.purpose = remaining[1]
+		remaining = remaining[2:]
+	}
+	if len(remaining) > 0 && remaining[0] == "--" {
+		remaining = remaining[1:]
+	}
+	update.summary = strings.Join(remaining, " ")
+	return update, nil
 }
 
 func (c *apiClient) auth(ctx context.Context, key ssh.PublicKey, sshUser string, remote string, createLink bool) (keyAuth, error) {

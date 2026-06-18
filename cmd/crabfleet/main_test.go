@@ -3,8 +3,12 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/alecthomas/kong"
@@ -38,10 +42,127 @@ func TestShellQuoteMatchesGatewaySplitter(t *testing.T) {
 	}
 }
 
+func TestShellQuoteQuotesMetacharacters(t *testing.T) {
+	values := []string{
+		"$(touch /tmp/pwned)",
+		";id",
+		"&",
+		"`id`",
+		">file",
+		"*",
+		"line\nnext",
+	}
+	for _, value := range values {
+		quoted := shellQuote(value)
+		if !strings.HasPrefix(quoted, "'") || !strings.HasSuffix(quoted, "'") {
+			t.Fatalf("shellQuote(%q) = %q, want single-quoted", value, quoted)
+		}
+		args, err := splitForTest("message IS-1 " + quoted)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := args[2]; got != value {
+			t.Fatalf("round trip = %q, want %q", got, value)
+		}
+	}
+}
+
+func TestMutatingAPIFailureDoesNotFallbackToSSH(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/api/ssh/interactive-sessions" {
+			t.Errorf("request = %s %s", r.Method, r.URL.Path)
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		conn, _, err := w.(http.Hijacker).Hijack()
+		if err != nil {
+			t.Error(err)
+			return
+		}
+		_ = conn.Close()
+	}))
+	defer server.Close()
+
+	app := &cli{API: server.URL, SSHHost: defaultSSHHost, Token: "gateway-token", Fingerprint: "SHA256:test"}
+	err := (newCmd{Branch: "main", Command: "codex --yolo"}).Run(app, app.apiClient())
+	if err == nil {
+		t.Fatal("expected ambiguous mutation error")
+	}
+	if got := err.Error(); !strings.Contains(got, "not retrying through SSH") {
+		t.Fatalf("error = %q", got)
+	}
+}
+
+func TestLocalAuthFailureStillFallsBackToSSH(t *testing.T) {
+	dir := t.TempDir()
+	argsPath := filepath.Join(dir, "ssh-args")
+	sshPath := filepath.Join(dir, "ssh")
+	if err := os.WriteFile(sshPath, []byte("#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$SSH_ARGS_PATH\"\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("SSH_ARGS_PATH", argsPath)
+
+	app := &cli{API: defaultAPIURL, SSHHost: "crabd.test"}
+	if err := (newCmd{Branch: "main", Command: "codex --yolo", Repo: "openclaw/crabfleet"}).Run(app, app.apiClient()); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(argsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	output := string(data)
+	if !strings.Contains(output, "crabd.test\n") || !strings.Contains(output, "new --branch main --repo openclaw/crabfleet") {
+		t.Fatalf("ssh args = %q", output)
+	}
+}
+
+func TestNewCommandSanitizesControlPlaneOutput(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"session":{"id":"IS-1\u001b]52;c;bad\u0007","repo":"openclaw/crabfleet\u001b[31m","status":"ready","vncUrl":"https://example.test/vnc\u001b[0m","ptyAvailable":true}}`))
+	}))
+	defer server.Close()
+
+	app := &cli{API: server.URL, Token: "gateway-token", Fingerprint: "SHA256:test", NoInput: true}
+	output := captureStdout(t, func() {
+		if err := (newCmd{Branch: "main", Command: "codex --yolo", Detach: true}).Run(app, app.apiClient()); err != nil {
+			t.Fatal(err)
+		}
+	})
+	if strings.ContainsAny(output, "\x1b\x07") {
+		t.Fatalf("output contains terminal controls: %q", output)
+	}
+	if !strings.Contains(output, "session: IS-1]52;c;bad") {
+		t.Fatalf("output = %q", output)
+	}
+}
+
 func TestFirstLineSkipsBlankLines(t *testing.T) {
 	if got, want := firstLine("\n\n https://example.com/vnc\nignored\n"), "https://example.com/vnc"; got != want {
 		t.Fatalf("firstLine = %q, want %q", got, want)
 	}
+}
+
+func captureStdout(t *testing.T, fn func()) string {
+	t.Helper()
+	previous := os.Stdout
+	reader, writer, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	os.Stdout = writer
+	defer func() {
+		os.Stdout = previous
+	}()
+	fn()
+	_ = writer.Close()
+	data, err := io.ReadAll(reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = reader.Close()
+	return string(data)
 }
 
 func TestNewRuntimeAndProfileOverridesAreOptional(t *testing.T) {
@@ -81,10 +202,18 @@ func TestNewRuntimeAndProfileOverridesAreOptional(t *testing.T) {
 	if bytes.Contains(encoded, []byte(`"profile"`)) {
 		t.Fatalf("omitted profile was serialized: %s", encoded)
 	}
-	for _, arg := range cmd.sshCreateArgs(req) {
+	args := cmd.sshCreateArgs(req)
+	for _, arg := range args {
 		if arg == "--runtime" {
 			t.Fatal("SSH fallback forced a runtime override")
 		}
+	}
+
+	cmd = parse("new", "--repo", "openclaw/crabfleet", "--", "--starts-with-dash").New
+	req = cmd.sessionRequest(&cli{})
+	args = cmd.sshCreateArgs(req)
+	if got, want := args[len(args)-2:], []string{"--", "--starts-with-dash"}; got[0] != want[0] || got[1] != want[1] {
+		t.Fatalf("prompt separator tail = %q, want %q", got, want)
 	}
 
 	cmd = parse("new", "--runtime", "container").New
@@ -92,7 +221,7 @@ func TestNewRuntimeAndProfileOverridesAreOptional(t *testing.T) {
 	if req.Runtime != "container" {
 		t.Fatalf("runtime = %q, want explicit override", req.Runtime)
 	}
-	args := cmd.sshCreateArgs(req)
+	args = cmd.sshCreateArgs(req)
 	found := false
 	for index := 0; index+1 < len(args); index++ {
 		if args[index] == "--runtime" && args[index+1] == "container" {

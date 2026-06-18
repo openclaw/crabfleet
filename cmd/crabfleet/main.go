@@ -195,29 +195,35 @@ func (cmd newCmd) Run(app *cli, api *fleetapi.Client) error {
 	req := cmd.sessionRequest(app)
 	session, err := api.CreateSession(context.Background(), req)
 	if err != nil {
-		if app.NoInput || app.JSON {
-			return err
+		if canFallbackToSSH(app, err) {
+			args := cmd.sshCreateArgs(req)
+			if cmd.VNC {
+				output, captureErr := runSSHCommandOutput(app, args...)
+				if output != "" {
+					fmt.Fprint(os.Stdout, output)
+				}
+				if captureErr != nil {
+					return captureErr
+				}
+				if url := vncURLFromOutput(output); url != "" {
+					return openURL(url)
+				}
+				return nil
+			}
+			return runSSHCommand(app, args...)
 		}
-		args := cmd.sshCreateArgs(req)
-		if cmd.VNC {
-			output, captureErr := runSSHCommandOutput(app, args...)
-			if output != "" {
-				fmt.Fprint(os.Stdout, output)
-			}
-			if captureErr != nil {
-				return captureErr
-			}
-			if url := vncURLFromOutput(output); url != "" {
-				return openURL(url)
-			}
-			return nil
-		}
-		return runSSHCommand(app, args...)
+		return ambiguousMutationError("create session", err)
 	}
 	if app.JSON {
 		return json.NewEncoder(os.Stdout).Encode(session)
 	}
-	fmt.Fprintf(os.Stdout, "session: %s\nrepo: %s\nstatus: %s\n", session.ID, session.Repo, session.Status)
+	fmt.Fprintf(
+		os.Stdout,
+		"session: %s\nrepo: %s\nstatus: %s\n",
+		fleettext.Safe(session.ID),
+		fleettext.Safe(session.Repo),
+		fleettext.Safe(session.Status),
+	)
 	if session.ParentSessionID != "" {
 		fmt.Fprintf(os.Stdout, "parent: %s\n", fleettext.Safe(session.ParentSessionID))
 	}
@@ -228,10 +234,10 @@ func (cmd newCmd) Run(app *cli, api *fleetapi.Client) error {
 		fmt.Fprintf(os.Stdout, "summary: %s\n", fleettext.Safe(session.Summary))
 	}
 	if session.Attachable() {
-		fmt.Fprintf(os.Stdout, "attach: crabfleet attach %s\n", session.ID)
+		fmt.Fprintf(os.Stdout, "attach: crabfleet attach %s\n", fleettext.Safe(session.ID))
 	}
 	if session.VNCURL != "" {
-		fmt.Fprintf(os.Stdout, "vnc: %s\n", session.VNCURL)
+		fmt.Fprintf(os.Stdout, "vnc: %s\n", fleettext.Safe(session.VNCURL))
 	}
 	if cmd.VNC && session.VNCURL != "" {
 		return openURL(session.VNCURL)
@@ -303,7 +309,7 @@ func (cmd newCmd) sshCreateArgs(req fleetapi.CreateSessionRequest) []string {
 		args = append(args, "--vnc")
 	}
 	if req.Prompt != "" {
-		args = append(args, req.Prompt)
+		args = append(args, "--", req.Prompt)
 	}
 	return args
 }
@@ -330,17 +336,17 @@ func (cmd statusCmd) Run(app *cli, api *fleetapi.Client) error {
 func (cmd deleteCmd) Run(app *cli, api *fleetapi.Client) error {
 	session, err := api.Action(context.Background(), cmd.ID, "stop")
 	if err != nil {
-		if app.NoInput || app.JSON {
-			return err
+		if canFallbackToSSH(app, err) {
+			return runSSH(app, "delete", cmd.ID)
 		}
-		return runSSH(app, "delete", cmd.ID)
+		return ambiguousMutationError("delete session", err)
 	}
 	if app.JSON {
 		return json.NewEncoder(os.Stdout).Encode(session)
 	}
-	fmt.Fprintf(os.Stdout, "session: %s\nstatus: %s\n", session.ID, session.Status)
+	fmt.Fprintf(os.Stdout, "session: %s\nstatus: %s\n", fleettext.Safe(session.ID), fleettext.Safe(session.Status))
 	if note := session.LifecycleStopNote(); note != "" {
-		fmt.Fprintf(os.Stdout, "note: %s\n", note)
+		fmt.Fprintf(os.Stdout, "note: %s\n", fleettext.Safe(note))
 	}
 	return nil
 }
@@ -388,17 +394,17 @@ func (cmd checkpointsCmd) Run(app *cli, api *fleetapi.Client) error {
 		return json.NewEncoder(os.Stdout).Encode(checkpoints)
 	}
 	if len(checkpoints.Checkpoints) == 0 {
-		fmt.Fprintf(os.Stdout, "session: %s\ncheckpoints: none\n", checkpoints.Session.ID)
+		fmt.Fprintf(os.Stdout, "session: %s\ncheckpoints: none\n", fleettext.Safe(checkpoints.Session.ID))
 		return nil
 	}
-	fmt.Fprintf(os.Stdout, "session: %s\n", checkpoints.Session.ID)
+	fmt.Fprintf(os.Stdout, "session: %s\n", fleettext.Safe(checkpoints.Session.ID))
 	for _, checkpoint := range checkpoints.Checkpoints {
 		fmt.Fprintf(
 			os.Stdout,
 			"%s  %s  %s\n",
-			checkpoint.ID,
+			fleettext.Safe(checkpoint.ID),
 			time.UnixMilli(checkpoint.CreatedAt).Format(time.RFC3339),
-			checkpoint.Workdir,
+			fleettext.Safe(checkpoint.Workdir),
 		)
 	}
 	return nil
@@ -407,30 +413,40 @@ func (cmd checkpointsCmd) Run(app *cli, api *fleetapi.Client) error {
 func (cmd checkpointCmd) Run(app *cli, api *fleetapi.Client) error {
 	checkpoint, err := api.Checkpoint(context.Background(), cmd.ID)
 	if err != nil {
-		if app.NoInput || app.JSON {
-			return err
+		if canFallbackToSSH(app, err) {
+			return runSSH(app, "checkpoint", cmd.ID)
 		}
-		return runSSH(app, "checkpoint", cmd.ID)
+		return ambiguousMutationError("create checkpoint", err)
 	}
 	if app.JSON {
 		return json.NewEncoder(os.Stdout).Encode(checkpoint)
 	}
-	fmt.Fprintf(os.Stdout, "session: %s\ncheckpoint: %s\n", checkpoint.Session.ID, checkpoint.Checkpoint.ID)
+	fmt.Fprintf(
+		os.Stdout,
+		"session: %s\ncheckpoint: %s\n",
+		fleettext.Safe(checkpoint.Session.ID),
+		fleettext.Safe(checkpoint.Checkpoint.ID),
+	)
 	return nil
 }
 
 func (cmd restoreCmd) Run(app *cli, api *fleetapi.Client) error {
 	checkpoint, err := api.Restore(context.Background(), cmd.ID, cmd.Checkpoint)
 	if err != nil {
-		if app.NoInput || app.JSON {
-			return err
+		if canFallbackToSSH(app, err) {
+			return runSSH(app, "restore", cmd.ID, cmd.Checkpoint)
 		}
-		return runSSH(app, "restore", cmd.ID, cmd.Checkpoint)
+		return ambiguousMutationError("restore checkpoint", err)
 	}
 	if app.JSON {
 		return json.NewEncoder(os.Stdout).Encode(checkpoint)
 	}
-	fmt.Fprintf(os.Stdout, "session: %s\nrestored: %s\n", checkpoint.Session.ID, checkpoint.Checkpoint.ID)
+	fmt.Fprintf(
+		os.Stdout,
+		"session: %s\nrestored: %s\n",
+		fleettext.Safe(checkpoint.Session.ID),
+		fleettext.Safe(checkpoint.Checkpoint.ID),
+	)
 	return nil
 }
 
@@ -463,7 +479,7 @@ func (cmd vncCmd) Run(app *cli, api *fleetapi.Client) error {
 		if cmd.Open {
 			return openURL(session.VNCURL)
 		}
-		fmt.Fprintln(os.Stdout, session.VNCURL)
+		fmt.Fprintln(os.Stdout, fleettext.Safe(session.VNCURL))
 		return nil
 	}
 	return fmt.Errorf("session %s not found", cmd.ID)
@@ -518,15 +534,15 @@ func (cmd messageCmd) Run(app *cli, api *fleetapi.Client) error {
 		return errors.New("message text is required")
 	}
 	if err := api.Message(context.Background(), cmd.ID, message, !cmd.NoEnter, 120, 34); err != nil {
-		if app.NoInput || app.JSON {
-			return err
+		if canFallbackToSSH(app, err) {
+			args := []string{"message", cmd.ID}
+			if cmd.NoEnter {
+				args = append(args, "--no-enter")
+			}
+			args = append(args, message)
+			return runSSHCommand(app, args...)
 		}
-		args := []string{"message", cmd.ID}
-		if cmd.NoEnter {
-			args = append(args, "--no-enter")
-		}
-		args = append(args, message)
-		return runSSHCommand(app, args...)
+		return ambiguousMutationError("send terminal input", err)
 	}
 	if app.JSON {
 		return json.NewEncoder(os.Stdout).Encode(map[string]any{
@@ -556,17 +572,17 @@ func (cmd summaryCmd) Run(app *cli, api *fleetapi.Client) error {
 	}
 	session, err := api.UpdateSummary(context.Background(), cmd.ID, summary, cmd.Purpose)
 	if err != nil {
-		if app.NoInput || app.JSON {
-			return err
+		if canFallbackToSSH(app, err) {
+			args := []string{"summary", cmd.ID}
+			if cmd.Purpose != "" {
+				args = append(args, "--purpose", cmd.Purpose)
+			}
+			if summary != "" {
+				args = append(args, summary)
+			}
+			return runSSHCommand(app, args...)
 		}
-		args := []string{"summary", cmd.ID}
-		if cmd.Purpose != "" {
-			args = append(args, "--purpose", cmd.Purpose)
-		}
-		if summary != "" {
-			args = append(args, summary)
-		}
-		return runSSHCommand(app, args...)
+		return ambiguousMutationError("update summary", err)
 	}
 	if app.JSON {
 		return json.NewEncoder(os.Stdout).Encode(session)
@@ -617,11 +633,26 @@ func shellQuote(value string) string {
 		return "''"
 	}
 	if strings.IndexFunc(value, func(r rune) bool {
-		return r == ' ' || r == '\t' || r == '\n' || r == '\r' || r == '\'' || r == '"' || r == '\\'
+		return !isShellSafeRune(r)
 	}) == -1 {
 		return value
 	}
 	return "'" + strings.ReplaceAll(value, "'", "'\\''") + "'"
+}
+
+func isShellSafeRune(r rune) bool {
+	return (r >= 'A' && r <= 'Z') ||
+		(r >= 'a' && r <= 'z') ||
+		(r >= '0' && r <= '9') ||
+		strings.ContainsRune("_@%+=:,./-", r)
+}
+
+func ambiguousMutationError(operation string, err error) error {
+	return fmt.Errorf("%s may have reached Crabfleet before confirmation; not retrying through SSH: %w", operation, err)
+}
+
+func canFallbackToSSH(app *cli, err error) bool {
+	return !app.NoInput && !app.JSON && errors.Is(err, fleetapi.ErrMissingAuth)
 }
 
 func openURL(url string) error {
