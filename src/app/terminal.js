@@ -5,10 +5,12 @@ import {
   encodeAckPayload,
   encodeResizePayload,
   encodeSubscribePayload,
-  encodeTerminalFrame,
-  tryDecodeTerminalFrame,
 } from "@openclaw/libterminal/protocol";
-import { createGhosttyTerminal, loadGhosttyRuntime } from "@openclaw/libterminal/browser";
+import {
+  TerminalHubClient,
+  createGhosttyTerminal,
+  loadGhosttyRuntime,
+} from "@openclaw/libterminal/browser";
 import { clipboardName, isTerminalReadyInteractiveSession, terminalText } from "./utils.js";
 
 const terminalTheme = {
@@ -38,8 +40,7 @@ const terminalTheme = {
 const ghosttyWasmPath = "__GHOSTTY_WASM_PATH__";
 const terminalFrameLimits = { maxFrameBytes: 16 * 1024 * 1024 };
 let terminalEpoch = 0;
-let terminalHubSocket = null;
-let terminalHubReconnectTimer = null;
+let terminalHubClient = null;
 let terminalHubOptions = {};
 const terminalHosts = new Map();
 
@@ -66,14 +67,14 @@ export async function mountTerminal(session, mount, options = {}) {
         setTerminalStatus(session.id, previous.terminalExitLabel || "PTY exited");
         return;
       }
-      if (!terminalHubSocket || terminalHubSocket.readyState >= WebSocket.CLOSING) {
+      if (!terminalHubClient?.isOpen) {
         connectTerminalSocket(session, previous, previous.term);
       } else if (!previous.subscribed) {
         subscribeTerminalHost(session, previous, previous.term);
       }
       setTerminalStatus(
         session.id,
-        terminalHubSocket?.readyState === WebSocket.OPEN
+        terminalHubClient?.isOpen
           ? previous.canInput
             ? "Live PTY"
             : "Read-only PTY"
@@ -225,8 +226,8 @@ export function disposeTerminal(id) {
   if (!host) return;
   const restoreScroll = preserveScrollPosition(host.mount);
   releaseTerminalFocus(host.mount);
-  if (host.live && terminalHubSocket?.readyState === WebSocket.OPEN) {
-    sendTerminalFrame(id, TerminalMessageType.Unsubscribe);
+  if (host.live && terminalHubClient?.isOpen) {
+    terminalHubClient.send({ type: TerminalMessageType.Unsubscribe, sessionId: id });
   }
   if (host.pasteHandler)
     host.mount?.removeEventListener("paste", host.pasteHandler, { capture: true });
@@ -236,11 +237,9 @@ export function disposeTerminal(id) {
   } catch {}
   terminalHosts.delete(id);
   if (![...terminalHosts.values()].some((item) => item.live)) {
-    if (terminalHubReconnectTimer) clearTimeout(terminalHubReconnectTimer);
-    terminalHubReconnectTimer = null;
-    if (terminalHubSocket?.readyState < WebSocket.CLOSING) {
-      terminalHubSocket.close(1000, "no terminals mounted");
-    }
+    const client = terminalHubClient;
+    terminalHubClient = null;
+    client?.close(1000, "no terminals mounted");
   }
   restoreScroll();
 }
@@ -288,74 +287,59 @@ function syncTerminalInputState(session, host, term) {
 }
 
 function ensureTerminalHub() {
-  if (terminalHubSocket && terminalHubSocket.readyState < WebSocket.CLOSING) return;
-  if (terminalHubReconnectTimer) {
-    clearTimeout(terminalHubReconnectTimer);
-    terminalHubReconnectTimer = null;
+  if (!terminalHubClient) {
+    const client = new TerminalHubClient({
+      url: terminalSocketUrl,
+      frameLimits: terminalFrameLimits,
+      shouldReconnect: () =>
+        [...terminalHosts.values()].some((host) => host.live && !host.terminalExited),
+      onOpen: () => {
+        if (terminalHubClient !== client) return;
+        for (const session of terminalHubOptions.sessions?.() || []) {
+          const host = terminalHosts.get(session.id);
+          if (host?.live && !host.terminalExited && shouldConnectLiveTerminal(session)) {
+            subscribeTerminalHost(session, host, host.term);
+          }
+        }
+      },
+      onFrame: handleTerminalHubFrame,
+      onClose: (event) => {
+        if (terminalHubClient !== client) return;
+        for (const [id, host] of terminalHosts) {
+          if (!host.live || host.terminalExited) continue;
+          host.subscribed = false;
+          const reason = event.reason || (event.code === 1000 ? "closed" : `closed ${event.code}`);
+          setTerminalStatus(id, `PTY ${reason}`);
+        }
+      },
+      onError: () => {
+        if (terminalHubClient !== client) return;
+        for (const [id, host] of terminalHosts) {
+          if (host.live && !host.terminalExited) setTerminalStatus(id, "PTY error");
+        }
+      },
+    });
+    terminalHubClient = client;
   }
-  const socket = new WebSocket(terminalSocketUrl());
-  socket.binaryType = "arraybuffer";
-  terminalHubSocket = socket;
   for (const [id, host] of terminalHosts) {
     if (host.live) setTerminalStatus(id, "Connecting PTY");
   }
-  socket.addEventListener("open", () => {
-    sendTerminalFrame("", TerminalMessageType.Hello);
-    for (const session of terminalHubOptions.sessions?.() || []) {
-      const host = terminalHosts.get(session.id);
-      if (host?.live && !host.terminalExited && shouldConnectLiveTerminal(session)) {
-        subscribeTerminalHost(session, host, host.term);
-      }
-    }
-  });
-  socket.addEventListener("message", (event) => {
-    terminalFrameBytes(event.data).then((bytes) => {
-      const frame = tryDecodeTerminalFrame(bytes, terminalFrameLimits);
-      if (frame) handleTerminalHubFrame(frame);
-    });
-  });
-  socket.addEventListener("close", (event) => {
-    if (terminalHubSocket !== socket) return;
-    for (const [id, host] of terminalHosts) {
-      if (!host.live || host.terminalExited) continue;
-      host.subscribed = false;
-      const reason = event.reason || (event.code === 1000 ? "closed" : `closed ${event.code}`);
-      setTerminalStatus(id, `PTY ${reason}`);
-    }
-    terminalHubSocket = null;
-    if ([...terminalHosts.values()].some((host) => host.live && !host.terminalExited)) {
-      terminalHubReconnectTimer = setTimeout(() => ensureTerminalHub(), 1500);
-    }
-  });
-  socket.addEventListener("error", () => {
-    if (terminalHubSocket !== socket) return;
-    for (const [id, host] of terminalHosts) {
-      if (host.live && !host.terminalExited) setTerminalStatus(id, "PTY error");
-    }
-  });
+  terminalHubClient.connect();
 }
 
 function subscribeTerminalHost(session, host, term) {
-  if (!terminalHubSocket || terminalHubSocket.readyState !== WebSocket.OPEN) return;
-  host.subscribed = true;
+  if (!terminalHubClient?.isOpen) return;
   const flags =
     TerminalSubscribeFlags.Output |
     TerminalSubscribeFlags.Snapshot |
     TerminalSubscribeFlags.Events |
     TerminalSubscribeFlags.OutputAcknowledgements;
-  sendTerminalFrame(
-    session.id,
-    TerminalMessageType.Subscribe,
-    encodeSubscribePayload({ flags, columns: term?.cols ?? 0, rows: term?.rows ?? 0 }),
-  );
-  setTerminalStatus(session.id, "Connecting PTY");
-}
-
-async function terminalFrameBytes(data) {
-  if (data instanceof ArrayBuffer) return new Uint8Array(data);
-  if (data instanceof Blob) return new Uint8Array(await data.arrayBuffer());
-  if (typeof data === "string") return new TextEncoder().encode(data);
-  return new Uint8Array(data);
+  host.subscribed = terminalHubClient.send({
+    type: TerminalMessageType.Subscribe,
+    sessionId: session.id,
+    payload: encodeSubscribePayload({ flags, columns: term?.cols ?? 0, rows: term?.rows ?? 0 }),
+  });
+  if (host.subscribed) setTerminalStatus(session.id, "Connecting PTY");
 }
 
 function handleTerminalHubFrame(frame) {
@@ -366,11 +350,11 @@ function handleTerminalHubFrame(frame) {
     sendTerminalColorQueryResponses(host, frame.payload);
     if (host.controller) host.controller.write(frame.payload);
     else host.term?.write(frame.payload);
-    sendTerminalFrame(
-      frame.sessionId,
-      TerminalMessageType.Ack,
-      encodeAckPayload(frame.payload.byteLength),
-    );
+    terminalHubClient?.send({
+      type: TerminalMessageType.Ack,
+      sessionId: frame.sessionId,
+      payload: encodeAckPayload(frame.payload.byteLength),
+    });
     return;
   }
   const event = decodeJsonPayload(frame.payload);
@@ -396,11 +380,11 @@ function handleTerminalHubFrame(frame) {
   if (event?.type === "subscribed") {
     setTerminalStatus(frame.sessionId, event.canInput ? "Live PTY" : "Read-only PTY");
     if (event.canInput && host.term?.cols && host.term?.rows) {
-      sendTerminalFrame(
-        frame.sessionId,
-        TerminalMessageType.Resize,
-        encodeResizePayload({ columns: host.term.cols, rows: host.term.rows }),
-      );
+      terminalHubClient?.send({
+        type: TerminalMessageType.Resize,
+        sessionId: frame.sessionId,
+        payload: encodeResizePayload({ columns: host.term.cols, rows: host.term.rows }),
+      });
       if (host.focused) focusTerminalWithoutScroll(host);
     }
   }
@@ -444,7 +428,7 @@ function firstClipboardFile(data) {
 
 async function uploadTerminalClipboardBlob(id, blob, name, mediaType = blob?.type || "") {
   const host = terminalHosts.get(id);
-  if (!host?.canInput || terminalHubSocket?.readyState !== WebSocket.OPEN) {
+  if (!host?.canInput || !terminalHubClient?.isOpen) {
     setTerminalStatus(id, "Live control required");
     return;
   }
@@ -590,7 +574,7 @@ function scheduleTerminalResubscribe(id) {
       !host.terminalExited &&
       session?.kind === "interactive" &&
       shouldConnectLiveTerminal(session) &&
-      terminalHubSocket?.readyState === WebSocket.OPEN
+      terminalHubClient?.isOpen
     ) {
       subscribeTerminalHost(session, host, host.term);
     }
@@ -659,15 +643,9 @@ function focusTerminalWithoutScroll(host) {
 }
 
 function sendTerminalInput(host, data) {
-  if (!host.canInput || terminalHubSocket?.readyState !== WebSocket.OPEN) return;
+  if (!host.canInput) return;
   const payload = typeof data === "string" ? new TextEncoder().encode(data) : data;
-  sendTerminalFrame(host.sessionId, TerminalMessageType.Input, payload);
-}
-
-function sendTerminalFrame(sessionId, type, payload = new Uint8Array()) {
-  if (terminalHubSocket?.readyState === WebSocket.OPEN) {
-    terminalHubSocket.send(encodeTerminalFrame({ type, sessionId, payload }, terminalFrameLimits));
-  }
+  terminalHubClient?.send({ type: TerminalMessageType.Input, sessionId: host.sessionId, payload });
 }
 
 function isStaleTerminalMount(session, mount, mountEpoch) {
