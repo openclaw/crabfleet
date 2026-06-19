@@ -4,6 +4,7 @@
 
 - Add atomically claimed recurring card intervals with constant-time catch-up, crash-recoverable leases, scheduler/API proof, and coalescing for active or capacity-blocked runs, thanks @Jhacarreiro.
 - Reuse `@openclaw/libterminal` for terminal protocol codecs, Worker relays, Ghostty assets, and browser hub transport while keeping Crabfleet authorization and session policy local.
+- Update `@openclaw/libterminal` to 0.3.1 for terminal lifecycle, Worker asset generation, and package-validation fixes.
 - Fix automated Worker deployments by converging the app Custom Domain with the DNS-scoped deployment token instead of requiring zone-route access from the Worker token.
 
 ## 0.2.0 - 2026-06-15
