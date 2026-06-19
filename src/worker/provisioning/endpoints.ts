@@ -1,5 +1,7 @@
 import { getSandbox } from "@cloudflare/sandbox";
+import { bridgeWebSockets } from "@openclaw/libterminal/worker";
 
+import { redactedAdapterMessage } from "../../runtime-adapter.ts";
 import { cachedBooleanGrant } from "../../terminal-authorization.ts";
 import { sanitizeTrustedProxyRequest } from "../../trusted-proxy-auth.ts";
 import { database, type InteractiveSessionRow } from "../database.ts";
@@ -26,7 +28,6 @@ import {
   interactiveSessionPurpose,
   interactiveSessionSummary,
 } from "../session-create-request.ts";
-import { bridgeWebSockets } from "../terminal-websocket-bridge.ts";
 import { isManagedInteractiveSessionId } from "./standalone-sandbox.ts";
 import { stageStandaloneSandboxProvisionCleanup } from "./standalone-sandbox-repository.ts";
 import { failedProvision, safeProviderError } from "./result.ts";
@@ -245,6 +246,7 @@ export class InteractiveProvisioningEndpoints {
     bridgeWebSockets(server, response.webSocket, {
       canSendLeft: terminalGrant,
       deniedReason: "standalone Sandbox authorization revoked or expired",
+      sanitizeCloseReason: (reason) => redactedAdapterMessage(reason, "detached"),
     });
     return new Response(null, { status: 101, webSocket: client });
   }

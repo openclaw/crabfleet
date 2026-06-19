@@ -15,7 +15,8 @@ import {
   encodeResizePayload,
   encodeSubscribePayload,
   encodeTerminalFrame,
-} from "../src/terminal-protocol.ts";
+  tryDecodeTerminalFrame,
+} from "@openclaw/libterminal/protocol";
 
 type TerminalProtocolFixture = {
   magic: number;
@@ -69,13 +70,13 @@ test("TypeScript terminal constants and encoders match the shared v2 protocol", 
           TerminalSubscribeFlags.Output |
           TerminalSubscribeFlags.Events |
           TerminalSubscribeFlags.OutputAcknowledgements,
-        cols: 144,
+        columns: 144,
         rows: 41,
       }),
     ),
     fixture.vectors.subscribe,
   );
-  assert.equal(hex(encodeResizePayload(132, 43)), fixture.vectors.resize);
+  assert.equal(hex(encodeResizePayload({ columns: 132, rows: 43 })), fixture.vectors.resize);
   assert.equal(hex(encodeAckPayload(65_535)), fixture.vectors.ack);
 });
 
@@ -96,15 +97,15 @@ test("terminal frames round-trip binary payloads and session ids", () => {
 });
 
 test("terminal decoder rejects truncated, trailing, and wrong-version frames", () => {
-  assert.equal(decodeTerminalFrame(new Uint8Array([0x43, 0x59])), null);
+  assert.equal(tryDecodeTerminalFrame(new Uint8Array([0x43, 0x59])), null);
   const encoded = encodeTerminalFrame({ type: TerminalMessageType.Ping });
   encoded[2] = 99;
-  assert.equal(decodeTerminalFrame(encoded), null);
+  assert.equal(tryDecodeTerminalFrame(encoded), null);
   const wrongType = encodeTerminalFrame({ type: TerminalMessageType.Ping });
   wrongType[3] = 99;
-  assert.equal(decodeTerminalFrame(wrongType), null);
+  assert.equal(tryDecodeTerminalFrame(wrongType), null);
   assert.equal(
-    decodeTerminalFrame(
+    tryDecodeTerminalFrame(
       Uint8Array.from([...encodeTerminalFrame({ type: TerminalMessageType.Ping }), 0]),
     ),
     null,
@@ -120,7 +121,7 @@ test("terminal subscribe and resize payloads use one exact little-endian shape",
         TerminalSubscribeFlags.OutputAcknowledgements,
       snapshotMinIntervalMs: 100,
       snapshotMaxIntervalMs: 500,
-      cols: 0,
+      columns: 0,
       rows: 0,
     }),
   );
@@ -131,16 +132,19 @@ test("terminal subscribe and resize payloads use one exact little-endian shape",
       TerminalSubscribeFlags.OutputAcknowledgements,
     snapshotMinIntervalMs: 100,
     snapshotMaxIntervalMs: 500,
-    cols: 0,
+    columns: 0,
     rows: 0,
   });
 
-  assert.deepEqual(decodeResizePayload(encodeResizePayload(132, 43)), { cols: 132, rows: 43 });
+  assert.deepEqual(decodeResizePayload(encodeResizePayload({ columns: 132, rows: 43 })), {
+    columns: 132,
+    rows: 43,
+  });
   assert.equal(decodeAckPayload(encodeAckPayload(65_535)), 65_535);
-  assert.equal(decodeSubscribePayload(new Uint8Array(12)), null);
-  assert.equal(decodeSubscribePayload(new Uint8Array(21)), null);
-  assert.equal(decodeResizePayload(new Uint8Array(9)), null);
-  assert.equal(decodeAckPayload(new Uint8Array(5)), null);
+  assert.throws(() => decodeSubscribePayload(new Uint8Array(12)));
+  assert.throws(() => decodeSubscribePayload(new Uint8Array(21)));
+  assert.throws(() => decodeResizePayload(new Uint8Array(9)));
+  assert.throws(() => decodeAckPayload(new Uint8Array(5)));
 });
 
 test("terminal subscribe payloads carry initial PTY size", () => {
@@ -148,7 +152,7 @@ test("terminal subscribe payloads carry initial PTY size", () => {
     decodeSubscribePayload(
       encodeSubscribePayload({
         flags: TerminalSubscribeFlags.Output,
-        cols: 144,
+        columns: 144,
         rows: 41,
       }),
     ),
@@ -156,7 +160,7 @@ test("terminal subscribe payloads carry initial PTY size", () => {
       flags: TerminalSubscribeFlags.Output,
       snapshotMinIntervalMs: 0,
       snapshotMaxIntervalMs: 0,
-      cols: 144,
+      columns: 144,
       rows: 41,
     },
   );

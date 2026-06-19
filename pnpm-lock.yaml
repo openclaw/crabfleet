@@ -12,8 +12,8 @@ importers:
         specifier: 0.12.0
         version: 0.12.0
       '@openclaw/libterminal':
-        specifier: 0.1.2
-        version: 0.1.2
+        specifier: 0.2.0
+        version: 0.2.0
       kysely:
         specifier: ^0.29.2
         version: 0.29.2
@@ -535,8 +535,8 @@ packages:
       '@emnapi/core': ^1.7.1
       '@emnapi/runtime': ^1.7.1
 
-  '@openclaw/libterminal@0.1.2':
-    resolution: {integrity: sha512-a0efrWM8EMEUrPJ9gWgsEeWD/WstJbNjgTTUwq4sxJCyuDDWOjjvz1KjrCGZ83B+0gMstYXcQAFR7f9/URQpQQ==}
+  '@openclaw/libterminal@0.2.0':
+    resolution: {integrity: sha512-WCj5eIVoASc+lTe7PFQxQ9aBBt4rYbCT/oKL3TNJvUaMNFoxYDnAGDlniCWOuL6/A8Gd388GL4UukTAYqFSGtA==}
     engines: {node: ^22.18.0 || >=24.11.0}
     peerDependencies:
       node-pty: '>=1.0.0'
@@ -1807,7 +1807,7 @@ snapshots:
       '@tybys/wasm-util': 0.10.2
     optional: true
 
-  '@openclaw/libterminal@0.1.2':
+  '@openclaw/libterminal@0.2.0':
     dependencies:
       ghostty-web: 0.4.0
 

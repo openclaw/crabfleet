@@ -9,7 +9,7 @@ import {
   encodeAckPayload,
   encodeSubscribePayload,
   encodeTerminalFrame,
-} from "../src/terminal-protocol.ts";
+} from "@openclaw/libterminal/protocol";
 import type { User } from "../src/worker/models.ts";
 import { containerCapabilities, interactiveSession } from "../src/worker/session-model.ts";
 import { TerminalHub, type TerminalHubDependencies } from "../src/worker/terminal-hub.ts";
@@ -192,7 +192,7 @@ test("terminal hub routes multiplex frames and explicit output acknowledgements"
       sessionId: session.id,
       payload: encodeSubscribePayload({
         flags: TerminalSubscribeFlags.OutputAcknowledgements,
-        cols: 140,
+        columns: 140,
         rows: 40,
       }),
     }),
@@ -220,6 +220,16 @@ test("terminal hub routes multiplex frames and explicit output acknowledgements"
       type: TerminalMessageType.Ack,
       sessionId: session.id,
       payload: encodeAckPayload(output.payload.byteLength),
+    }),
+  });
+  await flushQueues();
+  assert.deepEqual(upstream.sent, ['{"type":"ack","bytes":6}']);
+
+  server.emit("message", {
+    data: encodeTerminalFrame({
+      type: TerminalMessageType.Ack,
+      sessionId: session.id,
+      payload: new Uint8Array([0]),
     }),
   });
   await flushQueues();
@@ -275,7 +285,7 @@ test("terminal hub immediately acknowledges upstream output when the client opts
     data: encodeTerminalFrame({
       type: TerminalMessageType.Subscribe,
       sessionId: session.id,
-      payload: encodeSubscribePayload({ flags: 0, cols: 0, rows: 0 }),
+      payload: encodeSubscribePayload({ flags: 0, columns: 0, rows: 0 }),
     }),
   });
   await flushQueues();
