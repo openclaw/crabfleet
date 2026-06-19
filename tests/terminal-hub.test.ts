@@ -225,6 +225,16 @@ test("terminal hub routes multiplex frames and explicit output acknowledgements"
   await flushQueues();
   assert.deepEqual(upstream.sent, ['{"type":"ack","bytes":6}']);
 
+  server.emit("message", {
+    data: encodeTerminalFrame({
+      type: TerminalMessageType.Ack,
+      sessionId: session.id,
+      payload: new Uint8Array([0]),
+    }),
+  });
+  await flushQueues();
+  assert.deepEqual(upstream.sent, ['{"type":"ack","bytes":6}']);
+
   const inputPayload = new TextEncoder().encode("ls\r");
   server.emit("message", {
     data: encodeTerminalFrame({

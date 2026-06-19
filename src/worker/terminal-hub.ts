@@ -246,7 +246,7 @@ export class TerminalHub {
             return;
           }
           if (frame.type === TerminalMessageType.Ack) {
-            const bytes = decodeAckPayload(frame.payload);
+            const bytes = tryDecodeAckPayload(frame.payload);
             if (
               bytes &&
               subscription.outputAcknowledgements &&
@@ -535,6 +535,14 @@ function tryDecodeResizePayload(payload: Uint8Array): { cols: number; rows: numb
   try {
     const size = decodeResizePayload(payload);
     return { cols: size.columns, rows: size.rows };
+  } catch {
+    return null;
+  }
+}
+
+function tryDecodeAckPayload(payload: Uint8Array): number | null {
+  try {
+    return decodeAckPayload(payload);
   } catch {
     return null;
   }
