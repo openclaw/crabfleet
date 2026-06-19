@@ -6,38 +6,34 @@ import { promisify } from "node:util";
 
 import { loadGhosttyRuntime } from "@openclaw/libterminal/browser";
 import { GHOSTTY_ASSET_PATHS, readGhosttyAsset } from "@openclaw/libterminal/node";
+import { readGhosttyWorkerAsset } from "@openclaw/libterminal/worker-assets";
 
 const execFileAsync = promisify(execFile);
 
-test("generated Ghostty WASM is byte-exact and served with executable asset policy", async () => {
+test("libterminal Worker Ghostty assets are byte-exact and keep Crabfleet response policy", async () => {
   await execFileAsync(process.execPath, ["scripts/generate-assets.mjs"]);
   const generated = await import(`../src/generated.ts?terminal-assets=${Date.now()}`);
   const { terminalAssetResponse } = await import(
     `../src/worker/terminal-assets.ts?terminal-assets=${Date.now()}`
   );
-  const wasmBytes = (await readGhosttyAsset(GHOSTTY_ASSET_PATHS.wasm))?.body;
-  assert.ok(wasmBytes);
-
-  assert.equal(generated.GHOSTTY_WEB_PATH, GHOSTTY_ASSET_PATHS.module);
-  assert.equal(generated.GHOSTTY_VT_WASM_PATH, GHOSTTY_ASSET_PATHS.wasm);
-  assert.equal(generated.GHOSTTY_BROWSER_EXTERNAL_PATH, GHOSTTY_ASSET_PATHS.browserExternal);
   assert.equal(generated.APP_HTML.includes("__GHOSTTY_WASM_PATH__"), false);
-  assert.equal(
-    Buffer.compare(Buffer.from(generated.GHOSTTY_VT_WASM_BASE64, "base64"), wasmBytes),
-    0,
-  );
+  assert.equal(generated.APP_HTML.includes(GHOSTTY_ASSET_PATHS.wasm), true);
+  assert.equal("GHOSTTY_VT_WASM_BASE64" in generated, false);
 
-  const wasm = terminalAssetResponse(generated.GHOSTTY_VT_WASM_PATH);
-  assert.equal(wasm?.status, 200);
-  assert.equal(wasm?.headers.get("content-type"), "application/wasm");
-  assert.equal(wasm?.headers.get("cache-control"), "no-store");
-  assert.equal(Buffer.compare(Buffer.from(await wasm!.arrayBuffer()), wasmBytes), 0);
-
-  for (const path of [GHOSTTY_ASSET_PATHS.module, GHOSTTY_ASSET_PATHS.browserExternal]) {
-    const asset = terminalAssetResponse(path);
-    assert.equal(asset?.status, 200);
-    assert.equal(asset?.headers.get("content-type"), "text/javascript; charset=utf-8");
-    assert.equal(asset?.headers.get("cache-control"), "no-store");
+  for (const pathname of Object.values(GHOSTTY_ASSET_PATHS)) {
+    const expected = await readGhosttyAsset(pathname);
+    const workerAsset = readGhosttyWorkerAsset(pathname);
+    const response = terminalAssetResponse(pathname);
+    assert.ok(expected);
+    assert.equal(workerAsset?.contentType, expected.contentType);
+    assert.equal(
+      Buffer.compare(Buffer.from(workerAsset?.body ?? []), Buffer.from(expected.body)),
+      0,
+    );
+    assert.equal(response?.status, 200);
+    assert.equal(response?.headers.get("content-type"), expected.contentType);
+    assert.equal(response?.headers.get("cache-control"), "no-store");
+    assert.equal(Buffer.compare(Buffer.from(await response!.arrayBuffer()), expected.body), 0);
   }
   assert.equal(terminalAssetResponse("/vendor/unknown.js"), null);
 });
