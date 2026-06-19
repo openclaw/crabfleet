@@ -5,20 +5,21 @@ import {
   decodeAckPayload,
   decodeResizePayload,
   decodeSubscribePayload,
-  decodeTerminalFrame,
   encodeJsonPayload,
   encodeTerminalFrame,
-} from "../terminal-protocol.ts";
+  tryDecodeTerminalFrame,
+} from "@openclaw/libterminal/protocol";
+import {
+  normalizeWebSocketMessageData,
+  sendOutputAcknowledgement,
+} from "@openclaw/libterminal/worker";
 import { redactedAdapterMessage } from "../runtime-adapter.ts";
 import { badRequest, unauthorized } from "./http.ts";
 import type { User } from "./models.ts";
 import type { InteractiveSession } from "./session-model.ts";
-import {
-  sendTerminalOutputAcknowledgement,
-  webSocketMessageData,
-} from "./terminal-websocket-bridge.ts";
 
 const encoder = new TextEncoder();
+const terminalFrameLimits = { maxFrameBytes: 16 * 1024 * 1024 };
 
 export type TerminalUpstream = {
   socket: WebSocket;
@@ -132,10 +133,10 @@ export class TerminalHub {
       queue = queue
         .catch(() => undefined)
         .then(async () => {
-          const data = await webSocketMessageData(event.data);
+          const data = await normalizeWebSocketMessageData(event.data);
           const bytes =
             typeof data === "string" ? encoder.encode(data) : new Uint8Array(data.slice(0));
-          const frame = decodeTerminalFrame(bytes);
+          const frame = tryDecodeTerminalFrame(bytes, terminalFrameLimits);
           if (!frame) {
             sendTerminalJson(server, TerminalMessageType.Error, "", { error: "invalid frame" });
             return;
@@ -223,7 +224,7 @@ export class TerminalHub {
             return;
           }
           if (frame.type === TerminalMessageType.Resize) {
-            const size = decodeResizePayload(frame.payload);
+            const size = tryDecodeResizePayload(frame.payload);
             if (!(await subscription.canInput())) {
               sendTerminalJson(server, TerminalMessageType.ControlRevoked, frame.sessionId, {
                 error: "terminal control has not been granted",
@@ -253,7 +254,7 @@ export class TerminalHub {
               subscription.upstream.readyState === WebSocket.OPEN
             ) {
               subscription.outputAcknowledgementBytes -= bytes;
-              sendTerminalOutputAcknowledgement(subscription.upstream, bytes);
+              sendOutputAcknowledgement(subscription.upstream, bytes);
             }
             return;
           }
@@ -288,7 +289,7 @@ export class TerminalHub {
       sendTerminalJson(client, TerminalMessageType.Error, "", { error: "session id required" });
       return;
     }
-    const requestedSubscription = decodeSubscribePayload(frame.payload);
+    const requestedSubscription = tryDecodeSubscribePayload(frame.payload);
     if (!requestedSubscription) {
       sendTerminalJson(client, TerminalMessageType.Error, id, {
         error: "invalid subscribe payload",
@@ -334,7 +335,7 @@ export class TerminalHub {
       const canInputNow = await canInput();
       const canView = this.dependencies.viewGrant(request, user, session);
       const reconcileSubscription = this.dependencies.reconcileSubscription(id);
-      const cols = canInputNow ? terminalDimension(requestedSubscription.cols, 120) : 120;
+      const cols = canInputNow ? terminalDimension(requestedSubscription.columns, 120) : 120;
       const rows = canInputNow ? terminalDimension(requestedSubscription.rows, 34) : 34;
       const outputAcknowledgements = Boolean(
         requestedSubscription.flags & TerminalSubscribeFlags.OutputAcknowledgements,
@@ -418,7 +419,7 @@ export class TerminalHub {
         outputQueue = outputQueue
           .catch(() => undefined)
           .then(async () => {
-            const data = await webSocketMessageData(raw);
+            const data = await normalizeWebSocketMessageData(raw);
             if (client.readyState !== WebSocket.OPEN || !viewGranted) return;
             if (typeof data === "string") {
               const parsed = parseTerminalControlMessage(data);
@@ -431,7 +432,7 @@ export class TerminalHub {
               if (activeSubscription.outputAcknowledgements) {
                 activeSubscription.outputAcknowledgementBytes += output.byteLength;
               } else if (upstreamConnection.outputAcknowledgements) {
-                sendTerminalOutputAcknowledgement(upstream, output.byteLength);
+                sendOutputAcknowledgement(upstream, output.byteLength);
               }
               return;
             }
@@ -440,7 +441,7 @@ export class TerminalHub {
             if (activeSubscription.outputAcknowledgements) {
               activeSubscription.outputAcknowledgementBytes += output.byteLength;
             } else if (upstreamConnection.outputAcknowledgements) {
-              sendTerminalOutputAcknowledgement(upstream, output.byteLength);
+              sendOutputAcknowledgement(upstream, output.byteLength);
             }
           });
       });
@@ -506,8 +507,8 @@ export function sendTerminalFrame(
   if (socket.readyState === WebSocket.OPEN) {
     socket.send(
       payload
-        ? encodeTerminalFrame({ type, sessionId, payload })
-        : encodeTerminalFrame({ type, sessionId }),
+        ? encodeTerminalFrame({ type, sessionId, payload }, terminalFrameLimits)
+        : encodeTerminalFrame({ type, sessionId }, terminalFrameLimits),
     );
   }
 }
@@ -525,6 +526,25 @@ export function parseTerminalControlMessage(data: string): Record<string, unknow
   try {
     const parsed = JSON.parse(data) as Record<string, unknown>;
     return typeof parsed.type === "string" ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+function tryDecodeResizePayload(payload: Uint8Array): { cols: number; rows: number } | null {
+  try {
+    const size = decodeResizePayload(payload);
+    return { cols: size.columns, rows: size.rows };
+  } catch {
+    return null;
+  }
+}
+
+function tryDecodeSubscribePayload(
+  payload: Uint8Array,
+): ReturnType<typeof decodeSubscribePayload> | null {
+  try {
+    return decodeSubscribePayload(payload);
   } catch {
     return null;
   }

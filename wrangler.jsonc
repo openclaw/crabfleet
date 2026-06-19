@@ -12,7 +12,6 @@
       "vite.config.mjs",
       "src/app.html",
       "src/index.ts",
-      "src/terminal-protocol.ts",
       "src/app",
       "src/assets",
       "docs/spec.md",

@@ -3,12 +3,13 @@ import test from "node:test";
 
 import {
   bridgeWebSockets,
-  sendTerminalOutputAcknowledgement,
+  decodeOutputAcknowledgement,
+  normalizeWebSocketMessageData,
+  sendOutputAcknowledgement,
   terminalMessageByteLength,
-  terminalOutputAcknowledgement,
   terminalOutputAcknowledgements,
-  webSocketMessageData,
-} from "../src/worker/terminal-websocket-bridge.ts";
+} from "@openclaw/libterminal/worker";
+import { redactedAdapterMessage } from "../src/runtime-adapter.ts";
 
 type Listener = (event: Event & { data?: unknown; code?: number; reason?: string }) => void;
 
@@ -61,35 +62,37 @@ test("terminal acknowledgement protocol is explicit and bounded", () => {
   assert.equal(terminalOutputAcknowledgements("wss://terminal.example?flow=other"), false);
   assert.equal(terminalOutputAcknowledgements("not a url"), false);
 
-  assert.equal(terminalOutputAcknowledgement('{"type":"ack","bytes":12}'), 12);
-  assert.equal(terminalOutputAcknowledgement('{"type":"ack","bytes":0}'), null);
-  assert.equal(terminalOutputAcknowledgement('{"type":"ack","bytes":1048577}'), null);
-  assert.equal(terminalOutputAcknowledgement('{"type":"resize","bytes":12}'), null);
-  assert.equal(terminalOutputAcknowledgement(new ArrayBuffer(4)), null);
+  assert.equal(decodeOutputAcknowledgement('{"type":"ack","bytes":12}'), 12);
+  assert.equal(decodeOutputAcknowledgement('{"type":"ack","bytes":0}'), null);
+  assert.equal(decodeOutputAcknowledgement('{"type":"ack","bytes":1048577}'), null);
+  assert.equal(decodeOutputAcknowledgement('{"type":"resize","bytes":12}'), null);
+  assert.equal(decodeOutputAcknowledgement(new ArrayBuffer(4)), null);
   assert.equal(terminalMessageByteLength("€"), 3);
   assert.equal(terminalMessageByteLength(new ArrayBuffer(7)), 7);
 
   const open = socket();
-  sendTerminalOutputAcknowledgement(open, 9);
+  sendOutputAcknowledgement(open, 9);
   assert.deepEqual(open.sent, ['{"type":"ack","bytes":9}']);
   open.readyState = WebSocket.CLOSED;
-  sendTerminalOutputAcknowledgement(open, 10);
+  sendOutputAcknowledgement(open, 10);
   assert.equal(open.sent.length, 1);
 });
 
 test("WebSocket message data preserves text and normalizes binary views", async () => {
-  assert.equal(await webSocketMessageData("text"), "text");
+  assert.equal(await normalizeWebSocketMessageData("text"), "text");
   const buffer = new Uint8Array([1, 2, 3]).buffer;
-  assert.equal(await webSocketMessageData(buffer), buffer);
+  assert.equal(await normalizeWebSocketMessageData(buffer), buffer);
   assert.deepEqual(
-    new Uint8Array((await webSocketMessageData(new Uint8Array([4, 5]))) as ArrayBuffer),
+    new Uint8Array((await normalizeWebSocketMessageData(new Uint8Array([4, 5]))) as ArrayBuffer),
     new Uint8Array([4, 5]),
   );
   assert.deepEqual(
-    new Uint8Array((await webSocketMessageData(new Blob([new Uint8Array([6, 7])]))) as ArrayBuffer),
+    new Uint8Array(
+      (await normalizeWebSocketMessageData(new Blob([new Uint8Array([6, 7])]))) as ArrayBuffer,
+    ),
     new Uint8Array([6, 7]),
   );
-  assert.equal(await webSocketMessageData(42), "42");
+  assert.equal(await normalizeWebSocketMessageData(42), "42");
 });
 
 test("terminal bridge queues both directions and forwards earned acknowledgements", async () => {
@@ -137,7 +140,9 @@ test("terminal bridge handles immediate acknowledgements and authorization revoc
 test("terminal bridge propagates sanitized close reasons and peer errors", () => {
   const left = socket();
   const right = socket();
-  bridgeWebSockets(left, right);
+  bridgeWebSockets(left, right, {
+    sanitizeCloseReason: (reason) => redactedAdapterMessage(reason, "detached"),
+  });
   left.emit("close", {
     code: 1001,
     reason: "failed at wss://terminal.example/session?token=secret",

@@ -1,4 +1,5 @@
 import { getSandbox } from "@cloudflare/sandbox";
+import { terminalOutputAcknowledgements } from "@openclaw/libterminal/worker";
 
 import {
   attributedTerminalInputPayloads,
@@ -49,7 +50,6 @@ import {
   type TerminalUpstream,
 } from "./terminal-hub.ts";
 import { interactiveTerminalFetch } from "./runtime-adapter-transport.ts";
-import { terminalOutputAcknowledgements } from "./terminal-websocket-bridge.ts";
 
 const terminalInputStates = new Map<string, TerminalInputState>();
 

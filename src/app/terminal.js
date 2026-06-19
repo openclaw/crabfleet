@@ -2,12 +2,12 @@ import {
   TerminalMessageType,
   TerminalSubscribeFlags,
   decodeJsonPayload,
-  decodeTerminalFrame,
   encodeAckPayload,
   encodeResizePayload,
   encodeSubscribePayload,
   encodeTerminalFrame,
-} from "../terminal-protocol.ts";
+  tryDecodeTerminalFrame,
+} from "@openclaw/libterminal/protocol";
 import { createGhosttyTerminal, loadGhosttyRuntime } from "@openclaw/libterminal/browser";
 import { clipboardName, isTerminalReadyInteractiveSession, terminalText } from "./utils.js";
 
@@ -36,6 +36,7 @@ const terminalTheme = {
 };
 
 const ghosttyWasmPath = "__GHOSTTY_WASM_PATH__";
+const terminalFrameLimits = { maxFrameBytes: 16 * 1024 * 1024 };
 let terminalEpoch = 0;
 let terminalHubSocket = null;
 let terminalHubReconnectTimer = null;
@@ -309,7 +310,7 @@ function ensureTerminalHub() {
   });
   socket.addEventListener("message", (event) => {
     terminalFrameBytes(event.data).then((bytes) => {
-      const frame = decodeTerminalFrame(bytes);
+      const frame = tryDecodeTerminalFrame(bytes, terminalFrameLimits);
       if (frame) handleTerminalHubFrame(frame);
     });
   });
@@ -345,7 +346,7 @@ function subscribeTerminalHost(session, host, term) {
   sendTerminalFrame(
     session.id,
     TerminalMessageType.Subscribe,
-    encodeSubscribePayload({ flags, cols: term?.cols ?? 0, rows: term?.rows ?? 0 }),
+    encodeSubscribePayload({ flags, columns: term?.cols ?? 0, rows: term?.rows ?? 0 }),
   );
   setTerminalStatus(session.id, "Connecting PTY");
 }
@@ -398,7 +399,7 @@ function handleTerminalHubFrame(frame) {
       sendTerminalFrame(
         frame.sessionId,
         TerminalMessageType.Resize,
-        encodeResizePayload(host.term.cols, host.term.rows),
+        encodeResizePayload({ columns: host.term.cols, rows: host.term.rows }),
       );
       if (host.focused) focusTerminalWithoutScroll(host);
     }
@@ -665,7 +666,7 @@ function sendTerminalInput(host, data) {
 
 function sendTerminalFrame(sessionId, type, payload = new Uint8Array()) {
   if (terminalHubSocket?.readyState === WebSocket.OPEN) {
-    terminalHubSocket.send(encodeTerminalFrame({ type, sessionId, payload }));
+    terminalHubSocket.send(encodeTerminalFrame({ type, sessionId, payload }, terminalFrameLimits));
   }
 }
 
