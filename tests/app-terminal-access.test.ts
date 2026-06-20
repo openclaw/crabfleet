@@ -29,6 +29,12 @@ test("browser terminals consume live control grants and revocations", async () =
   assert.match(source, /TerminalMessageType\.ControlGranted/);
   assert.match(source, /TerminalMessageType\.ControlRevoked/);
   assert.match(source, /applyTerminalInputCapability\(host, canInput\)/);
+  assert.equal(
+    source.match(/encodeResizePayload\(\{ columns: host\.term\.cols, rows: host\.term\.rows \}\)/g)
+      ?.length,
+    2,
+  );
+  assert.doesNotMatch(source, /encodeResizePayload\(host\.term\.cols,\s*host\.term\.rows\)/);
 });
 
 test("server subscription capability authoritatively updates terminal input", () => {

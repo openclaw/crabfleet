@@ -386,7 +386,7 @@ function handleTerminalHubFrame(frame) {
       sendTerminalFrame(
         frame.sessionId,
         TerminalMessageType.Resize,
-        encodeResizePayload(host.term.cols, host.term.rows),
+        encodeResizePayload({ columns: host.term.cols, rows: host.term.rows }),
       );
       if (host.focused) focusTerminalWithoutScroll(host);
     }
