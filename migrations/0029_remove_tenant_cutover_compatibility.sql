@@ -1,3 +1,5 @@
+-- The stable-subject writer and one-time backfill shipped in the preceding
+-- deployment. Every active writer now persists stable subjects directly.
 UPDATE interactive_sessions
 SET owner_subject = (
   SELECT CASE

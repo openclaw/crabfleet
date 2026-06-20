@@ -49,7 +49,6 @@ import {
   readInteractiveSessionEventRows,
   readInteractiveSessionRecord,
 } from "./session-repository.ts";
-import { tenancyMode } from "./tenancy.ts";
 
 const openClawPreparationTimeoutMs = 60_000;
 
@@ -172,16 +171,10 @@ export class OpenClawApplication {
       });
       const store: OpenClawCreateStore = {
         defaultRuntime: deploymentConfig(this.env).defaultRuntime,
-        privateTenancy: tenancyMode(this.env) === "private",
         now: () => Date.now(),
         preparationSignal: () => AbortSignal.timeout(openClawPreparationTimeoutMs),
-        readRequestSession: async (requestId, requestHash, compatibility) => {
-          const session = await readOpenClawRequestSession(
-            this.env,
-            requestId,
-            requestHash,
-            compatibility,
-          );
+        readRequestSession: async (requestId, requestHash) => {
+          const session = await readOpenClawRequestSession(this.env, requestId, requestHash);
           return session ? this.sessions.present(session, this.serviceUser) : null;
         },
         resolvePrincipal: (value) =>

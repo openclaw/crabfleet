@@ -38,7 +38,7 @@ export function sessionRow(values: Partial<InteractiveSessionRow> = {}): Interac
     purpose: "Fix the issue",
     summary: "Working",
     owner: "owner",
-    owner_subject: "",
+    owner_subject: "github:42",
     created_by: "github:42",
     status: "ready",
     lease_id: "lease-1",

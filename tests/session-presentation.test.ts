@@ -90,6 +90,7 @@ test("session presentation hides provider authority from viewers without control
   const session = interactiveSession(
     sessionRow({
       owner: "someone-else",
+      owner_subject: "github:99",
       runtime: "crabbox",
       adapter: runtimeAdapterName,
       profile: "linux",
@@ -163,7 +164,9 @@ test("delegated control expires atomically in presented state", () => {
   const session = interactiveSession(
     sessionRow({
       owner: "someone-else",
+      owner_subject: "github:99",
       controller: "operator",
+      controller_subject: "github:42",
       control_granted_at: 50,
       control_expires_at: 200,
       status: "ready",

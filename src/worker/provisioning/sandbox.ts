@@ -227,7 +227,7 @@ export class ManagedSandboxLeaseRefreshService {
     if (refreshStartedAt && now - refreshStartedAt < 2 * 60_000) {
       throw serviceUnavailable("Cloudflare Sandbox lease refresh is already in progress");
     }
-    if (!user || !ownsInteractiveSession(user, session, this.dependencies.tenancyMode)) {
+    if (!user || !ownsInteractiveSession(user, session)) {
       throw serviceUnavailable(sandboxLeaseOwnerReconnectMessage);
     }
 

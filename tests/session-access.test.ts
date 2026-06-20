@@ -11,7 +11,6 @@ import {
   canViewInteractiveSession,
   delegatedInteractiveSessionControlAvailable,
   interactiveSessionAccess,
-  interactiveSessionActorCandidates,
 } from "../src/worker/session-access.ts";
 import { interactiveSession } from "../src/worker/session-model.ts";
 import { sessionRow } from "./helpers/session-row.ts";
@@ -29,22 +28,14 @@ function user(values: Partial<User> = {}): User {
   };
 }
 
-test("session actor candidates include canonical and fallback identities", () => {
-  assert.deepEqual(
-    [...interactiveSessionActorCandidates(user())],
-    ["operator", "github:42", "operator@example.test"],
-  );
-  assert.deepEqual(
-    [...interactiveSessionActorCandidates(user({ login: null }))],
-    ["operator@example.test", "github:42"],
-  );
-});
-
 test("owners and elevated roles can manage sessions", () => {
   const owned = interactiveSession(sessionRow({ owner: "operator@example.test" }), []);
   assert.equal(canManageInteractiveSession(user(), owned), true);
 
-  const foreign = interactiveSession(sessionRow({ owner: "someone-else" }), []);
+  const foreign = interactiveSession(
+    sessionRow({ owner: "someone-else", owner_subject: "github:99" }),
+    [],
+  );
   assert.equal(canManageInteractiveSession(user(), foreign), false);
   assert.equal(canManageInteractiveSession(user({ role: "maintainer" }), foreign), true);
   assert.equal(canManageInteractiveSession(user({ role: "owner" }), foreign), true);
@@ -54,7 +45,10 @@ test("only the recorded creator identity can change multiplayer", () => {
   const owned = interactiveSession(sessionRow({ owner: "github:42" }), []);
   assert.equal(canChangeInteractiveSessionMultiplayer(user(), owned), true);
 
-  const foreign = interactiveSession(sessionRow({ owner: "someone-else" }), []);
+  const foreign = interactiveSession(
+    sessionRow({ owner: "someone-else", owner_subject: "github:99" }),
+    [],
+  );
   assert.equal(canChangeInteractiveSessionMultiplayer(user({ role: "owner" }), foreign), false);
 });
 
@@ -67,7 +61,9 @@ test("delegated terminal control requires the canonical actor and a live lease",
   const session = interactiveSession(
     sessionRow({
       owner: "someone-else",
+      owner_subject: "github:99",
       controller: "operator",
+      controller_subject: "github:42",
       control_expires_at: 200,
     }),
     [],
@@ -79,7 +75,9 @@ test("delegated terminal control requires the canonical actor and a live lease",
   const emailController = interactiveSession(
     sessionRow({
       owner: "someone-else",
+      owner_subject: "github:99",
       controller: "operator@example.test",
+      controller_subject: "github:99",
       control_expires_at: 200,
     }),
     [],
@@ -114,14 +112,14 @@ test("private tenancy hides foreign sessions from every global role", () => {
   }
 });
 
-test("private tenancy fails closed for legacy owners without a stable subject", () => {
+test("private tenancy fails closed for owners without a stable subject", () => {
   const legacy = interactiveSession(sessionRow({ owner: "operator", owner_subject: "" }), []);
   assert.equal(canViewInteractiveSession(user(), legacy, 100, { mode: "private" }), false);
   assert.equal(canManageInteractiveSession(user(), legacy, { mode: "private" }), false);
   assert.equal(canViewInteractiveSession(user(), legacy, 100, { mode: "shared" }), true);
 });
 
-test("private tenancy fails closed for legacy controllers without a stable subject", () => {
+test("delegated control requires a stable controller subject in every tenancy mode", () => {
   const legacy = interactiveSession(
     sessionRow({
       owner: "other",
@@ -133,7 +131,7 @@ test("private tenancy fails closed for legacy controllers without a stable subje
     [],
   );
   assert.equal(canControlInteractiveSession(user(), legacy, 100, true, { mode: "private" }), false);
-  assert.equal(canControlInteractiveSession(user(), legacy, 100, true, { mode: "shared" }), true);
+  assert.equal(canControlInteractiveSession(user(), legacy, 100, true, { mode: "shared" }), false);
 });
 
 test("private tenancy grants bounded view or control without management", () => {
@@ -267,7 +265,10 @@ test("agent authority is limited to its session and direct children", () => {
 });
 
 test("shared tenancy honors named controller grants without granting management", () => {
-  const foreign = interactiveSession(sessionRow({ owner: "other" }), []);
+  const foreign = interactiveSession(
+    sessionRow({ owner: "other", owner_subject: "github:99" }),
+    [],
+  );
   assert.deepEqual(
     interactiveSessionAccess(user(), foreign, 100, true, {
       mode: "shared",
@@ -284,7 +285,10 @@ test("shared tenancy honors named controller grants without granting management"
 });
 
 test("shared tenancy requires control or a named grant for live terminal reads", () => {
-  const foreign = interactiveSession(sessionRow({ owner: "other" }), []);
+  const foreign = interactiveSession(
+    sessionRow({ owner: "other", owner_subject: "github:99" }),
+    [],
+  );
   assert.equal(
     canReadInteractiveSessionTerminal(user(), foreign, 100, true, { mode: "shared" }),
     false,

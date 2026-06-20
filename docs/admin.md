@@ -221,7 +221,7 @@ Proxy-only identity cannot link SSH keys. Use a separate OAuth-capable origin th
 
 The tenant-isolation migration backfills stable card owners, session owners, and delegated-control subjects only when a legacy subject, login, or email resolves to exactly one active tenant subject. Rotated bootstrap rows collapse to `bootstrap:owner`; ambiguous or unresolved legacy actors remain unbound and fail closed in private mode.
 
-The migration installs compatibility triggers for writes from the previous Worker during cutover. The standard deploy command and GitHub workflow deploy the new Worker and run `pnpm deploy:tenant-backfill`, but deliberately leave those triggers installed so late writes from drained Worker isolates remain protected. During a later deployment or maintenance window—never the migration rollout itself—run `pnpm deploy:tenant-finalize` to repeat the backfill and remove the triggers after the old Worker generation has fully drained.
+The migration is finalized by the next numbered D1 migration, which removes the temporary cutover triggers. Deployments now use only the normal migration sequence; there are no post-deploy backfill or manual finalization commands. Stable owner and controller subjects are required directly by current write and authorization paths.
 
 ### Scoped Service Auth
 

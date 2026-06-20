@@ -7,10 +7,10 @@
 - Update `@openclaw/libterminal` to 0.3.1 for terminal lifecycle, Worker asset generation, and package-validation fixes.
 - Add private-by-default tenant isolation for cards and sessions, trusted-proxy automatic onboarding, stable owner identities, expiring named viewer/controller grants with UI/API revocation, and current authorization checks across terminal, desktop, diagnostics, checkpoints, logs, transcripts, metadata, cleanup, and child-session paths.
 - Revalidate named principals against current authentication policy, migrate only unambiguous legacy subjects, reject subjectless private control approvals, and scope Fleet policy totals to visible sessions.
-- Bridge the tenant-isolation cutover with legacy-writer triggers and an idempotent post-deploy backfill, retaining the triggers until a later rollout has drained old Worker requests.
+- Complete the tenant-isolation cutover by removing legacy-writer triggers, repeated backfill/finalizer commands, mutable actor fallbacks, owner adoption, and legacy OpenClaw replay hashes.
 - Keep teardown revocation available, bind OpenClaw replay identity and Sandbox refresh to stable owners, conceal hidden terminal state, and render destructive controls only from server-computed per-session authority.
-- Keep shared-mode live terminal reads behind control or a named grant, revision-fence concurrent grant revocation, and preserve owner-validated legacy OpenClaw replays.
-- Bind OpenClaw crabboxes and GitHub Actions sessions to explicit stable human owners in private tenancy, retain service authority only across validated OpenClaw lineage, and keep bootstrap ownership stable across token rotation.
+- Keep shared-mode live terminal reads behind control or a named grant, revision-fence concurrent grant revocation, and bind OpenClaw replays to exact stable-owner request hashes.
+- Bind every OpenClaw crabbox and GitHub Actions session to an explicit stable human owner, retain service authority only across validated OpenClaw lineage, and keep bootstrap ownership stable across token rotation.
 - Fix local Vite development with `@openclaw/libterminal` by reserving Worker-served Ghostty aliases for production builds and serving the local WASM, icons, and logo without generated placeholders.
 - Keep the mobile navigation and named-access dialog within narrow viewports.
 - Keep each agent credential scoped to its authenticated session and direct children instead of inheriting access to every session owned by the same human.

@@ -3,7 +3,6 @@ import type {
   InteractiveSessionCreateRequest,
   ResolvedInteractiveSessionCreateRequest,
 } from "./session-create-request.ts";
-import type { OpenClawReplayCompatibility } from "./openclaw-request.ts";
 import type { InteractiveSessionLineage } from "./session-lineage.ts";
 import type { InteractiveSessionReservationContext } from "./session-reservation-context.ts";
 import type {
@@ -26,7 +25,6 @@ export type InteractiveSessionCreateOptions = {
   rootSessionId?: string | null;
   openClawRequestId?: string | null;
   openClawRequestHash?: string | null;
-  openClawReplayCompatibility?: OpenClawReplayCompatibility;
   afterReserve?: () => Promise<void>;
 };
 
@@ -104,11 +102,7 @@ export type InteractiveSessionCreationStore = {
   ): Promise<void>;
   recordRequest(insertedSessionId: string, insertedAt: number): Promise<void>;
   isConstraintError(error: unknown): boolean;
-  readRequestReplay(
-    requestId: string,
-    requestHash: string,
-    compatibility?: OpenClawReplayCompatibility,
-  ): Promise<InteractiveSession | null>;
+  readRequestReplay(requestId: string, requestHash: string): Promise<InteractiveSession | null>;
   persistProvisionResult(
     input: InteractiveProvisionPersistenceInput,
     result: InteractiveProvisionResult,
@@ -264,9 +258,6 @@ export class InteractiveSessionCreationService {
           maximumAttempts: this.configuration.maximumAttempts,
           requestId: options.openClawRequestId ?? null,
           requestHash: options.openClawRequestHash ?? null,
-          ...(options.openClawReplayCompatibility
-            ? { requestCompatibility: options.openClawReplayCompatibility }
-            : {}),
         });
         if (replay) return replay;
       }
@@ -311,7 +302,6 @@ export class InteractiveSessionCreationService {
       maximumAttempts: number;
       requestId: string | null;
       requestHash: string | null;
-      requestCompatibility?: OpenClawReplayCompatibility;
     },
   ): Promise<InteractiveSession | null> {
     const constraintError = this.store.isConstraintError(error);
@@ -321,11 +311,7 @@ export class InteractiveSessionCreationService {
       context.requestId &&
       context.requestHash
     ) {
-      const existing = await this.store.readRequestReplay(
-        context.requestId,
-        context.requestHash,
-        context.requestCompatibility,
-      );
+      const existing = await this.store.readRequestReplay(context.requestId, context.requestHash);
       if (existing) return existing;
     }
     if (

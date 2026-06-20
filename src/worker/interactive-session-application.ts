@@ -487,13 +487,8 @@ export class InteractiveSessionApplication {
           now: insertedAt,
         }),
       isConstraintError,
-      readRequestReplay: async (requestId, requestHash, compatibility) => {
-        const session = await readOpenClawRequestSession(
-          this.env,
-          requestId,
-          requestHash,
-          compatibility,
-        );
+      readRequestReplay: async (requestId, requestHash) => {
+        const session = await readOpenClawRequestSession(this.env, requestId, requestHash);
         return session ? this.present(session, user) : null;
       },
       persistProvisionResult: (input, result) =>

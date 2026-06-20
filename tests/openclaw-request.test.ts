@@ -114,66 +114,23 @@ test("OpenClaw replay lookup distinguishes conflicts, completion, preparation, a
     { message: "OpenClaw crabbox request is still preparing" },
   );
 
-  const legacyRequest = {
-    body: { repo: "openclaw/crabfleet", branch: "main" },
-    defaultRuntime: "container" as const,
-  };
-  const legacyHash = await openClawCrabboxRequestHash(
-    legacyRequest.body,
+  const oldHash = await openClawCrabboxRequestHash(
+    { repo: "openclaw/crabfleet", branch: "main" },
     "old-login",
-    legacyRequest.defaultRuntime,
+    "container",
   );
-  const compatible = await readOpenClawRequestSession(
-    env(
-      replayRow({
-        owner: "old-login",
-        owner_subject: "github:42",
-        openclaw_request_hash: legacyHash,
-        replay_request_hash: legacyHash,
-      }),
-    ),
-    "request-1",
-    "stable-hash",
-    {
-      legacyRequest,
-      ownerSubject: "github:42",
-    },
-  );
-  assert.equal(compatible?.id, "IS-42");
-
-  const privateHash = await openClawCrabboxRequestHash(
-    legacyRequest.body,
-    "github:42",
-    legacyRequest.defaultRuntime,
-  );
-  const sharedRollback = await readOpenClawRequestSession(
-    env(
-      replayRow({
-        owner: "old-login",
-        owner_subject: "github:42",
-        openclaw_request_hash: privateHash,
-        replay_request_hash: privateHash,
-      }),
-    ),
-    "request-1",
-    legacyHash,
-    {
-      legacyRequest,
-      expectedOwner: "old-login",
-      resolvedOwnerSubject: "github:42",
-      ownerSubject: null,
-    },
-  );
-  assert.equal(sharedRollback?.id, "IS-42");
-
   await assert.rejects(
     readOpenClawRequestSession(
-      env(replayRow({ owner_subject: "github:99" })),
+      env(
+        replayRow({
+          openclaw_request_hash: oldHash,
+          replay_request_hash: oldHash,
+        }),
+      ),
       "request-1",
-      "hash-1",
-      { ownerSubject: "github:42" },
+      "stable-hash",
     ),
-    { message: "OpenClaw crabbox request id already belongs to a different owner" },
+    { message: "OpenClaw crabbox request id already belongs to a different request" },
   );
 
   const session = await readOpenClawRequestSession(env(replayRow()), "request-1", "hash-1");

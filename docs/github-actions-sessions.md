@@ -114,12 +114,12 @@ Required fields:
 - `workKind`
 - `repo`
 
-Private-tenancy deployments also require `owner`, resolved to exactly one active Crabfleet user by login, email, or stable subject. Existing owned work keys can resume without repeating it.
+New work keys also require `owner`, resolved to exactly one active Crabfleet user by login, email, or stable subject. Existing owned work keys can resume without repeating it.
 
 Optional fields:
 
 - `branch`, default `main`
-- `owner` in shared tenancy
+- `owner` when resuming an existing owned work key
 - `sourceUrl`
 - `runUrl`
 - `purpose`

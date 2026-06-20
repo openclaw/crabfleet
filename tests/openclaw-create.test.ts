@@ -24,11 +24,17 @@ function activeSignal(): AbortSignal {
 function createStore(overrides: Partial<OpenClawCreateStore> = {}): OpenClawCreateStore {
   return {
     defaultRuntime: "container",
-    privateTenancy: false,
     now: () => 100,
     preparationSignal: activeSignal,
     readRequestSession: async () => null,
-    resolvePrincipal: async () => null,
+    resolvePrincipal: async (value) =>
+      value
+        ? {
+            subject: "github:42",
+            principal: `@${openClawOwner(value)}`,
+            actor: openClawOwner(value),
+          }
+        : null,
     prepareBranch: async () => undefined,
     createSession: async () => session(),
     audit: async () => undefined,
@@ -103,7 +109,7 @@ test("OpenClaw create prepares the branch after reservation and before provision
         calls.push("reserve");
         receivedToken = githubToken;
         assert.equal(options.owner, "maintainer");
-        assert.equal(options.ownerSubject, "");
+        assert.equal(options.ownerSubject, "github:42");
         assert.equal(options.createdBy, "service:openclaw");
         await options.afterReserve();
         calls.push("provision");
@@ -130,11 +136,10 @@ test("OpenClaw create prepares the branch after reservation and before provision
   assert.deepEqual(calls, ["reserve", "prepare", "provision", "audit:100"]);
 });
 
-test("OpenClaw private creation binds the requested owner to a stable subject", async () => {
+test("OpenClaw creation binds the requested owner to a stable subject", async () => {
   let created = false;
   const service = new OpenClawCreateService(
     createStore({
-      privateTenancy: true,
       resolvePrincipal: async (value) =>
         value === "maintainer"
           ? { subject: "github:42", principal: "@maintainer", actor: "maintainer" }
@@ -155,38 +160,27 @@ test("OpenClaw private creation binds the requested owner to a stable subject", 
   assert.equal(created, true);
 
   await assert.rejects(
-    new OpenClawCreateService(createStore({ privateTenancy: true })).create({
+    new OpenClawCreateService(createStore({ resolvePrincipal: async () => null })).create({
       owner: "missing",
       repo: "openclaw/crabfleet",
     }),
-    { message: "owner must identify one active Crabfleet user in private tenancy" },
+    { message: "owner must identify one active Crabfleet user" },
   );
 });
 
 test("OpenClaw resolves a raw stable subject before normalizing its display owner", async () => {
   const resolved: string[] = [];
   let replayHash = "";
-  let replayCompatibility: {
-    legacyRequest: {
-      body: Record<string, unknown>;
-      defaultRuntime: "crabbox" | "container";
-    };
-    expectedOwner: string;
-    resolvedOwnerSubject: string | null;
-    ownerSubject: string | null;
-  } | null = null;
   const service = new OpenClawCreateService(
     createStore({
-      privateTenancy: true,
       resolvePrincipal: async (value) => {
         resolved.push(value);
         return value === "github:42"
           ? { subject: "github:42", principal: "@maintainer", actor: "maintainer" }
           : null;
       },
-      readRequestSession: async (_requestId, requestHash, compatibility) => {
+      readRequestSession: async (_requestId, requestHash) => {
         replayHash = requestHash;
-        replayCompatibility = compatibility;
         return null;
       },
       createSession: async (_body, _token, options) => {
@@ -215,36 +209,19 @@ test("OpenClaw resolves a raw stable subject before normalizing its display owne
       "container",
     ),
   );
-  assert.deepEqual(replayCompatibility, {
-    legacyRequest: {
-      body: {
-        owner: "github:42",
-        repo: "openclaw/crabfleet",
-        requestId: "stable-owner",
-        branch: "main",
-      },
-      defaultRuntime: "container",
-    },
-    expectedOwner: "maintainer",
-    resolvedOwnerSubject: "github:42",
-    ownerSubject: "github:42",
-  });
 });
 
-test("shared OpenClaw replay identity ignores mutable principal resolution", async () => {
+test("OpenClaw replay identity uses the stable owner subject", async () => {
   let requestHash = "";
-  let compatibility: Parameters<OpenClawCreateStore["readRequestSession"]>[2] | null = null;
   const service = new OpenClawCreateService(
     createStore({
-      privateTenancy: false,
       resolvePrincipal: async () => ({
         subject: "github:42",
         principal: "@maintainer",
         actor: "maintainer",
       }),
-      readRequestSession: async (_requestId, hash, receivedCompatibility) => {
+      readRequestSession: async (_requestId, hash) => {
         requestHash = hash;
-        compatibility = receivedCompatibility;
         return null;
       },
     }),
@@ -259,24 +236,10 @@ test("shared OpenClaw replay identity ignores mutable principal resolution", asy
     requestHash,
     await openClawCrabboxRequestHash(
       { repo: "openclaw/crabfleet", branch: "main" },
-      "maintainer",
+      "github:42",
       "container",
     ),
   );
-  assert.deepEqual(compatibility, {
-    legacyRequest: {
-      body: {
-        owner: "maintainer",
-        repo: "openclaw/crabfleet",
-        requestId: "shared-owner",
-        branch: "main",
-      },
-      defaultRuntime: "container",
-    },
-    expectedOwner: "maintainer",
-    resolvedOwnerSubject: "github:42",
-    ownerSubject: null,
-  });
 });
 
 test("OpenClaw create defers masked branch permissions but reports timeouts", async () => {

@@ -48,7 +48,6 @@ export type GitHubActionsSessionRegistrationUpdate = {
 };
 
 export type GitHubActionsSessionRegistrationStore = {
-  privateTenancy: boolean;
   now(): number;
   newAgentToken(): string;
   hashToken(token: string): Promise<string>;
@@ -58,7 +57,6 @@ export type GitHubActionsSessionRegistrationStore = {
   nextSessionId(): Promise<string>;
   insertSession(values: Insertable<InteractiveSessionTable>): Promise<void>;
   readById(id: string): Promise<InteractiveSessionRow | null>;
-  adoptLegacyOwner(id: string, owner: string, ownerSubject: string): Promise<boolean>;
   updateSession(id: string, values: GitHubActionsSessionRegistrationUpdate): Promise<void>;
   isConstraintError(error: unknown): boolean;
   disconnectRunner(id: string): Promise<void>;
@@ -103,8 +101,8 @@ export class GitHubActionsSessionRegistrationService {
     const agentTokenHash = await this.store.hashToken(agentToken);
     const now = this.store.now();
     let existing = await this.store.readByWorkKey(workKey);
-    if (!existing && this.store.privateTenancy && !resolvedOwner) {
-      throw badRequest("owner is required in private tenancy");
+    if (!existing && !resolvedOwner) {
+      throw badRequest("owner is required for new GitHub Actions work");
     }
     const purpose =
       boundedValue(input.purpose, 500) ||
@@ -122,8 +120,8 @@ export class GitHubActionsSessionRegistrationService {
         runUrl,
         purpose,
         summary,
-        owner: resolvedOwner?.actor ?? null,
-        ownerSubject: resolvedOwner?.subject ?? null,
+        owner: resolvedOwner!.actor,
+        ownerSubject: resolvedOwner!.subject,
         agentTokenHash,
         now,
       });
@@ -133,10 +131,7 @@ export class GitHubActionsSessionRegistrationService {
       throw badRequest("workKey is already registered to a different runtime");
     }
     if (resolvedOwner && !existing.owner_subject) {
-      await this.store.adoptLegacyOwner(existing.id, resolvedOwner.actor, resolvedOwner.subject);
-      const adopted = await this.store.readById(existing.id);
-      if (!adopted) throw new Error("GitHub Actions session disappeared during owner adoption");
-      existing = adopted;
+      throw badRequest("workKey is missing a stable owner; use a new workKey");
     }
     if (
       resolvedOwner &&
@@ -147,8 +142,8 @@ export class GitHubActionsSessionRegistrationService {
     }
     const owner = resolvedOwner?.actor ?? existing.owner;
     const ownerSubject = resolvedOwner?.subject ?? existing.owner_subject;
-    if (this.store.privateTenancy && !ownerSubject) {
-      throw badRequest("owner is required in private tenancy");
+    if (!ownerSubject) {
+      throw badRequest("workKey is missing a stable owner; use a new workKey");
     }
 
     const resumed = existing.work_state !== "registered" || existing.status !== "ready";
@@ -200,8 +195,8 @@ export class GitHubActionsSessionRegistrationService {
     runUrl: string | null;
     purpose: string;
     summary: string;
-    owner: string | null;
-    ownerSubject: string | null;
+    owner: string;
+    ownerSubject: string;
     agentTokenHash: string;
     now: number;
   }): Promise<InteractiveSessionRow | null> {
@@ -231,8 +226,8 @@ export function buildGitHubActionsSessionValues(input: {
   runUrl: string | null;
   purpose: string;
   summary: string;
-  owner: string | null;
-  ownerSubject: string | null;
+  owner: string;
+  ownerSubject: string;
   agentTokenHash: string;
   now: number;
 }): Insertable<InteractiveSessionTable> {
@@ -262,8 +257,8 @@ export function buildGitHubActionsSessionValues(input: {
     prompt: input.purpose,
     purpose: input.purpose,
     summary: input.summary,
-    owner: input.owner ?? `github-actions:${input.id}`,
-    owner_subject: input.ownerSubject ?? "",
+    owner: input.owner,
+    owner_subject: input.ownerSubject,
     created_by: "service:openclaw",
     status: "ready",
     lease_id: null,
