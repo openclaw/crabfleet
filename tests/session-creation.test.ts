@@ -332,16 +332,9 @@ test("session creation returns a durable replay after a request reservation race
         throw constraint;
       },
       isConstraintError: (error) => error === constraint,
-      readRequestReplay: async (requestId, requestHash, compatibility) => {
+      readRequestReplay: async (requestId, requestHash) => {
         assert.equal(requestId, "request-1");
         assert.equal(requestHash, "hash-1");
-        assert.deepEqual(compatibility, {
-          legacyRequest: {
-            body: { repo: "openclaw/crabfleet" },
-            defaultRuntime: "container",
-          },
-          ownerSubject: "github:42",
-        });
         return replay;
       },
       provisionManaged: async () => {
@@ -356,13 +349,6 @@ test("session creation returns a durable replay after a request reservation race
     await service.create({ repo: "openclaw/crabfleet" }, undefined, {
       openClawRequestId: "request-1",
       openClawRequestHash: "hash-1",
-      openClawReplayCompatibility: {
-        legacyRequest: {
-          body: { repo: "openclaw/crabfleet" },
-          defaultRuntime: "container",
-        },
-        ownerSubject: "github:42",
-      },
     }),
     replay,
   );

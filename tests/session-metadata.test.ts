@@ -207,7 +207,7 @@ test("control approval grants a bounded lease and clears the request", async () 
   assert.deepEqual(audits, ["interactive session control granted IS-7 to reviewer"]);
 });
 
-test("private control approval rejects a legacy request without a stable subject", async () => {
+test("private control approval rejects a request without a stable subject", async () => {
   const session = interactiveSession(
     sessionRow({ control_requested_by: "ambiguous", control_requested_at: 90 }),
     [],

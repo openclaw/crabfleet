@@ -154,25 +154,11 @@ export class InteractiveSessionGrantRepository {
     const db = database(this.env);
     const existing = await db
       .selectFrom("interactive_session_grants")
-      .select(["subject", "principal"])
+      .select("subject")
       .where("session_id", "=", sessionId)
       .where("subject", "=", subject)
       .executeTakeFirst();
     if (!existing) return false;
-    const identity = await db
-      .selectFrom("users")
-      .select(["login", "email"])
-      .where("subject", "=", subject)
-      .executeTakeFirst();
-    const legacyActors = [
-      existing.principal,
-      existing.principal.replace(/^@/, ""),
-      identity?.login,
-      identity?.email,
-      subject,
-    ].filter(
-      (value, index, values): value is string => Boolean(value) && values.indexOf(value) === index,
-    );
     const deleteGrant = db
       .deleteFrom("interactive_session_grants")
       .where("session_id", "=", sessionId)
@@ -185,15 +171,7 @@ export class InteractiveSessionGrantRepository {
         control_requested_at: null,
       })
       .where("id", "=", sessionId)
-      .where((expression) =>
-        expression.or([
-          expression("control_requested_by_subject", "=", subject),
-          expression.and([
-            expression("control_requested_by_subject", "is", null),
-            expression("control_requested_by", "in", legacyActors),
-          ]),
-        ]),
-      );
+      .where("control_requested_by_subject", "=", subject);
     const clearDelegatedControl = db
       .updateTable("interactive_sessions")
       .set({
@@ -203,15 +181,7 @@ export class InteractiveSessionGrantRepository {
         control_expires_at: null,
       })
       .where("id", "=", sessionId)
-      .where((expression) =>
-        expression.or([
-          expression("controller_subject", "=", subject),
-          expression.and([
-            expression("controller_subject", "is", null),
-            expression("controller", "in", legacyActors),
-          ]),
-        ]),
-      );
+      .where("controller_subject", "=", subject);
     const advanceSessionRevision = db
       .updateTable("interactive_sessions")
       .set({ updated_at: sql<number>`MAX(updated_at + 1, ${now})` })

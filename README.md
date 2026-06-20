@@ -93,7 +93,7 @@ Content-Type: application/json
 {"workKey":"openclaw/crabfleet:pr:42","workKind":"pr_repair","repo":"openclaw/crabfleet","branch":"fix/pr-42","owner":"operator@example.test","sourceUrl":"https://github.com/openclaw/crabfleet/pull/42","runUrl":"https://github.com/openclaw/crabfleet/actions/runs/123","purpose":"repair PR 42","summary":"starting repair"}
 ```
 
-The response contains `{session, agentToken, runnerPtyUrl, browserUrl}`. Private-tenancy deployments require `owner` to resolve to one active Crabfleet user; the stable subject owns browser visibility while the OpenClaw service retains lifecycle authority for its session. `runnerPtyUrl` includes the rotated session-scoped query credential and works directly with Node's global `WebSocket`:
+The response contains `{session, agentToken, runnerPtyUrl, browserUrl}`. New work keys require `owner` to resolve to one active Crabfleet user; the stable subject owns browser visibility while the OpenClaw service retains lifecycle authority for its session. `runnerPtyUrl` includes the rotated session-scoped query credential and works directly with Node's global `WebSocket`:
 
 ```js
 const terminal = new WebSocket(runnerPtyUrl);
@@ -372,7 +372,7 @@ curl -fsS https://crabfleet.openclaw.ai/api/openclaw/crabboxes \
   -d '{"owner":"@steipete","repo":"openclaw/crabfleet","prompt":"prep the meeting follow-up"}'
 ```
 
-The created crabbox appears in the fleet grid under the requested owner. In private tenancy, `owner` must resolve to one active Crabfleet user by login, email, or stable subject. Provisioning follows normal interactive-session routing: built-in Sandbox for Container or the versioned adapter for Crabbox.
+The created crabbox appears in the fleet grid under the requested owner. `owner` must resolve to one active Crabfleet user by login, email, or stable subject. Provisioning follows normal interactive-session routing: built-in Sandbox for Container or the versioned adapter for Crabbox.
 
 ### Project Structure
 

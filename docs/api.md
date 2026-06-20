@@ -386,7 +386,7 @@ Response:
 }
 ```
 
-Private-tenancy deployments require `owner` for a new work key; it must resolve to exactly one active Crabfleet user by login, email, or stable subject. Existing owned work keys can resume without repeating it, and a work key cannot transfer to a different stable owner. Shared tenancy keeps `owner` optional. `runnerPtyUrl` is directly usable with Node's global `WebSocket`; no custom headers are required. The query credential is session-scoped, rotates on registration, is stored only as a hash, and is not exposed through viewer/session APIs.
+Every new work key requires `owner`; it must resolve to exactly one active Crabfleet user by login, email, or stable subject. Existing owned work keys can resume without repeating it, and a work key cannot transfer to a different stable owner. `runnerPtyUrl` is directly usable with Node's global `WebSocket`; no custom headers are required. The query credential is session-scoped, rotates on registration, is stored only as a hash, and is not exposed through viewer/session APIs.
 
 ### GET /api/agent/interactive-sessions/:id/runner-pty
 
@@ -611,10 +611,9 @@ After finalized-session cleanup, the retained replay tombstone rejects the
 request instead of provisioning duplicate work. The fingerprint includes the
 resolved stable owner subject and a nonreversible digest of any supplied GitHub
 credential; the credential itself is not stored in the replay ledger.
-Pre-upgrade display-owner fingerprints remain replayable only when the migrated
-session owner subject matches the currently resolved stable owner.
+Request IDs created before stable-owner fingerprints were introduced are intentionally not replayed; callers must allocate a new request ID.
 
-In private tenancy, `owner` must resolve to exactly one active Crabfleet user by login, email, or stable subject. Crabfleet persists both the stable subject and the user's actor-compatible login/email so Sandbox credential and lease checks agree with the human owner. That subject owns human visibility and management; the exact OpenClaw service separately retains automation lifecycle and terminal authority for its own session and only descendants first validated inside that service-owned lineage.
+`owner` must resolve to exactly one active Crabfleet user by login, email, or stable subject. Crabfleet persists both the stable subject and the user's actor-compatible login/email so Sandbox credential and lease checks agree with the human owner. That subject owns human visibility and management; the exact OpenClaw service separately retains automation lifecycle and terminal authority for its own session and only descendants first validated inside that service-owned lineage.
 
 Response:
 

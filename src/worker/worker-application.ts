@@ -39,7 +39,6 @@ import { readSandboxFleetPolicies } from "./session-control-do.ts";
 import { interactiveTerminalRouteAvailable } from "./session-terminal-route.ts";
 import { SharedSessionService, type SharedSessionServiceStore } from "./shared-session-service.ts";
 import { SshGateway } from "./ssh-gateway.ts";
-import { tenancyMode } from "./tenancy.ts";
 import { createWorkflowService, type WorkflowService } from "./workflow-service.ts";
 
 const services = {
@@ -480,7 +479,7 @@ export class WorkerApplication {
     session: InteractiveSession,
   ): Promise<InteractiveSession & { githubToken?: string }> {
     if (!user?.subject.startsWith("github:")) return session;
-    if (!ownsInteractiveSession(user, session, tenancyMode(this.env))) return session;
+    if (!ownsInteractiveSession(user, session)) return session;
     const githubToken =
       (await sessionGitHubToken(request, this.env, user.subject)) ??
       (await this.sshGateway().githubTokenForRequest(request, user));

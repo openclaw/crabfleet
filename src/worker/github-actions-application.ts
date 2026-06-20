@@ -33,7 +33,6 @@ import { readAgentSessionCredential, readInteractiveSessionRecord } from "./sess
 import { newAgentToken } from "./session-reservation-context.ts";
 import { githubActionsRelayStub } from "./session-control-do.ts";
 import { ServiceRegistry } from "./service-registry.ts";
-import { tenancyMode } from "./tenancy.ts";
 
 const services = {
   adminRepository: Symbol("admin-repository"),
@@ -70,7 +69,6 @@ export class GitHubActionsApplication {
   async register(input: GitHubActionsSessionRegistrationInput, user: User) {
     const repository = this.repository();
     const store: GitHubActionsSessionRegistrationStore = {
-      privateTenancy: tenancyMode(this.env) === "private",
       now: () => Date.now(),
       newAgentToken,
       hashToken: sha256,
@@ -81,8 +79,6 @@ export class GitHubActionsApplication {
       nextSessionId: () => nextInteractiveSessionId(this.env),
       insertSession: (values) => repository.insertSession(values),
       readById: (id) => repository.readById(id),
-      adoptLegacyOwner: (id, owner, ownerSubject) =>
-        repository.adoptLegacyOwner(id, owner, ownerSubject),
       updateSession: (id, values) => repository.updateSession(id, values),
       isConstraintError,
       disconnectRunner: (id) => this.disconnectRunner(id),

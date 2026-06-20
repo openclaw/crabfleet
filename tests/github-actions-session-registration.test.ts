@@ -44,7 +44,6 @@ function registrationStore(initialRows: InteractiveSessionRow[] = []): {
     concurrentRow: null,
   };
   const store: GitHubActionsSessionRegistrationStore = {
-    privateTenancy: false,
     now: () => 100,
     newAgentToken: () => "agent-token",
     hashToken: async () => "agent-token-hash",
@@ -74,13 +73,6 @@ function registrationStore(initialRows: InteractiveSessionRow[] = []): {
       state.rows.set(row.id, row);
     },
     readById: async (id) => state.rows.get(id) ?? null,
-    adoptLegacyOwner: async (id, owner, ownerSubject) => {
-      state.operations.push("adopt-owner");
-      const row = state.rows.get(id);
-      if (!row || row.owner_subject) return false;
-      state.rows.set(id, { ...row, owner, owner_subject: ownerSubject });
-      return true;
-    },
     updateSession: async (id, values) => {
       state.operations.push("update");
       state.updates.push({ id, values });
@@ -135,14 +127,14 @@ test("GitHub Actions rows centralize session defaults and scoped ownership", () 
     runUrl: null,
     purpose: "fix issue",
     summary: "starting",
-    owner: null,
-    ownerSubject: null,
+    owner: "operator",
+    ownerSubject: "github:42",
     agentTokenHash: "agent-hash",
     now: 100,
   });
   assert.equal(values.runtime, "github_actions");
-  assert.equal(values.owner, "github-actions:IS-123");
-  assert.equal(values.owner_subject, "");
+  assert.equal(values.owner, "operator");
+  assert.equal(values.owner_subject, "github:42");
   assert.equal(values.root_session_id, "IS-123");
   assert.equal(values.agent_token_hash, "agent-hash");
   assert.equal(values.work_state, "registered");
@@ -157,6 +149,7 @@ test("new GitHub Actions work registers, rotates credentials, and records eviden
     workKind: "issue_fix",
     repo: "OpenClaw/CrabFleet",
     sourceUrl: "https://example.test/issues/123",
+    owner: "operator@example.test",
   });
 
   assert.equal(result.session.id, "IS-101");
@@ -178,20 +171,18 @@ test("new GitHub Actions work registers, rotates credentials, and records eviden
   ]);
 });
 
-test("private GitHub Actions registration requires and persists a stable owner", async () => {
+test("GitHub Actions registration requires and persists a stable owner", async () => {
   const missing = registrationStore();
-  missing.store.privateTenancy = true;
   await assert.rejects(
     new GitHubActionsSessionRegistrationService(missing.store).register({
       workKey: "issue:private-missing",
       workKind: "issue",
       repo: "openclaw/crabfleet",
     }),
-    { message: "owner is required in private tenancy" },
+    { message: "owner is required for new GitHub Actions work" },
   );
 
   const owned = registrationStore();
-  owned.store.privateTenancy = true;
   const result = await new GitHubActionsSessionRegistrationService(owned.store).register({
     workKey: "issue:private-owned",
     workKind: "issue",
@@ -212,7 +203,6 @@ test("GitHub Actions work keys cannot transfer between tenant owners", async () 
     owner_subject: "github:42",
   });
   const { store } = registrationStore([existing]);
-  store.privateTenancy = true;
   await assert.rejects(
     new GitHubActionsSessionRegistrationService(store).register({
       workKey: "issue:owned",
@@ -224,57 +214,27 @@ test("GitHub Actions work keys cannot transfer between tenant owners", async () 
   );
 });
 
-test("legacy GitHub Actions owner adoption rejects a concurrent winner", async () => {
-  const legacy = sessionRow({
-    id: "IS-legacy",
+test("GitHub Actions rejects work keys without a stable owner", async () => {
+  const subjectless = sessionRow({
+    id: "IS-subjectless",
     runtime: "github_actions",
-    work_key: "issue:legacy",
-    owner: "legacy",
+    work_key: "issue:subjectless",
+    owner: "subjectless",
     owner_subject: "",
   });
-  const { store, state } = registrationStore([legacy]);
-  store.privateTenancy = true;
-  store.adoptLegacyOwner = async (id) => {
-    state.operations.push("adopt-owner-lost");
-    const row = state.rows.get(id);
-    assert.ok(row);
-    state.rows.set(id, { ...row, owner: "other", owner_subject: "github:99" });
-    return false;
-  };
+  const { store, state } = registrationStore([subjectless]);
 
   await assert.rejects(
     new GitHubActionsSessionRegistrationService(store).register({
-      workKey: "issue:legacy",
+      workKey: "issue:subjectless",
       workKind: "issue",
       repo: "openclaw/crabfleet",
       owner: "operator@example.test",
     }),
-    { message: "workKey is already registered to a different owner" },
+    { message: "workKey is missing a stable owner; use a new workKey" },
   );
   assert.equal(state.updates.length, 0);
-  assert.deepEqual(state.operations, ["repo:openclaw/crabfleet", "adopt-owner-lost"]);
-});
-
-test("legacy GitHub Actions owner adoption is conditional and reread", async () => {
-  const legacy = sessionRow({
-    id: "IS-legacy-owned",
-    runtime: "github_actions",
-    work_key: "issue:legacy-owned",
-    owner: "legacy",
-    owner_subject: "",
-  });
-  const { store, state } = registrationStore([legacy]);
-  store.privateTenancy = true;
-
-  const result = await new GitHubActionsSessionRegistrationService(store).register({
-    workKey: "issue:legacy-owned",
-    workKind: "issue",
-    repo: "openclaw/crabfleet",
-    owner: "operator@example.test",
-  });
-  assert.equal(result.session.owner, "operator");
-  assert.equal(state.rows.get("IS-legacy-owned")?.owner_subject, "github:42");
-  assert.ok(state.operations.indexOf("adopt-owner") < state.operations.indexOf("update"));
+  assert.deepEqual(state.operations, ["repo:openclaw/crabfleet"]);
 });
 
 test("resumed work preserves omitted links and resets terminal state", async () => {
@@ -315,6 +275,7 @@ test("stale runner disconnect failures do not suppress registration evidence", a
     workKey: "issue:disconnect-race",
     workKind: "issue",
     repo: "openclaw/crabfleet",
+    owner: "operator@example.test",
   });
 
   assert.deepEqual(state.events, ["GitHub Actions work registered"]);
@@ -336,6 +297,7 @@ test("registration adopts a concurrently inserted work key", async () => {
     workKey: "issue:race",
     workKind: "issue",
     repo: "openclaw/crabfleet",
+    owner: "operator@example.test",
   });
 
   assert.equal(result.session.id, "IS-concurrent");

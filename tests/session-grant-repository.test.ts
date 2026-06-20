@@ -211,9 +211,6 @@ test("grant revocation atomically removes access and delegated control", async (
       results: [
         {
           subject: "proxy:collaborator@example.test",
-          principal: "collaborator@example.test",
-          login: "collaborator",
-          email: "collaborator@example.test",
         },
       ],
       batches,
@@ -226,17 +223,17 @@ test("grant revocation atomically removes access and delegated control", async (
   assert.match(batches[0]?.[0]?.sql ?? "", /^delete from "interactive_session_grants"/i);
   assert.match(batches[0]?.[1]?.sql ?? "", /^update "interactive_sessions"/i);
   assert.match(batches[0]?.[1]?.sql ?? "", /"control_requested_by_subject" = \?/i);
-  assert.match(batches[0]?.[1]?.sql ?? "", /"control_requested_by" in/i);
+  assert.doesNotMatch(batches[0]?.[1]?.sql ?? "", /"control_requested_by" in/i);
   assert.doesNotMatch(batches[0]?.[1]?.sql ?? "", /where[^]*"controller_subject" = \?/i);
   assert.match(batches[0]?.[2]?.sql ?? "", /^update "interactive_sessions"/i);
   assert.match(batches[0]?.[2]?.sql ?? "", /"controller_subject" = \?/i);
-  assert.match(batches[0]?.[2]?.sql ?? "", /"controller" in/i);
+  assert.doesNotMatch(batches[0]?.[2]?.sql ?? "", /"controller" in/i);
   assert.doesNotMatch(batches[0]?.[2]?.sql ?? "", /where[^]*"control_requested_by_subject" = \?/i);
   assert.match(batches[0]?.[3]?.sql ?? "", /"updated_at" = MAX\(updated_at \+ 1, \?\)/i);
   assert.ok(batches[0]?.[0]?.parameters.includes("IS-42"));
   assert.ok(batches[0]?.[0]?.parameters.includes("proxy:collaborator@example.test"));
-  assert.ok(batches[0]?.[1]?.parameters.includes("collaborator"));
-  assert.ok(batches[0]?.[2]?.parameters.includes("collaborator@example.test"));
+  assert.ok(batches[0]?.[1]?.parameters.includes("proxy:collaborator@example.test"));
+  assert.ok(batches[0]?.[2]?.parameters.includes("proxy:collaborator@example.test"));
   assert.ok(batches[0]?.[3]?.parameters.includes(2_000));
 });
 

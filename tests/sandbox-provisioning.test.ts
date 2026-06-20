@@ -116,7 +116,7 @@ const refreshUser: User = {
   teams: [],
 };
 
-const legacySandboxSession = interactiveSession(
+const sandboxSession = interactiveSession(
   sessionRow({
     owner: "owner",
     created_by: "github:42",
@@ -466,7 +466,7 @@ test("managed Sandbox lease refresh claims, provisions, commits, cleans, and log
   const refreshed = await service.ensureCurrent(
     new Request("https://example.test"),
     refreshUser,
-    legacySandboxSession,
+    sandboxSession,
   );
 
   assert.equal(refreshed.leaseId, sandboxLeaseId(claim.lease));
@@ -513,12 +513,23 @@ test("managed Sandbox refresh follows stable ownership across login changes", as
   );
 });
 
-test("private Sandbox refresh rejects unresolved legacy ownership", async () => {
+test("private Sandbox refresh rejects missing stable ownership", async () => {
   const service = new ManagedSandboxLeaseRefreshService(
     refreshDependencies({ tenancyMode: "private" }),
   );
+  const unresolved = interactiveSession(
+    sessionRow({
+      owner: "owner",
+      owner_subject: "",
+      created_by: "github:42",
+      lease_id: "sandbox:old:terminal-old:autostart-v3",
+      status: "ready",
+      updated_at: 100,
+    }),
+    [],
+  );
   await assert.rejects(
-    service.ensureCurrent(new Request("https://example.test"), refreshUser, legacySandboxSession),
+    service.ensureCurrent(new Request("https://example.test"), refreshUser, unresolved),
     /session owner must reconnect/,
   );
 });
@@ -549,7 +560,7 @@ test("managed Sandbox lease refresh fails before claiming without owner credenti
   );
 
   await assert.rejects(
-    service.ensureCurrent(new Request("https://example.test"), refreshUser, legacySandboxSession),
+    service.ensureCurrent(new Request("https://example.test"), refreshUser, sandboxSession),
     /GitHub PR credentials are not connected/,
   );
   assert.deepEqual(calls, ["token"]);
@@ -571,27 +582,27 @@ test("managed Sandbox lease refresh stages redacted provider failures", async ()
   );
 
   await assert.rejects(
-    service.ensureCurrent(new Request("https://example.test"), refreshUser, legacySandboxSession),
+    service.ensureCurrent(new Request("https://example.test"), refreshUser, sandboxSession),
     /Cloudflare Sandbox lease refresh failed: \[credential\]/,
   );
   assert.deepEqual(calls, ["Cloudflare Sandbox lease refresh failed: [credential]:200"]);
 });
 
 test("Sandbox lease refresh payload preserves durable identity and scoped credentials", () => {
-  assert.deepEqual(sandboxLeaseRefreshPayload(legacySandboxSession, "github-token"), {
-    id: legacySandboxSession.id,
-    parentSessionId: legacySandboxSession.parentSessionId,
-    rootSessionId: legacySandboxSession.rootSessionId ?? legacySandboxSession.id,
-    repo: legacySandboxSession.repo,
-    branch: legacySandboxSession.branch,
+  assert.deepEqual(sandboxLeaseRefreshPayload(sandboxSession, "github-token"), {
+    id: sandboxSession.id,
+    parentSessionId: sandboxSession.parentSessionId,
+    rootSessionId: sandboxSession.rootSessionId ?? sandboxSession.id,
+    repo: sandboxSession.repo,
+    branch: sandboxSession.branch,
     runtime: "container",
-    profile: legacySandboxSession.profile,
-    command: legacySandboxSession.command,
-    prompt: legacySandboxSession.prompt,
-    purpose: legacySandboxSession.purpose,
-    summary: legacySandboxSession.summary,
-    owner: legacySandboxSession.owner,
-    createdBy: legacySandboxSession.createdBy,
+    profile: sandboxSession.profile,
+    command: sandboxSession.command,
+    prompt: sandboxSession.prompt,
+    purpose: sandboxSession.purpose,
+    summary: sandboxSession.summary,
+    owner: sandboxSession.owner,
+    createdBy: sandboxSession.createdBy,
     githubToken: "github-token",
   });
 });
@@ -681,7 +692,7 @@ test("managed Sandbox refresh claim persists one fenced replacement lease", asyn
     return { changes: 1 };
   });
 
-  const claimed = await claimManagedSandboxLeaseRefresh(env, legacySandboxSession, 200, 900);
+  const claimed = await claimManagedSandboxLeaseRefresh(env, sandboxSession, 200, 900);
 
   assert.ok(claimed);
   assert.equal(claimed.claimRevision, 200);
@@ -692,7 +703,7 @@ test("managed Sandbox refresh claim persists one fenced replacement lease", asyn
   assert.match(executions[0].sql, /sandbox_refresh_sandbox_id/);
   assert.match(executions[0].sql, /sandbox_refresh_claim_expires_at/);
   assert.match(executions[0].sql, /agent_token_hash/);
-  assert.ok(executions[0].parameters.includes(legacySandboxSession.leaseId));
+  assert.ok(executions[0].parameters.includes(sandboxSession.leaseId));
   assert.ok(executions[0].parameters.includes("ready"));
   assert.ok(executions[0].parameters.includes("attached"));
   assert.ok(executions[0].parameters.includes("detached"));
