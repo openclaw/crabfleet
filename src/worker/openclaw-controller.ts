@@ -46,7 +46,7 @@ export type OpenClawControllerStore = {
     session: InteractiveSession,
     input: OpenClawMessageInput,
   ): Promise<void>;
-  stopSession(request: Request, sessionId: string): Promise<InteractiveSession>;
+  stopSession(request: Request, session: InteractiveSession): Promise<InteractiveSession>;
   registerActionSession(
     input: GitHubActionsSessionRegistrationInput,
   ): Promise<GitHubActionsSessionRegistration>;
@@ -151,9 +151,9 @@ export class OpenClawController {
     sessionId: string,
     rootSessionId: string,
   ): Promise<OpenClawCrabboxResponse> {
-    await this.rootScopedSession(sessionId, rootSessionId);
-    const session = await this.store.stopSession(request, sessionId);
-    return this.crabboxSummaryResponse(session);
+    const current = await this.rootScopedSession(sessionId, rootSessionId);
+    const stopped = await this.store.stopSession(request, current);
+    return this.crabboxSummaryResponse(stopped);
   }
 
   async createCrabboxEmbedTicket(

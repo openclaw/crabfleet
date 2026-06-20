@@ -41,8 +41,8 @@ function dependencies(calls: string[]): BrowserSessionRouteDependencies {
       calls.push(`cleanup:${user.login}`);
       return { handler: "cleanup" };
     },
-    async readFreshSession(sessionId) {
-      calls.push(`read:${sessionId}`);
+    async readFreshSession(user, sessionId) {
+      calls.push(`read:${user.login}:${sessionId}`);
       return interactiveSession(sessionRow({ id: sessionId }), []);
     },
     presentSession(session, user) {
@@ -88,6 +88,18 @@ function dependencies(calls: string[]): BrowserSessionRouteDependencies {
     async uploadClipboard(_request, user, sessionId) {
       calls.push(`clipboard:${user.login}:${sessionId}`);
       return { handler: "clipboard" };
+    },
+    async listGrants(user, sessionId) {
+      calls.push(`grants:list:${user.login}:${sessionId}`);
+      return { handler: "grants:list" };
+    },
+    async grantAccess(user, sessionId, input) {
+      calls.push(`grants:create:${user.login}:${sessionId}:${input.principal}:${input.role}`);
+      return { handler: "grants:create" };
+    },
+    async revokeAccess(user, sessionId, subject) {
+      calls.push(`grants:revoke:${user.login}:${sessionId}:${subject}`);
+      return { handler: "grants:revoke" };
     },
   };
 }
@@ -146,7 +158,11 @@ test("browser session collection routes enforce create and cleanup roles", async
 
 test("browser session routes dispatch all JSON resources with decoded identities", async () => {
   const cases: Array<[Request, number, string[]]> = [
-    [request("GET", "/api/interactive-sessions/IS%2F2"), 200, ["read:IS/2", "present:IS/2:viewer"]],
+    [
+      request("GET", "/api/interactive-sessions/IS%2F2"),
+      200,
+      ["read:viewer:IS/2", "present:IS/2:viewer"],
+    ],
     [request("GET", "/api/interactive-sessions/IS%2F2/logs"), 200, ["logs:viewer:IS/2"]],
     [request("POST", "/api/interactive-sessions/IS%2F2/summary", {}), 200, ["summary:viewer:IS/2"]],
     [
@@ -179,6 +195,23 @@ test("browser session routes dispatch all JSON resources with decoded identities
       201,
       ["clipboard:viewer:IS/2"],
     ],
+    [request("GET", "/api/interactive-sessions/IS%2F2/grants"), 200, ["grants:list:viewer:IS/2"]],
+    [
+      request("POST", "/api/interactive-sessions/IS%2F2/grants", {
+        principal: "collaborator@example.test",
+        role: "viewer",
+      }),
+      201,
+      ["grants:create:viewer:IS/2:collaborator@example.test:viewer"],
+    ],
+    [
+      request(
+        "DELETE",
+        "/api/interactive-sessions/IS%2F2/grants/proxy%3Acollaborator%40example.test",
+      ),
+      200,
+      ["grants:revoke:viewer:IS/2:proxy:collaborator@example.test"],
+    ],
   ];
 
   for (const [value, expectedStatus, expectedCalls] of cases) {
@@ -208,8 +241,8 @@ test("browser session resources report missing sessions and exact fallthrough", 
   const missingCalls: string[] = [];
   await assert.rejects(
     dispatch(request("GET", "/api/interactive-sessions/IS-404"), viewer, missingCalls, {
-      readFreshSession: async (sessionId) => {
-        missingCalls.push(`read:${sessionId}`);
+      readFreshSession: async (user, sessionId) => {
+        missingCalls.push(`read:${user.login}:${sessionId}`);
         return null;
       },
     }),
@@ -218,7 +251,7 @@ test("browser session resources report missing sessions and exact fallthrough", 
       return true;
     },
   );
-  assert.deepEqual(missingCalls, ["read:IS-404"]);
+  assert.deepEqual(missingCalls, ["read:viewer:IS-404"]);
 
   const calls: string[] = [];
   for (const value of [

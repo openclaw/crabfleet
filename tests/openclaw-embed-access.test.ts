@@ -5,6 +5,7 @@ import { createOpenClawEmbedTicket } from "../src/openclaw-service.ts";
 import {
   canControlOpenClawEmbeddedTerminalRequest,
   isOpenClawEmbedSessionToken,
+  terminalInputAuthorization,
 } from "../src/worker/openclaw-embed-access.ts";
 
 test("embedded terminal requests require an exact session-scoped ticket", async () => {
@@ -34,4 +35,36 @@ test("embedded terminal requests require an exact session-scoped ticket", async 
     false,
   );
   assert.equal(await isOpenClawEmbedSessionToken({}, "IS-2", token, now), false);
+});
+
+test("signed-in terminal input retains valid embed-ticket authority", async () => {
+  const now = Date.now();
+  const env = { CRABBOX_EMBED_TICKET_SECRET: "embed-secret" };
+  const token = await createOpenClawEmbedTicket("embed-secret", "IS-2", now + 60_000);
+  const request = new Request(
+    `https://fleet.example/api/terminal/ws?shareSession=IS-2&token=${encodeURIComponent(token)}`,
+  );
+  let authenticatedChecks = 0;
+
+  assert.equal(
+    await terminalInputAuthorization(request, env, "IS-2", async () => {
+      authenticatedChecks += 1;
+      return false;
+    }),
+    true,
+  );
+  assert.equal(authenticatedChecks, 0);
+  assert.equal(
+    await terminalInputAuthorization(
+      new Request("https://fleet.example/api/terminal/ws"),
+      env,
+      "IS-2",
+      async () => {
+        authenticatedChecks += 1;
+        return true;
+      },
+    ),
+    true,
+  );
+  assert.equal(authenticatedChecks, 1);
 });

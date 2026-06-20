@@ -5,6 +5,7 @@ import { promisify } from "node:util";
 import { GHOSTTY_ASSET_PATHS } from "@openclaw/libterminal/node";
 
 import { css, js, preThemeScript, themeToggleHtml } from "./docs-site-assets.mjs";
+import { buildLucideIconScript } from "./lucide-icon-script.mjs";
 import { escapeHtml, markdownToHtml } from "./worker-markdown.mjs";
 
 const run = promisify(execFile);
@@ -120,28 +121,6 @@ async function inlineViteAssets(html) {
 function viteAssetUrl(path) {
   const relative = path.replace(/^\/?/, "");
   return new URL(relative, appBuildRoot);
-}
-
-function buildLucideIconScript(iconNodes) {
-  const names = [
-    "book-open",
-    "check",
-    "copy",
-    "git-pull-request",
-    "layout-grid",
-    "link-2",
-    "moon",
-    "settings",
-    "square-terminal",
-    "sun",
-    "terminal",
-    "triangle-alert",
-    "x",
-  ];
-  const selected = Object.fromEntries(names.map((name) => [name, iconNodes[name]]));
-  return `(() => {
-  globalThis.lucideIconNodes = ${JSON.stringify(selected)};
-})();`;
 }
 
 function stripFrontmatter(markdown) {

@@ -32,11 +32,14 @@ import { scheduleRecurringCardTick } from "./scheduled.ts";
 import { createSandboxSessionResourceService } from "./sandbox-session-resources.ts";
 import { ServiceRegistry } from "./service-registry.ts";
 import type { InteractiveSession } from "./session-model.ts";
+import { interactiveSessionOwnerSubject } from "./session-model.ts";
 import { readInteractiveSessionShareCredential } from "./session-repository.ts";
+import { ownsInteractiveSession } from "./session-access.ts";
 import { readSandboxFleetPolicies } from "./session-control-do.ts";
 import { interactiveTerminalRouteAvailable } from "./session-terminal-route.ts";
 import { SharedSessionService, type SharedSessionServiceStore } from "./shared-session-service.ts";
 import { SshGateway } from "./ssh-gateway.ts";
+import { tenancyMode } from "./tenancy.ts";
 import { createWorkflowService, type WorkflowService } from "./workflow-service.ts";
 
 const services = {
@@ -137,7 +140,7 @@ export class WorkerApplication {
       searchGitHubRefs: (number) => this.githubReferenceService().search(number),
       createCard: async (request, user) =>
         this.cardLifecycleService().create(await readJson<CardCreateInput>(request), user),
-      readCardRuns: (cardId) => this.cardLifecycleService().runs(cardId),
+      readCardRuns: (user, cardId) => this.cardLifecycleService().runs(user, cardId),
       mutateCard: (user, cardId, action) =>
         this.cardLifecycleService().mutate(user, cardId, action),
       runRecurringCardScheduler: () => this.cardLifecycleService().runRecurringScheduler(),
@@ -172,8 +175,8 @@ export class WorkerApplication {
           removedIds,
         };
       },
-      readFreshSession: (sessionId) => this.sessions.readFresh(sessionId),
-      presentSession: (session, user) => this.sessions.present(session, user),
+      readFreshSession: (user, sessionId) => this.sessions.readFreshForUser(user, sessionId),
+      presentSession: (session, user) => this.sessions.presentVisibleForUser(session, user),
       readLogs: (user, sessionId) => this.sessions.readLogBundle(user, sessionId),
       readTranscript: (user, sessionId) => this.sessions.transcript(user, sessionId),
       updateSummary: (user, sessionId, input) =>
@@ -191,6 +194,10 @@ export class WorkerApplication {
       openVnc: (user, sessionId) => this.desktop().open(user, sessionId),
       uploadClipboard: (request, user, sessionId) =>
         this.terminal().uploadClipboard(request, user, sessionId),
+      listGrants: (user, sessionId) => this.sessions.listGrants(user, sessionId),
+      grantAccess: (user, sessionId, input) => this.sessions.grantAccess(user, sessionId, input),
+      revokeAccess: (user, sessionId, subject) =>
+        this.sessions.revokeAccess(user, sessionId, subject),
     };
   }
 
@@ -215,8 +222,8 @@ export class WorkerApplication {
         return user;
       },
       requireAgentUser: async (request) => (await this.githubActions.authenticate(request)).user,
-      readFreshSession: (sessionId) => this.sessions.readFresh(sessionId),
-      presentSession: (session, user) => this.sessions.present(session, user),
+      readFreshSession: (user, sessionId) => this.sessions.readFreshForUser(user, sessionId),
+      presentSession: (session, user) => this.sessions.presentVisibleForUser(session, user),
       mutateSession: (request, user, sessionId, action) =>
         this.sessions.mutate(request, user, sessionId, action),
       listCheckpoints: (user, sessionId) =>
@@ -256,7 +263,7 @@ export class WorkerApplication {
       admin.readSettings(),
       user.role === "owner" ? admin.readAllowEntries() : Promise.resolve([]),
       admin.readEnabledRepos(),
-      this.cardLifecycleService().list(),
+      this.cardLifecycleService().list(user),
       this.sessions.readAll(user),
       user.role === "owner" ? this.workflowService().summaries() : Promise.resolve([]),
     ]);
@@ -348,6 +355,7 @@ export class WorkerApplication {
     const result = await this.sessions.create(user, body, undefined, {
       createdBy: `session:${parent.id}`,
       owner: parent.owner,
+      ownerSubject: parent[interactiveSessionOwnerSubject],
       parentSessionId: parent.id,
       rootSessionId: parent.rootSessionId || parent.id,
     });
@@ -364,7 +372,7 @@ export class WorkerApplication {
       services.terminal,
       () =>
         new InteractiveTerminalService(this.env, {
-          readFreshSession: (sessionId) => this.sessions.readFresh(sessionId),
+          readSession: (sessionId) => this.sessions.read(sessionId),
           reconcileSession: (sessionId, now) => this.runtime.reconcileById(sessionId, now),
           reconcileIntervalMs: runtimeAdapterReconcileIntervalMs,
           resolveSandboxSession: (request, user, session) =>
@@ -376,7 +384,7 @@ export class WorkerApplication {
   private desktop() {
     return this.registry.get(services.desktop, () =>
       createInteractiveDesktopService(this.env, {
-        readFreshSession: (sessionId) => this.sessions.readFresh(sessionId),
+        readFreshSession: (user, sessionId) => this.sessions.readFreshForUser(user, sessionId),
         delegatedControlAvailable: (session) => this.sessions.delegatedControlAvailable(session),
       }),
     );
@@ -385,8 +393,7 @@ export class WorkerApplication {
   private sandboxResources() {
     return this.registry.get(services.sandboxResources, () =>
       createSandboxSessionResourceService(this.env, {
-        presentSession: (session, user) => this.sessions.present(session, user),
-        delegatedControlAvailable: (session) => this.sessions.delegatedControlAvailable(session),
+        presentSession: (session, user) => this.sessions.presentForUser(session, user),
       }),
     );
   }
@@ -473,7 +480,7 @@ export class WorkerApplication {
     session: InteractiveSession,
   ): Promise<InteractiveSession & { githubToken?: string }> {
     if (!user?.subject.startsWith("github:")) return session;
-    if (actor(user) !== session.owner) return session;
+    if (!ownsInteractiveSession(user, session, tenancyMode(this.env))) return session;
     const githubToken =
       (await sessionGitHubToken(request, this.env, user.subject)) ??
       (await this.sshGateway().githubTokenForRequest(request, user));

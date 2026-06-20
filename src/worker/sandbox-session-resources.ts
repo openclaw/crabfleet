@@ -5,6 +5,13 @@ import type { RuntimeEnv } from "./env.ts";
 import { serviceUnavailable } from "./http.ts";
 import type { User } from "./models.ts";
 import {
+  canControlInteractiveSession,
+  canManageInteractiveSession,
+  canViewInteractiveSession,
+  delegatedInteractiveSessionControlAvailable,
+} from "./session-access.ts";
+import { InteractiveSessionGrantRepository } from "./session-grant-repository.ts";
+import {
   SandboxSessionResourceService,
   type SandboxSessionResourceServiceDependencies,
 } from "./sandbox-session-resource-service.ts";
@@ -14,10 +21,10 @@ import { sandboxControlStub, type SandboxCheckpoint } from "./session-control-do
 import { appendInteractiveSessionEventRecord } from "./session-events.ts";
 import type { InteractiveSession } from "./session-model.ts";
 import { readInteractiveSessionRecord } from "./session-repository.ts";
+import { tenancyMode, tenantSubject } from "./tenancy.ts";
 
 export type SandboxSessionResourceFactoryDependencies = {
-  presentSession(session: InteractiveSession, user: User): InteractiveSession;
-  delegatedControlAvailable(session: InteractiveSession): boolean;
+  presentSession(session: InteractiveSession, user: User): Promise<InteractiveSession>;
 };
 
 export function createSandboxSessionResourceService(
@@ -29,7 +36,9 @@ export function createSandboxSessionResourceService(
     sandboxAvailable: Boolean(env.SANDBOX),
     readSession: (sessionId) => readInteractiveSessionRecord(env, sessionId),
     presentSession: dependencies.presentSession,
-    delegatedControlAvailable: dependencies.delegatedControlAvailable,
+    canView: (user, session) => sessionAccess(env, user, session, "view"),
+    canControl: (user, session) => sessionAccess(env, user, session, "control"),
+    canManage: (user, session) => sessionAccess(env, user, session, "manage"),
     runDiagnostics: async (session, workdir, script) => {
       const sandbox = managedSandbox(env, session);
       const setup = await createSandboxSession(
@@ -89,6 +98,31 @@ export function createSandboxSessionResourceService(
       }),
   };
   return new SandboxSessionResourceService(resourceDependencies);
+}
+
+async function sessionAccess(
+  env: RuntimeEnv,
+  user: User,
+  session: InteractiveSession,
+  needed: "view" | "control" | "manage",
+): Promise<boolean> {
+  const now = Date.now();
+  const grant = await new InteractiveSessionGrantRepository(env).readActive(
+    session.id,
+    tenantSubject(user),
+    now,
+  );
+  const context = { mode: tenancyMode(env), grant } as const;
+  if (needed === "manage") return canManageInteractiveSession(user, session, context);
+  return needed === "control"
+    ? canControlInteractiveSession(
+        user,
+        session,
+        now,
+        delegatedInteractiveSessionControlAvailable(Boolean(env.SANDBOX), session),
+        context,
+      )
+    : canViewInteractiveSession(user, session, now, context);
 }
 
 function checkpointRegistry(env: RuntimeEnv) {

@@ -37,6 +37,7 @@ The web app at [crabfleet.openclaw.ai/app](https://crabfleet.openclaw.ai/app/) e
 - **Repo-gated cards.** Prompt cards and GitHub issue/PR previews stay scoped to enabled OpenClaw repos.
 - **Runtime policy.** Crabfleet records runtime selection, capabilities, heartbeat, stall state, and operator intent.
 - **Admin guardrails.** User/team allowlists, repo allowlists, roles, caps, and `CRABBOX.md` workflow evaluation live in the dashboard.
+- **Private tenant boundaries.** Cards and sessions are owner-scoped by default, with expiring named viewer/controller grants and separate public read-only links.
 - **Generated docs.** The spec, API pages, and architecture notes are built into a searchable documentation shell.
 
 ## What Works Today

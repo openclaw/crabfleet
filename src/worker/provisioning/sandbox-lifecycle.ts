@@ -28,6 +28,7 @@ import {
 import { appendInteractiveSessionEventRecord } from "../session-events.ts";
 import type { InteractiveSession } from "../session-model.ts";
 import { readInteractiveSessionRecord } from "../session-repository.ts";
+import { tenancyMode } from "../tenancy.ts";
 import { cleanupPendingProvision, safeProviderError } from "./result.ts";
 import { ManagedSandboxLeaseRefreshService, ManagedSandboxProvisioningService } from "./sandbox.ts";
 import {
@@ -152,6 +153,7 @@ export class SandboxLifecycleService {
   private leaseRefresh(): ManagedSandboxLeaseRefreshService {
     return new ManagedSandboxLeaseRefreshService({
       sandboxAvailable: Boolean(this.env.SANDBOX),
+      tenancyMode: tenancyMode(this.env),
       now: Date.now,
       ensurePolicy: (session, sandboxId) =>
         ensureSandboxCredentialPolicy(this.env, session, sandboxId),

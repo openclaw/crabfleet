@@ -6,13 +6,17 @@ import {
 } from "../runtime-profiles.ts";
 import type { User } from "./models.ts";
 import {
+  activeInteractiveSessionGrant,
   canChangeInteractiveSessionMultiplayer,
   canControlInteractiveSession,
   canManageInteractiveSession,
+  canViewInteractiveSession,
+  type InteractiveSessionAccessGrant,
 } from "./session-access.ts";
 import { interactiveSessionAdapterControlPlane, type InteractiveSession } from "./session-model.ts";
 import { activeDelegatedController } from "./session-sharing.ts";
 import { interactiveSessionPtyAvailable } from "./session-terminal-availability.ts";
+import type { TenancyMode } from "./tenancy.ts";
 
 export type InteractiveSessionPresentationContext = {
   now: number;
@@ -21,6 +25,8 @@ export type InteractiveSessionPresentationContext = {
   runtimeProfiles: RuntimeProfileDescriptor[];
   configuredRuntimeAdapterControlPlane: (profile: string) => string | null;
   browserVncUrl: (sessionId: string) => string;
+  tenancyMode: TenancyMode;
+  grant: InteractiveSessionAccessGrant | null;
 };
 
 export function presentInteractiveSession(
@@ -28,14 +34,19 @@ export function presentInteractiveSession(
   user: User,
   context: InteractiveSessionPresentationContext,
 ): InteractiveSession {
-  const canManage = canManageInteractiveSession(user, session);
-  const canChangeMultiplayer = canChangeInteractiveSessionMultiplayer(user, session);
+  const accessContext = { mode: context.tenancyMode, grant: context.grant };
+  const canManage = canManageInteractiveSession(user, session, accessContext);
+  const canChangeMultiplayer = canChangeInteractiveSessionMultiplayer(user, session, accessContext);
   const canControl = canControlInteractiveSession(
     user,
     session,
     context.now,
     context.delegatedControlAvailable,
+    accessContext,
   );
+  const canView = canViewInteractiveSession(user, session, context.now, accessContext);
+  const canViewLiveTerminal =
+    canControl || Boolean(activeInteractiveSessionGrant(user, context.grant, context.now));
   const activeController = activeDelegatedController(session, context.now);
   const ready = ["ready", "attached", "detached"].includes(session.status);
   const versionedDesktopAvailable =
@@ -44,7 +55,7 @@ export function presentInteractiveSession(
     (session.capabilities.vnc || session.capabilities.desktop);
   const ptyAvailable = interactiveSessionPtyAvailable(
     session,
-    canControl,
+    canViewLiveTerminal,
     context.terminalRouteAvailable,
   );
   const codexSshReady =
@@ -84,6 +95,6 @@ export function presentInteractiveSession(
     canManage,
     canChangeMultiplayer,
     canControl,
-    canRequestControl: context.delegatedControlAvailable && !canControl,
+    canRequestControl: canView && context.delegatedControlAvailable && !canControl,
   };
 }

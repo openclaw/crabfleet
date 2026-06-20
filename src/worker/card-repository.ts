@@ -2,6 +2,7 @@ import { sql, type Kysely } from "kysely";
 
 import {
   activeRunStatuses,
+  cardOwnerSubject,
   type Card,
   type CardChanges,
   type ChangedFile,
@@ -20,7 +21,11 @@ import {
 import type { RuntimeEnv } from "./env.ts";
 import { badRequest } from "./http.ts";
 import type { RunStatus } from "./models.ts";
+import type { User } from "./models.ts";
 import { runtimeCapabilities } from "./session-model.ts";
+import { tenancyMode, tenantSubject } from "./tenancy.ts";
+
+const d1IdentifierBatchSize = 80;
 
 export class CardRepository implements CardLifecycleStore {
   private readonly env: RuntimeEnv;
@@ -29,9 +34,9 @@ export class CardRepository implements CardLifecycleStore {
     this.env = env;
   }
 
-  async readCards(): Promise<Card[]> {
+  async readCards(user?: User): Promise<Card[]> {
     const db = database(this.env);
-    const cards = await db
+    let query = db
       .selectFrom("cards")
       .select([
         "id",
@@ -43,6 +48,7 @@ export class CardRepository implements CardLifecycleStore {
         "policy",
         "lane",
         "owner",
+        "owner_subject",
         "started_at",
         "created_at",
         "changed_files",
@@ -50,31 +56,37 @@ export class CardRepository implements CardLifecycleStore {
         "schedule_json",
         "next_run_at",
         "last_scheduled_run_at",
-      ])
-      .orderBy("updated_at", "desc")
-      .orderBy("created_at", "desc")
-      .execute();
+      ]);
+    if (user && tenancyMode(this.env) === "private") {
+      query = query.where("owner_subject", "=", tenantSubject(user));
+    }
+    const cards = await query.orderBy("updated_at", "desc").orderBy("created_at", "desc").execute();
     if (!cards.length) return [];
-    const runs = await this.readActiveRuns();
-    const eventRows = (
-      await sql<{ card_id: string; message: string; created_at: number }>`
-        SELECT card_id, message, created_at
-        FROM (
-          SELECT card_id, message, created_at, id,
-            row_number() OVER (PARTITION BY card_id ORDER BY created_at DESC, id DESC) AS rank
-          FROM events
-          WHERE card_id IN (SELECT id FROM cards)
-        )
-        WHERE rank <= 80
-        ORDER BY card_id ASC, created_at ASC, id ASC
-      `.execute(db)
-    ).rows;
+    const runs = await this.readRunsByIds(
+      cards.map((card) => card.active_run_id).filter((id): id is string => Boolean(id)),
+    );
+    const eventRows: Array<{ card_id: string; message: string; created_at: number }> = [];
+    for (const cardIds of identifierBatches(cards.map((card) => card.id))) {
+      const batch = await sql<{ card_id: string; message: string; created_at: number }>`
+          SELECT card_id, message, created_at
+          FROM (
+            SELECT card_id, message, created_at, id,
+              row_number() OVER (PARTITION BY card_id ORDER BY created_at DESC, id DESC) AS rank
+            FROM events
+            WHERE card_id IN (${sql.join(cardIds)})
+          )
+          WHERE rank <= 80
+          ORDER BY card_id ASC, created_at ASC, id ASC
+        `.execute(db);
+      eventRows.push(...batch.rows);
+    }
     const logs = new Map<string, string[]>();
     for (const row of eventRows) {
       const line = `${new Date(row.created_at).toLocaleTimeString("en-GB")} ${row.message}`;
       logs.set(row.card_id, [...(logs.get(row.card_id) ?? []), line]);
     }
     return cards.map((card) => ({
+      [cardOwnerSubject]: card.owner_subject,
       id: card.id,
       title: card.title,
       prompt: card.prompt,
@@ -95,9 +107,9 @@ export class CardRepository implements CardLifecycleStore {
     }));
   }
 
-  async readCard(cardId: string): Promise<Card | null> {
+  async readCard(cardId: string, user?: User): Promise<Card | null> {
     const db = database(this.env);
-    const card = await db
+    let query = db
       .selectFrom("cards")
       .select([
         "id",
@@ -109,6 +121,7 @@ export class CardRepository implements CardLifecycleStore {
         "policy",
         "lane",
         "owner",
+        "owner_subject",
         "started_at",
         "created_at",
         "changed_files",
@@ -118,8 +131,11 @@ export class CardRepository implements CardLifecycleStore {
         "next_run_at",
         "last_scheduled_run_at",
       ])
-      .where("id", "=", cardId)
-      .executeTakeFirst();
+      .where("id", "=", cardId);
+    if (user && tenancyMode(this.env) === "private") {
+      query = query.where("owner_subject", "=", tenantSubject(user));
+    }
+    const card = await query.executeTakeFirst();
     if (!card) return null;
     const runs = await this.readRunsByIds(card.active_run_id ? [card.active_run_id] : []);
     const eventRows = (
@@ -136,6 +152,7 @@ export class CardRepository implements CardLifecycleStore {
       `.execute(db)
     ).rows;
     return {
+      [cardOwnerSubject]: card.owner_subject,
       id: card.id,
       title: card.title,
       prompt: card.prompt,
@@ -193,6 +210,7 @@ export class CardRepository implements CardLifecycleStore {
         policy: input.policy,
         lane: input.lane,
         owner: input.owner,
+        owner_subject: input[cardOwnerSubject],
         started_at: input.startedAt,
         created_at: input.createdAt,
         updated_at: input.updatedAt,
@@ -540,24 +558,26 @@ export class CardRepository implements CardLifecycleStore {
   private async readRunsByIds(ids: string[]): Promise<Map<string, RunAttempt>> {
     const uniqueIds = [...new Set(ids)].filter(Boolean);
     if (!uniqueIds.length) return new Map();
-    const rows = await database(this.env)
-      .selectFrom("run_attempts")
-      .selectAll()
-      .where("id", "in", uniqueIds)
-      .execute();
+    const rows: RunAttemptTable[] = [];
+    for (const batch of identifierBatches(uniqueIds)) {
+      rows.push(
+        ...(await database(this.env)
+          .selectFrom("run_attempts")
+          .selectAll()
+          .where("id", "in", batch)
+          .execute()),
+      );
+    }
     return new Map(rows.map((row) => [row.id, runAttempt(row)]));
   }
+}
 
-  private async readActiveRuns(): Promise<Map<string, RunAttempt>> {
-    const rows = (
-      await sql<RunAttemptTable>`
-        SELECT run_attempts.*
-        FROM run_attempts
-        INNER JOIN cards ON cards.active_run_id = run_attempts.id
-      `.execute(database(this.env))
-    ).rows;
-    return new Map(rows.map((row) => [row.id, runAttempt(row)]));
+function identifierBatches<T>(values: T[]): T[][] {
+  const batches: T[][] = [];
+  for (let offset = 0; offset < values.length; offset += d1IdentifierBatchSize) {
+    batches.push(values.slice(offset, offset + d1IdentifierBatchSize));
   }
+  return batches;
 }
 
 function eventInsert(

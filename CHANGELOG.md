@@ -5,6 +5,14 @@
 - Add atomically claimed recurring card intervals with constant-time catch-up, crash-recoverable leases, scheduler/API proof, and coalescing for active or capacity-blocked runs, thanks @Jhacarreiro.
 - Reuse `@openclaw/libterminal` for terminal protocol codecs, Worker relays, Ghostty assets, and browser hub transport while keeping Crabfleet authorization and session policy local.
 - Update `@openclaw/libterminal` to 0.3.1 for terminal lifecycle, Worker asset generation, and package-validation fixes.
+- Add private-by-default tenant isolation for cards and sessions, trusted-proxy automatic onboarding, stable owner identities, expiring named viewer/controller grants with UI/API revocation, and current authorization checks across terminal, desktop, diagnostics, checkpoints, logs, transcripts, metadata, cleanup, and child-session paths.
+- Revalidate named principals against current authentication policy, migrate only unambiguous legacy subjects, reject subjectless private control approvals, and scope Fleet policy totals to visible sessions.
+- Bridge the tenant-isolation cutover with legacy-writer triggers and an idempotent post-deploy backfill, retaining the triggers until a later rollout has drained old Worker requests.
+- Keep teardown revocation available, bind OpenClaw replay identity and Sandbox refresh to stable owners, conceal hidden terminal state, and render destructive controls only from server-computed per-session authority.
+- Keep shared-mode live terminal reads behind control or a named grant, revision-fence concurrent grant revocation, and preserve owner-validated legacy OpenClaw replays.
+- Bind OpenClaw crabboxes and GitHub Actions sessions to explicit stable human owners in private tenancy, retain service authority only across validated OpenClaw lineage, and keep bootstrap ownership stable across token rotation.
+- Fix local Vite development with `@openclaw/libterminal` by reserving Worker-served Ghostty aliases for production builds and serving the local WASM, icons, and logo without generated placeholders.
+- Keep the mobile navigation and named-access dialog within narrow viewports.
 - Fix automated Worker deployments by converging the app Custom Domain with the DNS-scoped deployment token instead of requiring zone-route access from the Worker token.
 
 ## 0.2.0 - 2026-06-15

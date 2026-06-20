@@ -47,7 +47,7 @@ function controllerStore(
     ],
     countTranscriptEvents: async () => 1,
     sendMessage: async () => undefined,
-    stopSession: async (_request, sessionId) => session(sessionId, { status: "stopped" }),
+    stopSession: async (_request, current) => ({ ...current, status: "stopped" }),
     registerActionSession: async () => ({
       session: session("IS-action", { runtime: "github_actions" }),
       agentToken: "agent-token",
@@ -156,8 +156,8 @@ test("OpenClaw controller fences mutations by root before delivery or stop", asy
       sendMessage: async (_request, value, input) => {
         calls.push(`message:${value.id}:${String(input.message)}`);
       },
-      stopSession: async (_request, sessionId) => {
-        calls.push(`stop:${sessionId}`);
+      stopSession: async (_request, current) => {
+        calls.push(`stop:${current.id}`);
         return { ...child, status: "stopped" };
       },
       stopSessionRoot: async (_request, rootSessionId) => {

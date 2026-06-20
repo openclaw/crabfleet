@@ -1,6 +1,5 @@
-import type { User } from "./models.ts";
+import { deadInteractiveSessionStatuses, type User } from "./models.ts";
 import { badRequest, forbidden, notFound } from "./http.ts";
-import { canControlInteractiveSession, canManageInteractiveSession } from "./session-access.ts";
 import type { SandboxCheckpoint } from "./session-control-do.ts";
 import {
   isSandboxInteractiveSession,
@@ -19,8 +18,10 @@ export type SandboxSessionResourceServiceDependencies = {
   now(): number;
   sandboxAvailable: boolean;
   readSession(sessionId: string): Promise<InteractiveSession | null>;
-  presentSession(session: InteractiveSession, user: User): InteractiveSession;
-  delegatedControlAvailable(session: InteractiveSession): boolean;
+  presentSession(session: InteractiveSession, user: User): Promise<InteractiveSession>;
+  canView(user: User, session: InteractiveSession): Promise<boolean>;
+  canControl(user: User, session: InteractiveSession): Promise<boolean>;
+  canManage(user: User, session: InteractiveSession): Promise<boolean>;
   runDiagnostics(
     session: InteractiveSession,
     workdir: string,
@@ -50,17 +51,16 @@ export class SandboxSessionResourceService {
     sessionId: string,
   ): Promise<{ session: InteractiveSession; diagnostics: unknown }> {
     const session = await this.readSession(sessionId);
-    const presented = this.dependencies.presentSession(session, user);
-    if (
-      !canControlInteractiveSession(
-        user,
-        session,
-        this.dependencies.now(),
-        this.dependencies.delegatedControlAvailable(session),
-      )
-    ) {
+    if (!(await this.dependencies.canView(user, session))) {
+      throw notFound("interactive session not found");
+    }
+    if (!(await this.dependencies.canControl(user, session))) {
       throw forbidden("terminal control has not been granted");
     }
+    if (session.status === "stopping" || deadInteractiveSessionStatuses.includes(session.status)) {
+      throw badRequest(`session is ${session.status}`);
+    }
+    const presented = await this.dependencies.presentSession(session, user);
     if (!this.dependencies.sandboxAvailable || !isSandboxInteractiveSession(session)) {
       return {
         session: presented,
@@ -111,7 +111,7 @@ export class SandboxSessionResourceService {
     const checkpoints = await this.dependencies.listStoredCheckpoints(sessionId);
     return {
       checkpoints: checkpoints.map(withoutBackup),
-      session: this.dependencies.presentSession(session, user),
+      session: await this.dependencies.presentSession(session, user),
     };
   }
 
@@ -142,7 +142,7 @@ export class SandboxSessionResourceService {
     );
     return {
       checkpoint: withoutBackup(checkpoint),
-      session: this.dependencies.presentSession(session, user),
+      session: await this.dependencies.presentSession(session, user),
     };
   }
 
@@ -163,7 +163,7 @@ export class SandboxSessionResourceService {
     );
     return {
       checkpoint: withoutBackup(checkpoint),
-      session: this.dependencies.presentSession(session, user),
+      session: await this.dependencies.presentSession(session, user),
     };
   }
 
@@ -175,7 +175,10 @@ export class SandboxSessionResourceService {
 
   private async managedSession(user: User, sessionId: string): Promise<InteractiveSession> {
     const session = await this.readSession(sessionId);
-    if (!canManageInteractiveSession(user, session)) {
+    if (!(await this.dependencies.canView(user, session))) {
+      throw notFound("interactive session not found");
+    }
+    if (!(await this.dependencies.canManage(user, session))) {
       throw forbidden("only the session owner or maintainer can manage checkpoints");
     }
     if (!this.dependencies.sandboxAvailable || !isSandboxInteractiveSession(session)) {

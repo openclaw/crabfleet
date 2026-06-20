@@ -16,6 +16,7 @@ import {
   requireUser,
   sessionGitHubToken,
   tokenLogin,
+  trustedProxyAutomaticRole,
 } from "../src/worker/auth.ts";
 import { openSecret, sealSecret, sha256 } from "../src/worker/crypto.ts";
 import type { RuntimeEnv } from "../src/worker/env.ts";
@@ -281,6 +282,77 @@ test("auth policy helpers normalize identities, advertise configured methods, an
 
   const config = await readFile(new URL("../wrangler.jsonc", import.meta.url), "utf8");
   assert.match(config, /"CRABFLEET_DEV_LOGIN_ENABLED": "false"/);
+});
+
+test("trusted proxy automatic roles admit authenticated users without a global allowlist", async () => {
+  const writes: string[] = [];
+  const env = runtimeEnv(
+    d1((sql, _parameters, kind) => {
+      if (kind === "all" && /from "allow_entries"/i.test(sql)) return { results: [] };
+      if (kind === "all" && /from "users"/i.test(sql)) return { results: [] };
+      if (kind === "run" && /^insert into "users"/i.test(sql)) {
+        writes.push(sql);
+        return { changes: 1 };
+      }
+      throw new Error(`unexpected query: ${sql}`);
+    }),
+    { CRABFLEET_TRUSTED_PROXY_AUTO_ROLE: "maintainer" },
+  );
+
+  const authenticated = await requireUser(new Request("https://fleet.example/api/state"), env, {
+    kind: "authenticated",
+    identity: {
+      subject: "proxy:operator@example.test",
+      identity: "operator@example.test",
+      login: null,
+      email: "operator@example.test",
+      name: "operator@example.test",
+    },
+  });
+
+  assert.deepEqual(authenticated, {
+    subject: "proxy:operator@example.test",
+    login: null,
+    email: "operator@example.test",
+    name: "operator@example.test",
+    role: "maintainer",
+    allowed: true,
+    teams: [],
+  });
+  assert.equal(writes.length, 1);
+});
+
+test("trusted proxy automatic roles fail closed on elevated or malformed values", async () => {
+  assert.equal(trustedProxyAutomaticRole("viewer"), "viewer");
+  assert.equal(trustedProxyAutomaticRole("maintainer"), "maintainer");
+  for (const value of [undefined, "", "owner", "Maintainer", " maintainer "]) {
+    assert.equal(trustedProxyAutomaticRole(value), null);
+  }
+
+  const env = runtimeEnv(
+    d1((sql) => {
+      assert.match(sql, /from "allow_entries"/i);
+      return { results: [] };
+    }),
+    { CRABFLEET_TRUSTED_PROXY_AUTO_ROLE: "owner" },
+  );
+  await assert.rejects(
+    requireUser(new Request("https://fleet.example/api/state"), env, {
+      kind: "authenticated",
+      identity: {
+        subject: "proxy:operator@example.test",
+        identity: "operator@example.test",
+        login: null,
+        email: "operator@example.test",
+        name: "operator@example.test",
+      },
+    }),
+    (error: unknown) =>
+      error instanceof Error &&
+      error.message === "trusted proxy automatic role is invalid" &&
+      "status" in error &&
+      error.status === 403,
+  );
 });
 
 test("secret encryption round-trips with the configured key and fails closed", async () => {

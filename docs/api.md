@@ -19,7 +19,9 @@ Session cookie: `crabbox_session`
 
 GitHub sessions last 15 minutes. Bootstrap sessions last 1 hour. API JSON responses use `cache-control: no-store`.
 
-Deployments may instead accept a trusted reverse-proxy identity when all trusted-proxy bindings are configured. The request URL must use the exact configured backend origin, the proxy must send the shared secret and configured identity header, and the asserted user must still have a direct login/email allowlist entry. Mutations and WebSocket upgrades must also prove the configured public origin. Crabfleet strips proxy assertions, cookies, and upstream authorization credentials before app and terminal routing.
+Deployments may instead accept a trusted reverse-proxy identity when all trusted-proxy bindings are configured. The request URL must use the exact configured backend origin, and the proxy must send the shared secret and configured identity header. The asserted user needs a direct login/email allowlist entry unless `CRABFLEET_TRUSTED_PROXY_AUTO_ROLE` grants valid proxy identities the `viewer` or `maintainer` role; allowlist matches take precedence and all other automatic-role values fail closed. Mutations and WebSocket upgrades must also prove the configured public origin. Crabfleet strips proxy assertions, cookies, and upstream authorization credentials before app and terminal routing.
+
+`CRABFLEET_TENANCY_MODE` defaults to `private`. Private API reads return only cards and sessions owned by the authenticated stable subject, plus sessions covered by an unexpired named grant or delegated-control lease. Global roles do not bypass this boundary. Set the mode to exact `shared` only for the legacy team-wide visibility contract.
 
 ## Public Endpoints
 
@@ -114,6 +116,8 @@ Every card may include:
 - `run`: active run attempt, including `selectionReason` and `capabilities`
 - `logs`: last 80 events
 - `schedule`, `nextRunAt`, and `lastScheduledRunAt`: recurring cadence and persisted scheduler evidence
+
+In private tenancy mode, `cards`, `interactiveSessions`, and derived Fleet state contain only the current tenant's visible records.
 
 ## GitHub Lookup
 
@@ -307,7 +311,7 @@ An adapter-reported `failed` workspace is not locally terminal until Crabfleet c
 
 ### GET /api/terminal/ws
 
-Session owner, maintainer/owner role, viewer with a current delegated control grant, SSH gateway linked-key identity, scoped session agent, or a public shared-link token for read-only sessions. Multiplex WebSocket endpoint used by the Ghostty WASM session grid, Go CLI, and SSH gateway. One socket can subscribe to multiple interactive sessions, receive PTY output frames, resize terminals, and send input only when the current user has control.
+Visible session owner, user with a current named viewer/controller grant, current delegated controller, SSH gateway linked-key identity, scoped session agent, or a public shared-link token for read-only sessions. In shared tenancy mode, legacy maintainer/owner visibility also applies. Multiplex WebSocket endpoint used by the Ghostty WASM session grid, Go CLI, and SSH gateway. One socket can subscribe to multiple interactive sessions, receive PTY output frames, resize terminals, and send input only when the current user has control.
 
 The wire format is a compact binary frame:
 
@@ -331,7 +335,7 @@ Supported client actions:
 - `Ping`: keepalive, answered with `Pong`.
 - `Ack`: acknowledge consumed output bytes for negotiated flow control.
 
-Server messages include `Welcome`, `Output`, `Event`, `Error`, `ControlRevoked`, and `Pong`. Shared-link viewers can subscribe and scroll output, but input frames are rejected unless an owner/maintainer grants writable control. Subscriptions require the current `terminal` capability; withdrawing it prevents new attaches, closes existing terminal sockets on the next authorization check, suppresses attachable state from app, API, fleet, CLI, and SSH responses, and removes Fleet terminal/SSH affordances. Recurring and per-input authorization use short-lived D1 snapshots only; throttled subscription reconciliation runs independently and never blocks an input frame on provider I/O.
+Server messages include `Welcome`, `Output`, `Event`, `Error`, `ControlRevoked`, and `Pong`. Shared-link and named-viewer clients can subscribe and scroll output, but input frames are rejected without current controller or owner access. Subscriptions require the current `terminal` capability; withdrawing it prevents new attaches, closes existing terminal sockets on the next authorization check, suppresses attachable state from app, API, fleet, CLI, and SSH responses, and removes Fleet terminal/SSH affordances. Recurring and per-input authorization use short-lived D1 snapshots only; throttled subscription reconciliation runs independently and never blocks an input frame on provider I/O.
 
 Target resolution:
 
@@ -363,6 +367,7 @@ Request:
   "workKind": "pr_repair",
   "repo": "openclaw/crabfleet",
   "branch": "fix/pr-42",
+  "owner": "operator@example.test",
   "sourceUrl": "https://github.com/openclaw/crabfleet/pull/42",
   "runUrl": "https://github.com/openclaw/crabfleet/actions/runs/123",
   "purpose": "repair PR 42",
@@ -381,7 +386,7 @@ Response:
 }
 ```
 
-`runnerPtyUrl` is directly usable with Node's global `WebSocket`; no custom headers are required. The query credential is session-scoped, rotates on registration, is stored only as a hash, and is not exposed through viewer/session APIs.
+Private-tenancy deployments require `owner` for a new work key; it must resolve to exactly one active Crabfleet user by login, email, or stable subject. Existing owned work keys can resume without repeating it, and a work key cannot transfer to a different stable owner. Shared tenancy keeps `owner` optional. `runnerPtyUrl` is directly usable with Node's global `WebSocket`; no custom headers are required. The query credential is session-scoped, rotates on registration, is stored only as a hash, and is not exposed through viewer/session APIs.
 
 ### GET /api/agent/interactive-sessions/:id/runner-pty
 
@@ -439,7 +444,7 @@ Fields:
 
 Container sessions use the built-in Sandbox when its binding is available. Otherwise, and for Crabbox sessions, `CRABBOX_RUNTIME_ADAPTER_URL` or `CRABBOX_RUNTIME_ADAPTER_URL_TEMPLATE` creates and reconciles the versioned adapter workspace and records its resolved lifecycle identity, status, capabilities, expiry, and terminal connection. Without either supported backend the session is stored as `pending_adapter`.
 
-Session responses include `ptyAvailable`, the authenticated Worker's authoritative answer for whether the current terminal capability, lifecycle state, and configured Sandbox or adapter route can resolve a PTY connection. Every controllable session exposes only the Worker-owned `/api/terminal/ws` route in `attachUrl`; signed provider connections remain server-side even for owners and controllers.
+Session responses include `ptyAvailable`, the authenticated Worker's authoritative answer for whether the current terminal capability, lifecycle state, grant, and configured Sandbox or adapter route permit a PTY connection. Owners, controllers, and named viewers with live read-only access receive only the Worker-owned `/api/terminal/ws` route in `attachUrl`; signed provider connections remain server-side, and every input frame is independently restricted to current controllers.
 
 When the selected runtime profile configures `codexSsh`, a ready `runtime-v1` session response may include `codexSsh: { alias, setupCommand }` for session managers. The alias and optional command are resolved from bounded `{providerResourceId}`, `{workspaceId}`, `{sessionId}`, and `{profile}` placeholders. Alias components use a strict OpenSSH-safe character set. `codexSsh.setupCommand` is an argv-like array whose first and static items use a shell-safe character set and whose dynamic items must each be one complete placeholder; Crabfleet POSIX-shell-quotes every substituted argument so opaque provider identifiers remain data. Missing values, an unsafe resolved alias, or a current profile route that differs from the workspace's immutable registered adapter control plane suppresses the handoff. Shared links and delegated terminal-only controllers never receive it. The command is display/copy data only; Crabfleet never executes it.
 
@@ -459,19 +464,19 @@ Returns refreshed app state plus `removedIds`.
 
 ### GET /api/interactive-sessions/:id
 
-Viewer+. Returns one current decorated session after a bounded lifecycle refresh.
+Authenticated viewer. Returns one current decorated session after a bounded lifecycle refresh only when the caller owns it, has a current named grant, or holds the active delegated-control lease. Hidden sessions return `404`.
 
 ### GET /api/interactive-sessions/:id/logs
 
-Viewer+. Returns up to 5,000 recent D1 events, the total event count, truncation state, and current R2 archive snapshot metadata when available. It does not read or return the archived R2 objects.
+Visible-session viewer. Returns up to 5,000 recent D1 events, the total event count, truncation state, and current R2 archive snapshot metadata when available. It does not read or return the archived R2 objects.
 
 ### GET /api/interactive-sessions/:id/transcript
 
-Session owner or maintainer/owner role. Returns the Markdown transcript from R2 when archived, or a D1 event-log transcript fallback.
+Visible-session viewer. Returns the Markdown transcript from R2 when archived, or a D1 event-log transcript fallback.
 
 ### POST /api/interactive-sessions/:id/summary
 
-Viewer+ with owner/maintainer access. Updates `purpose` and/or `summary`.
+Session manager. In private mode this is the stable session owner. Updates `purpose` and/or `summary`.
 
 ```json
 {
@@ -480,36 +485,60 @@ Viewer+ with owner/maintainer access. Updates `purpose` and/or `summary`.
 }
 ```
 
+### GET /api/interactive-sessions/:id/grants
+
+Session owner. Lists named access grants, including role and expiry. Expired grants remain visible for owner audit but do not authorize access. Listing remains available while a session is stopping so access can be audited and revoked during teardown.
+
+### POST /api/interactive-sessions/:id/grants
+
+Session owner. Creates or replaces one time-limited named grant for exactly one active Crabfleet user. Resolution rechecks the current allowlist or configured trusted-proxy automatic role instead of trusting persisted historical admission state. Returns `201` and the refreshed grant list.
+
+```json
+{
+  "principal": "teammate@example.com",
+  "role": "controller",
+  "expiresInSeconds": 86400
+}
+```
+
+- `principal`: unique active user subject, login, or email.
+- `role`: `viewer` for state/log/transcript/read-only terminal access, or `controller` to add terminal input, diagnostics, clipboard, and desktop access.
+- `expiresInSeconds`: optional; defaults to 24 hours and must be between 5 minutes and 30 days.
+
+### DELETE /api/interactive-sessions/:id/grants/:subject
+
+Session owner. Revokes the named grant, atomically clears any pending or active delegated-control lease for that subject, and advances the session revision so an older concurrent approval cannot restore control. Revocation remains available while the session is stopping. Returns the refreshed grant list. `:subject` is URL encoded.
+
 ### GET /api/interactive-sessions/:id/diagnostics
 
 Viewer+ with writable control. Runs a bounded environment, checkout, GitHub, Codex, and tool inventory inside a Cloudflare Sandbox session. Other backends return an unavailable result instead of executing diagnostics.
 
 ### GET /api/interactive-sessions/:id/checkpoints
 
-Session owner or maintainer. Lists registered Cloudflare Sandbox checkpoints without exposing provider backup material.
+Session manager. In private mode this is the stable session owner. Lists registered Cloudflare Sandbox checkpoints without exposing provider backup material.
 
 ### POST /api/interactive-sessions/:id/checkpoints
 
-Session owner or maintainer. Creates a backup of the current Sandbox worktree and returns `201`. Checkpoint storage requires the configured backup R2 binding and, for presigned backups, the matching Cloudflare account and R2 credentials.
+Session manager. In private mode this is the stable session owner. Creates a backup of the current Sandbox worktree and returns `201`. Checkpoint storage requires the configured backup R2 binding and, for presigned backups, the matching Cloudflare account and R2 credentials.
 
 ### POST /api/interactive-sessions/:id/checkpoints/:checkpoint/restore
 
-Session owner or maintainer. Restores a registered checkpoint into the active Cloudflare Sandbox session.
+Session manager. In private mode this is the stable session owner. Restores a registered checkpoint into the active Cloudflare Sandbox session.
 
 ### POST /api/interactive-sessions/:id/actions
 
 Actions:
 
 - `attach`: viewer with control, mark seen/attached and return the session.
-- `share_link`: owner/maintainer, enable or rotate a public read-only share URL; response includes `shareUrl` once.
-- `disable_share`: owner/maintainer, disable the share URL and clear pending/granted control.
+- `share_link`: session manager, enable or rotate a public read-only share URL; response includes `shareUrl` once.
+- `disable_share`: session manager, disable the share URL and clear pending/granted control.
 - `request_control`: viewer, request writable terminal control.
-- `approve_control`: owner/maintainer, grant pending requester 30 minutes of writable terminal control.
-- `deny_control`: owner/maintainer, clear a pending control request.
-- `revoke_control`: owner/maintainer, revoke active delegated control.
+- `approve_control`: session manager, grant pending requester 30 minutes of writable terminal control.
+- `deny_control`: session manager, clear a pending control request.
+- `revoke_control`: session manager, revoke active delegated control.
 - `enable_multiplayer`: session creator, prefix submitted terminal prompts with the actor.
 - `disable_multiplayer`: session creator, stop prefixing submitted terminal prompts with the actor.
-- `stop`: owner/maintainer, internal wire action behind user-facing Delete or End. Versioned adapters release the provider workspace before marking stopped, and asynchronous releases remain `stopping` until reconciliation confirms completion. Built-in Sandbox sessions clean up their durable lease and credential policy. For GitHub Actions, End disconnects and finalizes only the Crabfleet terminal session; it does not call GitHub's workflow-cancellation API, so the workflow run may continue.
+- `stop`: session manager, internal wire action behind user-facing Delete or End. Versioned adapters release the provider workspace before marking stopped, and asynchronous releases remain `stopping` until reconciliation confirms completion. Built-in Sandbox sessions clean up their durable lease and credential policy. For GitHub Actions, End disconnects and finalizes only the Crabfleet terminal session; it does not call GitHub's workflow-cancellation API, so the workflow run may continue.
 
 Response:
 
@@ -579,9 +608,13 @@ request returns the original crabbox; reusing the ID with a different request is
 rejected. A replay while the original reservation is still preparing returns a
 retryable service-unavailable response instead of claiming the crabbox is ready.
 After finalized-session cleanup, the retained replay tombstone rejects the
-request instead of provisioning duplicate work. The fingerprint includes a
-nonreversible digest of any supplied GitHub credential; the credential itself is
-not stored in the replay ledger.
+request instead of provisioning duplicate work. The fingerprint includes the
+resolved stable owner subject and a nonreversible digest of any supplied GitHub
+credential; the credential itself is not stored in the replay ledger.
+Pre-upgrade display-owner fingerprints remain replayable only when the migrated
+session owner subject matches the currently resolved stable owner.
+
+In private tenancy, `owner` must resolve to exactly one active Crabfleet user by login, email, or stable subject. Crabfleet persists both the stable subject and the user's actor-compatible login/email so Sandbox credential and lease checks agree with the human owner. That subject owns human visibility and management; the exact OpenClaw service separately retains automation lifecycle and terminal authority for its own session and only descendants first validated inside that service-owned lineage.
 
 Response:
 
@@ -589,7 +622,7 @@ Response:
 {
   "session": {
     "id": "IS-105",
-    "owner": "@steipete",
+    "owner": "steipete",
     "runtime": "crabbox",
     "vncUrl": "https://..."
   },

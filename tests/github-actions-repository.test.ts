@@ -62,15 +62,18 @@ test("GitHub Actions repository owns registration and lifecycle SQL", async () =
       runUrl: null,
       purpose: "fix issue",
       summary: "starting",
+      owner: null,
+      ownerSubject: null,
       agentTokenHash: "agent-hash",
       now: 100,
     }),
   );
+  assert.equal(await repository.adoptLegacyOwner("IS-101", "operator", "github:42"), true);
   await repository.updateSession("IS-101", registrationUpdate);
   await repository.updateSession("IS-101", workStateUpdate);
   await repository.updateSession("IS-101", runnerConnectionUpdate);
 
-  assert.equal(executions.length, 6);
+  assert.equal(executions.length, 7);
   assert.match(executions[0].sql, /select .* from "interactive_sessions"/i);
   assert.match(executions[0].sql, /"work_key" = \?/i);
   assert.ok(executions[0].parameters.includes("issue:101"));
@@ -78,9 +81,11 @@ test("GitHub Actions repository owns registration and lifecycle SQL", async () =
   assert.ok(executions[1].parameters.includes("IS-101"));
   assert.match(executions[2].sql, /insert into "interactive_sessions"/i);
   assert.ok(executions[2].parameters.includes("issue:102"));
-  assert.match(executions[3].sql, /"terminal_finalize_pending" = \?/i);
-  assert.match(executions[4].sql, /"completion_reason" = \?/i);
-  assert.match(executions[5].sql, /"last_heartbeat_at" = \?/i);
+  assert.match(executions[3].sql, /"owner_subject" = \?/i);
+  assert.match(executions[3].sql, /where "id" = \? and "owner_subject" = \?/i);
+  assert.match(executions[4].sql, /"terminal_finalize_pending" = \?/i);
+  assert.match(executions[5].sql, /"completion_reason" = \?/i);
+  assert.match(executions[6].sql, /"last_heartbeat_at" = \?/i);
   for (const execution of executions.slice(3)) {
     assert.match(execution.sql, /update "interactive_sessions"/i);
     assert.match(execution.sql, /where "id" = \?/i);
@@ -89,6 +94,8 @@ test("GitHub Actions repository owns registration and lifecycle SQL", async () =
 });
 
 const registrationUpdate: GitHubActionsSessionRegistrationUpdate = {
+  owner: "operator@example.test",
+  owner_subject: "github:42",
   repo: "openclaw/crabfleet",
   branch: "main",
   purpose: "fix issue",

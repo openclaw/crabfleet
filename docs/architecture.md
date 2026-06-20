@@ -83,9 +83,10 @@ D1 is canonical for product metadata:
 - `allow_entries`: direct user, email, and team allowlist roles.
 - `repos`: enabled repositories.
 - `users`, `sessions`, `ssh_keys`, `ssh_link_codes`: browser and SSH identity.
-- `cards`, `run_attempts`, `events`: Board state and durable attempt evidence.
+- `cards`, `run_attempts`, `events`: tenant-owned Board state and durable attempt evidence.
 - `repo_workflows`: evaluated `CRABBOX.md` source, parsed defaults, and errors.
-- `interactive_sessions`, `interactive_session_events`: live/retained session state.
+- `interactive_sessions`, `interactive_session_events`: live/retained session state with stable owner subjects.
+- `interactive_session_grants`: expiring per-subject viewer/controller access created by the stable session owner.
 - `interactive_session_log_archives`: current archive snapshot metadata and object keys.
 - `id_sequences`: monotonic managed session IDs.
 - `interactive_session_credential_policies`, `standalone_sandbox_provisions`, and reconcile state: durable credential ownership and teardown.
@@ -138,7 +139,13 @@ Interactive sessions are the live execution plane. Supported paths:
 - **Versioned runtime adapter:** Worker durably registers a tenant-namespaced workspace ID, creates and reconciles the provider workspace, proxies PTY access, mints transient desktop links, and confirms provider release before terminal state.
 - **GitHub Actions:** OpenClaw automation registers a logical work key; an Actions runner connects outbound to `SessionControlDO`, reports work state, and receives browser steering.
 
-Sessions can carry parent/root lineage, purpose, summary, share state, delegated control, multiplayer mode, archive metadata, and runtime-specific capability state.
+Sessions can carry a stable tenant owner, parent/root lineage, purpose, summary, named grants, public share state, delegated control, multiplayer mode, archive metadata, and runtime-specific capability state.
+
+`CRABFLEET_TENANCY_MODE` defaults to `private`. Private D1 reads scope cards to the stable owner and sessions to ownership, an unexpired named grant, or a current delegated-control lease before events or archive metadata are loaded. Bootstrap access normalizes every token-derived identity to one stable tenant subject. OpenClaw-created sessions bind their human-facing owner to an active stable subject; the exact internal service creator separately retains lifecycle and terminal authority only after the requested session is validated inside its service-owned lineage. Every direct session, terminal, diagnostics, checkpoint, desktop, cleanup, and metadata path repeats current authorization at its mutation boundary. Global roles do not bypass another tenant. Exact `shared` mode retains the legacy team-wide projection.
+
+Fleet aggregation filters Sandbox policy summaries to the already-visible session IDs before attaching policy details or computing totals. Tenant responses therefore cannot infer another tenant's policy activity from global Durable Object state.
+
+Terminal subscriptions authorize the loaded session before returning lifecycle or capability errors, so missing and tenant-hidden IDs have the same observable result. Generic shared-mode visibility does not imply live terminal access: terminal output requires control authority, a current named grant, or a separately validated share/embed token. Sandbox GitHub-token attachment and stale-lease refresh use the deployment tenancy mode, compare stable owner subjects when present, and leave unresolved private legacy owners fail-closed. Client destructive controls use the Worker's per-session `canManage` projection rather than global role inference.
 
 An optional `CRABFLEET_RUNTIME_PROFILES_JSON` allowlist exposes generic Crabbox profile labels and capability previews without teaching the Worker provider-specific semantics. The Worker validates the opaque profile ID. A fixed adapter maps it internally, or `CRABBOX_RUNTIME_ADAPTER_URL_TEMPLATE` selects a distinct outbound adapter by lowercase DNS-label profile; each adapter enforces its real provider capabilities.
 
@@ -201,7 +208,7 @@ If R2 is enabled after D1-only finalization, reconciliation requeues missing obj
 ## Authentication
 
 - **GitHub OAuth:** org membership plus direct/team allowlist; encrypted per-session OAuth token supports scoped runtime GitHub access.
-- **Trusted reverse proxy:** exact backend origin plus shared-secret assertion; identity still passes the existing allowlist and role model.
+- **Trusted reverse proxy:** exact backend origin plus shared-secret assertion; identity passes the direct allowlist unless a fail-closed `viewer` or `maintainer` automatic role is configured.
 - **Bootstrap token:** owner break-glass access.
 - **SSH gateway:** linked public-key fingerprint plus gateway bearer.
 - **Agent session:** session ID plus session-scoped agent token.

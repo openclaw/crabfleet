@@ -9,6 +9,7 @@ import {
   type RecurringSchedulerTickResult,
   type RunAttempt,
   type WorkflowConfig,
+  cardOwnerSubject,
 } from "./card-model.ts";
 import {
   cardScheduleSummary,
@@ -21,6 +22,7 @@ import { badRequest, notFound } from "./http.ts";
 import type { User } from "./models.ts";
 import { normalizeRepo } from "./repositories.ts";
 import { containerCapabilities, crabboxCapabilities } from "./session-model.ts";
+import { tenantSubject } from "./tenancy.ts";
 
 export type CardCreateInput = {
   title?: unknown;
@@ -53,8 +55,8 @@ export type CardRunClaimInput = {
 };
 
 export type CardLifecycleStore = {
-  readCards(): Promise<Card[]>;
-  readCard(cardId: string): Promise<Card | null>;
+  readCards(user?: User): Promise<Card[]>;
+  readCard(cardId: string, user?: User): Promise<Card | null>;
   readRunsForCard(cardId: string): Promise<RunAttempt[]>;
   nextCardId(): Promise<string>;
   insertCard(
@@ -108,12 +110,12 @@ export class CardLifecycleService {
     this.dependencies = dependencies;
   }
 
-  list(): Promise<Card[]> {
-    return this.dependencies.store.readCards();
+  list(user: User): Promise<Card[]> {
+    return this.dependencies.store.readCards(user);
   }
 
-  async runs(cardId: string): Promise<RunAttempt[] | null> {
-    return (await this.dependencies.store.readCard(cardId))
+  async runs(user: User, cardId: string): Promise<RunAttempt[] | null> {
+    return (await this.dependencies.store.readCard(cardId, user))
       ? this.dependencies.store.readRunsForCard(cardId)
       : null;
   }
@@ -137,6 +139,7 @@ export class CardLifecycleService {
       const id = await this.dependencies.store.nextCardId();
       try {
         await this.dependencies.store.insertCard({
+          [cardOwnerSubject]: tenantSubject(user),
           id,
           title,
           prompt,
@@ -154,7 +157,7 @@ export class CardLifecycleService {
           updatedAt: now,
           actor: actor(user),
         });
-        return { card: (await this.dependencies.store.readCard(id)) as Card };
+        return { card: (await this.dependencies.store.readCard(id, user)) as Card };
       } catch (error) {
         if (!this.dependencies.isConstraintError(error) || attempt === 2) throw error;
       }
@@ -163,7 +166,7 @@ export class CardLifecycleService {
   }
 
   async mutate(user: User, cardId: string, action: string): Promise<{ card: Card }> {
-    const card = await this.dependencies.store.readCard(cardId);
+    const card = await this.dependencies.store.readCard(cardId, user);
     if (!card) throw notFound("card not found");
     const now = this.dependencies.now();
     const actorName = actor(user);
@@ -171,15 +174,16 @@ export class CardLifecycleService {
     if (action === "start" || action === "pulse") {
       const wasRunning = card.lane === "Running";
       if (!wasRunning) {
-        if ((await this.claimRunning(user, card, now)) !== "claimed") return this.result(cardId);
+        if ((await this.claimRunning(user, card, now)) !== "claimed")
+          return this.result(user, cardId);
       } else if (card.run && activeRunStatuses.includes(card.run.status)) {
         await this.dependencies.store.heartbeatRun(card.run.id, actorName, now + 2, "heartbeat ok");
-        return this.result(cardId);
+        return this.result(user, cardId);
       } else if ((await this.claimRunning(user, card, now)) !== "claimed") {
-        return this.result(cardId);
+        return this.result(user, cardId);
       }
       await this.dependencies.store.appendEvent(card.id, actorName, "heartbeat ok", now + 3);
-      return this.result(cardId);
+      return this.result(user, cardId);
     }
 
     if (action === "advance") {
@@ -189,7 +193,7 @@ export class CardLifecycleService {
         ] ?? "Todo";
       if (nextLane === "Running") {
         await this.claimRunning(user, card, now);
-        return this.result(cardId);
+        return this.result(user, cardId);
       }
       await this.dependencies.store.moveCard(card.id, nextLane, card.startedAt, now);
       if (
@@ -200,13 +204,13 @@ export class CardLifecycleService {
         await this.dependencies.store.finishRunForLane(card.run.id, nextLane, actorName, now + 1);
       }
       await this.dependencies.store.appendEvent(card.id, actorName, `moved to ${nextLane}`, now);
-      return this.result(cardId);
+      return this.result(user, cardId);
     }
 
-    if (action === "attach") return this.result(cardId);
+    if (action === "attach") return this.result(user, cardId);
     if (action === "watch") {
       await this.dependencies.store.appendEvent(card.id, actorName, "watch attached", now);
-      return this.result(cardId);
+      return this.result(user, cardId);
     }
     if (action === "takeover") {
       if (!card.run || !activeRunStatuses.includes(card.run.status)) {
@@ -220,14 +224,14 @@ export class CardLifecycleService {
         "operator takeover granted",
         now,
       );
-      return this.result(cardId);
+      return this.result(user, cardId);
     }
     if (action === "stall") {
       if (!card.run || !activeRunStatuses.includes(card.run.status)) {
         throw badRequest("no active run to mark stalled");
       }
       await this.dependencies.store.stall(card, actorName, now, "operator marked stalled");
-      return this.result(cardId);
+      return this.result(user, cardId);
     }
     throw badRequest("unknown action");
   }
@@ -297,6 +301,7 @@ export class CardLifecycleService {
           runResult = await this.claimRunning(system, card, now, {
             pulseExisting: false,
             reconcileStalled: false,
+            internalRead: true,
           });
         }
       } catch {
@@ -338,10 +343,16 @@ export class CardLifecycleService {
     user: User,
     card: Card,
     now: number,
-    options: { pulseExisting?: boolean; reconcileStalled?: boolean } = {},
+    options: {
+      pulseExisting?: boolean;
+      reconcileStalled?: boolean;
+      internalRead?: boolean;
+    } = {},
   ): Promise<"claimed" | "capacity" | "active"> {
     if (options.reconcileStalled !== false) await this.reconcileStalledRuns(now);
-    const currentCard = (await this.dependencies.store.readCard(card.id)) ?? card;
+    const currentCard =
+      (await this.dependencies.store.readCard(card.id, options.internalRead ? undefined : user)) ??
+      card;
     await this.dependencies.requireRepo(currentCard.repo);
     const settings = await this.dependencies.readSettings();
     const cap = numberSetting(settings.cap, 20);
@@ -395,8 +406,8 @@ export class CardLifecycleService {
     return "claimed";
   }
 
-  private async result(cardId: string): Promise<{ card: Card }> {
-    return { card: (await this.dependencies.store.readCard(cardId)) as Card };
+  private async result(user: User, cardId: string): Promise<{ card: Card }> {
+    return { card: (await this.dependencies.store.readCard(cardId, user)) as Card };
   }
 }
 

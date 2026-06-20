@@ -10,6 +10,7 @@ import {
   restorableSessionReturnUrl,
   restoreSessionReturnUrl,
   sessionRouteUrl,
+  withoutSharedToken,
 } from "../src/app/routing.js";
 
 test("app routing parses board and shared session locations", () => {
@@ -46,6 +47,12 @@ test("app and session route builders preserve only owned URL state", () => {
       grid: true,
     }).toString(),
     "https://fleet.example/sessions",
+  );
+  assert.equal(
+    withoutSharedToken(
+      "https://fleet.example/sessions/IS-2?token=old&view=grid#terminal",
+    ).toString(),
+    "https://fleet.example/sessions/IS-2?view=grid#terminal",
   );
 });
 

@@ -3,6 +3,7 @@ import {
   canDeleteInteractiveWorkspace,
   canMaintain,
   elapsed,
+  fleetCoversInteractiveSessions,
   humanStatus,
   interactiveSessionStatus,
   isFleetSessionAttachable,
@@ -20,7 +21,7 @@ export function FleetPage(props) {
   const preferredRepo = deployment.preferredRepo || "openclaw/crabfleet";
   const sessions = props.state.interactiveSessions || [];
   const fleet = props.state.fleet;
-  const totals = fleet?.totals || {};
+  const totals = fleetCoversInteractiveSessions(fleet, sessions) ? fleet.totals : {};
   const fleetSessionsById = new Map(
     (fleet?.sessions || []).map((session) => [session.id, session]),
   );
@@ -123,7 +124,7 @@ export function FleetPage(props) {
                       session={{ ...session, fleet: fleetSessionsById.get(session.id) }}
                       openSessionGrid={props.openSessionGrid}
                       deleteInteractiveSession={props.deleteInteractiveSession}
-                      canManage={session.canManage || canMaintain(props.state.user)}
+                      canManage={session.canManage === true}
                       sshHost={sshHost}
                     />
                   ))}

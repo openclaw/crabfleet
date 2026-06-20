@@ -19,6 +19,7 @@ Crabfleet gives OpenClaw maintainers a fleet dashboard where every Codex crabbox
 - **Diff previews.** Card tiles show changed files and totals; the run drawer shows a compact Codiff-style patch view.
 - **Multi-runtime policy.** Auto-select between the Container and Crabbox adapter surfaces based on card overrides, repo workflow defaults, and task requirements.
 - **Allowlist controls.** Restrict access to OpenClaw org members and specific repos through admin-managed allowlists.
+- **Private tenant isolation.** New deployments show each user only their own cards and sessions unless the owner creates a named grant, a delegated-control lease, or a public read-only link.
 - **Session history.** D1-backed card/run events plus periodically refreshed R2 event, transcript, and summary snapshots with terminal finalization guarantees.
 - **Repo workflow config.** Owners can evaluate `CRABBOX.md` per repo and use it for runtime and merge defaults.
 
@@ -89,10 +90,10 @@ POST /api/openclaw/action-sessions
 Authorization: Bearer CRABBOX_OPENCLAW_TOKEN
 Content-Type: application/json
 
-{"workKey":"openclaw/crabfleet:pr:42","workKind":"pr_repair","repo":"openclaw/crabfleet","branch":"fix/pr-42","sourceUrl":"https://github.com/openclaw/crabfleet/pull/42","runUrl":"https://github.com/openclaw/crabfleet/actions/runs/123","purpose":"repair PR 42","summary":"starting repair"}
+{"workKey":"openclaw/crabfleet:pr:42","workKind":"pr_repair","repo":"openclaw/crabfleet","branch":"fix/pr-42","owner":"operator@example.test","sourceUrl":"https://github.com/openclaw/crabfleet/pull/42","runUrl":"https://github.com/openclaw/crabfleet/actions/runs/123","purpose":"repair PR 42","summary":"starting repair"}
 ```
 
-The response contains `{session, agentToken, runnerPtyUrl, browserUrl}`. `runnerPtyUrl` includes the rotated session-scoped query credential and works directly with Node's global `WebSocket`:
+The response contains `{session, agentToken, runnerPtyUrl, browserUrl}`. Private-tenancy deployments require `owner` to resolve to one active Crabfleet user; the stable subject owns browser visibility while the OpenClaw service retains lifecycle authority for its session. `runnerPtyUrl` includes the rotated session-scoped query credential and works directly with Node's global `WebSocket`:
 
 ```js
 const terminal = new WebSocket(runnerPtyUrl);
@@ -149,6 +150,7 @@ merge:
 - Bootstrap token for admin setup and recovery
 - Short-lived D1-backed sessions; users reauthenticate after expiry
 - Role-based access control (owner, maintainer, viewer)
+- Private-by-default tenant isolation with time-limited named viewer/controller grants
 
 ## Deployment
 
@@ -197,6 +199,8 @@ The Crabbox namespace cutover intentionally has no old-name compatibility. Exist
 - `CRABFLEET_TRUSTED_PROXY_PUBLIC_ORIGIN` – Optional browser-visible HTTPS origin required on mutations and WebSocket upgrades; defaults to `CRABFLEET_TRUSTED_PROXY_ORIGIN`
 - `CRABFLEET_TRUSTED_PROXY_SECRET` – Shared secret required on `X-Crabfleet-Proxy-Secret` for trusted reverse-proxy identity
 - `CRABFLEET_TRUSTED_USER_HEADER` – Optional trusted identity header name, default `X-Authenticated-User`; the proxy must remove caller-supplied copies before injecting it
+- `CRABFLEET_TRUSTED_PROXY_AUTO_ROLE` – Optional `viewer` or `maintainer` role for valid trusted-proxy identities without individual allowlist entries; other values fail closed. Use `maintainer` when every authenticated tenant should be able to create its own work.
+- `CRABFLEET_TENANCY_MODE` – Optional `private` or `shared`; defaults to `private`. Private mode scopes cards and sessions to their stable owner subject plus explicit, unexpired session grants. Bootstrap token rotation preserves one stable bootstrap owner subject. `shared` restores the legacy team-wide visibility model and should be an intentional deployment choice.
 - `GITHUB_CLIENT_ID` – GitHub OAuth app client ID (optional)
 - `GITHUB_CLIENT_SECRET` – GitHub OAuth app secret (optional)
 - `GITHUB_REDIRECT_URI` – Optional authoritative GitHub OAuth callback URL; when set it must be an absolute HTTPS URL with no credentials, query, or fragment and the exact `/auth/github/callback` path. Requests on another host restart login on this configured origin. When absent, the callback defaults to the HTTPS request origin (or literal-loopback HTTP for local development).
@@ -368,7 +372,7 @@ curl -fsS https://crabfleet.openclaw.ai/api/openclaw/crabboxes \
   -d '{"owner":"@steipete","repo":"openclaw/crabfleet","prompt":"prep the meeting follow-up"}'
 ```
 
-The created crabbox appears in the fleet grid under the requested owner. Provisioning follows normal interactive-session routing: built-in Sandbox for Container or the versioned adapter for Crabbox.
+The created crabbox appears in the fleet grid under the requested owner. In private tenancy, `owner` must resolve to one active Crabfleet user by login, email, or stable subject. Provisioning follows normal interactive-session routing: built-in Sandbox for Container or the versioned adapter for Crabbox.
 
 ### Project Structure
 
@@ -412,6 +416,8 @@ Full documentation available at [docs.crabfleet.ai](https://docs.crabfleet.ai):
 
 - All state-changing operations require authentication
 - Repo operations require allowlist membership
+- Cards and sessions are tenant-private by default; global roles do not bypass another tenant's session boundary
+- Named session grants are owner-managed, time-limited, and independently scoped to read-only or terminal-control access
 - Merge policy is stored as intent; Crabfleet does not currently perform merges
 - Runtime tokens are scoped and short-lived
 - Secrets never logged or stored in D1/R2

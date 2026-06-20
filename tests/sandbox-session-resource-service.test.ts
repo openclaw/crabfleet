@@ -45,12 +45,20 @@ function dependencies(
       calls.push(`read:${sessionId}`);
       return session;
     },
-    presentSession(current, user) {
+    async presentSession(current, user) {
       calls.push(`present:${current.id}:${user.login}`);
       return { ...current, summary: "presented" };
     },
-    delegatedControlAvailable(current) {
-      calls.push(`delegate:${current.id}`);
+    async canView(user, current) {
+      calls.push(`view:${user.login}:${current.id}`);
+      return true;
+    },
+    async canControl(user, current) {
+      calls.push(`control:${user.login}:${current.id}`);
+      return true;
+    },
+    async canManage(user, current) {
+      calls.push(`manage:${user.login}:${current.id}`);
       return true;
     },
     async runDiagnostics(current, workdir, script) {
@@ -106,6 +114,8 @@ test("Sandbox checkpoint creation stores backup before durable evidence", async 
   assert.equal(result.session.summary, "presented");
   assert.deepEqual(calls, [
     "read:IS-42",
+    "view:owner:IS-42",
+    "manage:owner:IS-42",
     "backup:create:IS-42:/workspace/crabbox-is-42:checkpoint-100",
     "store:backup-1:checkpoint-100",
     "event:IS-42:owner:checkpoint created backup-1 in sandbox-1:100",
@@ -125,6 +135,8 @@ test("Sandbox checkpoint restore reads registry before provider mutation", async
   assert.equal("backup" in result.checkpoint, false);
   assert.deepEqual(calls, [
     "read:IS-42",
+    "view:owner:IS-42",
+    "manage:owner:IS-42",
     "checkpoint:IS-42:backup-1",
     "backup:restore:IS-42:backup-1",
     "event:IS-42:owner:checkpoint restored backup-1:100",
@@ -151,10 +163,25 @@ test("Sandbox diagnostics parse provider output and retain invalid output eviden
   });
   assert.deepEqual(calls, [
     "read:IS-42",
+    "view:owner:IS-42",
+    "control:owner:IS-42",
     "present:IS-42:owner",
-    "delegate:IS-42",
     "diagnostics:IS-42:/workspace/crabbox-is-42:true",
   ]);
+});
+
+test("Sandbox diagnostics reject teardown states before provider work", async () => {
+  for (const status of ["stopping", "stopped", "expired", "failed"] as const) {
+    const calls: string[] = [];
+    const service = new SandboxSessionResourceService(
+      dependencies(calls, sandboxSession({ status })),
+    );
+
+    await assert.rejects(() => service.readDiagnostics(owner, "IS-42"), {
+      message: `session is ${status}`,
+    });
+    assert.deepEqual(calls, ["read:IS-42", "view:owner:IS-42", "control:owner:IS-42"]);
+  }
 });
 
 test("non-Sandbox diagnostics return unavailable without provider work", async () => {
@@ -172,4 +199,10 @@ test("non-Sandbox diagnostics return unavailable without provider work", async (
     calls.some((call) => call.startsWith("diagnostics:")),
     false,
   );
+  assert.deepEqual(calls, [
+    "read:IS-42",
+    "view:owner:IS-42",
+    "control:owner:IS-42",
+    "present:IS-42:owner",
+  ]);
 });

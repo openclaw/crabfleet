@@ -160,7 +160,7 @@ test("finalized deletion claims and removes events, archive metadata, and sessio
   );
 
   assert.equal(await deleteFinalizedInteractiveSession(env, row, logArchive), true);
-  assert.equal(batch.length, 4);
+  assert.equal(batch.length, 5);
   assert.match(batch[0]?.sql ?? "", /update "interactive_sessions"/i);
   assert.match(batch[0]?.sql ?? "", /interactive_session_credential_policies/i);
   assert.match(batch[0]?.sql ?? "", /WITH RECURSIVE active_ancestor\(id\)/i);
@@ -169,7 +169,8 @@ test("finalized deletion claims and removes events, archive metadata, and sessio
   assert.match(batch[0]?.sql ?? "", /count\(\*\)/i);
   assert.match(batch[1]?.sql ?? "", /delete from "interactive_session_events"/i);
   assert.match(batch[2]?.sql ?? "", /delete from "interactive_session_log_archives"/i);
-  assert.match(batch[3]?.sql ?? "", /delete from "interactive_sessions"/i);
+  assert.match(batch[3]?.sql ?? "", /delete from "interactive_session_grants"/i);
+  assert.match(batch[4]?.sql ?? "", /delete from "interactive_sessions"/i);
   const claimToken = batch[0]?.parameters.find(
     (parameter): parameter is string =>
       typeof parameter === "string" && parameter.startsWith("cleanup:"),
@@ -178,5 +179,6 @@ test("finalized deletion claims and removes events, archive metadata, and sessio
   assert.ok(batch[1]?.parameters.includes(claimToken));
   assert.ok(batch[2]?.parameters.includes(claimToken));
   assert.ok(batch[3]?.parameters.includes(claimToken));
-  assert.ok(batch[3]?.parameters.includes(2));
+  assert.ok(batch[4]?.parameters.includes(claimToken));
+  assert.ok(batch[4]?.parameters.includes(2));
 });

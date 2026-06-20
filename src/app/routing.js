@@ -26,6 +26,12 @@ export function appViewUrl(href, value) {
   return url;
 }
 
+export function withoutSharedToken(href) {
+  const url = new URL(href);
+  url.searchParams.delete("token");
+  return url;
+}
+
 export function sessionRouteUrl(
   href,
   { id, grid = false, appView = "fleet", sharedSessionId = null, sharedToken = null },

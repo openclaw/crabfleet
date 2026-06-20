@@ -1,6 +1,6 @@
-import { deadInteractiveSessionStatuses, type User } from "./models.ts";
+import { deadInteractiveSessionStatuses, userSessionOwnerSubject, type User } from "./models.ts";
 import { bearerToken, forbidden, unauthorized } from "./http.ts";
-import type { InteractiveSession } from "./session-model.ts";
+import { interactiveSessionOwnerSubject, type InteractiveSession } from "./session-model.ts";
 
 export type AgentSessionCredential = {
   session: InteractiveSession;
@@ -77,6 +77,9 @@ export function agentSessionToken(
 
 export function agentSessionUser(session: InteractiveSession): User {
   return {
+    ...(session[interactiveSessionOwnerSubject]
+      ? { [userSessionOwnerSubject]: session[interactiveSessionOwnerSubject] }
+      : {}),
     subject: `agent:${session.id}`,
     login: session.owner,
     email: null,

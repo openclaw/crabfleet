@@ -328,6 +328,261 @@ func TestAttachClosesCloseableTerminalAfterRemoteClosure(t *testing.T) {
 	}
 }
 
+func TestClientSubscribesReadOnlyAndSuppressesInput(t *testing.T) {
+	acknowledged := make(chan uint32, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := websocket.Accept(w, r, nil)
+		if err != nil {
+			t.Error(err)
+			return
+		}
+		defer conn.Close(websocket.StatusNormalClosure, "")
+
+		for range 2 {
+			if _, _, err := conn.Read(r.Context()); err != nil {
+				t.Error(err)
+				return
+			}
+		}
+		event, _ := json.Marshal(eventPayload{Type: "subscribed", CanInput: false})
+		if err := conn.Write(r.Context(), websocket.MessageBinary, encodeFrame(frame{
+			messageType: messageEvent,
+			sessionID:   "IS-read-only",
+			payload:     event,
+		})); err != nil {
+			t.Error(err)
+			return
+		}
+		if err := conn.Write(r.Context(), websocket.MessageBinary, encodeFrame(frame{
+			messageType: messageOutput,
+			sessionID:   "IS-read-only",
+			payload:     []byte("read-only\n"),
+		})); err != nil {
+			t.Error(err)
+			return
+		}
+		_, payload, err := conn.Read(r.Context())
+		if err != nil {
+			t.Error(err)
+			return
+		}
+		ack, err := decodeFrame(payload)
+		if err != nil {
+			t.Error(err)
+			return
+		}
+		if ack.messageType != messageAck {
+			t.Errorf("read-only client sent message type = %d", ack.messageType)
+			return
+		}
+		acknowledged <- binary.LittleEndian.Uint32(ack.payload)
+		closed, _ := json.Marshal(eventPayload{Type: "closed"})
+		_ = conn.Write(r.Context(), websocket.MessageBinary, encodeFrame(frame{
+			messageType: messageEvent,
+			sessionID:   "IS-read-only",
+			payload:     closed,
+		}))
+	}))
+	defer server.Close()
+
+	endpoint, err := Endpoint(server.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	client, err := Dial(context.Background(), endpoint, "IS-read-only", Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+	if client.canInput.Load() {
+		t.Fatal("read-only subscription unexpectedly has input control")
+	}
+	inputReader, inputWriter := io.Pipe()
+	defer inputReader.Close()
+	defer inputWriter.Close()
+	terminal := &readWriter{reader: inputReader, closer: inputReader}
+	resizes := make(chan Size, 1)
+	resizes <- Size{Cols: 132, Rows: 43}
+	if err := client.Attach(context.Background(), terminal, resizes); err != nil {
+		t.Fatal(err)
+	}
+	if terminal.String() != "read-only\n" {
+		t.Fatalf("output = %q", terminal.String())
+	}
+	if bytes := <-acknowledged; bytes != uint32(len("read-only\n")) {
+		t.Fatalf("acknowledged = %d", bytes)
+	}
+}
+
+func TestClientReadOnlyAttachReturnsOnTerminalEOF(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := websocket.Accept(w, r, nil)
+		if err != nil {
+			t.Error(err)
+			return
+		}
+		defer conn.Close(websocket.StatusNormalClosure, "")
+		for range 2 {
+			if _, _, err := conn.Read(r.Context()); err != nil {
+				t.Error(err)
+				return
+			}
+		}
+		event, _ := json.Marshal(eventPayload{Type: "subscribed", CanInput: false})
+		if err := conn.Write(r.Context(), websocket.MessageBinary, encodeFrame(frame{
+			messageType: messageEvent,
+			sessionID:   "IS-read-only-eof",
+			payload:     event,
+		})); err != nil {
+			t.Error(err)
+			return
+		}
+		_, _, _ = conn.Read(r.Context())
+	}))
+	defer server.Close()
+
+	endpoint, err := Endpoint(server.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	client, err := Dial(context.Background(), endpoint, "IS-read-only-eof", Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+
+	done := make(chan error, 1)
+	go func() {
+		done <- client.Attach(context.Background(), &readWriter{reader: bytes.NewReader(nil)}, nil)
+	}()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("read-only attach did not return after terminal EOF")
+	}
+}
+
+func TestClientContinuesReadOnlyAndResumesControl(t *testing.T) {
+	resumedSize := make(chan Size, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := websocket.Accept(w, r, nil)
+		if err != nil {
+			t.Error(err)
+			return
+		}
+		defer conn.Close(websocket.StatusNormalClosure, "")
+		for range 2 {
+			if _, _, err := conn.Read(r.Context()); err != nil {
+				t.Error(err)
+				return
+			}
+		}
+		subscribed, _ := json.Marshal(eventPayload{Type: "subscribed", CanInput: true})
+		if err := conn.Write(r.Context(), websocket.MessageBinary, encodeFrame(frame{
+			messageType: messageEvent,
+			sessionID:   "IS-live-control",
+			payload:     subscribed,
+		})); err != nil {
+			t.Error(err)
+			return
+		}
+		if err := conn.Write(r.Context(), websocket.MessageBinary, encodeFrame(frame{
+			messageType: messageControlRevoked,
+			sessionID:   "IS-live-control",
+		})); err != nil {
+			t.Error(err)
+			return
+		}
+		if err := conn.Write(r.Context(), websocket.MessageBinary, encodeFrame(frame{
+			messageType: messageOutput,
+			sessionID:   "IS-live-control",
+			payload:     []byte("read-only\n"),
+		})); err != nil {
+			t.Error(err)
+			return
+		}
+		if _, payload, err := conn.Read(r.Context()); err != nil {
+			t.Error(err)
+			return
+		} else if ack, decodeErr := decodeFrame(payload); decodeErr != nil || ack.messageType != messageAck {
+			t.Errorf("read-only acknowledgement = %#v, %v", ack, decodeErr)
+			return
+		}
+		if err := conn.Write(r.Context(), websocket.MessageBinary, encodeFrame(frame{
+			messageType: messageControlGranted,
+			sessionID:   "IS-live-control",
+		})); err != nil {
+			t.Error(err)
+			return
+		}
+		_, payload, err := conn.Read(r.Context())
+		if err != nil {
+			t.Error(err)
+			return
+		}
+		resize, err := decodeFrame(payload)
+		if err != nil || resize.messageType != messageResize {
+			t.Errorf("resumed resize = %#v, %v", resize, err)
+			return
+		}
+		resumedSize <- Size{
+			Cols: binary.LittleEndian.Uint32(resize.payload[0:4]),
+			Rows: binary.LittleEndian.Uint32(resize.payload[4:8]),
+		}
+		if err := conn.Write(r.Context(), websocket.MessageBinary, encodeFrame(frame{
+			messageType: messageOutput,
+			sessionID:   "IS-live-control",
+			payload:     []byte("live\n"),
+		})); err != nil {
+			t.Error(err)
+			return
+		}
+		if _, _, err := conn.Read(r.Context()); err != nil {
+			t.Error(err)
+			return
+		}
+		closed, _ := json.Marshal(eventPayload{Type: "closed"})
+		_ = conn.Write(r.Context(), websocket.MessageBinary, encodeFrame(frame{
+			messageType: messageEvent,
+			sessionID:   "IS-live-control",
+			payload:     closed,
+		}))
+	}))
+	defer server.Close()
+
+	endpoint, err := Endpoint(server.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	client, err := Dial(context.Background(), endpoint, "IS-live-control", Options{
+		Cols: 132,
+		Rows: 43,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+	inputReader, inputWriter := io.Pipe()
+	defer inputReader.Close()
+	defer inputWriter.Close()
+	terminal := &readWriter{reader: inputReader, closer: inputReader}
+	if err := client.Attach(context.Background(), terminal, nil); err != nil {
+		t.Fatal(err)
+	}
+	if terminal.String() != "read-only\nlive\n" {
+		t.Fatalf("output = %q", terminal.String())
+	}
+	if size := <-resumedSize; size != (Size{Cols: 132, Rows: 43}) {
+		t.Fatalf("resumed size = %#v", size)
+	}
+	if !client.canInput.Load() {
+		t.Fatal("client did not resume input control")
+	}
+}
+
 type readWriter struct {
 	reader io.Reader
 	closer io.Closer

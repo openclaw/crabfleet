@@ -32,6 +32,7 @@ export type TerminalHubSubscription = {
   upstream: WebSocket;
   canView: () => Promise<boolean>;
   canInput: () => Promise<boolean>;
+  canInputGranted: boolean;
   markClosing: (reason: string) => void;
   viewCheck: ReturnType<typeof setInterval> | null;
   cols: number;
@@ -45,7 +46,11 @@ export type TerminalHubDependencies = {
   upgradeResponse(client: WebSocket): Response;
   canOpenAnonymous(request: Request): Promise<boolean>;
   canViewShared(request: Request, sessionId: string): Promise<boolean>;
-  readSession(sessionId: string): Promise<InteractiveSession | null>;
+  readSession(
+    request: Request,
+    user: User | null,
+    sessionId: string,
+  ): Promise<InteractiveSession | null>;
   canViewSession(
     request: Request,
     user: User | null,
@@ -78,6 +83,7 @@ export type TerminalHubDependencies = {
     user: User | null,
     session: InteractiveSession,
     message: string,
+    error?: unknown,
   ): Promise<void>;
   markDetached(user: User | null, sessionId: string, message: string): Promise<void>;
 };
@@ -204,10 +210,9 @@ export class TerminalHub {
             return;
           }
           if (frame.type === TerminalMessageType.Input || frame.type === TerminalMessageType.Key) {
-            if (!(await subscription.canInput())) {
-              sendTerminalJson(server, TerminalMessageType.ControlRevoked, frame.sessionId, {
-                error: "terminal control has not been granted",
-              });
+            const canInput = await subscription.canInput();
+            updateTerminalInputCapability(server, subscription, canInput);
+            if (!canInput) {
               return;
             }
             if (subscription.upstream.readyState === WebSocket.OPEN) {
@@ -225,10 +230,9 @@ export class TerminalHub {
           }
           if (frame.type === TerminalMessageType.Resize) {
             const size = tryDecodeResizePayload(frame.payload);
-            if (!(await subscription.canInput())) {
-              sendTerminalJson(server, TerminalMessageType.ControlRevoked, frame.sessionId, {
-                error: "terminal control has not been granted",
-              });
+            const canInput = await subscription.canInput();
+            updateTerminalInputCapability(server, subscription, canInput);
+            if (!canInput) {
               return;
             }
             if (size) {
@@ -301,13 +305,17 @@ export class TerminalHub {
       return;
     }
 
-    if (!user && !(await this.dependencies.canViewShared(request, id))) {
-      sendTerminalJson(client, TerminalMessageType.Error, id, { error: "unauthorized" });
+    const session = await this.dependencies.readSession(request, user, id);
+    if (!session) {
+      sendTerminalJson(client, TerminalMessageType.Error, id, {
+        error: "interactive session not found",
+      });
       return;
     }
-
-    const session = await this.dependencies.readSession(id);
-    if (!session) {
+    const canView = user
+      ? await this.dependencies.canViewSession(request, user, session)
+      : await this.dependencies.canViewShared(request, id);
+    if (!canView) {
       sendTerminalJson(client, TerminalMessageType.Error, id, {
         error: "interactive session not found",
       });
@@ -325,11 +333,6 @@ export class TerminalHub {
       });
       return;
     }
-    if (!(await this.dependencies.canViewSession(request, user, session))) {
-      sendTerminalJson(client, TerminalMessageType.Error, id, { error: "unauthorized" });
-      return;
-    }
-
     try {
       const canInput = this.dependencies.inputGrant(request, user, session);
       const canInputNow = await canInput();
@@ -367,17 +370,37 @@ export class TerminalHub {
           [session.adapterWorkspaceId, session.providerResourceId],
           [session.attachUrl],
         );
-        await this.dependencies.markConnectionFailure(user, session, message);
+        await this.dependencies.markConnectionFailure(user, session, message, error);
         sendTerminalJson(client, TerminalMessageType.Error, id, { error: message });
         return;
       }
       const upstream = upstreamConnection.socket;
+      if (!(await canView())) {
+        if (upstream.readyState < WebSocket.CLOSING) upstream.close(1008, "share revoked");
+        sendTerminalJson(client, TerminalMessageType.Error, id, {
+          error: "interactive session not found",
+        });
+        return;
+      }
       if (!isHubOpen() || client.readyState !== WebSocket.OPEN) {
         if (upstream.readyState < WebSocket.CLOSING) upstream.close(1000, "client closed");
         return;
       }
       let viewGranted = true;
       let viewCheck: ReturnType<typeof setInterval> | null = null;
+      const activeSubscription: TerminalHubSubscription = {
+        session,
+        upstream,
+        canView,
+        canInput,
+        canInputGranted: canInputNow,
+        markClosing,
+        viewCheck,
+        cols,
+        rows,
+        outputAcknowledgements: outputAcknowledgements && upstreamConnection.outputAcknowledgements,
+        outputAcknowledgementBytes: 0,
+      };
       const revokeView = () => {
         if (!viewGranted) return;
         viewGranted = false;
@@ -395,19 +418,15 @@ export class TerminalHub {
             if (!allowed) revokeView();
           })
           .catch(() => revokeView());
+        void canInput()
+          .then((allowed) => {
+            if (viewGranted) updateTerminalInputCapability(client, activeSubscription, allowed);
+          })
+          .catch(() => {
+            if (viewGranted) updateTerminalInputCapability(client, activeSubscription, false);
+          });
       }, 5000);
-      const activeSubscription: TerminalHubSubscription = {
-        session,
-        upstream,
-        canView,
-        canInput,
-        markClosing,
-        viewCheck,
-        cols,
-        rows,
-        outputAcknowledgements: outputAcknowledgements && upstreamConnection.outputAcknowledgements,
-        outputAcknowledgementBytes: 0,
-      };
+      activeSubscription.viewCheck = viewCheck;
       subscriptions.set(id, activeSubscription);
       let outputQueue = Promise.resolve();
       sendTerminalJson(client, TerminalMessageType.Event, id, {
@@ -496,6 +515,21 @@ export class TerminalHub {
       });
     }
   }
+}
+
+function updateTerminalInputCapability(
+  socket: WebSocket,
+  subscription: TerminalHubSubscription,
+  canInput: boolean,
+): void {
+  if (subscription.canInputGranted === canInput) return;
+  subscription.canInputGranted = canInput;
+  sendTerminalJson(
+    socket,
+    canInput ? TerminalMessageType.ControlGranted : TerminalMessageType.ControlRevoked,
+    subscription.session.id,
+    canInput ? { canInput: true } : { canInput: false, error: "terminal control revoked" },
+  );
 }
 
 export function sendTerminalFrame(

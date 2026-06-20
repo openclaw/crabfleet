@@ -14,7 +14,7 @@ test("worker entrypoint delegates interactive-session lifecycle composition", as
   assert.match(worker, /new InteractiveSessionApplication\(/);
   assert.match(worker, /this\.sessions\.create\(/);
   assert.match(worker, /this\.sessions\.mutate\(/);
-  assert.match(worker, /this\.sessions\.readFresh\(/);
+  assert.match(worker, /this\.sessions\.readFreshForUser\(/);
   assert.doesNotMatch(entrypoint, /InteractiveSession(?:Creation|Attach|Metadata|Stop)Service/);
 
   assert.match(application, /export class InteractiveSessionApplication/);
@@ -47,6 +47,13 @@ test("worker entrypoint delegates OpenClaw and GitHub Actions composition", asyn
   assert.match(openClaw, /export class OpenClawApplication/);
   assert.match(openClaw, /new OpenClawController\(/);
   assert.match(openClaw, /new OpenClawSupervisionService\(/);
+  assert.match(openClaw, /mutate\([\s\S]*?openClawAuthorizedUser/);
+  assert.match(openClaw, /openTerminal\([\s\S]*?openClawAuthorizedUser/);
+  assert.match(openClaw, /decorateSession:[\s\S]*?openClawAuthorizedUser/);
+  assert.match(
+    openClaw,
+    /createSession: async[\s\S]*?requireRootScopedSession[\s\S]*?openClawAuthorizedUser/,
+  );
   assert.match(githubActions, /export class GitHubActionsApplication/);
   assert.match(githubActions, /new GitHubActionsSessionRegistrationService\(/);
   assert.match(githubActions, /new GitHubActionsWorkStateService\(/);
@@ -60,4 +67,44 @@ test("worker entrypoint retains only routing and platform composition", async ()
   assert.match(entrypoint, /application\.controlPlaneRoutes\(context\)/);
   assert.match(entrypoint, /application\.serviceSessionRoutes\(\)/);
   assert.match(entrypoint, /application\.browserSessionRoutes\(\)/);
+});
+
+test("terminal subscriptions authorize around targeted lifecycle refresh", async () => {
+  const terminal = await readFile(
+    new URL("../src/worker/interactive-terminal-service.ts", import.meta.url),
+    "utf8",
+  );
+  assert.match(terminal, /readAuthorizedFreshSession\(\{/);
+  assert.match(terminal, /authorize: \(session\) =>[\s\S]*canViewTerminalSession/);
+  assert.match(terminal, /refresh: async \(\) =>[\s\S]*reconcileSession/);
+});
+
+test("authorized transcript responses are never stored in shared caches", async () => {
+  const application = await readFile(
+    new URL("../src/worker/interactive-session-application.ts", import.meta.url),
+    "utf8",
+  );
+  const transcript = application.slice(
+    application.indexOf("  async transcript("),
+    application.indexOf("  async updateSummary("),
+  );
+
+  assert.match(transcript, /securityHeaders\("text\/markdown; charset=utf-8", false\)/);
+  assert.match(transcript, /"cache-control": "no-store"/);
+  assert.doesNotMatch(transcript, /securityHeaders\("text\/markdown; charset=utf-8"\)/);
+});
+
+test("session state applies the final active-grant authorization snapshot", async () => {
+  const application = await readFile(
+    new URL("../src/worker/interactive-session-application.ts", import.meta.url),
+    "utf8",
+  );
+  const readAll = application.slice(
+    application.indexOf("  async readAll("),
+    application.indexOf("  async readFresh("),
+  );
+
+  assert.match(readAll, /readActiveForSessions/);
+  assert.match(readAll, /flatMap/);
+  assert.match(readAll, /this\.canView\(user, session, grant, now\)/);
 });

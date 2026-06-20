@@ -38,10 +38,22 @@ test("app actions use styled HTML dialogs instead of browser prompts", async () 
   assert.match(dialogs, /showModal\(\)/);
   assert.match(dialogs, /function Drawer[\s\S]*?<dialog[\s\S]*?aria-labelledby=\{titleId\}/);
   assert.match(dialogs, /function Drawer[\s\S]*?previousFocus\?\.focus\?\.\(\)/);
+  assert.match(dialogs, /dialog\.kind === "access"/);
+  assert.match(dialogs, /name="principal"/);
+  assert.match(dialogs, /void revokeGrant\(grant\.subject\)/);
   assert.match(workDrawers, /defaults\.profiles\.map\(\(profile\) =>/);
   assert.match(workDrawers, /runtimeProfileOptionLabel\(profile\)/);
   assert.match(workDrawers, /onReset=\{\(\) => setRuntime\(defaults\.runtime\)\}/);
   assert.match(adminDrawer, /useEffect\(\(\) => setRepo\(preferred\), \[preferred\]\)/);
+  assert.match(sessionWorkspace, /const canManage = Boolean\(session\.canManage\)/);
+  assert.doesNotMatch(sessionWorkspace, /session\.canManage \|\| canMaintain/);
+  assert.match(sessionWorkspace, /manageInteractiveSessionAccess\(session\.id\)/);
+  assert.match(
+    sessionWorkspace,
+    /props\.minimal[\s\S]*?!session\.sharedLinkOnly && !session\.sharedReadOnly[\s\S]*?Logs/,
+  );
+  assert.match(sessionWorkspace, /Codex CLI terminals with explicit sharing controls\./);
+  assert.doesNotMatch(sessionWorkspace, /Private Codex CLI terminals/);
 });
 
 test("fleet terminal affordances require attachable session state", async () => {
@@ -59,4 +71,21 @@ test("workspace deletion remains available from Fleet", async () => {
   assert.match(fleet, /canManage && actionable/);
   assert.match(fleet, /const endLabel = ending/);
   assert.match(fleet, /deleteInteractiveSession\(session\.id\)/);
+});
+
+test("mobile navigation and access dialogs stay inside the viewport", async () => {
+  const html = await readFile(new URL("../src/app.html", import.meta.url), "utf8");
+
+  assert.match(
+    html,
+    /@media \(max-width: 720px\)[\s\S]*?\.nav-actions \{[\s\S]*?grid-template-columns: repeat\(2, minmax\(0, 1fr\)\);[\s\S]*?width: 100%;/,
+  );
+  assert.match(
+    html,
+    /@media \(max-width: 720px\)[\s\S]*?\.action-dialog \{[\s\S]*?width: calc\(100vw - 20px\);/,
+  );
+  assert.match(
+    html,
+    /@media \(max-width: 720px\)[\s\S]*?\.action-dialog-access-form \{[\s\S]*?grid-template-columns: 1fr;/,
+  );
 });

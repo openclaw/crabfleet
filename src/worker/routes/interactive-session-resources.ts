@@ -2,12 +2,13 @@ import { json, notFound, readJson } from "../http.ts";
 import type { User } from "../models.ts";
 import type { InteractiveSession } from "../session-model.ts";
 import type { InteractiveSessionSummaryInput } from "../session-metadata.ts";
+import type { InteractiveSessionGrantInput } from "../session-grant-service.ts";
 
 export type InteractiveSessionResourceRouteDependencies = {
   basePath: string;
   requireUser(request: Request): Promise<User>;
-  readFreshSession(sessionId: string): Promise<InteractiveSession | null>;
-  presentSession(session: InteractiveSession, user: User): InteractiveSession;
+  readFreshSession(user: User, sessionId: string): Promise<InteractiveSession | null>;
+  presentSession(session: InteractiveSession, user: User): Promise<InteractiveSession | null>;
   readLogs(user: User, sessionId: string): Promise<unknown>;
   readTranscript(user: User, sessionId: string): Promise<Response>;
   updateSummary(
@@ -22,6 +23,13 @@ export type InteractiveSessionResourceRouteDependencies = {
   readDiagnostics?(user: User, sessionId: string): Promise<unknown>;
   openVnc?(user: User, sessionId: string): Promise<Response>;
   uploadClipboard?(request: Request, user: User, sessionId: string): Promise<unknown>;
+  listGrants?(user: User, sessionId: string): Promise<unknown>;
+  grantAccess?(
+    user: User,
+    sessionId: string,
+    input: InteractiveSessionGrantInput,
+  ): Promise<unknown>;
+  revokeAccess?(user: User, sessionId: string, subject: string): Promise<unknown>;
 };
 
 export async function handleInteractiveSessionResourceRoute(
@@ -38,9 +46,11 @@ export async function handleInteractiveSessionResourceRoute(
 
   if (request.method === "GET" && !resource) {
     const user = await dependencies.requireUser(request);
-    const session = await dependencies.readFreshSession(sessionId);
+    const session = await dependencies.readFreshSession(user, sessionId);
     if (!session) throw notFound("interactive session not found");
-    return json({ session: dependencies.presentSession(session, user) });
+    const presented = await dependencies.presentSession(session, user);
+    if (!presented) throw notFound("interactive session not found");
+    return json({ session: presented });
   }
   if (request.method === "GET" && resource === "logs") {
     const user = await dependencies.requireUser(request);
@@ -97,6 +107,28 @@ export async function handleInteractiveSessionResourceRoute(
     return json(await dependencies.uploadClipboard(request, user, sessionId), {
       status: 201,
     });
+  }
+
+  if (resource === "grants" && dependencies.listGrants && dependencies.grantAccess) {
+    const user = await dependencies.requireUser(request);
+    if (request.method === "GET") return json(await dependencies.listGrants(user, sessionId));
+    if (request.method === "POST") {
+      return json(
+        await dependencies.grantAccess(
+          user,
+          sessionId,
+          await readJson<InteractiveSessionGrantInput>(request),
+        ),
+        { status: 201 },
+      );
+    }
+    return null;
+  }
+
+  const grantMatch = dependencies.revokeAccess ? resource.match(/^grants\/(.+)$/) : null;
+  if (request.method === "DELETE" && grantMatch && dependencies.revokeAccess) {
+    const user = await dependencies.requireUser(request);
+    return json(await dependencies.revokeAccess(user, sessionId, decoded(grantMatch[1])));
   }
 
   return null;

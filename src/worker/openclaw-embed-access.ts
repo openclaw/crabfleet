@@ -32,3 +32,13 @@ export async function canControlOpenClawEmbeddedTerminalRequest(
     shareSession === sessionId && (await isOpenClawEmbedSessionToken(env, sessionId, token, now))
   );
 }
+
+export async function terminalInputAuthorization(
+  request: Request,
+  env: Pick<RuntimeEnv, "CRABBOX_EMBED_TICKET_SECRET">,
+  sessionId: string,
+  authenticatedControl: (() => Promise<boolean>) | null,
+): Promise<boolean> {
+  if (await canControlOpenClawEmbeddedTerminalRequest(request, env, sessionId)) return true;
+  return authenticatedControl ? authenticatedControl() : false;
+}

@@ -63,6 +63,7 @@ const allowedPolicy: InteractiveSessionMetadataPolicy = {
   canChangeMultiplayer: true,
   canControl: true,
   delegatedControlAvailable: true,
+  stableSubjectsRequired: false,
 };
 
 function hasStatus(status: number): (error: unknown) => boolean {
@@ -82,6 +83,7 @@ async function mutate(
     session: context.session,
     action,
     actor: "operator",
+    subject: "github:operator",
     policy: { ...allowedPolicy, ...options.policy },
     now: 100,
   });
@@ -133,8 +135,10 @@ test("disabling sharing clears share and delegated-control state", async () => {
     share_token_hash: null,
     share_token_preview: null,
     control_requested_by: null,
+    control_requested_by_subject: null,
     control_requested_at: null,
     controller: null,
+    controller_subject: null,
     control_granted_at: null,
     control_expires_at: null,
   });
@@ -168,6 +172,7 @@ test("control requests require a live revocable session", async () => {
   const { mutations } = await mutate("request_control", { policy: { canControl: false } });
   assert.deepEqual(mutations[0]?.values, {
     control_requested_by: "operator",
+    control_requested_by_subject: "github:operator",
     control_requested_at: 100,
   });
 });
@@ -180,19 +185,37 @@ test("existing controllers do not create duplicate requests", async () => {
 
 test("control approval grants a bounded lease and clears the request", async () => {
   const session = interactiveSession(
-    sessionRow({ id: "IS-7", control_requested_by: "reviewer", control_requested_at: 90 }),
+    sessionRow({
+      id: "IS-7",
+      control_requested_by: "reviewer",
+      control_requested_by_subject: "github:reviewer",
+      control_requested_at: 90,
+    }),
     [],
   );
   const { audits, mutations } = await mutate("approve_control", { session });
 
   assert.deepEqual(mutations[0]?.values, {
     controller: "reviewer",
+    controller_subject: "github:reviewer",
     control_granted_at: 100,
     control_expires_at: 1_800_100,
     control_requested_by: null,
+    control_requested_by_subject: null,
     control_requested_at: null,
   });
   assert.deepEqual(audits, ["interactive session control granted IS-7 to reviewer"]);
+});
+
+test("private control approval rejects a legacy request without a stable subject", async () => {
+  const session = interactiveSession(
+    sessionRow({ control_requested_by: "ambiguous", control_requested_at: 90 }),
+    [],
+  );
+  await assert.rejects(
+    () => mutate("approve_control", { session, policy: { stableSubjectsRequired: true } }),
+    { message: "control request has no stable subject" },
+  );
 });
 
 test("deny and revoke clear only their owned control state", async () => {
@@ -203,12 +226,14 @@ test("deny and revoke clear only their owned control state", async () => {
   const denied = await mutate("deny_control", { session: requested });
   assert.deepEqual(denied.mutations[0]?.values, {
     control_requested_by: null,
+    control_requested_by_subject: null,
     control_requested_at: null,
   });
 
   const revoked = await mutate("revoke_control");
   assert.deepEqual(revoked.mutations[0]?.values, {
     controller: null,
+    controller_subject: null,
     control_granted_at: null,
     control_expires_at: null,
   });
@@ -222,6 +247,7 @@ test("lost metadata ownership reports a conflict before audit or reread", async 
         session: context.session,
         action: "disable_share",
         actor: "operator",
+        subject: "github:operator",
         policy: allowedPolicy,
         now: 100,
       }),
@@ -237,6 +263,7 @@ test("archive refresh failures do not roll back persisted metadata", async () =>
     session: context.session,
     action: "disable_share",
     actor: "operator",
+    subject: "github:operator",
     policy: allowedPolicy,
     now: 100,
   });

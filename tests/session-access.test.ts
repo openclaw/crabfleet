@@ -2,11 +2,15 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import type { User } from "../src/worker/models.ts";
+import { userSessionOwnerSubject, userTenantSubject } from "../src/worker/models.ts";
 import {
   canChangeInteractiveSessionMultiplayer,
   canControlInteractiveSession,
   canManageInteractiveSession,
+  canReadInteractiveSessionTerminal,
+  canViewInteractiveSession,
   delegatedInteractiveSessionControlAvailable,
+  interactiveSessionAccess,
   interactiveSessionActorCandidates,
 } from "../src/worker/session-access.ts";
 import { interactiveSession } from "../src/worker/session-model.ts";
@@ -92,4 +96,216 @@ test("delegated terminal control requires a configured Sandbox for Sandbox sessi
   assert.equal(delegatedInteractiveSessionControlAvailable(false, sandbox), false);
   assert.equal(delegatedInteractiveSessionControlAvailable(true, sandbox), true);
   assert.equal(delegatedInteractiveSessionControlAvailable(false, adapter), true);
+});
+
+test("private tenancy hides foreign sessions from every global role", () => {
+  const foreign = interactiveSession(
+    sessionRow({ owner: "other", owner_subject: "proxy:other@example.test" }),
+    [],
+  );
+  for (const role of ["viewer", "maintainer", "owner"] as const) {
+    const current = user({ role });
+    assert.equal(canViewInteractiveSession(current, foreign, 100, { mode: "private" }), false);
+    assert.equal(canManageInteractiveSession(current, foreign, { mode: "private" }), false);
+    assert.equal(
+      canControlInteractiveSession(current, foreign, 100, true, { mode: "private" }),
+      false,
+    );
+  }
+});
+
+test("private tenancy fails closed for legacy owners without a stable subject", () => {
+  const legacy = interactiveSession(sessionRow({ owner: "operator", owner_subject: "" }), []);
+  assert.equal(canViewInteractiveSession(user(), legacy, 100, { mode: "private" }), false);
+  assert.equal(canManageInteractiveSession(user(), legacy, { mode: "private" }), false);
+  assert.equal(canViewInteractiveSession(user(), legacy, 100, { mode: "shared" }), true);
+});
+
+test("private tenancy fails closed for legacy controllers without a stable subject", () => {
+  const legacy = interactiveSession(
+    sessionRow({
+      owner: "other",
+      owner_subject: "github:99",
+      controller: "operator",
+      controller_subject: null,
+      control_expires_at: 200,
+    }),
+    [],
+  );
+  assert.equal(canControlInteractiveSession(user(), legacy, 100, true, { mode: "private" }), false);
+  assert.equal(canControlInteractiveSession(user(), legacy, 100, true, { mode: "shared" }), true);
+});
+
+test("private tenancy grants bounded view or control without management", () => {
+  const foreign = interactiveSession(
+    sessionRow({ owner: "other", owner_subject: "proxy:other@example.test" }),
+    [],
+  );
+  const viewer = interactiveSessionAccess(user(), foreign, 100, true, {
+    mode: "private",
+    grant: { subject: "github:42", role: "viewer", expiresAt: 200 },
+  });
+  assert.deepEqual(viewer, {
+    visible: true,
+    manage: false,
+    control: false,
+    changeMultiplayer: false,
+    role: "viewer",
+  });
+
+  const controller = interactiveSessionAccess(user(), foreign, 100, true, {
+    mode: "private",
+    grant: { subject: "github:42", role: "controller", expiresAt: 200 },
+  });
+  assert.deepEqual(controller, {
+    visible: true,
+    manage: false,
+    control: true,
+    changeMultiplayer: false,
+    role: "controller",
+  });
+
+  for (const grant of [
+    { subject: "github:42", role: "controller" as const, expiresAt: 100 },
+    { subject: "github:99", role: "controller" as const, expiresAt: 200 },
+  ]) {
+    assert.equal(
+      interactiveSessionAccess(user(), foreign, 100, true, { mode: "private", grant }).visible,
+      false,
+    );
+  }
+});
+
+test("private tenancy uses stable subjects for ownership and delegated control", () => {
+  const current = user();
+  current[userTenantSubject] = "proxy:operator@example.test";
+  const owned = interactiveSession(
+    sessionRow({ owner: "legacy", owner_subject: "proxy:operator@example.test" }),
+    [],
+  );
+  assert.deepEqual(interactiveSessionAccess(current, owned, 100, true, { mode: "private" }), {
+    visible: true,
+    manage: true,
+    control: true,
+    changeMultiplayer: true,
+    role: "owner",
+  });
+
+  const delegated = interactiveSession(
+    sessionRow({
+      owner: "other",
+      owner_subject: "proxy:other@example.test",
+      controller: "legacy-controller",
+      controller_subject: "proxy:operator@example.test",
+      control_expires_at: 200,
+    }),
+    [],
+  );
+  const access = interactiveSessionAccess(current, delegated, 100, true, { mode: "private" });
+  assert.equal(access.visible, true);
+  assert.equal(access.control, true);
+  assert.equal(access.manage, false);
+});
+
+test("agent same-owner authority does not inherit the owner's grants or delegated control", () => {
+  const agent = user({ subject: "agent:IS-agent", login: "owner" });
+  agent[userSessionOwnerSubject] = "github:42";
+  const owned = interactiveSession(sessionRow({ owner: "owner", owner_subject: "github:42" }), []);
+  assert.equal(canManageInteractiveSession(agent, owned, { mode: "private" }), true);
+
+  const foreign = interactiveSession(
+    sessionRow({
+      owner: "collaborator",
+      owner_subject: "github:99",
+      controller_subject: "github:42",
+      control_expires_at: 200,
+    }),
+    [],
+  );
+  const inherited = interactiveSessionAccess(agent, foreign, 100, true, {
+    mode: "private",
+    grant: { subject: "github:42", role: "controller", expiresAt: 200 },
+  });
+  assert.equal(inherited.visible, false);
+  assert.equal(inherited.control, false);
+
+  const explicit = interactiveSessionAccess(agent, foreign, 100, true, {
+    mode: "private",
+    grant: { subject: "agent:IS-agent", role: "controller", expiresAt: 200 },
+  });
+  assert.equal(explicit.visible, true);
+  assert.equal(explicit.control, true);
+  assert.equal(explicit.manage, false);
+});
+
+test("shared tenancy honors named controller grants without granting management", () => {
+  const foreign = interactiveSession(sessionRow({ owner: "other" }), []);
+  assert.deepEqual(
+    interactiveSessionAccess(user(), foreign, 100, true, {
+      mode: "shared",
+      grant: { subject: "github:42", role: "controller", expiresAt: 200 },
+    }),
+    {
+      visible: true,
+      manage: false,
+      control: true,
+      changeMultiplayer: false,
+      role: "controller",
+    },
+  );
+});
+
+test("shared tenancy requires control or a named grant for live terminal reads", () => {
+  const foreign = interactiveSession(sessionRow({ owner: "other" }), []);
+  assert.equal(
+    canReadInteractiveSessionTerminal(user(), foreign, 100, true, { mode: "shared" }),
+    false,
+  );
+  assert.equal(
+    canReadInteractiveSessionTerminal(user({ role: "maintainer" }), foreign, 100, true, {
+      mode: "shared",
+    }),
+    true,
+  );
+  assert.equal(
+    canReadInteractiveSessionTerminal(user(), foreign, 100, true, {
+      mode: "shared",
+      grant: { subject: "github:42", role: "viewer", expiresAt: 200 },
+    }),
+    true,
+  );
+});
+
+test("private tenancy gives exact service creators lifecycle authority", () => {
+  const created = interactiveSession(
+    sessionRow({
+      owner: "operator",
+      owner_subject: "github:42",
+      created_by: "service:openclaw",
+    }),
+    [],
+  );
+  const service = user({
+    subject: "service:openclaw",
+    login: "openclaw",
+    email: null,
+    role: "owner",
+  });
+  assert.deepEqual(interactiveSessionAccess(service, created, 100, true, { mode: "private" }), {
+    visible: true,
+    manage: true,
+    control: true,
+    changeMultiplayer: false,
+    role: "owner",
+  });
+  assert.equal(
+    interactiveSessionAccess(
+      user({ subject: "service:other", login: "other", role: "owner" }),
+      created,
+      100,
+      true,
+      { mode: "private" },
+    ).visible,
+    false,
+  );
 });

@@ -3,7 +3,7 @@ import { runtimeAdapterBrowserVncUrl, runtimeAdapterName } from "../runtime-adap
 import { browserAppOrigin, browserSessionShareUrl, deploymentConfig } from "./deployment.ts";
 import { AdminRepository } from "./admin-repository.ts";
 import { actor } from "./auth.ts";
-import { badRequest, forbidden, notFound, readJson, securityHeaders, text } from "./http.ts";
+import { badRequest, notFound, readJson, securityHeaders, text } from "./http.ts";
 import type { RuntimeEnv } from "./env.ts";
 import type { User } from "./models.ts";
 import type { OpenClawSupervisionService } from "./openclaw-supervision.ts";
@@ -29,7 +29,9 @@ import {
   canChangeInteractiveSessionMultiplayer,
   canControlInteractiveSession,
   canManageInteractiveSession,
+  canViewInteractiveSession,
   delegatedInteractiveSessionControlAvailable,
+  type InteractiveSessionAccessGrant,
 } from "./session-access.ts";
 import {
   InteractiveSessionAttachService,
@@ -50,6 +52,15 @@ import {
   type InteractiveSessionLineageStore,
 } from "./session-lineage.ts";
 import { archiveInteractiveSessionLogs, sessionLogTranscript } from "./session-log-archive.ts";
+import {
+  InteractiveSessionGrantRepository,
+  type InteractiveSessionGrant,
+} from "./session-grant-repository.ts";
+import {
+  InteractiveSessionGrantService,
+  type InteractiveSessionGrantInput,
+  type InteractiveSessionGrantServiceStore,
+} from "./session-grant-service.ts";
 import {
   InteractiveSessionMetadataService,
   isInteractiveSessionMetadataAction,
@@ -75,11 +86,12 @@ import {
   readInteractiveSessionEventRows,
   readInteractiveSessionLogArchives,
   readInteractiveSessionRecord,
-  readInteractiveSessionRecords,
+  readInteractiveSessionRecordsForUser,
   readInteractiveSessionTerminalCleanupIntent,
   readRuntimeAdapterCreatePending,
 } from "./session-repository.ts";
 import { createInteractiveSessionReservationContext } from "./session-reservation-context.ts";
+import { readAuthorizedFreshSession } from "./session-authorized-refresh.ts";
 import {
   RuntimeAdapterStopService,
   type RuntimeAdapterStopStore,
@@ -92,12 +104,15 @@ import {
   type GitHubActionsSessionStopStore,
 } from "./github-actions-session-stop.ts";
 import { nextInteractiveSessionId } from "./session-id-repository.ts";
+import { tenancyMode, tenantSubject } from "./tenancy.ts";
 
 const services = {
   adminRepository: Symbol("admin-repository"),
   attach: Symbol("attach"),
   cleanup: Symbol("cleanup"),
   githubActionsStop: Symbol("github-actions-stop"),
+  grants: Symbol("grants"),
+  grantRepository: Symbol("grant-repository"),
   lineage: Symbol("lineage"),
 };
 
@@ -140,7 +155,9 @@ export class InteractiveSessionApplication {
       ? [...new Set(body.ids.map((id) => clean(String(id), 80)).filter(Boolean))]
       : [];
     const removedIds = await this.cleanupService().cleanup(ids, (row) =>
-      canManageInteractiveSession(user, interactiveSession(row, [])),
+      canManageInteractiveSession(user, interactiveSession(row, []), {
+        mode: tenancyMode(this.env),
+      }),
     );
     if (removedIds.length) {
       await this.dependencies.audit(
@@ -153,9 +170,19 @@ export class InteractiveSessionApplication {
   }
 
   async readAll(user: User): Promise<InteractiveSession[]> {
-    return (await readInteractiveSessionRecords(this.env)).map((session) =>
-      this.present(session, user),
+    const sessions = await readInteractiveSessionRecordsForUser(this.env, user, 80, Date.now());
+    const now = Date.now();
+    const grants = await this.grantRepository().readActiveForSessions(
+      sessions.map((session) => session.id),
+      tenantSubject(user),
+      now,
     );
+    return sessions.flatMap((session) => {
+      const grant = grants.get(session.id) ?? null;
+      return this.canView(user, session, grant, now)
+        ? [this.present(session, user, grant, now)]
+        : [];
+    });
   }
 
   async readFresh(id: string): Promise<InteractiveSession | null> {
@@ -163,6 +190,34 @@ export class InteractiveSessionApplication {
       console.error("targeted runtime adapter reconciliation failed", error);
     });
     return readInteractiveSessionRecord(this.env, id);
+  }
+
+  read(id: string): Promise<InteractiveSession | null> {
+    return readInteractiveSessionRecord(this.env, id);
+  }
+
+  readFreshForUser(user: User, id: string): Promise<InteractiveSession | null> {
+    return readAuthorizedFreshSession({
+      read: () => this.read(id),
+      authorize: async (session) => {
+        const now = Date.now();
+        return this.canView(user, session, await this.grantFor(user, id, now), now);
+      },
+      refresh: async () => {
+        await this.runtime.reconcileById(id).catch((error) => {
+          console.error("targeted runtime adapter reconciliation failed", error);
+        });
+      },
+    });
+  }
+
+  async readVisibleFresh(user: User, id: string): Promise<InteractiveSession | null> {
+    const session = await this.readFreshForUser(user, id);
+    if (!session) return null;
+    const now = Date.now();
+    const grant = await this.grantFor(user, session.id, now);
+    if (!this.canView(user, session, grant, now)) return null;
+    return this.present(session, user, grant, now);
   }
 
   async readLogBundle(
@@ -177,13 +232,16 @@ export class InteractiveSessionApplication {
   }> {
     const session = await readInteractiveSessionRecord(this.env, id);
     if (!session) throw notFound("interactive session not found");
+    const now = Date.now();
+    const grant = await this.grantFor(user, id, now);
+    if (!this.canView(user, session, grant, now)) throw notFound("interactive session not found");
     const [events, eventCount, archives] = await Promise.all([
       readInteractiveSessionEventRows(this.env, id, { limit: 5000, newest: true }),
       countInteractiveSessionEvents(this.env, id),
       readInteractiveSessionLogArchives(this.env, [id]),
     ]);
     return {
-      session: this.present(session, user),
+      session: this.present(session, user, grant, now),
       events: events.map(interactiveSessionEvent),
       archive: archives.get(id) ?? null,
       eventCount,
@@ -194,19 +252,23 @@ export class InteractiveSessionApplication {
   async transcript(user: User, id: string): Promise<Response> {
     const session = await readInteractiveSessionRecord(this.env, id);
     if (!session) throw notFound("interactive session not found");
-    if (!canManageInteractiveSession(user, session)) throw forbidden("session is not visible");
+    const now = Date.now();
+    const grant = await this.grantFor(user, id, now);
+    if (!this.canView(user, session, grant, now)) throw notFound("interactive session not found");
 
     if (this.env.SESSION_LOGS && session.logArchive?.transcriptKey) {
       const object = await this.env.SESSION_LOGS.get(session.logArchive.transcriptKey);
       if (object?.body) {
         return new Response(object.body, {
-          headers: securityHeaders("text/markdown; charset=utf-8"),
+          headers: securityHeaders("text/markdown; charset=utf-8", false),
         });
       }
     }
 
     const events = await readInteractiveSessionEventRows(this.env, id, { limit: 10000 });
-    return text(sessionLogTranscript(session, events), "text/markdown; charset=utf-8");
+    return text(sessionLogTranscript(session, events), "text/markdown; charset=utf-8", {
+      "cache-control": "no-store",
+    });
   }
 
   async updateSummary(
@@ -214,6 +276,13 @@ export class InteractiveSessionApplication {
     id: string,
     input: InteractiveSessionSummaryInput,
   ): Promise<{ session: InteractiveSession }> {
+    const current = await readInteractiveSessionRecord(this.env, id);
+    if (!current) throw notFound("interactive session not found");
+    const grant = await this.grantFor(user, id);
+    const accessContext = this.accessContext(grant);
+    if (!canManageInteractiveSession(user, current, accessContext)) {
+      throw notFound("interactive session not found");
+    }
     return {
       session: this.present(
         await this.metadata(user).updateSummary({
@@ -221,9 +290,10 @@ export class InteractiveSessionApplication {
           sessionId: id,
           actor: actor(user),
           now: Date.now(),
-          canManage: (session) => canManageInteractiveSession(user, session),
+          canManage: (session) => canManageInteractiveSession(user, session, accessContext),
         }),
         user,
+        grant,
       ),
     };
   }
@@ -234,9 +304,14 @@ export class InteractiveSessionApplication {
     id: string,
     action: string,
   ): Promise<{ session: InteractiveSession; shareUrl?: string }> {
-    const session = await this.readFresh(id);
+    const session = await this.readFreshForUser(user, id);
     if (!session) throw notFound("interactive session not found");
     const now = Date.now();
+    const grant = await this.grantFor(user, id, now);
+    const accessContext = this.accessContext(grant);
+    if (!canViewInteractiveSession(user, session, now, accessContext)) {
+      throw notFound("interactive session not found");
+    }
     const userActor = actor(user);
     if (action === "attach") {
       const attached = await this.attach().attach({
@@ -247,29 +322,42 @@ export class InteractiveSessionApplication {
           session,
           now,
           this.delegatedControlAvailable(session),
+          accessContext,
         ),
         now,
       });
-      return { session: this.present(attached, user) };
+      return { session: this.present(attached, user, grant, now) };
     }
 
-    const canManage = canManageInteractiveSession(user, session);
+    const canManage = canManageInteractiveSession(user, session, accessContext);
     if (isInteractiveSessionMetadataAction(action)) {
       const delegatedControlAvailable = this.delegatedControlAvailable(session);
       const result = await this.metadata(user).mutate({
         session,
         action,
         actor: userActor,
+        subject: tenantSubject(user),
         policy: {
           canManage,
-          canChangeMultiplayer: canChangeInteractiveSessionMultiplayer(user, session),
-          canControl: canControlInteractiveSession(user, session, now, delegatedControlAvailable),
+          canChangeMultiplayer: canChangeInteractiveSessionMultiplayer(
+            user,
+            session,
+            accessContext,
+          ),
+          canControl: canControlInteractiveSession(
+            user,
+            session,
+            now,
+            delegatedControlAvailable,
+            accessContext,
+          ),
           delegatedControlAvailable,
+          stableSubjectsRequired: tenancyMode(this.env) === "private",
         },
         now,
       });
       return {
-        session: this.present(result.session, user),
+        session: this.present(result.session, user, grant, now),
         ...(result.shareToken
           ? { shareUrl: browserSessionShareUrl(request, this.env, id, result.shareToken) }
           : {}),
@@ -283,15 +371,20 @@ export class InteractiveSessionApplication {
         canManage,
         now,
       });
-      return { session: this.present(stopped, user) };
+      return { session: this.present(stopped, user, grant, now) };
     }
 
     throw badRequest("unknown action");
   }
 
-  present(session: InteractiveSession, user: User): InteractiveSession {
+  present(
+    session: InteractiveSession,
+    user: User,
+    grant: InteractiveSessionAccessGrant | null = null,
+    now = Date.now(),
+  ): InteractiveSession {
     return presentInteractiveSession(session, user, {
-      now: Date.now(),
+      now,
       delegatedControlAvailable: this.delegatedControlAvailable(session),
       terminalRouteAvailable: interactiveTerminalRouteAvailable(this.env, session),
       runtimeProfiles: deploymentConfig(this.env).runtimeProfiles,
@@ -299,7 +392,43 @@ export class InteractiveSessionApplication {
         configuredRuntimeAdapterControlPlane(this.env, profile),
       browserVncUrl: (sessionId) =>
         runtimeAdapterBrowserVncUrl(browserAppOrigin(this.env), sessionId),
+      tenancyMode: tenancyMode(this.env),
+      grant,
     });
+  }
+
+  async presentForUser(session: InteractiveSession, user: User): Promise<InteractiveSession> {
+    const now = Date.now();
+    return this.present(session, user, await this.grantFor(user, session.id, now), now);
+  }
+
+  async presentVisibleForUser(
+    session: InteractiveSession,
+    user: User,
+  ): Promise<InteractiveSession | null> {
+    const now = Date.now();
+    const grant = await this.grantFor(user, session.id, now);
+    return this.canView(user, session, grant, now) ? this.present(session, user, grant, now) : null;
+  }
+
+  listGrants(user: User, sessionId: string): Promise<{ grants: InteractiveSessionGrant[] }> {
+    return this.grants().list(user, sessionId);
+  }
+
+  grantAccess(
+    user: User,
+    sessionId: string,
+    input: InteractiveSessionGrantInput,
+  ): Promise<{ grants: InteractiveSessionGrant[] }> {
+    return this.grants().grant(user, sessionId, input);
+  }
+
+  revokeAccess(
+    user: User,
+    sessionId: string,
+    subject: string,
+  ): Promise<{ grants: InteractiveSessionGrant[] }> {
+    return this.grants().revoke(user, sessionId, subject);
   }
 
   delegatedControlAvailable(session: InteractiveSession): boolean {
@@ -313,7 +442,7 @@ export class InteractiveSessionApplication {
       now: () => Date.now(),
       defaultIdentity: () => {
         const identity = actor(user);
-        return { owner: identity, createdBy: identity };
+        return { owner: identity, ownerSubject: tenantSubject(user), createdBy: identity };
       },
       resolveRequest: (body, identity) =>
         resolveInteractiveSessionCreateRequest(this.env, body, identity),
@@ -358,8 +487,13 @@ export class InteractiveSessionApplication {
           now: insertedAt,
         }),
       isConstraintError,
-      readRequestReplay: async (requestId, requestHash) => {
-        const session = await readOpenClawRequestSession(this.env, requestId, requestHash);
+      readRequestReplay: async (requestId, requestHash, compatibility) => {
+        const session = await readOpenClawRequestSession(
+          this.env,
+          requestId,
+          requestHash,
+          compatibility,
+        );
         return session ? this.present(session, user) : null;
       },
       persistProvisionResult: (input, result) =>
@@ -408,7 +542,8 @@ export class InteractiveSessionApplication {
       () =>
         new InteractiveSessionLineageService({
           readSession: (id) => readInteractiveSessionRecord(this.env, id),
-          canManage: canManageInteractiveSession,
+          canManage: (user, session) =>
+            canManageInteractiveSession(user, session, { mode: tenancyMode(this.env) }),
         } satisfies InteractiveSessionLineageStore),
     );
   }
@@ -489,7 +624,9 @@ export class InteractiveSessionApplication {
             attach_url: null,
             vnc_url: null,
             controller: null,
+            controller_subject: null,
             control_requested_by: null,
+            control_requested_by_subject: null,
             control_requested_at: null,
             control_granted_at: null,
             control_expires_at: null,
@@ -555,6 +692,59 @@ export class InteractiveSessionApplication {
       audit: (message, now) => this.dependencies.audit(user, message, now),
     };
     return new InteractiveSessionStopService(store, runtimeAdapterName);
+  }
+
+  private grantRepository(): InteractiveSessionGrantRepository {
+    return this.registry.get(
+      services.grantRepository,
+      () => new InteractiveSessionGrantRepository(this.env),
+    );
+  }
+
+  private grants(): InteractiveSessionGrantService {
+    return this.registry.get(services.grants, () => {
+      const repository = this.grantRepository();
+      return new InteractiveSessionGrantService({
+        readSession: (sessionId) => readInteractiveSessionRecord(this.env, sessionId),
+        canManage: async (user, session) =>
+          canManageInteractiveSession(user, session, { mode: tenancyMode(this.env) }),
+        resolvePrincipal: (value) => repository.resolvePrincipal(value),
+        list: (sessionId) => repository.list(sessionId),
+        upsert: (input) => repository.upsert(input),
+        revoke: (sessionId, subject, now) => repository.revoke(sessionId, subject, now),
+        appendEvent: (sessionId, actorName, message, now) =>
+          appendInteractiveSessionEventRecord(this.env, {
+            sessionId,
+            actor: actorName,
+            message,
+            now,
+          }),
+        audit: (user, message, now) => this.dependencies.audit(user, message, now),
+        warn: (event) => console.error(JSON.stringify(event)),
+        now: Date.now,
+      } satisfies InteractiveSessionGrantServiceStore);
+    });
+  }
+
+  private async grantFor(
+    user: User,
+    sessionId: string,
+    now = Date.now(),
+  ): Promise<InteractiveSessionGrant | null> {
+    return this.grantRepository().readActive(sessionId, tenantSubject(user), now);
+  }
+
+  private accessContext(grant: InteractiveSessionAccessGrant | null) {
+    return { mode: tenancyMode(this.env), grant } as const;
+  }
+
+  private canView(
+    user: User,
+    session: InteractiveSession,
+    grant: InteractiveSessionAccessGrant | null,
+    now: number,
+  ): boolean {
+    return canViewInteractiveSession(user, session, now, this.accessContext(grant));
   }
 }
 

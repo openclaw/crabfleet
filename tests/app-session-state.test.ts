@@ -76,9 +76,8 @@ test("session workspace derives status, footer, and terminal presentation", () =
 
 test("session cleanup and escape handling respect authorization and terminal focus", () => {
   const dead = { kind: "interactive", status: "stopped" };
-  assert.equal(canCleanInteractiveSession(dead, { role: "viewer" }), false);
-  assert.equal(canCleanInteractiveSession({ ...dead, canManage: true }, { role: "viewer" }), true);
-  assert.equal(canCleanInteractiveSession(dead, { role: "maintainer" }), true);
+  assert.equal(canCleanInteractiveSession(dead), false);
+  assert.equal(canCleanInteractiveSession({ ...dead, canManage: true }), true);
 
   const terminal = {
     closest: (selector: string) => (selector === ".ghostty-terminal" ? {} : null),

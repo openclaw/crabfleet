@@ -14,6 +14,36 @@ test("app shell metrics prefer fleet attachability totals", () => {
   );
 });
 
+test("app shell metrics include token-backed sessions missing from fleet state", () => {
+  assert.equal(
+    appShellMetrics({
+      cards: [],
+      fleet: {
+        totals: { attachable: 1 },
+        sessions: [{ id: "IS-owned" }],
+      },
+      interactiveSessions: [
+        {
+          id: "IS-owned",
+          status: "ready",
+          capabilities: { terminal: true },
+          attachUrl: "wss://terminal.example/owned",
+        },
+        {
+          id: "IS-shared",
+          status: "ready",
+          capabilities: { terminal: true },
+          attachUrl: null,
+          ptyAvailable: false,
+          sharedLinkOnly: true,
+          sharedReadOnly: true,
+        },
+      ],
+    }).cli,
+    2,
+  );
+});
+
 test("trusted proxy users cannot be presented with local logout", () => {
   assert.deepEqual(
     appUserPresentation({

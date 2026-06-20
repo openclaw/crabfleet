@@ -1,13 +1,15 @@
-import { isFleetSessionAttachable } from "./utils.js";
+import { fleetCoversInteractiveSessions, isFleetSessionAttachable } from "./utils.js";
 
 export function appShellMetrics(state) {
+  const interactiveSessions = state.interactiveSessions || [];
+  const fleetTotals = fleetCoversInteractiveSessions(state.fleet, interactiveSessions)
+    ? state.fleet.totals
+    : null;
   return {
     active: state.cards.filter((card) => card.lane === "Running").length,
     queue: state.cards.filter((card) => card.lane === "Todo").length,
     review: state.cards.filter((card) => card.lane === "Human Review").length,
-    cli:
-      state.fleet?.totals?.attachable ??
-      (state.interactiveSessions || []).filter(isFleetSessionAttachable).length,
+    cli: fleetTotals?.attachable ?? interactiveSessions.filter(isFleetSessionAttachable).length,
   };
 }
 

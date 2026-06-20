@@ -13,7 +13,7 @@ export type ControlPlaneRouteDependencies = {
   readFleet(user: User): Promise<unknown>;
   searchGitHubRefs(number: unknown): Promise<unknown>;
   createCard(request: Request, user: User): Promise<unknown>;
-  readCardRuns(cardId: string): Promise<unknown[] | null>;
+  readCardRuns(user: User, cardId: string): Promise<unknown[] | null>;
   mutateCard(user: User, cardId: string, action: string): Promise<unknown>;
   runRecurringCardScheduler(): Promise<unknown>;
   updatePolicy(input: AdminPolicyInput, user: User): Promise<void>;
@@ -52,7 +52,7 @@ export async function handleControlPlaneRoute(
 
   const runsMatch = url.pathname.match(/^\/api\/cards\/([^/]+)\/runs$/);
   if (request.method === "GET" && runsMatch) {
-    const runs = await dependencies.readCardRuns(decoded(runsMatch[1]));
+    const runs = await dependencies.readCardRuns(user, decoded(runsMatch[1]));
     if (!runs) throw notFound("card not found");
     return json({ runs });
   }

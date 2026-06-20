@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { sha256 } from "../src/worker/crypto.ts";
+import { userSessionOwnerSubject } from "../src/worker/models.ts";
 import {
   AgentSessionAuthenticator,
   agentSessionId,
@@ -93,6 +94,19 @@ test("agent authentication binds request identity and token to one active sessio
     teams: [],
   });
   await assert.rejects(() => auth.require(request, "IS-other"), { message: "unauthorized" });
+});
+
+test("agent authentication separates same-owner authority from the agent principal", async () => {
+  const request = new Request("https://fleet.example/api/agent/state", {
+    headers: {
+      authorization: "Bearer agent-token",
+      "x-crabfleet-session-id": "IS-agent",
+    },
+  });
+  const result = await authenticator({ owner_subject: "github:42" }).require(request);
+
+  assert.equal(result.user.subject, "agent:IS-agent");
+  assert.equal(result.user[userSessionOwnerSubject], "github:42");
 });
 
 test("agent authentication rejects missing, invalid, and inactive credentials", async () => {

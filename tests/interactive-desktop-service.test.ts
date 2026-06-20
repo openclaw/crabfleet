@@ -42,12 +42,20 @@ function dependencies(
 ): InteractiveDesktopServiceDependencies {
   return {
     now: () => 100,
-    async readFreshSession(sessionId) {
-      calls.push(`read:${sessionId}`);
+    async readFreshSession(user, sessionId) {
+      calls.push(`read:${user.login}:${sessionId}`);
       return session;
     },
     delegatedControlAvailable(current) {
       calls.push(`delegate:${current.id}`);
+      return true;
+    },
+    async canView(user, current) {
+      calls.push(`view:${user.login}:${current.id}`);
+      return true;
+    },
+    async canControl(user, current) {
+      calls.push(`control:${user.login}:${current.id}`);
       return true;
     },
     async resolveControlPlane(sessionId, workspaceId) {
@@ -90,8 +98,9 @@ test("desktop access mints then revalidates before redirect", async () => {
   assert.equal(response.headers.get("cache-control"), "no-store");
   assert.equal(response.headers.get("referrer-policy"), "no-referrer");
   assert.deepEqual(calls, [
-    "read:IS-42",
-    "delegate:IS-42",
+    "read:owner:IS-42",
+    "view:owner:IS-42",
+    "control:owner:IS-42",
     "resolve:IS-42:workspace-1",
     "mint:IS-42:https://controller.example",
     "revalidate:owner:IS-42:https://controller.example",
@@ -114,7 +123,7 @@ test("desktop access rejects non-adapter sessions without legacy URL fallback", 
       return true;
     },
   );
-  assert.deepEqual(calls, ["read:IS-42", "delegate:IS-42"]);
+  assert.deepEqual(calls, ["read:owner:IS-42", "view:owner:IS-42", "control:owner:IS-42"]);
 });
 
 test("desktop access fails closed when authorization changes after mint", async () => {

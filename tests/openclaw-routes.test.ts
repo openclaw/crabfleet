@@ -65,9 +65,9 @@ function routeController(calls: string[]): OpenClawController {
     sendMessage: async (_request, session, input) => {
       calls.push(`message:${session.id}:${String(input.message)}`);
     },
-    stopSession: async (_request, sessionId) => {
-      calls.push(`stop:${sessionId}`);
-      return { ...child, id: sessionId, status: "stopped" };
+    stopSession: async (_request, session) => {
+      calls.push(`stop:${session.id}`);
+      return { ...session, status: "stopped" };
     },
     registerActionSession: async (input) => {
       calls.push(`register:${String(input.workKey)}`);

@@ -89,7 +89,7 @@ test("interactive lineage derives the canonical root from the visible parent", a
 test("interactive lineage rejects missing or invisible parents", async () => {
   const service = new InteractiveSessionLineageService(lineageStore());
   await assert.rejects(service.resolve(user, "IS-missing", null), (error) => {
-    assert.equal(status(error), 400);
+    assert.equal(status(error), 404);
     assert.equal((error as Error).message, "parent session not found");
     return true;
   });
@@ -101,8 +101,8 @@ test("interactive lineage rejects missing or invisible parents", async () => {
     }),
   );
   await assert.rejects(hidden.resolve(user, "IS-2", null), (error) => {
-    assert.equal(status(error), 403);
-    assert.equal((error as Error).message, "parent session is not visible");
+    assert.equal(status(error), 404);
+    assert.equal((error as Error).message, "parent session not found");
     return true;
   });
 });

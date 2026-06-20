@@ -26,12 +26,14 @@ import {
   type AgentSessionAuthenticationStore,
 } from "./session-agent-auth.ts";
 import { appendInteractiveSessionEventRecord } from "./session-events.ts";
+import { InteractiveSessionGrantRepository } from "./session-grant-repository.ts";
 import { nextInteractiveSessionId } from "./session-id-repository.ts";
 import type { InteractiveSession } from "./session-model.ts";
 import { readAgentSessionCredential, readInteractiveSessionRecord } from "./session-repository.ts";
 import { newAgentToken } from "./session-reservation-context.ts";
 import { githubActionsRelayStub } from "./session-control-do.ts";
 import { ServiceRegistry } from "./service-registry.ts";
+import { tenancyMode } from "./tenancy.ts";
 
 const services = {
   adminRepository: Symbol("admin-repository"),
@@ -68,14 +70,19 @@ export class GitHubActionsApplication {
   async register(input: GitHubActionsSessionRegistrationInput, user: User) {
     const repository = this.repository();
     const store: GitHubActionsSessionRegistrationStore = {
+      privateTenancy: tenancyMode(this.env) === "private",
       now: () => Date.now(),
       newAgentToken,
       hashToken: sha256,
       requireRepo: (repo) => this.adminRepository().requireRepo(repo),
+      resolvePrincipal: (value) =>
+        new InteractiveSessionGrantRepository(this.env).resolvePrincipal(value),
       readByWorkKey: (workKey) => repository.readByWorkKey(workKey),
       nextSessionId: () => nextInteractiveSessionId(this.env),
       insertSession: (values) => repository.insertSession(values),
       readById: (id) => repository.readById(id),
+      adoptLegacyOwner: (id, owner, ownerSubject) =>
+        repository.adoptLegacyOwner(id, owner, ownerSubject),
       updateSession: (id, values) => repository.updateSession(id, values),
       isConstraintError,
       disconnectRunner: (id) => this.disconnectRunner(id),

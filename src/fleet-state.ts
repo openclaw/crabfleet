@@ -176,8 +176,10 @@ export function buildFleetState(
   policies: FleetSandboxPolicySummary[],
   options: FleetStateOptions,
 ): FleetState {
+  const visibleSessionIds = new Set(sessions.map((session) => session.id));
+  const visiblePolicies = policies.filter((policy) => visibleSessionIds.has(policy.sessionId));
   const policiesBySession = new Map<string, FleetSandboxPolicySummary>();
-  for (const policy of policies) {
+  for (const policy of visiblePolicies) {
     if (!policiesBySession.has(policy.sessionId)) policiesBySession.set(policy.sessionId, policy);
   }
   const sessionSummaries = sessions
@@ -207,7 +209,7 @@ export function buildFleetState(
     registryAvailable: options.registryAvailable ?? true,
     egress: {
       defaultHostCount: options.defaultEgressHosts.length,
-      policyCount: policies.length,
+      policyCount: visiblePolicies.length,
       sessionsWithPolicy: sessionSummaries.filter((session) => session.policy.present).length,
     },
     totals: {
@@ -262,14 +264,15 @@ export function fleetSessionSummary(
     active: !inactiveStatuses.has(session.status),
     attachable:
       terminalCapable &&
-      session.canControl !== false &&
-      (session.runtime === "github_actions" ||
-        (session.ptyAvailable ??
-          Boolean(
-            ptyRouteKind(session, {
-              sandboxAvailable: options.sandboxAvailable,
-            }),
-          ))) &&
+      (session.ptyAvailable === true ||
+        (session.canControl !== false &&
+          (session.runtime === "github_actions" ||
+            (session.ptyAvailable ??
+              Boolean(
+                ptyRouteKind(session, {
+                  sandboxAvailable: options.sandboxAvailable,
+                }),
+              ))))) &&
       ptyReadyStatuses.has(session.status),
     vnc:
       !inactiveStatuses.has(session.status) &&
