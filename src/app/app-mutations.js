@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "preact/hooks";
 import { api } from "./api.js";
+import { retainTokenBackedSession } from "./app-data.js";
 import { canCleanInteractiveSession } from "./session-state.js";
 import { disposeTerminal } from "./terminal.js";
 import {
@@ -80,6 +81,20 @@ export function interactiveShareDialog(shareUrl) {
   };
 }
 
+export function interactiveAccessDialog(grants, action, revoke) {
+  return {
+    kind: "access",
+    eyebrow: "Named access",
+    title: "Share this session",
+    description:
+      "Grant time-limited read-only or terminal-control access to an authenticated user.",
+    grants,
+    confirmLabel: "Grant access",
+    action,
+    revoke,
+  };
+}
+
 export async function presentInteractiveShareLink(id, interactiveSessionAction, openActionDialog) {
   const result = await interactiveSessionAction(id, "share_link");
   if (result.shareUrl) openActionDialog(interactiveShareDialog(result.shareUrl));
@@ -134,6 +149,10 @@ export function useAppMutations({
     setState((current) => removeInteractiveSessionState(current, id));
   }
 
+  function replaceFullState(nextState) {
+    setState((current) => retainTokenBackedSession(nextState, current));
+  }
+
   async function cardAction(id, action) {
     const result = await api(`/api/cards/${encodeURIComponent(id)}/actions`, {
       method: "POST",
@@ -175,7 +194,7 @@ export function useAppMutations({
       method: "POST",
       body: { ids },
     });
-    setState(result.state);
+    replaceFullState(result.state);
     const removed = new Set(result.removedIds || []);
     if (removed.has(focusedSessionIdRef.current)) {
       setFocusedSessionId(null);
@@ -209,9 +228,8 @@ export function useAppMutations({
   }
 
   function cleanupDeadInteractiveSessions() {
-    const user = stateRef.current.user;
     const ids = (stateRef.current.interactiveSessions || [])
-      .filter((session) => canCleanInteractiveSession(session, user))
+      .filter((session) => canCleanInteractiveSession(session))
       .map((session) => session.id);
     if (!ids.length) return null;
     openActionDialog({
@@ -228,6 +246,25 @@ export function useAppMutations({
 
   async function shareInteractiveSession(id) {
     return presentInteractiveShareLink(id, interactiveSessionAction, openActionDialog);
+  }
+
+  async function manageInteractiveSessionAccess(id) {
+    const result = await api(`/api/interactive-sessions/${encodeURIComponent(id)}/grants`);
+    openActionDialog(
+      interactiveAccessDialog(
+        result.grants || [],
+        (input) =>
+          api(`/api/interactive-sessions/${encodeURIComponent(id)}/grants`, {
+            method: "POST",
+            body: input,
+          }),
+        (subject) =>
+          api(
+            `/api/interactive-sessions/${encodeURIComponent(id)}/grants/${encodeURIComponent(subject)}`,
+            { method: "DELETE" },
+          ),
+      ),
+    );
   }
 
   async function openRunDetails(id) {
@@ -362,27 +399,33 @@ export function useAppMutations({
   }
 
   async function addAllow(value, role) {
-    setState(await api("/api/admin/allow", { method: "POST", body: { value, role } }));
+    replaceFullState(await api("/api/admin/allow", { method: "POST", body: { value, role } }));
   }
 
   async function removeAllow(value) {
-    setState(await api(`/api/admin/allow/${encodeURIComponent(value)}`, { method: "DELETE" }));
+    replaceFullState(
+      await api(`/api/admin/allow/${encodeURIComponent(value)}`, { method: "DELETE" }),
+    );
   }
 
   async function addRepo(repo) {
-    setState(await api("/api/admin/repos", { method: "POST", body: { repo } }));
+    replaceFullState(await api("/api/admin/repos", { method: "POST", body: { repo } }));
   }
 
   async function removeRepo(repo) {
-    setState(await api(`/api/admin/repos/${encodeURIComponent(repo)}`, { method: "DELETE" }));
+    replaceFullState(
+      await api(`/api/admin/repos/${encodeURIComponent(repo)}`, { method: "DELETE" }),
+    );
   }
 
   async function refreshWorkflow(repo) {
-    setState(await api("/api/admin/workflows/evaluate", { method: "POST", body: { repo } }));
+    replaceFullState(
+      await api("/api/admin/workflows/evaluate", { method: "POST", body: { repo } }),
+    );
   }
 
   async function updatePolicy(policy) {
-    setState(await api("/api/admin/policy", { method: "PUT", body: policy }));
+    replaceFullState(await api("/api/admin/policy", { method: "PUT", body: policy }));
   }
 
   return {
@@ -398,6 +441,7 @@ export function useAppMutations({
     cleanupInteractiveSession,
     cleanupDeadInteractiveSessions,
     shareInteractiveSession,
+    manageInteractiveSessionAccess,
     openRunDetails,
     createRefCard,
     createCard,

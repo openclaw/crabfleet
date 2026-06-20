@@ -43,6 +43,16 @@ export class GitHubActionsRepository {
     await database(this.env).insertInto("interactive_sessions").values(values).execute();
   }
 
+  async adoptLegacyOwner(id: string, owner: string, ownerSubject: string): Promise<boolean> {
+    const result = await database(this.env)
+      .updateTable("interactive_sessions")
+      .set({ owner, owner_subject: ownerSubject })
+      .where("id", "=", id)
+      .where("owner_subject", "=", "")
+      .executeTakeFirst();
+    return (result.numUpdatedRows ?? 0n) > 0n;
+  }
+
   async updateSession(id: string, values: GitHubActionsSessionUpdate): Promise<void> {
     await database(this.env)
       .updateTable("interactive_sessions")

@@ -44,12 +44,19 @@ function registrationStore(initialRows: InteractiveSessionRow[] = []): {
     concurrentRow: null,
   };
   const store: GitHubActionsSessionRegistrationStore = {
+    privateTenancy: false,
     now: () => 100,
     newAgentToken: () => "agent-token",
     hashToken: async () => "agent-token-hash",
     requireRepo: async (repo) => {
       state.operations.push(`repo:${repo}`);
     },
+    resolvePrincipal: async (value) =>
+      value === "operator@example.test"
+        ? { subject: "github:42", principal: "operator@example.test", actor: "operator" }
+        : value === "other@example.test"
+          ? { subject: "github:99", principal: "other@example.test", actor: "other" }
+          : null,
     readByWorkKey: async (workKey) => {
       state.workKeyReads += 1;
       if (state.concurrentRow && state.workKeyReads > 1) {
@@ -67,6 +74,13 @@ function registrationStore(initialRows: InteractiveSessionRow[] = []): {
       state.rows.set(row.id, row);
     },
     readById: async (id) => state.rows.get(id) ?? null,
+    adoptLegacyOwner: async (id, owner, ownerSubject) => {
+      state.operations.push("adopt-owner");
+      const row = state.rows.get(id);
+      if (!row || row.owner_subject) return false;
+      state.rows.set(id, { ...row, owner, owner_subject: ownerSubject });
+      return true;
+    },
     updateSession: async (id, values) => {
       state.operations.push("update");
       state.updates.push({ id, values });
@@ -121,11 +135,14 @@ test("GitHub Actions rows centralize session defaults and scoped ownership", () 
     runUrl: null,
     purpose: "fix issue",
     summary: "starting",
+    owner: null,
+    ownerSubject: null,
     agentTokenHash: "agent-hash",
     now: 100,
   });
   assert.equal(values.runtime, "github_actions");
   assert.equal(values.owner, "github-actions:IS-123");
+  assert.equal(values.owner_subject, "");
   assert.equal(values.root_session_id, "IS-123");
   assert.equal(values.agent_token_hash, "agent-hash");
   assert.equal(values.work_state, "registered");
@@ -159,6 +176,105 @@ test("new GitHub Actions work registers, rotates credentials, and records eviden
     "audit",
     "read",
   ]);
+});
+
+test("private GitHub Actions registration requires and persists a stable owner", async () => {
+  const missing = registrationStore();
+  missing.store.privateTenancy = true;
+  await assert.rejects(
+    new GitHubActionsSessionRegistrationService(missing.store).register({
+      workKey: "issue:private-missing",
+      workKind: "issue",
+      repo: "openclaw/crabfleet",
+    }),
+    { message: "owner is required in private tenancy" },
+  );
+
+  const owned = registrationStore();
+  owned.store.privateTenancy = true;
+  const result = await new GitHubActionsSessionRegistrationService(owned.store).register({
+    workKey: "issue:private-owned",
+    workKind: "issue",
+    repo: "openclaw/crabfleet",
+    owner: "operator@example.test",
+  });
+  assert.equal(result.session.owner, "operator");
+  assert.equal(owned.state.inserted[0]?.owner_subject, "github:42");
+  assert.equal(owned.state.updates[0]?.values.owner_subject, "github:42");
+});
+
+test("GitHub Actions work keys cannot transfer between tenant owners", async () => {
+  const existing = sessionRow({
+    id: "IS-owned",
+    runtime: "github_actions",
+    work_key: "issue:owned",
+    owner: "operator@example.test",
+    owner_subject: "github:42",
+  });
+  const { store } = registrationStore([existing]);
+  store.privateTenancy = true;
+  await assert.rejects(
+    new GitHubActionsSessionRegistrationService(store).register({
+      workKey: "issue:owned",
+      workKind: "issue",
+      repo: "openclaw/crabfleet",
+      owner: "other@example.test",
+    }),
+    { message: "workKey is already registered to a different owner" },
+  );
+});
+
+test("legacy GitHub Actions owner adoption rejects a concurrent winner", async () => {
+  const legacy = sessionRow({
+    id: "IS-legacy",
+    runtime: "github_actions",
+    work_key: "issue:legacy",
+    owner: "legacy",
+    owner_subject: "",
+  });
+  const { store, state } = registrationStore([legacy]);
+  store.privateTenancy = true;
+  store.adoptLegacyOwner = async (id) => {
+    state.operations.push("adopt-owner-lost");
+    const row = state.rows.get(id);
+    assert.ok(row);
+    state.rows.set(id, { ...row, owner: "other", owner_subject: "github:99" });
+    return false;
+  };
+
+  await assert.rejects(
+    new GitHubActionsSessionRegistrationService(store).register({
+      workKey: "issue:legacy",
+      workKind: "issue",
+      repo: "openclaw/crabfleet",
+      owner: "operator@example.test",
+    }),
+    { message: "workKey is already registered to a different owner" },
+  );
+  assert.equal(state.updates.length, 0);
+  assert.deepEqual(state.operations, ["repo:openclaw/crabfleet", "adopt-owner-lost"]);
+});
+
+test("legacy GitHub Actions owner adoption is conditional and reread", async () => {
+  const legacy = sessionRow({
+    id: "IS-legacy-owned",
+    runtime: "github_actions",
+    work_key: "issue:legacy-owned",
+    owner: "legacy",
+    owner_subject: "",
+  });
+  const { store, state } = registrationStore([legacy]);
+  store.privateTenancy = true;
+
+  const result = await new GitHubActionsSessionRegistrationService(store).register({
+    workKey: "issue:legacy-owned",
+    workKind: "issue",
+    repo: "openclaw/crabfleet",
+    owner: "operator@example.test",
+  });
+  assert.equal(result.session.owner, "operator");
+  assert.equal(state.rows.get("IS-legacy-owned")?.owner_subject, "github:42");
+  assert.ok(state.operations.indexOf("adopt-owner") < state.operations.indexOf("update"));
 });
 
 test("resumed work preserves omitted links and resets terminal state", async () => {

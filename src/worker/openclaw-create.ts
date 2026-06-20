@@ -5,10 +5,12 @@ import {
 import { GitHubApiError } from "./github.ts";
 import { badRequest, serviceUnavailable } from "./http.ts";
 import type { InteractiveSession } from "./session-model.ts";
+import type { ResolvedGrantPrincipal } from "./session-grant-repository.ts";
 import {
   openClawCrabboxRequestHash,
   openClawRequestId,
   type OpenClawCrabboxRequest,
+  type OpenClawReplayCompatibility,
 } from "./openclaw-request.ts";
 import { normalizeRepo } from "./repositories.ts";
 
@@ -19,17 +21,25 @@ export type OpenClawCreateInput = OpenClawCrabboxRequest & {
 
 export type OpenClawCreateSessionOptions = {
   owner: string;
+  ownerSubject: string;
   createdBy: "service:openclaw";
   openClawRequestId: string | null;
   openClawRequestHash: string | null;
+  openClawReplayCompatibility: OpenClawReplayCompatibility;
   afterReserve(): Promise<void>;
 };
 
 export type OpenClawCreateStore = {
   defaultRuntime: "crabbox" | "container";
+  privateTenancy: boolean;
   now(): number;
   preparationSignal(): AbortSignal;
-  readRequestSession(requestId: string, requestHash: string): Promise<InteractiveSession | null>;
+  readRequestSession(
+    requestId: string,
+    requestHash: string,
+    compatibility: OpenClawReplayCompatibility,
+  ): Promise<InteractiveSession | null>;
+  resolvePrincipal(value: string): Promise<ResolvedGrantPrincipal | null>;
   prepareBranch(
     repo: unknown,
     branch: unknown,
@@ -54,6 +64,13 @@ export class OpenClawCreateService {
 
   async create(input: OpenClawCreateInput): Promise<InteractiveSession> {
     const owner = openClawOwner(input.owner);
+    const ownerInput = clean(input.owner, 240);
+    const ownerIdentity =
+      (await this.store.resolvePrincipal(ownerInput)) ||
+      (ownerInput !== owner ? await this.store.resolvePrincipal(owner) : null);
+    if (!ownerIdentity && this.store.privateTenancy) {
+      throw badRequest("owner must identify one active Crabfleet user in private tenancy");
+    }
     const body: OpenClawCrabboxRequest = {
       ...input,
       branch: openClawServiceBranch(input.branch, "branch", "main"),
@@ -63,11 +80,24 @@ export class OpenClawCreateService {
     else delete body.baseBranch;
 
     const requestId = openClawRequestId(input.requestId);
+    const requestOwnerIdentity = this.store.privateTenancy
+      ? (ownerIdentity?.subject ?? owner)
+      : owner;
     const requestHash = requestId
-      ? await openClawCrabboxRequestHash(body, owner, this.store.defaultRuntime)
+      ? await openClawCrabboxRequestHash(body, requestOwnerIdentity, this.store.defaultRuntime)
       : null;
+    const replayCompatibility: OpenClawReplayCompatibility = {
+      legacyRequest: { body, defaultRuntime: this.store.defaultRuntime },
+      expectedOwner: ownerIdentity?.actor ?? owner,
+      resolvedOwnerSubject: ownerIdentity?.subject ?? null,
+      ownerSubject: this.store.privateTenancy ? (ownerIdentity?.subject ?? null) : null,
+    };
     if (requestId && requestHash) {
-      const existing = await this.store.readRequestSession(requestId, requestHash);
+      const existing = await this.store.readRequestSession(
+        requestId,
+        requestHash,
+        replayCompatibility,
+      );
       if (existing) return existing;
     }
 
@@ -75,10 +105,12 @@ export class OpenClawCreateService {
       body,
       clean(input.githubToken, 4000) || undefined,
       {
-        owner,
+        owner: ownerIdentity?.actor ?? owner,
+        ownerSubject: ownerIdentity?.subject ?? "",
         createdBy: "service:openclaw",
         openClawRequestId: requestId,
         openClawRequestHash: requestHash,
+        openClawReplayCompatibility: replayCompatibility,
         afterReserve: () => this.prepareBranch(body),
       },
     );

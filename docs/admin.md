@@ -23,7 +23,8 @@ The Admin drawer manages user/team access, enabled repos, card policy defaults, 
 
 - Create and move cards.
 - Start/pulse/stall card attempts.
-- Create, attach, share, control, delete, and clean up visible interactive sessions.
+- Create cards and interactive sessions for their tenant.
+- Attach, share, control, delete, and clean up sessions they own or can access at the required level.
 - Take over active card attempts when the runtime descriptor advertises takeover.
 
 Maintainers cannot edit org policy or allowlists.
@@ -33,9 +34,29 @@ Maintainers cannot edit org policy or allowlists.
 - Read Board and Fleet state.
 - Open session logs.
 - Use a public session share link.
+- Use a current named viewer or controller grant.
 - Request delegated terminal control where enabled.
 
-Viewers cannot create cards or sessions or mutate policy. Terminal subscription additionally requires session ownership, a valid share token, or an approved control grant.
+Viewers cannot create cards or sessions or mutate policy. Terminal subscription additionally requires session ownership, a current named grant, a valid share token, or an approved control lease.
+
+## Tenant Isolation
+
+`CRABFLEET_TENANCY_MODE` defaults to `private`.
+
+In private mode:
+
+- cards are visible only to their stable owner subject;
+- sessions are visible only to their owner, a user with an unexpired named grant, or the current delegated controller;
+- `maintainer` and `owner` roles do not bypass another tenant's card or session boundary;
+- only the session owner can manage named grants, sharing, checkpoints, metadata, and lifecycle;
+- an exact internal service creator retains lifecycle and terminal authority over its own session and validated descendants in that service-owned OpenClaw lineage, without granting another human tenant visibility;
+- named `viewer` grants allow state, logs, transcript, and read-only terminal output;
+- named `controller` grants add terminal input, diagnostics, clipboard, and desktop access;
+- a public share link remains read-only and can be disabled independently.
+
+Named owners and grants resolve only users admitted by the current allowlist or configured trusted-proxy automatic role. A stale `users.allowed` value does not authorize a principal. Private mode never falls back to mutable legacy owner/controller labels; an unresolved legacy control request must be denied rather than approved.
+
+Set `CRABFLEET_TENANCY_MODE=shared` only to retain the legacy team-wide visibility model. Shared mode keeps role-based maintainer/owner management semantics.
 
 ## Access Control
 
@@ -64,7 +85,7 @@ GitHub OAuth refreshes org/team membership at login. The strongest matching role
 owner > maintainer > viewer
 ```
 
-Trusted-proxy assertions cannot claim team entries; proxy users need a direct login/email allowlist entry.
+Trusted-proxy assertions cannot claim team entries. Proxy users need a direct login/email allowlist entry unless `CRABFLEET_TRUSTED_PROXY_AUTO_ROLE` is configured.
 
 ### Repositories
 
@@ -169,6 +190,7 @@ Optional:
 
 - `CRABFLEET_TRUSTED_PROXY_PUBLIC_ORIGIN`
 - `CRABFLEET_TRUSTED_USER_HEADER` (default `X-Authenticated-User`)
+- `CRABFLEET_TRUSTED_PROXY_AUTO_ROLE` (`viewer` or `maintainer` only)
 
 The proxy must:
 
@@ -179,7 +201,7 @@ The proxy must:
 5. inject `X-Crabfleet-Proxy-Secret`;
 6. preserve browser `Origin`.
 
-Crabfleet requires exact backend origin and constant-time shared-secret proof, then applies the normal direct allowlist and role. Unsafe methods and WebSocket upgrades also require the exact browser-visible origin. Missing, partial, malformed, or unexpected assertions fail closed.
+Crabfleet requires exact backend origin and constant-time shared-secret proof, then applies the normal direct allowlist and role. When `CRABFLEET_TRUSTED_PROXY_AUTO_ROLE` is set, a valid asserted identity that has no matching allowlist entry is admitted with that role and persisted as an active user; an allowlist match still wins. `owner`, malformed, and unexpected automatic-role values fail closed. Unsafe methods and WebSocket upgrades also require the exact browser-visible origin. Missing, partial, malformed, or unexpected assertions fail closed.
 
 Authenticated proxy requests have asserted identity, proxy secret, local cookie, `Authorization`, and `Proxy-Authorization` stripped before app or terminal routing. Service-token routes keep their own scoped auth model.
 
@@ -192,9 +214,14 @@ Proxy-only identity cannot link SSH keys. Use a separate OAuth-capable origin th
 `CRABBOX_BOOTSTRAP_TOKEN` is owner break-glass access for initial setup or OAuth recovery.
 
 - Session lifetime: one hour.
+- Tenant ownership uses one stable bootstrap subject, so rotating the token does not orphan bootstrap-owned cards or sessions.
 - Store in 1Password.
 - Do not use for routine onboarding.
 - Open `/app?auth=token` when GitHub auto-login is enabled.
+
+The tenant-isolation migration backfills stable card owners, session owners, and delegated-control subjects only when a legacy subject, login, or email resolves to exactly one active tenant subject. Rotated bootstrap rows collapse to `bootstrap:owner`; ambiguous or unresolved legacy actors remain unbound and fail closed in private mode.
+
+The migration installs compatibility triggers for writes from the previous Worker during cutover. The standard deploy command and GitHub workflow deploy the new Worker and run `pnpm deploy:tenant-backfill`, but deliberately leave those triggers installed so late writes from drained Worker isolates remain protected. During a later deployment or maintenance window—never the migration rollout itself—run `pnpm deploy:tenant-finalize` to repeat the backfill and remove the triggers after the old Worker generation has fully drained.
 
 ### Scoped Service Auth
 
@@ -331,7 +358,7 @@ Verify:
 1. request URL origin equals `CRABFLEET_TRUSTED_PROXY_ORIGIN`;
 2. browser mutation/WebSocket `Origin` equals the public origin;
 3. both identity and secret headers are present;
-4. the asserted direct identity is allowlisted;
+4. the asserted direct identity is allowlisted or a valid automatic role is configured;
 5. the backend is not reachable around the proxy.
 
 ### Repo Missing

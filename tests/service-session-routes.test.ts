@@ -68,8 +68,8 @@ function dependencies(calls: string[]): ServiceSessionRouteDependencies {
       calls.push("auth:agent");
       return agentUser;
     },
-    async readFreshSession(sessionId: string) {
-      calls.push(`read:${sessionId}`);
+    async readFreshSession(user: User, sessionId: string) {
+      calls.push(`read:${user.login}:${sessionId}`);
       return interactiveSession(sessionRow({ id: sessionId }), []);
     },
     presentSession(session: ReturnType<typeof interactiveSession>, user: User) {
@@ -153,11 +153,11 @@ test("service-session routes share read, log, transcript, and summary behavior b
   const cases: Array<[Request, string[]]> = [
     [
       request("GET", "/api/ssh/interactive-sessions/IS%2F2"),
-      ["auth:ssh", "read:IS/2", "present:IS/2:ssh-user"],
+      ["auth:ssh", "read:ssh-user:IS/2", "present:IS/2:ssh-user"],
     ],
     [
       request("GET", "/api/agent/interactive-sessions/IS%2F2"),
-      ["auth:agent", "read:IS/2", "present:IS/2:agent-user"],
+      ["auth:agent", "read:agent-user:IS/2", "present:IS/2:agent-user"],
     ],
     [
       request("GET", "/api/ssh/interactive-sessions/IS%2F2/logs"),
@@ -245,8 +245,8 @@ test("service-session routes keep actions and checkpoints SSH-only", async () =>
 test("service-session routes report missing reads and fall through on inexact resources", async () => {
   const missingCalls: string[] = [];
   const missingDependencies = dependencies(missingCalls);
-  missingDependencies.readFreshSession = async (sessionId: string) => {
-    missingCalls.push(`read:${sessionId}`);
+  missingDependencies.readFreshSession = async (user: User, sessionId: string) => {
+    missingCalls.push(`read:${user.login}:${sessionId}`);
     return null;
   };
   await assert.rejects(
@@ -265,7 +265,7 @@ test("service-session routes report missing reads and fall through on inexact re
       return true;
     },
   );
-  assert.deepEqual(missingCalls, ["auth:ssh", "read:IS-404"]);
+  assert.deepEqual(missingCalls, ["auth:ssh", "read:ssh-user:IS-404"]);
 
   const calls: string[] = [];
   for (const value of [

@@ -100,6 +100,7 @@ Example:
   "workKind": "issue_to_pr",
   "repo": "openclaw/openclaw",
   "branch": "clawsweeper/issue-openclaw-openclaw-123",
+  "owner": "operator@example.test",
   "sourceUrl": "https://github.com/openclaw/openclaw/issues/123",
   "runUrl": "https://github.com/openclaw/clawsweeper/actions/runs/123456",
   "purpose": "Convert issue to pull request",
@@ -113,9 +114,12 @@ Required fields:
 - `workKind`
 - `repo`
 
+Private-tenancy deployments also require `owner`, resolved to exactly one active Crabfleet user by login, email, or stable subject. Existing owned work keys can resume without repeating it.
+
 Optional fields:
 
 - `branch`, default `main`
+- `owner` in shared tenancy
 - `sourceUrl`
 - `runUrl`
 - `purpose`

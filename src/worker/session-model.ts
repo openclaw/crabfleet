@@ -38,9 +38,17 @@ export const crabboxCapabilities: RuntimeCapabilities = {
 export const interactiveSessionAdapterControlPlane = Symbol(
   "interactiveSessionAdapterControlPlane",
 );
+export const interactiveSessionOwnerSubject = Symbol("interactiveSessionOwnerSubject");
+export const interactiveSessionControlRequestedBySubject = Symbol(
+  "interactiveSessionControlRequestedBySubject",
+);
+export const interactiveSessionControllerSubject = Symbol("interactiveSessionControllerSubject");
 
 export type InteractiveSession = {
   [interactiveSessionAdapterControlPlane]: string | null;
+  [interactiveSessionOwnerSubject]: string;
+  [interactiveSessionControlRequestedBySubject]: string | null;
+  [interactiveSessionControllerSubject]: string | null;
   id: string;
   parentSessionId: string | null;
   rootSessionId: string | null;
@@ -131,6 +139,9 @@ export function interactiveSession(
   const capabilities = runtimeCapabilities(row.runtime, row.capabilities_json);
   return {
     [interactiveSessionAdapterControlPlane]: row.adapter_control_plane,
+    [interactiveSessionOwnerSubject]: row.owner_subject,
+    [interactiveSessionControlRequestedBySubject]: row.control_requested_by_subject,
+    [interactiveSessionControllerSubject]: row.controller_subject,
     id: row.id,
     parentSessionId: row.parent_session_id,
     rootSessionId: row.root_session_id ?? row.id,

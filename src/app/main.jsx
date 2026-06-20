@@ -10,7 +10,7 @@ import { handleAppEscape } from "./keyboard-shortcuts.js";
 import { useLinkedSession } from "./linked-session.js";
 import { LoginScreen } from "./login.jsx";
 import { isLoginScreenHidden } from "./login-state.js";
-import { parseSessionLink, restoreSessionReturnUrl } from "./routing.js";
+import { parseSessionLink, restoreSessionReturnUrl, withoutSharedToken } from "./routing.js";
 import { SessionsDrawer } from "./session-workspace.jsx";
 import { useTerminalHubState } from "./terminal-state.js";
 import { sessionItems } from "./utils.js";
@@ -83,6 +83,12 @@ function App() {
       setFocusedSessionId(null);
       linkedSessionOpenedRef.current = true;
       setSessionUrl(null);
+    },
+    onSharedSessionInvalidated: () => {
+      setSharedToken(null);
+      if (history.replaceState) {
+        history.replaceState(null, "", withoutSharedToken(location.href));
+      }
     },
   });
   const terminalStatus = useTerminalHubState({ sharedSessionId, sharedToken, stateRef });

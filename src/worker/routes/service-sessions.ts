@@ -16,8 +16,8 @@ export type ServiceSessionRouteDependencies = {
   openAgentRunnerPty(request: Request, sessionId: string): Promise<Response>;
   requireSshViewer(request: Request): Promise<User>;
   requireAgentUser(request: Request): Promise<User>;
-  readFreshSession(sessionId: string): Promise<InteractiveSession | null>;
-  presentSession(session: InteractiveSession, user: User): InteractiveSession;
+  readFreshSession(user: User, sessionId: string): Promise<InteractiveSession | null>;
+  presentSession(session: InteractiveSession, user: User): Promise<InteractiveSession | null>;
   mutateSession(request: Request, user: User, sessionId: string, action: string): Promise<unknown>;
   listCheckpoints(user: User, sessionId: string): Promise<unknown>;
   createCheckpoint(user: User, sessionId: string): Promise<unknown>;

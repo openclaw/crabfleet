@@ -2,6 +2,8 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import type { RuntimeEnv } from "../src/worker/env.ts";
+import type { User } from "../src/worker/models.ts";
+import { userServiceSessionAuthority } from "../src/worker/models.ts";
 import {
   buildInteractiveSessionReservationValues,
   countInteractiveSessionEvents,
@@ -21,6 +23,7 @@ import {
   readRuntimeAdapterCreatePending,
   readVisibleInteractiveSessionRow,
   readVisibleInteractiveSessionRows,
+  readVisibleInteractiveSessionRowsForUser,
 } from "../src/worker/session-repository.ts";
 import { containerCapabilities } from "../src/worker/session-model.ts";
 import { sessionRow } from "./helpers/session-row.ts";
@@ -93,6 +96,7 @@ function reservationInput() {
     purpose: "fix the issue",
     summary: "starting",
     owner: "maintainer",
+    ownerSubject: "github:42",
     createdBy: "service:openclaw",
     initialLeaseId: "sandbox:lease",
     initialAgentTokenHash: "agent-hash",
@@ -148,6 +152,65 @@ test("visible session reads exclude preparation reservations and stay bounded", 
     ["IS-2"],
   );
   assert.equal(calls, 2);
+});
+
+test("private session reads select only ownership, active grants, or delegated control", async () => {
+  const current: User = {
+    subject: "github:42",
+    login: "operator",
+    email: "operator@example.test",
+    name: "Operator",
+    role: "owner",
+    allowed: true,
+    teams: [],
+  };
+  const env = {
+    ...runtimeEnv((sql, parameters, kind) => {
+      assert.equal(kind, "all");
+      assert.match(sql, /owner_subject =/i);
+      assert.match(sql, /from interactive_session_grants as grant_row/i);
+      assert.match(sql, /grant_row\.expires_at is null or grant_row\.expires_at >/i);
+      assert.match(sql, /controller_subject =/i);
+      assert.match(sql, /control_expires_at >/i);
+      assert.ok(parameters.includes("github:42"));
+      assert.equal(parameters.includes("operator"), false);
+      assert.equal(parameters.includes("operator@example.test"), false);
+      assert.ok(parameters.includes(1_000));
+      assert.ok(parameters.includes(12));
+      return { results: [] };
+    }),
+    CRABFLEET_TENANCY_MODE: "private",
+  } as RuntimeEnv;
+
+  assert.deepEqual(await readVisibleInteractiveSessionRowsForUser(env, current, 12, 1_000), []);
+});
+
+test("agent session reads are limited to exact authority and direct children", async () => {
+  const agent: User = {
+    [userServiceSessionAuthority]: "IS-agent",
+    subject: "agent:IS-agent",
+    login: "operator",
+    email: null,
+    name: "Codex IS-agent",
+    role: "viewer",
+    allowed: true,
+    teams: [],
+  };
+  const env = {
+    ...runtimeEnv((sql, parameters) => {
+      assert.match(sql, /id =/i);
+      assert.match(sql, /parent_session_id =/i);
+      assert.match(sql, /created_by =/i);
+      assert.equal(parameters.includes("github:42"), false);
+      assert.ok(parameters.includes("agent:IS-agent"));
+      assert.ok(parameters.includes("IS-agent"));
+      assert.ok(parameters.includes("session:IS-agent"));
+      return { results: [] };
+    }),
+    CRABFLEET_TENANCY_MODE: "private",
+  } as RuntimeEnv;
+
+  assert.deepEqual(await readVisibleInteractiveSessionRowsForUser(env, agent, 12, 1_000), []);
 });
 
 test("agent credential reads require visible sessions and preserve token hashes", async () => {

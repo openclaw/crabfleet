@@ -61,7 +61,11 @@ function creationStore(
 ): InteractiveSessionCreationStore {
   return {
     now: () => 100,
-    defaultIdentity: () => ({ owner: "user:operator", createdBy: "user:operator" }),
+    defaultIdentity: () => ({
+      owner: "user:operator",
+      ownerSubject: "user:operator",
+      createdBy: "user:operator",
+    }),
     resolveRequest: (_body, identity) => ({ ...resolvedRequest, ...identity }),
     requireRepo: async () => undefined,
     resolveLineage: async () => ({ parentSessionId: null, rootSessionId: null }),
@@ -120,7 +124,11 @@ test("session creation owns normalization through decorated durable result", asy
   let provisionInput: unknown;
   const service = new InteractiveSessionCreationService(
     creationStore({
-      defaultIdentity: () => ({ owner: "default-owner", createdBy: "default-creator" }),
+      defaultIdentity: () => ({
+        owner: "default-owner",
+        ownerSubject: "user:default-owner",
+        createdBy: "default-creator",
+      }),
       resolveRequest: (body, identity) => {
         calls.push("resolve");
         assert.equal(body.repo, "openclaw/crabfleet");
@@ -258,6 +266,7 @@ test("session creation owns normalization through decorated durable result", asy
     purpose: "refactor",
     summary: "starting",
     owner: "owner-override",
+    ownerSubject: "",
     createdBy: "service:openclaw",
     initialLeaseId: null,
     initialAgentTokenHash: "agent-hash",
@@ -323,9 +332,16 @@ test("session creation returns a durable replay after a request reservation race
         throw constraint;
       },
       isConstraintError: (error) => error === constraint,
-      readRequestReplay: async (requestId, requestHash) => {
+      readRequestReplay: async (requestId, requestHash, compatibility) => {
         assert.equal(requestId, "request-1");
         assert.equal(requestHash, "hash-1");
+        assert.deepEqual(compatibility, {
+          legacyRequest: {
+            body: { repo: "openclaw/crabfleet" },
+            defaultRuntime: "container",
+          },
+          ownerSubject: "github:42",
+        });
         return replay;
       },
       provisionManaged: async () => {
@@ -340,6 +356,13 @@ test("session creation returns a durable replay after a request reservation race
     await service.create({ repo: "openclaw/crabfleet" }, undefined, {
       openClawRequestId: "request-1",
       openClawRequestHash: "hash-1",
+      openClawReplayCompatibility: {
+        legacyRequest: {
+          body: { repo: "openclaw/crabfleet" },
+          defaultRuntime: "container",
+        },
+        ownerSubject: "github:42",
+      },
     }),
     replay,
   );

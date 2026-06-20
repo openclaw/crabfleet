@@ -226,6 +226,10 @@ export async function deleteFinalizedInteractiveSession(
       .where("session_id", "=", row.id)
       .where(ownsFinalClaim),
     db
+      .deleteFrom("interactive_session_grants")
+      .where("session_id", "=", row.id)
+      .where(ownsFinalClaim),
+    db
       .deleteFrom("interactive_sessions")
       .where("id", "=", row.id)
       .where("status", "=", row.status)

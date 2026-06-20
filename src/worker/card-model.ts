@@ -2,6 +2,8 @@ import type { RunStatus } from "./models.ts";
 import type { RuntimeCapabilities } from "./session-model.ts";
 import type { CardSchedule } from "./card-schedule.ts";
 
+export const cardOwnerSubject = Symbol("cardOwnerSubject");
+
 export type WorkflowConfig = {
   runtime?: string;
   policy?: string;
@@ -11,6 +13,7 @@ export type WorkflowConfig = {
 };
 
 export type Card = {
+  [cardOwnerSubject]: string;
   id: string;
   title: string;
   prompt: string;

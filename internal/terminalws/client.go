@@ -11,6 +11,7 @@ import (
 	"net/url"
 	"strings"
 	"sync"
+	"sync/atomic"
 
 	"github.com/coder/websocket"
 )
@@ -74,6 +75,8 @@ type Size struct {
 type Client struct {
 	conn      *websocket.Conn
 	sessionID string
+	canInput  atomic.Bool
+	lastSize  atomic.Uint64
 	writeMu   sync.Mutex
 }
 
@@ -136,6 +139,7 @@ func Dial(ctx context.Context, endpoint string, sessionID string, options Option
 	}
 	conn.SetReadLimit(maxFrameBytes)
 	client := &Client{conn: conn, sessionID: sessionID}
+	client.rememberSize(Size{Cols: options.Cols, Rows: options.Rows})
 	closeWithError := func(err error) (*Client, error) {
 		_ = conn.Close(websocket.StatusInternalError, "terminal setup failed")
 		return nil, err
@@ -169,9 +173,7 @@ func Dial(ctx context.Context, endpoint string, sessionID string, options Option
 				return closeWithError(fmt.Errorf("decode terminal event: %w", err))
 			}
 			if event.Type == "subscribed" {
-				if !event.CanInput {
-					return closeWithError(errors.New("terminal control has not been granted"))
-				}
+				client.canInput.Store(event.CanInput)
 				return client, nil
 			}
 			if event.Type == "closed" {
@@ -189,6 +191,9 @@ func (c *Client) SendInput(ctx context.Context, payload []byte) error {
 	if len(payload) == 0 {
 		return nil
 	}
+	if !c.canInput.Load() {
+		return errors.New("terminal control has not been granted")
+	}
 	return c.write(ctx, frame{
 		messageType: messageInput,
 		sessionID:   c.sessionID,
@@ -198,6 +203,10 @@ func (c *Client) SendInput(ctx context.Context, payload []byte) error {
 
 func (c *Client) Resize(ctx context.Context, size Size) error {
 	if size.Cols == 0 || size.Rows == 0 {
+		return nil
+	}
+	c.rememberSize(size)
+	if !c.canInput.Load() {
 		return nil
 	}
 	return c.write(ctx, frame{
@@ -227,7 +236,7 @@ func (c *Client) Attach(ctx context.Context, terminal io.ReadWriter, resizes <-c
 		buffer := make([]byte, 32*1024)
 		for {
 			count, err := terminal.Read(buffer)
-			if count > 0 {
+			if count > 0 && c.canInput.Load() {
 				if writeErr := c.SendInput(ctx, buffer[:count]); writeErr != nil {
 					errCh <- writeErr
 					return
@@ -288,9 +297,23 @@ func (c *Client) Attach(ctx context.Context, terminal io.ReadWriter, resizes <-c
 					errCh <- err
 					return
 				}
-			case messageError, messageControlRevoked:
+			case messageError:
 				errCh <- frameError(current, "terminal connection failed")
 				return
+			case messageControlRevoked:
+				c.canInput.Store(false)
+			case messageControlGranted:
+				c.canInput.Store(true)
+				if size := c.rememberedSize(); size.Cols > 0 && size.Rows > 0 {
+					if err := c.write(ctx, frame{
+						messageType: messageResize,
+						sessionID:   c.sessionID,
+						payload:     resizePayload(size),
+					}); err != nil {
+						errCh <- err
+						return
+					}
+				}
 			case messageEvent:
 				var event eventPayload
 				if json.Unmarshal(current.payload, &event) == nil && event.Type == "closed" {
@@ -307,6 +330,15 @@ func (c *Client) Attach(ctx context.Context, terminal io.ReadWriter, resizes <-c
 		wg.Wait()
 	}
 	return normalizeCloseError(err)
+}
+
+func (c *Client) rememberSize(size Size) {
+	c.lastSize.Store(uint64(size.Cols)<<32 | uint64(size.Rows))
+}
+
+func (c *Client) rememberedSize() Size {
+	value := c.lastSize.Load()
+	return Size{Cols: uint32(value >> 32), Rows: uint32(value)}
 }
 
 func (c *Client) write(ctx context.Context, current frame) error {

@@ -12,7 +12,7 @@ export type OpenClawMutationStore = {
   recordEvent(sessionId: string, message: string, now: number): Promise<void>;
   audit(message: string, now: number): Promise<void>;
   openTerminal(session: InteractiveSession): Promise<OpenClawTerminalSocket>;
-  stopSession(sessionId: string): Promise<InteractiveSession>;
+  stopSession(session: InteractiveSession): Promise<InteractiveSession>;
   warn(event: Record<string, unknown>): void;
 };
 
@@ -65,9 +65,9 @@ export class OpenClawMutationService {
     }
   }
 
-  async stopSession(sessionId: string): Promise<InteractiveSession> {
-    await this.store.audit(`openclaw crabbox stop requested ${sessionId}`, this.store.now());
-    return this.store.stopSession(sessionId);
+  async stopSession(session: InteractiveSession): Promise<InteractiveSession> {
+    await this.store.audit(`openclaw crabbox stop requested ${session.id}`, this.store.now());
+    return this.store.stopSession(session);
   }
 }
 

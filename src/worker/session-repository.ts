@@ -8,6 +8,8 @@ import {
   type InteractiveSessionTable,
 } from "./database.ts";
 import type { RuntimeEnv } from "./env.ts";
+import { userServiceSessionAuthority, type User } from "./models.ts";
+import { sessionOwnerSubject, tenancyMode, tenantSubject } from "./tenancy.ts";
 import type { AgentSessionCredential } from "./session-agent-auth.ts";
 import type {
   InteractiveProvisionPersistence,
@@ -63,6 +65,7 @@ export type InteractiveSessionReservationBuildInput = {
   purpose: string;
   summary: string;
   owner: string;
+  ownerSubject: string;
   createdBy: string;
   initialLeaseId: string | null;
   initialAgentTokenHash: string;
@@ -106,6 +109,7 @@ export function buildInteractiveSessionReservationValues(
     purpose: input.purpose,
     summary: input.summary,
     owner: input.owner,
+    owner_subject: input.ownerSubject,
     created_by: input.createdBy,
     status: "provisioning",
     lease_id: input.initialLeaseId,
@@ -120,8 +124,10 @@ export function buildInteractiveSessionReservationValues(
     share_token_hash: null,
     share_token_preview: null,
     control_requested_by: null,
+    control_requested_by_subject: null,
     control_requested_at: null,
     controller: null,
+    controller_subject: null,
     control_granted_at: null,
     control_expires_at: null,
     multiplayer_mode: 0,
@@ -147,6 +153,47 @@ export async function readVisibleInteractiveSessionRows(
     .selectFrom("interactive_sessions")
     .selectAll()
     .where("preparation_pending", "=", 0)
+    .orderBy("updated_at", "desc")
+    .limit(Math.max(1, Math.floor(limit)))
+    .execute();
+}
+
+export async function readVisibleInteractiveSessionRowsForUser(
+  env: RuntimeEnv,
+  user: User,
+  limit = 80,
+  now = Date.now(),
+): Promise<InteractiveSessionRow[]> {
+  if (tenancyMode(env) === "shared") return readVisibleInteractiveSessionRows(env, limit);
+  const principalSubject = tenantSubject(user);
+  const ownerSubject = sessionOwnerSubject(user);
+  const sessionAuthority = user[userServiceSessionAuthority] || null;
+  const sessionCreator = sessionAuthority ? `session:${sessionAuthority}` : null;
+  return database(env)
+    .selectFrom("interactive_sessions")
+    .selectAll()
+    .where("preparation_pending", "=", 0)
+    .where(sql<boolean>`(
+      owner_subject = ${ownerSubject}
+      OR EXISTS (
+        SELECT 1
+        FROM interactive_session_grants AS grant_row
+        WHERE grant_row.session_id = interactive_sessions.id
+          AND grant_row.subject = ${principalSubject}
+          AND (grant_row.expires_at IS NULL OR grant_row.expires_at > ${now})
+      )
+      OR (
+        control_expires_at > ${now}
+        AND controller_subject = ${principalSubject}
+      )
+      OR (
+        ${sessionAuthority} IS NOT NULL
+        AND (
+          id = ${sessionAuthority}
+          OR (parent_session_id = ${sessionAuthority} AND created_by = ${sessionCreator})
+        )
+      )
+    )`)
     .orderBy("updated_at", "desc")
     .limit(Math.max(1, Math.floor(limit)))
     .execute();
@@ -187,6 +234,24 @@ export async function readInteractiveSessionRecords(
   limit = 80,
 ): Promise<InteractiveSession[]> {
   const rows = await readVisibleInteractiveSessionRows(env, limit);
+  if (!rows.length) return [];
+  const ids = rows.map((row) => row.id);
+  const [logs, archives] = await Promise.all([
+    readInteractiveSessionLogs(env, ids),
+    readInteractiveSessionLogArchives(env, ids),
+  ]);
+  return rows.map((row) =>
+    interactiveSession(row, logs.get(row.id) ?? [], archives.get(row.id) ?? null),
+  );
+}
+
+export async function readInteractiveSessionRecordsForUser(
+  env: RuntimeEnv,
+  user: User,
+  limit = 80,
+  now = Date.now(),
+): Promise<InteractiveSession[]> {
+  const rows = await readVisibleInteractiveSessionRowsForUser(env, user, limit, now);
   if (!rows.length) return [];
   const ids = rows.map((row) => row.id);
   const [logs, archives] = await Promise.all([
@@ -380,7 +445,9 @@ export async function persistGitHubActionsSessionStop(
       attach_url: null,
       vnc_url: null,
       controller: null,
+      controller_subject: null,
       control_requested_by: null,
+      control_requested_by_subject: null,
       control_requested_at: null,
       control_granted_at: null,
       control_expires_at: null,
@@ -489,7 +556,9 @@ export async function persistInteractiveSessionProvisionResult(
             stopped_at: terminalAt,
             agent_token_hash: null,
             controller: null,
+            controller_subject: null,
             control_requested_by: null,
+            control_requested_by_subject: null,
             control_requested_at: null,
             control_granted_at: null,
             control_expires_at: null,

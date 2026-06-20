@@ -117,6 +117,32 @@ test("session presentation hides provider authority from viewers without control
   assert.equal(presented.canRequestControl, true);
 });
 
+test("named viewers receive live read-only terminal routing", () => {
+  const session = interactiveSession(
+    sessionRow({
+      owner: "someone-else",
+      owner_subject: "github:99",
+      status: "ready",
+      attach_url: "wss://provider.example/terminal",
+    }),
+    [],
+  );
+  const presented = presentInteractiveSession(
+    session,
+    user(),
+    context({
+      tenancyMode: "private",
+      grant: { subject: "github:42", role: "viewer", expiresAt: 200 },
+    }),
+  );
+
+  assert.equal(presented.canControl, false);
+  assert.equal(presented.ptyAvailable, true);
+  assert.equal(presented.attachUrl, "/api/terminal/ws");
+  assert.equal(presented.adapter, null);
+  assert.equal(presented.leaseId, null);
+});
+
 test("session presentation never exposes legacy desktop URLs", () => {
   const session = interactiveSession(
     sessionRow({

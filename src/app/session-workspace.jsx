@@ -50,7 +50,7 @@ export function SessionsDrawer(props) {
         <div class="panel-head session-head">
           <div>
             <h2>Codex sessions</h2>
-            <p>Live Codex CLI terminals with shareable read access.</p>
+            <p>Codex CLI terminals with explicit sharing controls.</p>
           </div>
           <SessionTools focused={Boolean(focused)} {...props} />
         </div>
@@ -108,7 +108,7 @@ function SessionTools({
   state,
 }) {
   const deadCount = (state.interactiveSessions || []).filter((session) =>
-    canCleanInteractiveSession(session, state.user),
+    canCleanInteractiveSession(session),
   ).length;
   return (
     <div class="session-tools">
@@ -314,7 +314,7 @@ function InteractiveSessionActions(props) {
         : endsWorkflowSession
           ? "End"
           : "Stop";
-  const canManage = session.canManage || canMaintain(props.state.user);
+  const canManage = Boolean(session.canManage);
   const canChangeMultiplayer = Boolean(session.canChangeMultiplayer);
   const shareAction = session.shareMode === "link_read" ? "disable_share" : "share_link";
   const shareLabel = session.shareMode === "link_read" ? "Unshare" : "Share";
@@ -334,10 +334,15 @@ function InteractiveSessionActions(props) {
         {session.vncUrl ? (
           <button onClick={() => window.open(session.vncUrl, "_blank", "noopener")}>VNC</button>
         ) : null}
-        <button onClick={() => window.open(sessionLogsUrl(session.id), "_blank", "noopener")}>
-          Logs
-        </button>
+        {!session.sharedLinkOnly && !session.sharedReadOnly ? (
+          <button onClick={() => window.open(sessionLogsUrl(session.id), "_blank", "noopener")}>
+            Logs
+          </button>
+        ) : null}
         {canManage ? <button onClick={handleShare}>{shareLabel}</button> : null}
+        {canManage ? (
+          <button onClick={() => props.manageInteractiveSessionAccess(session.id)}>Access</button>
+        ) : null}
         {canChangeMultiplayer ? (
           <button
             aria-pressed={session.multiplayerMode}
@@ -374,6 +379,9 @@ function InteractiveSessionActions(props) {
         </button>
       ) : null}
       {canManage ? <button onClick={handleShare}>{shareLabel}</button> : null}
+      {canManage ? (
+        <button onClick={() => props.manageInteractiveSessionAccess(session.id)}>Access</button>
+      ) : null}
       {canChangeMultiplayer ? (
         <button
           aria-pressed={session.multiplayerMode}

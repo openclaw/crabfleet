@@ -14,8 +14,14 @@ import {
   readRuntimeAdapterResponseBody,
   runtimeAdapterFetch,
 } from "./runtime-adapter-transport.ts";
-import { canControlInteractiveSession } from "./session-access.ts";
+import {
+  canControlInteractiveSession,
+  canViewInteractiveSession,
+  delegatedInteractiveSessionControlAvailable,
+} from "./session-access.ts";
+import { InteractiveSessionGrantRepository } from "./session-grant-repository.ts";
 import { interactiveSession, type InteractiveSession } from "./session-model.ts";
+import { tenancyMode, tenantSubject } from "./tenancy.ts";
 
 type DesktopMintResult = {
   ok: boolean;
@@ -25,8 +31,10 @@ type DesktopMintResult = {
 
 export type InteractiveDesktopServiceDependencies = {
   now(): number;
-  readFreshSession(sessionId: string): Promise<InteractiveSession | null>;
+  readFreshSession(user: User, sessionId: string): Promise<InteractiveSession | null>;
   delegatedControlAvailable(session: InteractiveSession): boolean;
+  canView(user: User, session: InteractiveSession): Promise<boolean>;
+  canControl(user: User, session: InteractiveSession): Promise<boolean>;
   resolveControlPlane(sessionId: string, adapterWorkspaceId: string): Promise<string>;
   mintConnection(session: InteractiveSession, controlPlane: string): Promise<DesktopMintResult>;
   hasCurrentAccess(
@@ -37,7 +45,7 @@ export type InteractiveDesktopServiceDependencies = {
 };
 
 export type InteractiveDesktopServiceFactoryDependencies = {
-  readFreshSession(sessionId: string): Promise<InteractiveSession | null>;
+  readFreshSession(user: User, sessionId: string): Promise<InteractiveSession | null>;
   delegatedControlAvailable(session: InteractiveSession): boolean;
 };
 
@@ -49,20 +57,16 @@ export class InteractiveDesktopService {
   }
 
   async open(user: User, sessionId: string): Promise<Response> {
-    const session = await this.dependencies.readFreshSession(sessionId);
+    const session = await this.dependencies.readFreshSession(user, sessionId);
     if (!session) throw notFound("interactive session not found");
+    if (!(await this.dependencies.canView(user, session))) {
+      throw notFound("interactive session not found");
+    }
+    if (!(await this.dependencies.canControl(user, session))) {
+      throw forbidden("terminal control has not been granted");
+    }
     if (["stopping", "stopped", "expired", "failed"].includes(session.status)) {
       throw badRequest(`session is ${session.status}`);
-    }
-    if (
-      !canControlInteractiveSession(
-        user,
-        session,
-        this.dependencies.now(),
-        this.dependencies.delegatedControlAvailable(session),
-      )
-    ) {
-      throw forbidden("terminal control has not been granted");
     }
     if (session.adapter !== runtimeAdapterName) {
       throw badRequest("desktop access requires a runtime adapter session");
@@ -124,6 +128,8 @@ export function createInteractiveDesktopService(
     now: Date.now,
     readFreshSession: dependencies.readFreshSession,
     delegatedControlAvailable: dependencies.delegatedControlAvailable,
+    canView: (user, session) => currentInteractiveSessionAccess(env, user, session, "view"),
+    canControl: (user, session) => currentInteractiveSessionAccess(env, user, session, "control"),
     resolveControlPlane: (sessionId, adapterWorkspaceId) =>
       registeredRuntimeAdapterControlPlaneForSession(env, sessionId, adapterWorkspaceId),
     mintConnection: async (session, controlPlane) => {
@@ -191,12 +197,40 @@ async function currentRuntimeAdapterDesktopAccess(
   if (!currentRow) return false;
   const current = interactiveSession(currentRow, []);
   if (!current.capabilities.vnc && !current.capabilities.desktop) return false;
-  return canControlInteractiveSession(
-    user,
-    current,
-    Date.now(),
-    delegatedControlAvailable(current),
+  const now = Date.now();
+  const grant = await new InteractiveSessionGrantRepository(env).readActive(
+    current.id,
+    tenantSubject(user),
+    now,
   );
+  return canControlInteractiveSession(user, current, now, delegatedControlAvailable(current), {
+    mode: tenancyMode(env),
+    grant,
+  });
+}
+
+async function currentInteractiveSessionAccess(
+  env: RuntimeEnv,
+  user: User,
+  session: InteractiveSession,
+  needed: "view" | "control",
+): Promise<boolean> {
+  const now = Date.now();
+  const grant = await new InteractiveSessionGrantRepository(env).readActive(
+    session.id,
+    tenantSubject(user),
+    now,
+  );
+  const context = { mode: tenancyMode(env), grant } as const;
+  return needed === "control"
+    ? canControlInteractiveSession(
+        user,
+        session,
+        now,
+        delegatedInteractiveSessionControlAvailable(Boolean(env.SANDBOX), session),
+        context,
+      )
+    : canViewInteractiveSession(user, session, now, context);
 }
 
 function clean(value: unknown, maximum: number): string {

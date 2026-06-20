@@ -12,8 +12,10 @@ import {
 import {
   ManagedSandboxLeaseRefreshService,
   ManagedSandboxProvisioningService,
+  isSandboxLeaseOwnerReconnectError,
   managedSandboxProvisionPayloadMatches,
   sandboxLeaseRefreshPayload,
+  sandboxLeaseOwnerReconnectMessage,
   type ManagedSandboxLeaseRefreshDependencies,
   type ManagedSandboxProvisionClaim,
   type ManagedSandboxProvisioningDependencies,
@@ -141,6 +143,7 @@ function refreshDependencies(
 ): ManagedSandboxLeaseRefreshDependencies {
   return {
     sandboxAvailable: true,
+    tenancyMode: "shared",
     now: () => 200,
     async ensurePolicy() {},
     async readGitHubToken() {
@@ -479,6 +482,55 @@ test("managed Sandbox lease refresh claims, provisions, commits, cleans, and log
     "log:IS-42:owner:Cloudflare Sandbox lease refreshed:200",
     "read:2",
   ]);
+});
+
+test("managed Sandbox refresh follows stable ownership across login changes", async () => {
+  const stableSession = interactiveSession(
+    sessionRow({
+      owner: "old-login",
+      owner_subject: "github:42",
+      created_by: "github:42",
+      lease_id: "sandbox:old:terminal-old:autostart-v3",
+      status: "ready",
+      updated_at: 100,
+    }),
+    [],
+  );
+  const service = new ManagedSandboxLeaseRefreshService(refreshDependencies());
+  const renamedOwner = { ...refreshUser, login: "new-login" };
+  await service.ensureCurrent(new Request("https://example.test"), renamedOwner, {
+    ...stableSession,
+    githubToken: "github-token",
+  });
+
+  const reusedLogin = { ...refreshUser, subject: "github:99", login: "old-login" };
+  await assert.rejects(
+    service.ensureCurrent(new Request("https://example.test"), reusedLogin, {
+      ...stableSession,
+      githubToken: "github-token",
+    }),
+    /session owner must reconnect/,
+  );
+});
+
+test("private Sandbox refresh rejects unresolved legacy ownership", async () => {
+  const service = new ManagedSandboxLeaseRefreshService(
+    refreshDependencies({ tenancyMode: "private" }),
+  );
+  await assert.rejects(
+    service.ensureCurrent(new Request("https://example.test"), refreshUser, legacySandboxSession),
+    /session owner must reconnect/,
+  );
+});
+
+test("Sandbox owner reconnect failures are distinguishable from provider failures", () => {
+  const reconnect = Object.assign(new Error(sandboxLeaseOwnerReconnectMessage), { status: 503 });
+  assert.equal(isSandboxLeaseOwnerReconnectError(reconnect), true);
+  assert.equal(
+    isSandboxLeaseOwnerReconnectError(new Error(sandboxLeaseOwnerReconnectMessage)),
+    false,
+  );
+  assert.equal(isSandboxLeaseOwnerReconnectError(new Error("upstream failed")), false);
 });
 
 test("managed Sandbox lease refresh fails before claiming without owner credentials", async () => {

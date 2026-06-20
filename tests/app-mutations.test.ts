@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  interactiveAccessDialog,
   interactiveShareDialog,
   interactiveStopDialog,
   presentInteractiveShareLink,
@@ -103,4 +104,42 @@ test("interactive sharing does not open an empty dialog", async () => {
     (dialog) => dialogs.push(dialog),
   );
   assert.deepEqual(dialogs, []);
+});
+
+test("interactive named access dialogs retain grant and revocation actions", async () => {
+  const actions: unknown[] = [];
+  const grants = [
+    {
+      subject: "proxy:collaborator@example.test",
+      principal: "collaborator@example.test",
+      role: "viewer",
+      expiresAt: 200,
+    },
+  ];
+  const dialog = interactiveAccessDialog(
+    grants,
+    async (input) => actions.push(["grant", input]),
+    async (subject) => actions.push(["revoke", subject]),
+  );
+
+  assert.equal(dialog.kind, "access");
+  assert.equal(dialog.confirmLabel, "Grant access");
+  assert.equal(dialog.grants, grants);
+  await dialog.action({
+    principal: "collaborator@example.test",
+    role: "controller",
+    expiresInSeconds: 3600,
+  });
+  await dialog.revoke("proxy:collaborator@example.test");
+  assert.deepEqual(actions, [
+    [
+      "grant",
+      {
+        principal: "collaborator@example.test",
+        role: "controller",
+        expiresInSeconds: 3600,
+      },
+    ],
+    ["revoke", "proxy:collaborator@example.test"],
+  ]);
 });

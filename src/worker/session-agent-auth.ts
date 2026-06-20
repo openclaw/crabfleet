@@ -1,4 +1,8 @@
-import { deadInteractiveSessionStatuses, type User } from "./models.ts";
+import {
+  deadInteractiveSessionStatuses,
+  userServiceSessionAuthority,
+  type User,
+} from "./models.ts";
 import { bearerToken, forbidden, unauthorized } from "./http.ts";
 import type { InteractiveSession } from "./session-model.ts";
 
@@ -77,6 +81,7 @@ export function agentSessionToken(
 
 export function agentSessionUser(session: InteractiveSession): User {
   return {
+    [userServiceSessionAuthority]: session.id,
     subject: `agent:${session.id}`,
     login: session.owner,
     email: null,

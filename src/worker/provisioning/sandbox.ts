@@ -1,5 +1,4 @@
 import { githubActionsRuntime } from "../../github-actions-runtime.ts";
-import { actor } from "../auth.ts";
 import type { InteractiveSessionRow } from "../database.ts";
 import { badRequest, forbidden, serviceUnavailable } from "../http.ts";
 import type { User } from "../models.ts";
@@ -13,6 +12,8 @@ import {
   type SandboxLeaseRefreshFence,
 } from "../sandbox-lease.ts";
 import type { InteractiveSession } from "../session-model.ts";
+import { ownsInteractiveSession } from "../session-access.ts";
+import type { TenancyMode } from "../tenancy.ts";
 import { cleanupPendingProvision, failedProvision } from "./result.ts";
 import type { InteractiveProvisionRequest, InteractiveProvisionResult } from "./types.ts";
 
@@ -24,6 +25,18 @@ export type ManagedSandboxProvisionClaim = {
   previousSandboxId: string | null;
   claimRevision: number;
 };
+
+export const sandboxLeaseOwnerReconnectMessage =
+  "session owner must reconnect to refresh Cloudflare Sandbox lease";
+
+export function isSandboxLeaseOwnerReconnectError(error: unknown): boolean {
+  return (
+    error instanceof Error &&
+    error.message === sandboxLeaseOwnerReconnectMessage &&
+    "status" in error &&
+    error.status === 503
+  );
+}
 
 export type ManagedSandboxProvisionCommit = {
   committed: boolean;
@@ -149,6 +162,7 @@ export class ManagedSandboxProvisioningService {
 
 export type ManagedSandboxLeaseRefreshDependencies = {
   sandboxAvailable: boolean;
+  tenancyMode: TenancyMode;
   now(): number;
   ensurePolicy(session: InteractiveSession, sandboxId: string): Promise<void>;
   readGitHubToken(
@@ -213,8 +227,8 @@ export class ManagedSandboxLeaseRefreshService {
     if (refreshStartedAt && now - refreshStartedAt < 2 * 60_000) {
       throw serviceUnavailable("Cloudflare Sandbox lease refresh is already in progress");
     }
-    if (!user || actor(user) !== session.owner) {
-      throw serviceUnavailable("session owner must reconnect to refresh Cloudflare Sandbox lease");
+    if (!user || !ownsInteractiveSession(user, session, this.dependencies.tenancyMode)) {
+      throw serviceUnavailable(sandboxLeaseOwnerReconnectMessage);
     }
 
     const githubToken = user.subject.startsWith("github:")

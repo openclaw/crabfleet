@@ -55,6 +55,18 @@ test("fleet state aggregates sessions and redacted sandbox policies", () => {
         sandboxId: "crabbox-s1-abcd1234",
         sessionId: "s1",
       },
+      {
+        allowedHostCount: 99,
+        githubCredentialSource: "session",
+        githubRepo: "private/foreign",
+        hasGithubRepoNodeId: true,
+        hasGithubToken: true,
+        openAIBaseUrlHost: "foreign.example",
+        openAIOrgConfigured: true,
+        owner: "foreign",
+        sandboxId: "foreign-sandbox",
+        sessionId: "foreign-session",
+      },
     ],
     {
       canonicalUrl: "https://crabfleet.openclaw.ai",
@@ -201,6 +213,30 @@ test("withdrawn terminal capability suppresses fleet attachability", () => {
 
   assert.equal(fleet.totals.attachable, 0);
   assert.equal(fleet.sessions[0]?.attachable, false);
+});
+
+test("named read-only viewers remain Fleet-attachable", () => {
+  const fleet = buildFleetState(
+    [
+      {
+        ...baseSession,
+        canControl: false,
+        ptyAvailable: true,
+        attachUrl: null,
+        capabilities: { terminal: true },
+      },
+    ],
+    [],
+    {
+      canonicalUrl: "https://fleet.example",
+      defaultEgressHosts: [],
+      generatedAt: 100,
+      productUrl: "https://product.example",
+    },
+  );
+
+  assert.equal(fleet.sessions[0]?.attachable, true);
+  assert.equal(fleet.totals.attachable, 1);
 });
 
 test("fleet attachability follows resolvable PTY routes", () => {

@@ -15,7 +15,7 @@ function mutationStore(overrides: Partial<OpenClawMutationStore> = {}): OpenClaw
     recordEvent: async () => undefined,
     audit: async () => undefined,
     openTerminal: async () => ({ send() {}, close() {} }),
-    stopSession: async (id) => interactiveSession(sessionRow({ id, status: "stopped" }), []),
+    stopSession: async (session) => ({ ...session, status: "stopped" }),
     warn: () => undefined,
     ...overrides,
   };
@@ -140,13 +140,16 @@ test("OpenClaw stop records audit evidence before lifecycle mutation", async () 
       audit: async () => {
         calls.push("audit");
       },
-      stopSession: async (id) => {
+      stopSession: async (session) => {
         calls.push("stop");
-        return interactiveSession(sessionRow({ id, status: "stopped" }), []);
+        return { ...session, status: "stopped" };
       },
     }),
   );
 
-  assert.equal((await service.stopSession("IS-2")).status, "stopped");
+  assert.equal(
+    (await service.stopSession(interactiveSession(sessionRow({ id: "IS-2" }), []))).status,
+    "stopped",
+  );
   assert.deepEqual(calls, ["audit", "stop"]);
 });

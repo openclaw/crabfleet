@@ -72,6 +72,7 @@ export type CardTable = {
   policy: string;
   lane: string;
   owner: string;
+  owner_subject: Generated<string>;
   started_at: number | null;
   created_at: number;
   updated_at: number;
@@ -143,6 +144,7 @@ export type InteractiveSessionTable = {
   purpose: string;
   summary: string;
   owner: string;
+  owner_subject: Generated<string>;
   created_by: string;
   status: InteractiveSessionStatus;
   lease_id: string | null;
@@ -157,8 +159,10 @@ export type InteractiveSessionTable = {
   share_token_hash: string | null;
   share_token_preview: string | null;
   control_requested_by: string | null;
+  control_requested_by_subject: Generated<string | null>;
   control_requested_at: number | null;
   controller: string | null;
+  controller_subject: Generated<string | null>;
   control_granted_at: number | null;
   control_expires_at: number | null;
   multiplayer_mode: number;
@@ -176,6 +180,19 @@ export type InteractiveSessionTable = {
 };
 
 export type InteractiveSessionRow = Selectable<InteractiveSessionTable>;
+
+export type InteractiveSessionGrantTable = {
+  session_id: string;
+  subject: string;
+  principal: string;
+  role: "viewer" | "controller";
+  created_by_subject: string;
+  expires_at: number | null;
+  created_at: number;
+  updated_at: number;
+};
+
+export type InteractiveSessionGrantRow = Selectable<InteractiveSessionGrantTable>;
 
 export type OpenClawRequestReplayTable = {
   request_id: string;
@@ -313,6 +330,7 @@ export type Database = {
   cards: CardTable;
   run_attempts: RunAttemptTable;
   interactive_sessions: InteractiveSessionTable;
+  interactive_session_grants: InteractiveSessionGrantTable;
   openclaw_request_replays: OpenClawRequestReplayTable;
   interactive_session_events: InteractiveSessionEventTable;
   interactive_session_log_archives: InteractiveSessionLogArchiveTable;

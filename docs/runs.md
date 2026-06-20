@@ -94,7 +94,7 @@ The Take over action records `controlIntent = "takeover"` and operator only for 
 
 ## Interactive CLI Sessions
 
-Maintainers can create a standalone Codex CLI session without making a board card. The Worker stores the requested repo, branch, runtime, command, owner, attach/VNC URLs, status, and event log in D1. `CRABFLEET_INTERACTIVE_RUNTIMES` limits manual creation to `container`, `crabbox`, or both. `CRABFLEET_DEFAULT_RUNTIME` selects the deployment default (`container` when enabled, otherwise the only enabled runtime); the CLI and SSH gateway leave runtime unspecified unless the operator passes `--runtime`. Internal automation can also register service-owned `github_actions` sessions; this runtime is visible in Fleet but is not offered in the manual session form.
+Maintainers can create a standalone Codex CLI session without making a board card. The Worker stores the requested repo, branch, runtime, command, owner, attach/VNC URLs, status, and event log in D1. `CRABFLEET_INTERACTIVE_RUNTIMES` limits manual creation to `container`, `crabbox`, or both. `CRABFLEET_DEFAULT_RUNTIME` selects the deployment default (`container` when enabled, otherwise the only enabled runtime); the CLI and SSH gateway leave runtime unspecified unless the operator passes `--runtime`. Internal automation can also register `github_actions` sessions; private-tenancy registrations bind browser visibility to an explicit active user while the exact creating service retains lifecycle authority. This runtime is visible in Fleet but is not offered in the manual session form.
 
 Deployments can expose an allowlisted set of generic Crabbox profiles. The create drawer, Go CLI, and SSH gateway pass the selected opaque profile ID to Crabfleet; the Worker validates it and includes it in the immutable adapter create request. Profile capability flags are previews and requested capabilities, not a substitute for provider enforcement. A profile may also configure a provider-neutral Codex SSH handoff: after a versioned-adapter workspace is ready, its managers receive a validated concrete alias and optional copyable local setup command derived from non-secret session/provider identifiers. The handoff remains fenced to the workspace's immutable adapter control-plane registration. Crabfleet does not execute the command or emulate an SSH login shell; the deployment helper must install the alias and the remote host must expose an authenticated `codex` command on its login-shell `PATH`.
 
@@ -132,14 +132,18 @@ verification contract.
 
 Session sharing:
 
+- Sessions are tenant-private by default; global maintainer/owner roles do not reveal another tenant's sessions.
+- `Access` creates an expiring named `viewer` or `controller` grant for one authenticated user.
+- Named viewer grants allow logs, transcript, and terminal output; controller grants add terminal input, diagnostics, clipboard, and desktop access.
+- Owners can revoke a named grant independently; revocation atomically clears that subject's pending or active delegated-control lease.
 - `Share` creates a public read-only URL at `/app/sessions/:id?token=...`.
 - The share token is stored as a hash; generating a new link rotates the old one.
 - Public viewers can scroll the persisted session event buffer without signing in.
-- Writable PTY access still requires a signed-in allowlisted viewer and owner/maintainer approval.
+- Writable PTY access still requires owner access, a current controller grant, or an owner-approved delegated-control lease.
 
 Sandbox checkpoints:
 
-- The session owner, maintainers, and owners can list, create, and restore checkpoints for supported Sandbox sessions.
+- Session managers can list, create, and restore checkpoints for supported Sandbox sessions; in private mode only the stable session owner is a manager.
 - Delegated terminal control alone does not grant checkpoint access.
 - Browser APIs use `/api/interactive-sessions/:id/checkpoints`.
 - CLI and SSH use `checkpoints`, `checkpoint`, and `restore`.

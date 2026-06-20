@@ -5,6 +5,7 @@ import type { Database } from "./database.ts";
 import { badRequest, conflict, forbidden, notFound } from "./http.ts";
 import { deadInteractiveSessionStatuses } from "./models.ts";
 import type { InteractiveSession } from "./session-model.ts";
+import { interactiveSessionControlRequestedBySubject } from "./session-model.ts";
 
 export const interactiveSessionMetadataActions = [
   "share_link",
@@ -24,12 +25,14 @@ export type InteractiveSessionMetadataPolicy = {
   canChangeMultiplayer: boolean;
   canControl: boolean;
   delegatedControlAvailable: boolean;
+  stableSubjectsRequired: boolean;
 };
 
 export type InteractiveSessionMetadataMutation = {
   session: InteractiveSession;
   action: InteractiveSessionMetadataAction;
   actor: string;
+  subject: string;
   policy: InteractiveSessionMetadataPolicy;
   now: number;
 };
@@ -87,7 +90,7 @@ export class InteractiveSessionMetadataService {
   async mutate(
     input: InteractiveSessionMetadataMutation,
   ): Promise<InteractiveSessionMetadataResult> {
-    const { action, actor, now, policy, session } = input;
+    const { action, actor, subject, now, policy, session } = input;
 
     if (action === "share_link") {
       if (!policy.canManage) {
@@ -122,8 +125,10 @@ export class InteractiveSessionMetadataService {
           share_token_hash: null,
           share_token_preview: null,
           control_requested_by: null,
+          control_requested_by_subject: null,
           control_requested_at: null,
           controller: null,
+          controller_subject: null,
           control_granted_at: null,
           control_expires_at: null,
         },
@@ -167,6 +172,7 @@ export class InteractiveSessionMetadataService {
         `${actor} requested terminal control`,
         {
           control_requested_by: actor,
+          control_requested_by_subject: subject,
           control_requested_at: now,
         },
         now,
@@ -179,6 +185,9 @@ export class InteractiveSessionMetadataService {
         throw forbidden("only the session owner or maintainer can approve control");
       }
       if (!session.controlRequestedBy) throw badRequest("no pending control request");
+      if (policy.stableSubjectsRequired && !session[interactiveSessionControlRequestedBySubject]) {
+        throw badRequest("control request has no stable subject");
+      }
       this.requireDelegatedControl(policy);
       await this.persist(
         session,
@@ -186,9 +195,11 @@ export class InteractiveSessionMetadataService {
         `control granted to ${session.controlRequestedBy}`,
         {
           controller: session.controlRequestedBy,
+          controller_subject: session[interactiveSessionControlRequestedBySubject],
           control_granted_at: now,
           control_expires_at: now + delegatedControlDurationMs,
           control_requested_by: null,
+          control_requested_by_subject: null,
           control_requested_at: null,
         },
         now,
@@ -212,6 +223,7 @@ export class InteractiveSessionMetadataService {
           : "control request denied",
         {
           control_requested_by: null,
+          control_requested_by_subject: null,
           control_requested_at: null,
         },
         now,
@@ -228,6 +240,7 @@ export class InteractiveSessionMetadataService {
       "terminal control revoked",
       {
         controller: null,
+        controller_subject: null,
         control_granted_at: null,
         control_expires_at: null,
       },

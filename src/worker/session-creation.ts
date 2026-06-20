@@ -3,6 +3,7 @@ import type {
   InteractiveSessionCreateRequest,
   ResolvedInteractiveSessionCreateRequest,
 } from "./session-create-request.ts";
+import type { OpenClawReplayCompatibility } from "./openclaw-request.ts";
 import type { InteractiveSessionLineage } from "./session-lineage.ts";
 import type { InteractiveSessionReservationContext } from "./session-reservation-context.ts";
 import type {
@@ -20,10 +21,12 @@ import type {
 export type InteractiveSessionCreateOptions = {
   createdBy?: string;
   owner?: string;
+  ownerSubject?: string;
   parentSessionId?: string | null;
   rootSessionId?: string | null;
   openClawRequestId?: string | null;
   openClawRequestHash?: string | null;
+  openClawReplayCompatibility?: OpenClawReplayCompatibility;
   afterReserve?: () => Promise<void>;
 };
 
@@ -50,7 +53,7 @@ export type InteractiveSessionProvisionRecoveryInput = {
 
 export type InteractiveSessionCreationStore = {
   now(): number;
-  defaultIdentity(): { owner: string; createdBy: string };
+  defaultIdentity(): { owner: string; ownerSubject: string; createdBy: string };
   resolveRequest(
     body: InteractiveSessionCreateRequest,
     identity: { owner: string; createdBy: string },
@@ -101,7 +104,11 @@ export type InteractiveSessionCreationStore = {
   ): Promise<void>;
   recordRequest(insertedSessionId: string, insertedAt: number): Promise<void>;
   isConstraintError(error: unknown): boolean;
-  readRequestReplay(requestId: string, requestHash: string): Promise<InteractiveSession | null>;
+  readRequestReplay(
+    requestId: string,
+    requestHash: string,
+    compatibility?: OpenClawReplayCompatibility,
+  ): Promise<InteractiveSession | null>;
   persistProvisionResult(
     input: InteractiveProvisionPersistenceInput,
     result: InteractiveProvisionResult,
@@ -150,6 +157,12 @@ export class InteractiveSessionCreationService {
       owner: options.owner || defaultIdentity.owner,
       createdBy: options.createdBy || defaultIdentity.createdBy,
     });
+    const ownerSubject =
+      options.ownerSubject !== undefined
+        ? options.ownerSubject
+        : options.owner
+          ? ""
+          : defaultIdentity.ownerSubject;
     await this.store.requireRepo(request.repo);
     const lineage = await this.store.resolveLineage(
       options.parentSessionId ?? boundedId(body.parentSessionId),
@@ -181,6 +194,7 @@ export class InteractiveSessionCreationService {
             context,
             preparationReservation,
             options,
+            ownerSubject,
             now,
             adapterName: this.configuration.adapterName,
           }),
@@ -250,6 +264,9 @@ export class InteractiveSessionCreationService {
           maximumAttempts: this.configuration.maximumAttempts,
           requestId: options.openClawRequestId ?? null,
           requestHash: options.openClawRequestHash ?? null,
+          ...(options.openClawReplayCompatibility
+            ? { requestCompatibility: options.openClawReplayCompatibility }
+            : {}),
         });
         if (replay) return replay;
       }
@@ -294,6 +311,7 @@ export class InteractiveSessionCreationService {
       maximumAttempts: number;
       requestId: string | null;
       requestHash: string | null;
+      requestCompatibility?: OpenClawReplayCompatibility;
     },
   ): Promise<InteractiveSession | null> {
     const constraintError = this.store.isConstraintError(error);
@@ -303,7 +321,11 @@ export class InteractiveSessionCreationService {
       context.requestId &&
       context.requestHash
     ) {
-      const existing = await this.store.readRequestReplay(context.requestId, context.requestHash);
+      const existing = await this.store.readRequestReplay(
+        context.requestId,
+        context.requestHash,
+        context.requestCompatibility,
+      );
       if (existing) return existing;
     }
     if (
@@ -388,11 +410,21 @@ function reservationBuildInput(input: {
   context: InteractiveSessionReservationContext;
   preparationReservation: boolean;
   options: InteractiveSessionCreateOptions;
+  ownerSubject: string;
   now: number;
   adapterName: string;
 }): InteractiveSessionReservationBuildInput {
-  const { id, rootSessionId, lineage, request, context, preparationReservation, options, now } =
-    input;
+  const {
+    id,
+    rootSessionId,
+    lineage,
+    request,
+    context,
+    preparationReservation,
+    options,
+    ownerSubject,
+    now,
+  } = input;
   return {
     id,
     parentSessionId: lineage.parentSessionId,
@@ -415,6 +447,7 @@ function reservationBuildInput(input: {
     purpose: request.purpose,
     summary: request.summary,
     owner: request.owner,
+    ownerSubject,
     createdBy: request.createdBy,
     initialLeaseId: context.initialSandboxOwnership?.leaseId ?? null,
     initialAgentTokenHash: context.initialAgentTokenHash,

@@ -145,6 +145,93 @@ test("terminal hub requires an upgrade and authenticated or shared access", asyn
   assert.equal(server.accepted, false);
 });
 
+test("terminal subscriptions conceal hidden lifecycle state like missing sessions", async () => {
+  const messages: unknown[] = [];
+  for (const visibleSession of [
+    null,
+    interactiveSession(sessionRow({ id: "hidden", status: "stopped" }), []),
+  ]) {
+    const client = socket();
+    const server = socket();
+    const upstream = socket();
+    const hub = new TerminalHub(
+      dependencies(client, server, upstream, {
+        async readSession() {
+          return visibleSession;
+        },
+        async canViewSession() {
+          return false;
+        },
+      }),
+    );
+    await hub.open(
+      new Request("https://fleet.example/api/terminal/ws", {
+        headers: { upgrade: "websocket" },
+      }),
+      user,
+    );
+    server.emit("message", {
+      data: encodeTerminalFrame({
+        type: TerminalMessageType.Subscribe,
+        sessionId: visibleSession?.id ?? "missing",
+        payload: encodeSubscribePayload({ flags: 0, columns: 120, rows: 34 }),
+      }),
+    });
+    await flushQueues();
+    await flushQueues();
+    const error = frame(server.sent.at(-1)!);
+    assert.equal(error.type, TerminalMessageType.Error);
+    messages.push(decodeJsonPayload(error.payload));
+    server.emit("close");
+  }
+
+  assert.deepEqual(messages, [
+    { error: "interactive session not found" },
+    { error: "interactive session not found" },
+  ]);
+});
+
+test("terminal connection failures retain the original error for mutation policy", async () => {
+  const client = socket();
+  const server = socket();
+  const upstream = socket();
+  const failure = Object.assign(new Error("owner reconnect required"), { status: 503 });
+  let received: unknown;
+  const hub = new TerminalHub(
+    dependencies(client, server, upstream, {
+      async openUpstream() {
+        throw failure;
+      },
+      async markConnectionFailure(_user, _session, _message, error) {
+        received = error;
+      },
+    }),
+  );
+  await hub.open(
+    new Request("https://fleet.example/api/terminal/ws", {
+      headers: { upgrade: "websocket" },
+    }),
+    user,
+  );
+  server.emit("message", {
+    data: encodeTerminalFrame({
+      type: TerminalMessageType.Subscribe,
+      sessionId: session.id,
+      payload: encodeSubscribePayload({ flags: 0, columns: 120, rows: 34 }),
+    }),
+  });
+  await flushQueues();
+  await flushQueues();
+
+  assert.equal(received, failure);
+  const error = frame(server.sent.at(-1)!);
+  assert.equal(error.type, TerminalMessageType.Error);
+  assert.deepEqual(decodeJsonPayload(error.payload), {
+    error: "terminal unavailable: owner reconnect required",
+  });
+  server.emit("close");
+});
+
 test("terminal hub routes multiplex frames and explicit output acknowledgements", async () => {
   const client = socket();
   const server = socket();
@@ -254,6 +341,58 @@ test("terminal hub routes multiplex frames and explicit output acknowledgements"
   });
   await flushQueues();
   assert.deepEqual(upstream.closed, [{ code: 1000, reason: "unsubscribed" }]);
+  server.emit("close");
+});
+
+test("terminal hub publishes live controller downgrades and promotions", async () => {
+  const client = socket();
+  const server = socket();
+  const upstream = socket();
+  let canInput = true;
+  const hub = new TerminalHub(
+    dependencies(client, server, upstream, {
+      inputGrant: () => async () => canInput,
+    }),
+  );
+  await hub.open(
+    new Request("https://fleet.example/api/terminal/ws", {
+      headers: { upgrade: "websocket" },
+    }),
+    user,
+  );
+  server.emit("message", {
+    data: encodeTerminalFrame({
+      type: TerminalMessageType.Subscribe,
+      sessionId: session.id,
+      payload: encodeSubscribePayload({ flags: 0, columns: 120, rows: 34 }),
+    }),
+  });
+  await flushQueues();
+  await flushQueues();
+
+  canInput = false;
+  server.emit("message", {
+    data: encodeTerminalFrame({
+      type: TerminalMessageType.Input,
+      sessionId: session.id,
+      payload: new TextEncoder().encode("blocked"),
+    }),
+  });
+  await flushQueues();
+  assert.equal(frame(server.sent.at(-1)!).type, TerminalMessageType.ControlRevoked);
+  assert.deepEqual(upstream.sent, []);
+
+  canInput = true;
+  server.emit("message", {
+    data: encodeTerminalFrame({
+      type: TerminalMessageType.Input,
+      sessionId: session.id,
+      payload: new TextEncoder().encode("allowed"),
+    }),
+  });
+  await flushQueues();
+  assert.equal(frame(server.sent.at(-1)!).type, TerminalMessageType.ControlGranted);
+  assert.equal(new TextDecoder().decode(upstream.sent.at(-1) as Uint8Array), "allowed");
   server.emit("close");
 });
 

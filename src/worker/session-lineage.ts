@@ -1,4 +1,4 @@
-import { badRequest, forbidden } from "./http.ts";
+import { badRequest, notFound } from "./http.ts";
 import type { User } from "./models.ts";
 import type { InteractiveSession } from "./session-model.ts";
 
@@ -32,9 +32,8 @@ export class InteractiveSessionLineageService {
     }
 
     const parent = await this.store.readSession(parentId);
-    if (!parent) throw badRequest("parent session not found");
-    if (!this.store.canManage(user, parent)) {
-      throw forbidden("parent session is not visible");
+    if (!parent || !this.store.canManage(user, parent)) {
+      throw notFound("parent session not found");
     }
     return {
       parentSessionId: parent.id,

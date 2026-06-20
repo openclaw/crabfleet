@@ -14,12 +14,12 @@ export function useActionDialog() {
     dispatch({ type: "close" });
   }
 
-  async function confirmActionDialog() {
+  async function confirmActionDialog(input) {
     const current = state.dialog;
     if (!current?.action || current.pending) return;
     dispatch({ type: "start", id: current.id });
     try {
-      await current.action();
+      await current.action(input);
       dispatch({ type: "resolve", id: current.id });
     } catch (error) {
       dispatch({
@@ -90,15 +90,27 @@ export function ActionDialog({ dialog, onCancel, onConfirm }) {
   const elementRef = useRef(null);
   const cancelRef = useRef(null);
   const valueRef = useRef(null);
+  const principalRef = useRef(null);
   const [copied, setCopied] = useState(false);
+  const [accessGrants, setAccessGrants] = useState([]);
+  const [revoking, setRevoking] = useState("");
+  const [revokeError, setRevokeError] = useState("");
 
   useLayoutEffect(() => {
     if (!dialog) return;
     const element = elementRef.current;
     const previousFocus = document.activeElement;
     setCopied(false);
+    setAccessGrants(dialog.grants || []);
+    setRevoking("");
+    setRevokeError("");
     if (element && !element.open) element.showModal();
-    const focusTarget = dialog.kind === "share" ? valueRef.current : cancelRef.current;
+    const focusTarget =
+      dialog.kind === "share"
+        ? valueRef.current
+        : dialog.kind === "access"
+          ? principalRef.current
+          : cancelRef.current;
     focusTarget?.focus();
     if (dialog.kind === "share") focusTarget?.select();
     return () => {
@@ -110,6 +122,8 @@ export function ActionDialog({ dialog, onCancel, onConfirm }) {
   if (!dialog) return null;
   const titleId = `action-dialog-title-${dialog.id}`;
   const descriptionId = `action-dialog-description-${dialog.id}`;
+  const accessFormId = `action-dialog-access-${dialog.id}`;
+  const errorMessage = dialog.error || revokeError;
 
   async function copyValue() {
     const value = dialog.value || "";
@@ -125,10 +139,26 @@ export function ActionDialog({ dialog, onCancel, onConfirm }) {
     setCopied(success);
   }
 
+  async function revokeGrant(subject) {
+    if (!dialog.revoke || revoking || dialog.pending) return;
+    setRevoking(subject);
+    setRevokeError("");
+    try {
+      await dialog.revoke(subject);
+      setAccessGrants((grants) => grants.filter((grant) => grant.subject !== subject));
+    } catch (error) {
+      setRevokeError(error?.message || "Access could not be revoked.");
+    } finally {
+      setRevoking("");
+    }
+  }
+
   return (
     <dialog
       ref={elementRef}
-      class={`action-dialog ${dialog.kind === "danger" ? "danger" : ""}`}
+      class={`action-dialog ${dialog.kind === "danger" ? "danger" : ""} ${
+        dialog.kind === "access" ? "access" : ""
+      }`}
       aria-labelledby={titleId}
       aria-describedby={descriptionId}
       onCancel={(event) => {
@@ -143,7 +173,15 @@ export function ActionDialog({ dialog, onCancel, onConfirm }) {
       <section class="action-dialog-surface">
         <div class="action-dialog-content">
           <div class="action-dialog-icon" aria-hidden="true">
-            <Icon name={dialog.kind === "danger" ? "triangle-alert" : "link-2"} />
+            <Icon
+              name={
+                dialog.kind === "danger"
+                  ? "triangle-alert"
+                  : dialog.kind === "access"
+                    ? "user-plus"
+                    : "link-2"
+              }
+            />
           </div>
           <div class="action-dialog-copy">
             <span class="action-dialog-eyebrow">{dialog.eyebrow}</span>
@@ -157,9 +195,80 @@ export function ActionDialog({ dialog, onCancel, onConfirm }) {
               <input ref={valueRef} readonly value={dialog.value || ""} />
             </label>
           ) : null}
-          {dialog.error ? (
+          {dialog.kind === "access" ? (
+            <div class="action-dialog-access">
+              <form
+                id={accessFormId}
+                class="action-dialog-access-form"
+                onSubmit={(event) => {
+                  event.preventDefault();
+                  const data = new FormData(event.currentTarget);
+                  void onConfirm({
+                    principal: data.get("principal"),
+                    role: data.get("role"),
+                    expiresInSeconds: Number(data.get("expiresInSeconds")),
+                  });
+                }}
+              >
+                <label class="full">
+                  User login or email
+                  <input
+                    ref={principalRef}
+                    name="principal"
+                    autocomplete="off"
+                    placeholder="teammate@example.com"
+                    required
+                  />
+                </label>
+                <label>
+                  Access
+                  <select name="role" defaultValue="viewer">
+                    <option value="viewer">Read only</option>
+                    <option value="controller">Terminal control</option>
+                  </select>
+                </label>
+                <label>
+                  Expires
+                  <select name="expiresInSeconds" defaultValue="86400">
+                    <option value="3600">1 hour</option>
+                    <option value="86400">24 hours</option>
+                    <option value="604800">7 days</option>
+                    <option value="2592000">30 days</option>
+                  </select>
+                </label>
+              </form>
+              <div class="action-dialog-grants">
+                <strong>Current access</strong>
+                {accessGrants.length ? (
+                  accessGrants.map((grant) => (
+                    <div class="action-dialog-grant" key={grant.subject}>
+                      <span>
+                        <strong>{grant.principal}</strong>
+                        <small>
+                          {grant.role === "controller" ? "Terminal control" : "Read only"}
+                          {grant.expiresAt
+                            ? ` · expires ${new Date(grant.expiresAt).toLocaleString()}`
+                            : ""}
+                        </small>
+                      </span>
+                      <button
+                        type="button"
+                        disabled={Boolean(dialog.pending || revoking)}
+                        onClick={() => void revokeGrant(grant.subject)}
+                      >
+                        {revoking === grant.subject ? "Revoking…" : "Revoke"}
+                      </button>
+                    </div>
+                  ))
+                ) : (
+                  <span class="action-dialog-grants-empty">No named access grants.</span>
+                )}
+              </div>
+            </div>
+          ) : null}
+          {errorMessage ? (
             <div class="action-dialog-error" role="alert">
-              {dialog.error}
+              {errorMessage}
             </div>
           ) : null}
         </div>
@@ -174,6 +283,15 @@ export function ActionDialog({ dialog, onCancel, onConfirm }) {
                 <span aria-live="polite" aria-atomic="true">
                   {copied ? "Copied" : "Copy link"}
                 </span>
+              </button>
+            </>
+          ) : dialog.kind === "access" ? (
+            <>
+              <button ref={cancelRef} disabled={dialog.pending} onClick={onCancel}>
+                Done
+              </button>
+              <button class="primary" type="submit" form={accessFormId} disabled={dialog.pending}>
+                {dialog.pending ? "Granting…" : dialog.confirmLabel}
               </button>
             </>
           ) : (

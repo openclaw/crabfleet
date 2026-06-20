@@ -183,7 +183,9 @@ export async function persistInteractiveSessionReconciliation(
         ? {
             agent_token_hash: null,
             controller: null,
+            controller_subject: null,
             control_requested_by: null,
+            control_requested_by_subject: null,
             control_requested_at: null,
             control_granted_at: null,
             control_expires_at: null,

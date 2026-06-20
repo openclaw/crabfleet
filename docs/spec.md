@@ -107,20 +107,22 @@ Runtime selection order:
 Roles:
 
 - `owner`: deployment administration, plus all maintainer/viewer actions;
-- `maintainer`: session creation/control and card mutation;
-- `viewer`: visible state, logs, public share links, and delegated control requests. A terminal subscription requires session ownership, maintainer/owner role, a valid share token, or a current control grant. Session ownership separately grants management operations such as transcripts and checkpoints.
+- `maintainer`: session creation and card mutation; in shared mode, management of team-visible sessions;
+- `viewer`: authorized state, logs, public share links, named grants, and delegated control requests.
+
+`CRABFLEET_TENANCY_MODE` defaults to `private`. Private mode scopes cards to their stable owner subject and sessions to their owner, an unexpired named viewer/controller grant, or the current delegated controller. Global roles do not bypass another tenant. Only the stable owner manages session lifecycle, metadata, checkpoints, links, and named grants; an exact internal service creator retains lifecycle and terminal authority for its own session and explicitly validated descendants in a service-owned lineage. Exact `shared` mode preserves legacy team-wide visibility and role management.
 
 Authorization layers:
 
 1. authenticate by GitHub OAuth, bootstrap token, trusted reverse proxy, linked SSH key, or scoped service token;
 2. verify active OpenClaw org membership for GitHub users;
-3. resolve direct user/email or team allowlist role;
+3. resolve direct user/email or team allowlist role, or a configured trusted-proxy automatic `viewer`/`maintainer` role;
 4. enforce enabled repository access;
 5. apply action-specific ownership/control checks.
 
 GitHub sessions last 15 minutes. Bootstrap sessions last 1 hour. Browser sessions are not silently refreshed; expiry requires authentication again.
 
-Trusted-proxy identity is accepted only on the exact configured backend origin with the shared secret and configured identity header. The asserted identity still needs a direct allowlist entry. Mutation and WebSocket requests also prove the public origin. Proxy assertions and upstream credentials are stripped before downstream routing.
+Trusted-proxy identity is accepted only on the exact configured backend origin with the shared secret and configured identity header. The asserted identity needs a direct allowlist entry unless `CRABFLEET_TRUSTED_PROXY_AUTO_ROLE` is exactly `viewer` or `maintainer`; malformed or elevated automatic roles fail closed. Mutation and WebSocket requests also prove the public origin. Proxy assertions and upstream credentials are stripped before downstream routing.
 
 ## Runtime Backends
 
@@ -242,7 +244,9 @@ The signed provider URL is not stored in D1 or returned through Fleet.
 
 Session sharing:
 
-- owner/maintainer enables or rotates a public read-only URL;
+- the stable owner creates expiring named `viewer` or `controller` grants for active users;
+- revoking a named grant atomically clears that subject's pending or active delegated-control lease;
+- the session manager enables or rotates a public read-only URL;
 - disabling sharing invalidates the token and clears delegated control;
 - shared state includes D1 event scrollback but no write permission.
 
@@ -250,7 +254,7 @@ Supervision:
 
 - sessions may store `parentSessionId`, `rootSessionId`, `purpose`, and `summary`;
 - built-in Sandboxes receive a scoped agent token;
-- agent APIs allow same-owner state reads, child creation, transcript reads, summary updates, and PTY messaging;
+- session-scoped agent APIs allow reads and PTY messaging for the authenticated session and its direct children, plus child creation, transcript reads, and summary updates;
 - CLI tree, transcript, message, and summary commands use those APIs.
 
 ## Persistence
@@ -261,7 +265,7 @@ Primary tables cover:
 
 - users, sessions, allowlist, repositories, workflow configs;
 - cards, run attempts, card events, changes;
-- interactive sessions and events;
+- interactive sessions, events, stable owner subjects, and expiring named grants;
 - share/control state and supervision metadata;
 - provider lifecycles, standalone Sandbox ownership, credential-policy ownership;
 - terminal finalization and archive pointers;
@@ -392,6 +396,7 @@ Every push to `main` runs checks, tests, builds, migrations, deploys, and endpoi
 - Provider URLs and messages are bounded, validated, and redacted before persistence.
 - Workspace IDs and immutable create requests are fenced against replay and adoption.
 - Browser mutations and WebSocket upgrades enforce origin checks.
+- Tenant-private mode is the fail-closed default; global roles do not reveal foreign cards or sessions.
 - Shared links are read-only by default.
 - Terminal input requires current control on every path.
 - Sandbox credential cleanup is generation-fenced and retried until ownership is safely removed.

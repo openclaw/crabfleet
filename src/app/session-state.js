@@ -1,5 +1,4 @@
 import {
-  canMaintain,
   elapsed,
   humanStatus,
   interactiveSessionStatus,
@@ -22,8 +21,8 @@ export function sessionTerminalStatusLabel(session, terminalStatus) {
   return terminalStatus[session.id] || runtimeCapabilityLabel(session);
 }
 
-export function canCleanInteractiveSession(session, user) {
-  return isDeadInteractiveSession(session) && (session.canManage || canMaintain(user));
+export function canCleanInteractiveSession(session) {
+  return isDeadInteractiveSession(session) && session.canManage === true;
 }
 
 export function isSessionGridItem(session) {

@@ -1,6 +1,13 @@
 export type Role = "viewer" | "maintainer" | "owner";
 
+export const userTenantSubject = Symbol("userTenantSubject");
+export const userSessionOwnerSubject = Symbol("userSessionOwnerSubject");
+export const userServiceSessionAuthority = Symbol("userServiceSessionAuthority");
+
 export type User = {
+  [userTenantSubject]?: string;
+  [userSessionOwnerSubject]?: string;
+  [userServiceSessionAuthority]?: string;
   subject: string;
   login: string | null;
   email: string | null;

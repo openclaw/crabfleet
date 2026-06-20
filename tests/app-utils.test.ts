@@ -243,3 +243,16 @@ test("GitHub Actions sessions expose steerable terminal UI capabilities", () => 
     artifacts: false,
   });
 });
+
+test("token-backed read-only sessions remain Fleet-attachable without raw URLs", () => {
+  const shared = {
+    kind: "interactive",
+    status: "ready",
+    capabilities: { terminal: true },
+    attachUrl: null,
+    ptyAvailable: false,
+    sharedLinkOnly: true,
+    sharedReadOnly: true,
+  };
+  assert.equal(isFleetSessionAttachable(shared), true);
+});

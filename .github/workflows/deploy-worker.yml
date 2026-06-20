@@ -120,6 +120,16 @@ jobs:
           done
           pnpm exec wrangler deploy --secrets-file "$secrets_file"
 
+      - name: Repeat tenant isolation backfill
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: |
+          for attempt in 1 2 3; do
+            pnpm deploy:tenant-backfill && exit 0
+            sleep $((attempt * 5))
+          done
+          pnpm deploy:tenant-backfill
+
       - name: Ensure domains
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_DNS_API_TOKEN }}

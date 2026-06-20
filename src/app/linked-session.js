@@ -3,14 +3,21 @@ import { api } from "./api.js";
 import { linkedInteractiveSessionPlaceholder } from "./utils.js";
 
 export function linkedSessionFailure(id, status, sharedToken) {
-  return linkedInteractiveSessionPlaceholder(id, {
-    status: "unavailable",
-    lastEvent:
-      status === 404
-        ? "Codex session was not found."
-        : "You do not have access to this Codex session.",
-    sharedReadOnly: Boolean(sharedToken),
-  });
+  return {
+    ...linkedInteractiveSessionPlaceholder(id, {
+      status: "unavailable",
+      lastEvent:
+        status === 404
+          ? "Codex session was not found."
+          : "You do not have access to this Codex session.",
+      sharedReadOnly: Boolean(sharedToken),
+    }),
+    sharedLinkOnly: Boolean(sharedToken),
+  };
+}
+
+export function linkedSessionUsesSharedFallback(status, sharedToken) {
+  return Boolean(sharedToken) && (status === 403 || status === 404);
 }
 
 export function useLinkedSession({
@@ -66,8 +73,19 @@ export function useLinkedSession({
           } catch (error) {
             if (cancelled) return;
             if (error.status !== 403 && error.status !== 404) throw error;
+            let failure = error;
+            if (linkedSessionUsesSharedFallback(error.status, sharedToken)) {
+              try {
+                await loadSharedSession({ preserveSignedIn: true });
+                return;
+              } catch (sharedError) {
+                if (cancelled) return;
+                failure = sharedError;
+              }
+            }
+            if (failure.status !== 403 && failure.status !== 404) throw failure;
             upsertInteractiveSession(
-              linkedSessionFailure(sharedSessionId, error.status, sharedToken),
+              linkedSessionFailure(sharedSessionId, failure.status, sharedToken),
             );
             openedRef.current = true;
             setFocusedSessionId(sharedSessionId);
@@ -82,11 +100,12 @@ export function useLinkedSession({
           await loadSharedSession();
         } else if (!openedRef.current) {
           if (!existing) {
-            upsertInteractiveSession(
-              linkedInteractiveSessionPlaceholder(sharedSessionId, {
+            upsertInteractiveSession({
+              ...linkedInteractiveSessionPlaceholder(sharedSessionId, {
                 sharedReadOnly: Boolean(sharedToken),
               }),
-            );
+              sharedLinkOnly: Boolean(sharedToken),
+            });
           }
           openedRef.current = true;
           setFocusedSessionId(sharedSessionId);

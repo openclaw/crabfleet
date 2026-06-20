@@ -4,6 +4,7 @@ import { githubActionsCapabilities, githubActionsRuntime } from "../github-actio
 import type { InteractiveSessionRow, InteractiveSessionTable } from "./database.ts";
 import { badRequest } from "./http.ts";
 import { normalizeRepo } from "./repositories.ts";
+import type { ResolvedGrantPrincipal } from "./session-grant-repository.ts";
 import type { InteractiveSession } from "./session-model.ts";
 
 export type GitHubActionsSessionRegistrationInput = {
@@ -13,11 +14,14 @@ export type GitHubActionsSessionRegistrationInput = {
   branch?: string;
   sourceUrl?: string;
   runUrl?: string;
+  owner?: string;
   purpose?: string;
   summary?: string;
 };
 
 export type GitHubActionsSessionRegistrationUpdate = {
+  owner: string;
+  owner_subject: string;
   repo: string;
   branch: string;
   purpose: string;
@@ -44,14 +48,17 @@ export type GitHubActionsSessionRegistrationUpdate = {
 };
 
 export type GitHubActionsSessionRegistrationStore = {
+  privateTenancy: boolean;
   now(): number;
   newAgentToken(): string;
   hashToken(token: string): Promise<string>;
   requireRepo(repo: string): Promise<void>;
+  resolvePrincipal(value: string): Promise<ResolvedGrantPrincipal | null>;
   readByWorkKey(workKey: string): Promise<InteractiveSessionRow | null>;
   nextSessionId(): Promise<string>;
   insertSession(values: Insertable<InteractiveSessionTable>): Promise<void>;
   readById(id: string): Promise<InteractiveSessionRow | null>;
+  adoptLegacyOwner(id: string, owner: string, ownerSubject: string): Promise<boolean>;
   updateSession(id: string, values: GitHubActionsSessionRegistrationUpdate): Promise<void>;
   isConstraintError(error: unknown): boolean;
   disconnectRunner(id: string): Promise<void>;
@@ -83,6 +90,12 @@ export class GitHubActionsSessionRegistrationService {
     if (!repo) throw badRequest("repo is required");
     await this.store.requireRepo(repo);
 
+    const requestedOwner = boundedValue(input.owner, 320);
+    const resolvedOwner = requestedOwner ? await this.store.resolvePrincipal(requestedOwner) : null;
+    if (requestedOwner && !resolvedOwner) {
+      throw badRequest("owner must identify one active Crabfleet user");
+    }
+
     const branch = boundedValue(input.branch, 120) || "main";
     const sourceUrl = optionalHttpUrl(input.sourceUrl, "sourceUrl");
     const runUrl = optionalHttpUrl(input.runUrl, "runUrl");
@@ -90,6 +103,9 @@ export class GitHubActionsSessionRegistrationService {
     const agentTokenHash = await this.store.hashToken(agentToken);
     const now = this.store.now();
     let existing = await this.store.readByWorkKey(workKey);
+    if (!existing && this.store.privateTenancy && !resolvedOwner) {
+      throw badRequest("owner is required in private tenancy");
+    }
     const purpose =
       boundedValue(input.purpose, 500) ||
       existing?.purpose ||
@@ -106,6 +122,8 @@ export class GitHubActionsSessionRegistrationService {
         runUrl,
         purpose,
         summary,
+        owner: resolvedOwner?.actor ?? null,
+        ownerSubject: resolvedOwner?.subject ?? null,
         agentTokenHash,
         now,
       });
@@ -114,10 +132,30 @@ export class GitHubActionsSessionRegistrationService {
     if (existing.runtime !== githubActionsRuntime) {
       throw badRequest("workKey is already registered to a different runtime");
     }
+    if (resolvedOwner && !existing.owner_subject) {
+      await this.store.adoptLegacyOwner(existing.id, resolvedOwner.actor, resolvedOwner.subject);
+      const adopted = await this.store.readById(existing.id);
+      if (!adopted) throw new Error("GitHub Actions session disappeared during owner adoption");
+      existing = adopted;
+    }
+    if (
+      resolvedOwner &&
+      existing.owner_subject &&
+      existing.owner_subject !== resolvedOwner.subject
+    ) {
+      throw badRequest("workKey is already registered to a different owner");
+    }
+    const owner = resolvedOwner?.actor ?? existing.owner;
+    const ownerSubject = resolvedOwner?.subject ?? existing.owner_subject;
+    if (this.store.privateTenancy && !ownerSubject) {
+      throw badRequest("owner is required in private tenancy");
+    }
 
     const resumed = existing.work_state !== "registered" || existing.status !== "ready";
     const message = resumed ? "GitHub Actions work resumed" : "GitHub Actions work registered";
     await this.store.updateSession(existing.id, {
+      owner,
+      owner_subject: ownerSubject,
       repo,
       branch,
       purpose,
@@ -162,6 +200,8 @@ export class GitHubActionsSessionRegistrationService {
     runUrl: string | null;
     purpose: string;
     summary: string;
+    owner: string | null;
+    ownerSubject: string | null;
     agentTokenHash: string;
     now: number;
   }): Promise<InteractiveSessionRow | null> {
@@ -191,6 +231,8 @@ export function buildGitHubActionsSessionValues(input: {
   runUrl: string | null;
   purpose: string;
   summary: string;
+  owner: string | null;
+  ownerSubject: string | null;
   agentTokenHash: string;
   now: number;
 }): Insertable<InteractiveSessionTable> {
@@ -220,7 +262,8 @@ export function buildGitHubActionsSessionValues(input: {
     prompt: input.purpose,
     purpose: input.purpose,
     summary: input.summary,
-    owner: `github-actions:${input.id}`,
+    owner: input.owner ?? `github-actions:${input.id}`,
+    owner_subject: input.ownerSubject ?? "",
     created_by: "service:openclaw",
     status: "ready",
     lease_id: null,
@@ -235,8 +278,10 @@ export function buildGitHubActionsSessionValues(input: {
     share_token_hash: null,
     share_token_preview: null,
     control_requested_by: null,
+    control_requested_by_subject: null,
     control_requested_at: null,
     controller: null,
+    controller_subject: null,
     control_granted_at: null,
     control_expires_at: null,
     multiplayer_mode: 0,

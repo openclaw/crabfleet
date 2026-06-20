@@ -147,7 +147,19 @@ export function isTerminalReadyInteractiveSession(session) {
 export function isFleetSessionAttachable(session) {
   if (!runCapabilities(session).terminal) return false;
   if (typeof session?.fleet?.attachable === "boolean") return session.fleet.attachable;
-  return isTerminalReadyInteractiveSession(session) && Boolean(session.attachUrl);
+  return (
+    isTerminalReadyInteractiveSession(session) &&
+    (session.sharedLinkOnly === true ||
+      session.sharedReadOnly === true ||
+      Boolean(session.attachUrl))
+  );
+}
+
+export function fleetCoversInteractiveSessions(fleet, sessions = []) {
+  if (!fleet?.totals) return false;
+  if (!Array.isArray(fleet.sessions)) return true;
+  const fleetSessionIds = new Set(fleet.sessions.map((session) => session.id));
+  return sessions.every((session) => fleetSessionIds.has(session.id));
 }
 
 export function humanStatus(value) {

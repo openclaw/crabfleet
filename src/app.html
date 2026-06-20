@@ -2140,6 +2140,9 @@
         backdrop-filter: blur(4px);
         animation: fadeIn 0.16s ease;
       }
+      .action-dialog.access {
+        width: min(620px, calc(100vw - 32px));
+      }
       .action-dialog-surface {
         display: grid;
         grid-template-rows: minmax(0, 1fr) auto;
@@ -2219,6 +2222,56 @@
         font-family: ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;
         font-size: 12px;
       }
+      .action-dialog-access {
+        grid-column: 1 / -1;
+        display: grid;
+        gap: 18px;
+        margin-top: 18px;
+      }
+      .action-dialog-access-form {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 12px;
+      }
+      .action-dialog-access-form .full {
+        grid-column: 1 / -1;
+      }
+      .action-dialog-grants {
+        display: grid;
+        gap: 8px;
+      }
+      .action-dialog-grants > strong {
+        color: var(--muted);
+        font-size: 12px;
+      }
+      .action-dialog-grant {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+        padding: 10px 11px;
+        border: 1px solid var(--line);
+        border-radius: var(--radius-control);
+        background: var(--panel-2);
+      }
+      .action-dialog-grant > span {
+        min-width: 0;
+        display: grid;
+      }
+      .action-dialog-grant strong,
+      .action-dialog-grant small {
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      .action-dialog-grant small,
+      .action-dialog-grants-empty {
+        color: var(--muted);
+        font-size: 12px;
+      }
+      .action-dialog-grant button {
+        flex: none;
+      }
       .action-dialog-error {
         padding: 9px 11px;
         border: 1px solid color-mix(in srgb, var(--danger) 35%, var(--line));
@@ -2284,11 +2337,11 @@
         .rail {
           position: static;
           height: auto;
-          flex-direction: row;
+          display: grid;
+          grid-template-columns: minmax(0, 1fr) auto;
           border-right: 0;
           border-bottom: 1px solid var(--line);
           padding: 12px 16px;
-          flex-wrap: wrap;
         }
         .rail .spacer {
           display: none;
@@ -2297,8 +2350,23 @@
           display: none;
         }
         .brand-lockup {
+          grid-column: 1;
+          grid-row: 1;
           min-width: 0;
-          margin-right: auto;
+        }
+        .nav-actions {
+          grid-column: 1 / -1;
+          grid-row: 2;
+          display: grid;
+          grid-template-columns: repeat(2, minmax(0, 1fr));
+          width: 100%;
+        }
+        .nav-actions button {
+          width: 100%;
+        }
+        .rail .theme-toggle {
+          grid-column: 2;
+          grid-row: 1;
         }
         .shell {
           width: calc(100vw - 32px);
@@ -2403,6 +2471,12 @@
         .action-dialog-actions {
           display: grid;
           grid-template-columns: 1fr 1fr;
+        }
+        .action-dialog-access-form {
+          grid-template-columns: 1fr;
+        }
+        .action-dialog-access-form .full {
+          grid-column: auto;
         }
       }
     </style>

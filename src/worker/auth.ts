@@ -299,7 +299,7 @@ async function requireTrustedProxyUser(
   env: RuntimeEnv,
   identity: TrustedProxyIdentity,
 ): Promise<User> {
-  const user = await authorize(env, {
+  const candidate = {
     subject: identity.subject,
     login: identity.login,
     email: identity.email,
@@ -307,7 +307,17 @@ async function requireTrustedProxyUser(
     role: "viewer",
     allowed: false,
     teams: [],
-  });
+  } satisfies User;
+  const allowlisted = await authorize(env, candidate);
+  const automaticRole = trustedProxyAutomaticRole(env.CRABFLEET_TRUSTED_PROXY_AUTO_ROLE);
+  if (env.CRABFLEET_TRUSTED_PROXY_AUTO_ROLE && !automaticRole) {
+    throw forbidden("trusted proxy automatic role is invalid");
+  }
+  const user = allowlisted.allowed
+    ? allowlisted
+    : automaticRole
+      ? { ...candidate, role: automaticRole, allowed: true }
+      : allowlisted;
   if (!user.allowed) throw forbidden("trusted proxy user is not allowlisted");
 
   const existing = await database(env)
@@ -326,6 +336,10 @@ async function requireTrustedProxyUser(
     await upsertUser(env, user, Date.now());
   }
   return user;
+}
+
+export function trustedProxyAutomaticRole(value: unknown): "viewer" | "maintainer" | null {
+  return value === "viewer" || value === "maintainer" ? value : null;
 }
 
 function strongerRole(left: Role | null, right: Role): Role {

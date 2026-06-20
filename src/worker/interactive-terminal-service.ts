@@ -16,10 +16,11 @@ import type { RuntimeEnv } from "./env.ts";
 import { badRequest, forbidden, notFound, serviceUnavailable } from "./http.ts";
 import type { User } from "./models.ts";
 import {
-  canControlOpenClawEmbeddedTerminalRequest,
   isOpenClawEmbedSessionToken,
+  terminalInputAuthorization,
 } from "./openclaw-embed-access.ts";
 import { SandboxLifecycleService } from "./provisioning/sandbox-lifecycle.ts";
+import { isSandboxLeaseOwnerReconnectError } from "./provisioning/sandbox.ts";
 import {
   readTerminalClipboardBytes,
   terminalClipboardFilename,
@@ -33,11 +34,14 @@ import { isSandboxInteractiveSession, sandboxLeaseInfo } from "./sandbox-lease.t
 import { openSandboxTerminalResponse, sandboxWorkdir } from "./sandbox-runtime.ts";
 import {
   canControlInteractiveSession,
+  canReadInteractiveSessionTerminal,
   delegatedInteractiveSessionControlAvailable,
 } from "./session-access.ts";
+import { InteractiveSessionGrantRepository } from "./session-grant-repository.ts";
 import { githubActionsRelayStub } from "./session-control-do.ts";
 import { appendInteractiveSessionEventRecord } from "./session-events.ts";
 import type { InteractiveSession } from "./session-model.ts";
+import { readAuthorizedFreshSession } from "./session-authorized-refresh.ts";
 import { finalizeTerminalInteractiveSession } from "./session-terminal-finalization.ts";
 import {
   interactivePtyRouteKind,
@@ -50,11 +54,12 @@ import {
   type TerminalUpstream,
 } from "./terminal-hub.ts";
 import { interactiveTerminalFetch } from "./runtime-adapter-transport.ts";
+import { tenancyMode, tenantSubject } from "./tenancy.ts";
 
 const terminalInputStates = new Map<string, TerminalInputState>();
 
 export type InteractiveTerminalServiceDependencies = {
-  readFreshSession(sessionId: string): Promise<InteractiveSession | null>;
+  readSession(sessionId: string): Promise<InteractiveSession | null>;
   reconcileSession(sessionId: string, now: number): Promise<void>;
   reconcileIntervalMs: number;
   resolveSandboxSession(
@@ -217,7 +222,17 @@ export class InteractiveTerminalService {
         canOpenAnonymousTerminalHub(request, this.env, this.repository),
       canViewShared: (request, sessionId) =>
         canViewSharedTerminalRequest(request, this.env, this.repository, sessionId),
-      readSession: (sessionId) => this.dependencies.readFreshSession(sessionId),
+      readSession: (request, user, sessionId) =>
+        readAuthorizedFreshSession({
+          read: () => this.dependencies.readSession(sessionId),
+          authorize: (session) =>
+            canViewTerminalSession(request, this.env, this.repository, user, session),
+          refresh: async () => {
+            await this.dependencies.reconcileSession(sessionId, Date.now()).catch((error) => {
+              console.error("targeted terminal reconciliation failed", error);
+            });
+          },
+        }),
       canViewSession: (request, user, session) =>
         canViewTerminalSession(request, this.env, this.repository, user, session),
       inputGrant: (request, user, session) =>
@@ -230,7 +245,8 @@ export class InteractiveTerminalService {
         this.openUpstream(request, user, session, cols, rows),
       inputPayloads: (subscription, user, payload) =>
         multiplayerTerminalInputPayloads(this.repository, subscription, user, payload),
-      markConnectionFailure: async (user, session, message) => {
+      markConnectionFailure: async (user, session, message, error) => {
+        if (isSandboxLeaseOwnerReconnectError(error)) return;
         const markTerminal =
           session.runtime === githubActionsRuntime ||
           (isSandboxInteractiveSession(session) && this.env.SANDBOX)
@@ -359,9 +375,12 @@ function terminalInputGrant(
 ): () => Promise<boolean> {
   if (!session.capabilities.terminal) return async () => false;
   return cachedBooleanGrant(() =>
-    user
-      ? canControlInteractiveSessionById(repository, env, user, session.id)
-      : canControlOpenClawEmbeddedTerminalRequest(request, env, session.id),
+    terminalInputAuthorization(
+      request,
+      env,
+      session.id,
+      user ? () => canControlInteractiveSessionById(repository, env, user, session.id) : null,
+    ),
   );
 }
 
@@ -395,7 +414,7 @@ function terminalViewGrant(
   session: InteractiveSession,
 ): () => Promise<boolean> {
   return async () =>
-    Boolean(user && (await canControlInteractiveSessionById(repository, env, user, session.id))) ||
+    Boolean(user && (await canViewInteractiveSessionById(repository, env, user, session.id))) ||
     (await canViewSharedTerminalRequest(request, env, repository, session.id));
 }
 
@@ -436,7 +455,7 @@ async function canViewTerminalSession(
 ): Promise<boolean> {
   if (user) {
     requireRole(user, "viewer");
-    if (await canControlInteractiveSessionById(repository, env, user, session.id)) return true;
+    if (await canViewInteractiveSessionById(repository, env, user, session.id)) return true;
   }
   return canViewSharedTerminalRequest(request, env, repository, session.id);
 }
@@ -468,11 +487,42 @@ async function canControlInteractiveSessionById(
   if (!session) return false;
   if (!session.capabilities.terminal) return false;
   if (["stopping", "expired", "failed", "stopped"].includes(session.status)) return false;
+  const now = Date.now();
+  const grant = await new InteractiveSessionGrantRepository(env).readActive(
+    sessionId,
+    tenantSubject(user),
+    now,
+  );
   return canControlInteractiveSession(
     user,
     session,
-    Date.now(),
+    now,
     delegatedInteractiveSessionControlAvailable(Boolean(env.SANDBOX), session),
+    { mode: tenancyMode(env), grant },
+  );
+}
+
+async function canViewInteractiveSessionById(
+  repository: InteractiveTerminalRepository,
+  env: RuntimeEnv,
+  user: User,
+  sessionId: string,
+): Promise<boolean> {
+  const session = await repository.readSession(sessionId);
+  if (!session || !session.capabilities.terminal) return false;
+  if (["stopping", "expired", "failed", "stopped"].includes(session.status)) return false;
+  const now = Date.now();
+  const grant = await new InteractiveSessionGrantRepository(env).readActive(
+    sessionId,
+    tenantSubject(user),
+    now,
+  );
+  return canReadInteractiveSessionTerminal(
+    user,
+    session,
+    now,
+    delegatedInteractiveSessionControlAvailable(Boolean(env.SANDBOX), session),
+    { mode: tenancyMode(env), grant },
   );
 }
 

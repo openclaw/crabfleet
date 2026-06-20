@@ -40,12 +40,16 @@ const githubAutoLoginReadyKey = "crabbox-github-auto-login-ready";
 
 export function initialAppState(initialSessionLink) {
   if (!initialSessionLink.id) return emptyState;
+  const sharedLinkOnly = Boolean(initialSessionLink.token);
   return {
     ...emptyState,
     interactiveSessions: [
-      linkedInteractiveSessionPlaceholder(initialSessionLink.id, {
-        sharedReadOnly: Boolean(initialSessionLink.token),
-      }),
+      {
+        ...linkedInteractiveSessionPlaceholder(initialSessionLink.id, {
+          sharedReadOnly: sharedLinkOnly,
+        }),
+        sharedLinkOnly,
+      },
     ],
   };
 }
@@ -61,6 +65,84 @@ export function retainLinkedSession(nextState, linkedSession) {
     ...nextState,
     interactiveSessions: [linkedSession, ...(nextState.interactiveSessions || [])],
   };
+}
+
+export async function reconcileLinkedSessionState(
+  nextState,
+  linkedSession,
+  { sharedToken, loadSession },
+) {
+  if (
+    !linkedSession ||
+    (nextState.interactiveSessions || []).some((session) => session.id === linkedSession.id)
+  ) {
+    return nextState;
+  }
+  try {
+    const result = await loadSession(linkedSession.id);
+    return result?.session ? upsertLinkedSession(nextState, result.session) : nextState;
+  } catch (error) {
+    if (error?.status === 403 || error?.status === 404) {
+      return sharedToken
+        ? upsertLinkedSession(nextState, {
+            ...linkedSession,
+            sharedRevalidationPending: true,
+          })
+        : nextState;
+    }
+    console.warn("Linked session revalidation failed", error);
+    return sharedToken
+      ? upsertLinkedSession(nextState, {
+          ...linkedSession,
+          sharedRevalidationPending: true,
+        })
+      : retainLinkedSession(nextState, linkedSession);
+  }
+}
+
+export function upsertLinkedSession(nextState, linkedSession) {
+  return {
+    ...nextState,
+    interactiveSessions: [
+      linkedSession,
+      ...(nextState.interactiveSessions || []).filter((session) => session.id !== linkedSession.id),
+    ],
+  };
+}
+
+export function upsertSharedLinkedSession(nextState, linkedSession) {
+  const current = (nextState.interactiveSessions || []).find(
+    (session) => session.id === linkedSession.id,
+  );
+  if (
+    current &&
+    !current.routePlaceholder &&
+    current.sharedLinkOnly !== true &&
+    current.sharedRevalidationPending !== true
+  ) {
+    return nextState;
+  }
+  return upsertLinkedSession(nextState, { ...linkedSession, sharedLinkOnly: true });
+}
+
+export function removeSharedLinkedSession(nextState, sessionId) {
+  const current = (nextState.interactiveSessions || []).find((session) => session.id === sessionId);
+  if (current?.sharedLinkOnly !== true && current?.sharedRevalidationPending !== true) {
+    return nextState;
+  }
+  return {
+    ...nextState,
+    interactiveSessions: (nextState.interactiveSessions || []).filter(
+      (session) => session.id !== sessionId,
+    ),
+  };
+}
+
+export function retainTokenBackedSession(nextState, currentState) {
+  const linkedSession = (currentState.interactiveSessions || []).find(
+    (session) => session.sharedLinkOnly === true || session.sharedRevalidationPending === true,
+  );
+  return retainLinkedSession(nextState, linkedSession);
 }
 
 export function sharedSessionState(session, auth, deployment = defaultDeployment) {
@@ -133,6 +215,23 @@ export function createAppPolling({
   };
 }
 
+export async function runAppPollingInterval({
+  signedIn,
+  shared,
+  locked,
+  loadState,
+  loadSharedSession,
+  onSharedError,
+}) {
+  if (signedIn) await loadState?.();
+  if (!shared.id || !shared.token || locked) return;
+  try {
+    await loadSharedSession?.({ preserveSignedIn: signedIn, notify: false });
+  } catch (error) {
+    await onSharedError?.(error, { preserveSignedIn: signedIn, notify: false, shared });
+  }
+}
+
 export function createRequestFence() {
   let generation = 0;
   return {
@@ -155,6 +254,7 @@ export function useAppData({
   onSignedOut,
   onSharedSessionLoaded,
   onSharedSessionRejected,
+  onSharedSessionInvalidated,
 }) {
   const [state, setState] = useState(() => initialAppState(initialSessionLink));
   const [signedIn, setSignedIn] = useState(false);
@@ -169,6 +269,7 @@ export function useAppData({
     onSignedOut,
     onSharedSessionLoaded,
     onSharedSessionRejected,
+    onSharedSessionInvalidated,
   });
   const mountedRef = useRef(false);
   const autoLoginStarted = useRef(false);
@@ -189,20 +290,46 @@ export function useAppData({
     onSignedOut,
     onSharedSessionLoaded,
     onSharedSessionRejected,
+    onSharedSessionInvalidated,
   };
+
+  function updateSignedIn(value) {
+    signedInRef.current = value;
+    setSignedIn(value);
+  }
+
+  function clearAuthenticatedState(shared = sharedRef.current) {
+    callbacksRef.current.onSignedOut?.();
+    updateSignedIn(false);
+    const nextState = {
+      ...initialAppState(shared),
+      auth: stateRef.current.auth,
+      deployment: stateRef.current.deployment,
+    };
+    stateRef.current = nextState;
+    setState(nextState);
+  }
 
   if (!pollingRef.current) {
     pollingRef.current = createAppPolling({
       runInitial: () => loadStateRef.current?.(),
       runInterval: () => {
-        if (signedInRef.current) return loadStateRef.current?.();
+        const signedIn = signedInRef.current;
         const shared = sharedRef.current;
-        if (!shared.id || !shared.token || document.body.classList.contains("locked")) return;
-        return loadSharedSessionRef.current?.().catch((error) => {
-          if (error.status === 403 || error.status === 404) {
-            return showSharedLinkError(error);
-          }
-          console.warn("Shared session refresh failed", error);
+        return runAppPollingInterval({
+          signedIn,
+          shared,
+          locked: document.body.classList.contains("locked"),
+          loadState: () => loadStateRef.current?.(),
+          loadSharedSession: (options) => loadSharedSessionRef.current?.(options),
+          onSharedError: (error, context) => {
+            if (error.status === 403 || error.status === 404) {
+              return context.preserveSignedIn
+                ? showPreservedSharedLinkError(error, context.shared)
+                : showSharedLinkError(error);
+            }
+            console.warn("Shared session refresh failed", error);
+          },
         });
       },
       runRetry: () => loadStateRef.current?.(),
@@ -232,7 +359,11 @@ export function useAppData({
             (session) => session.id === linkedSessionId,
           )
         : null;
-      nextState = retainLinkedSession(nextState, linkedSession);
+      nextState = await reconcileLinkedSessionState(nextState, linkedSession, {
+        sharedToken: sharedRef.current.token,
+        loadSession: (id) => api(`/api/interactive-sessions/${encodeURIComponent(id)}`),
+      });
+      if (!isCurrentStateRequest(generation)) return;
       const activeRun = activeRunRef.current;
       const activeCard = nextState.cards.find((card) => card.id === activeRun.id);
       if (activeRun.id && activeRun.open && activeCard?.changes?.files?.length) {
@@ -248,16 +379,19 @@ export function useAppData({
       pollingRef.current.clearRetry();
       setAuthMethods(nextState.auth || authMethodsRef.current);
       setState(nextState);
-      setSignedIn(true);
+      updateSignedIn(true);
       setLoginMessage("");
       finishGithubLoginCallback(true);
     } catch (error) {
       if (!isCurrentStateRequest(generation)) return;
       if (error.status === 401 || error.status === 403) {
         const shared = sharedRef.current;
+        const sharedFallback = shared.id && shared.token ? shared : { id: null, token: null };
+        finishGithubLoginCallback(false);
+        clearAuthenticatedState(sharedFallback);
         if (shared.id && shared.token) {
           try {
-            await loadSharedSession();
+            await loadSharedSession({ forceSharedOnlyGeneration: generation });
           } catch (sharedError) {
             await showSharedLinkError(sharedError);
           }
@@ -265,10 +399,7 @@ export function useAppData({
         }
         const methods = await loadAuthMethods();
         if (!isCurrentStateRequest(generation)) return;
-        finishGithubLoginCallback(false);
         if (error.status === 401 && (await maybeAutoGithubLogin(methods))) return;
-        callbacksRef.current.onSignedOut?.();
-        setSignedIn(false);
         setLoginMessage(error.message === "unauthorized" ? "" : error.message);
         return;
       }
@@ -295,7 +426,7 @@ export function useAppData({
     return mountedRef.current && stateRequestFence.current.isCurrent(generation);
   }
 
-  async function performLoadSharedSession(shared) {
+  async function performLoadSharedSession(shared, notify, forceSharedOnlyGeneration) {
     let result;
     try {
       result = await api(
@@ -303,40 +434,95 @@ export function useAppData({
         { authOptional: true },
       );
     } catch (error) {
-      if (!sameSharedLink(sharedRef.current, shared)) return null;
+      if (
+        !sameSharedLink(sharedRef.current, shared) ||
+        (forceSharedOnlyGeneration !== null && !isCurrentStateRequest(forceSharedOnlyGeneration))
+      )
+        return null;
       throw error;
     }
     if (!sameSharedLink(sharedRef.current, shared)) return null;
-    const methods = await loadAuthMethods();
-    if (!mountedRef.current || !sameSharedLink(sharedRef.current, shared)) return null;
-    setState(
-      sharedSessionState(result.session, methods, stateRef.current.deployment || defaultDeployment),
-    );
-    setSignedIn(false);
-    callbacksRef.current.onSharedSessionLoaded?.(result.session);
-    return result.session;
+    if (
+      !mountedRef.current ||
+      !sameSharedLink(sharedRef.current, shared) ||
+      (forceSharedOnlyGeneration !== null && !isCurrentStateRequest(forceSharedOnlyGeneration))
+    )
+      return null;
+    const linkedSession = { ...result.session, sharedLinkOnly: true };
+    if (forceSharedOnlyGeneration !== null || !commitSharedSessionToSignedInState(linkedSession)) {
+      const methods = await loadAuthMethods();
+      if (
+        !mountedRef.current ||
+        !sameSharedLink(sharedRef.current, shared) ||
+        (forceSharedOnlyGeneration !== null && !isCurrentStateRequest(forceSharedOnlyGeneration))
+      )
+        return null;
+      if (
+        forceSharedOnlyGeneration !== null ||
+        !commitSharedSessionToSignedInState(linkedSession)
+      ) {
+        setState(
+          sharedSessionState(
+            linkedSession,
+            methods,
+            stateRef.current.deployment || defaultDeployment,
+          ),
+        );
+        updateSignedIn(false);
+      }
+    }
+    if (notify) callbacksRef.current.onSharedSessionLoaded?.(linkedSession);
+    return linkedSession;
   }
 
-  function loadSharedSession() {
+  function loadSharedSession({
+    preserveSignedIn = false,
+    notify = true,
+    forceSharedOnlyGeneration = null,
+  } = {}) {
     const shared = { ...sharedRef.current };
-    const key = sharedLinkKey(shared);
+    const key = `${sharedLinkKey(shared)}\0${preserveSignedIn ? "signed-in" : "shared"}\0${notify ? "notify" : "silent"}\0${forceSharedOnlyGeneration ?? "current"}`;
     if (sharedRequestRef.current?.key === key) return sharedRequestRef.current.request;
-    const request = performLoadSharedSession(shared).finally(() => {
-      if (sharedRequestRef.current?.request === request) sharedRequestRef.current = null;
-    });
+    const request = performLoadSharedSession(shared, notify, forceSharedOnlyGeneration).finally(
+      () => {
+        if (sharedRequestRef.current?.request === request) sharedRequestRef.current = null;
+      },
+    );
     sharedRequestRef.current = { key, request };
     return request;
   }
 
+  function commitSharedSessionToSignedInState(linkedSession) {
+    if (!signedInRef.current) return false;
+    setState((current) => upsertSharedLinkedSession(current, linkedSession));
+    return true;
+  }
+
   async function showSharedLinkError(error) {
+    const shared = { ...sharedRef.current };
     await loadAuthMethods();
-    if (!mountedRef.current) return;
+    if (!mountedRef.current || !sameSharedLink(sharedRef.current, shared)) return;
+    if (signedInRef.current) {
+      showPreservedSharedLinkError(error, shared);
+      return;
+    }
+    clearAuthenticatedState({ id: null, token: null });
     callbacksRef.current.onSharedSessionRejected?.();
-    setSignedIn(false);
     setLoginMessage(
       error?.status === 404
         ? "Shared session link is invalid or expired."
         : error?.message || "Shared session could not be loaded.",
+    );
+  }
+
+  function showPreservedSharedLinkError(error, shared) {
+    if (!mountedRef.current || !sameSharedLink(sharedRef.current, shared)) return;
+    setState((current) => removeSharedLinkedSession(current, shared.id));
+    callbacksRef.current.onSharedSessionInvalidated?.(shared.id);
+    console.warn(
+      error?.status === 404
+        ? "Shared session link expired or was revoked"
+        : "Shared session access was rejected",
     );
   }
 
@@ -400,6 +586,7 @@ export function useAppData({
     } catch {}
     autoLoginStarted.current = false;
     await api("/api/logout", { method: "POST", authOptional: true });
+    clearAuthenticatedState();
     await refreshState();
   }
 

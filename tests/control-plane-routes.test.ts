@@ -49,8 +49,8 @@ function dependencies(calls: string[]): ControlPlaneRouteDependencies {
       calls.push(`card:create:${user.login}`);
       return { handler: "card:create" };
     },
-    async readCardRuns(cardId) {
-      calls.push(`card:runs:${cardId}`);
+    async readCardRuns(user, cardId) {
+      calls.push(`card:runs:${user.login}:${cardId}`);
       return [{ id: "run-1" }];
     },
     async mutateCard(user, cardId, action) {
@@ -114,7 +114,7 @@ test("control-plane read and card routes enforce their role boundaries", async (
     [request("GET", "/api/fleet"), viewer, 200, ["fleet:viewer"]],
     [request("GET", "/api/github/refs?number=42"), maintainer, 200, ["github-refs:42"]],
     [request("POST", "/api/cards", {}), maintainer, 201, ["card:create:maintainer"]],
-    [request("GET", "/api/cards/card%2F1/runs"), viewer, 200, ["card:runs:card/1"]],
+    [request("GET", "/api/cards/card%2F1/runs"), viewer, 200, ["card:runs:viewer:card/1"]],
   ];
 
   for (const [value, user, expectedStatus, expectedCalls] of cases) {
@@ -223,8 +223,8 @@ test("control-plane routes report missing cards and exact fallthrough", async ()
   const calls: string[] = [];
   await assert.rejects(
     dispatch(request("GET", "/api/cards/missing/runs"), viewer, calls, {
-      readCardRuns: async (cardId) => {
-        calls.push(`card:runs:${cardId}`);
+      readCardRuns: async (user, cardId) => {
+        calls.push(`card:runs:${user.login}:${cardId}`);
         return null;
       },
     }),
@@ -233,7 +233,7 @@ test("control-plane routes report missing cards and exact fallthrough", async ()
       return true;
     },
   );
-  assert.deepEqual(calls, ["card:runs:missing"]);
+  assert.deepEqual(calls, ["card:runs:viewer:missing"]);
 
   const fallthroughCalls: string[] = [];
   for (const value of [

@@ -8,7 +8,7 @@ import { browserSessionEmbedUrl, browserSessionUrl, deploymentConfig } from "./d
 import type { RuntimeEnv } from "./env.ts";
 import type { GitHubActionsApplication } from "./github-actions-application.ts";
 import { serviceUnavailable } from "./http.ts";
-import type { User } from "./models.ts";
+import { userServiceSessionAuthority, type User } from "./models.ts";
 import { OpenClawBranchService } from "./openclaw-branch.ts";
 import { OpenClawController, type OpenClawControllerStore } from "./openclaw-controller.ts";
 import { OpenClawCreateService, type OpenClawCreateStore } from "./openclaw-create.ts";
@@ -31,7 +31,7 @@ import {
   removeInteractiveSessionReservation,
 } from "./openclaw-repository.ts";
 import { openClawEmbedTicketSecret } from "./openclaw-embed-access.ts";
-import { readOpenClawRequestSession } from "./openclaw-request.ts";
+import { readOpenClawRequestSession, type OpenClawCrabboxRequest } from "./openclaw-request.ts";
 import { OpenClawRootStopService, type OpenClawRootStopStore } from "./openclaw-root-stop.ts";
 import {
   OpenClawSupervisionService,
@@ -41,6 +41,7 @@ import type { RuntimeApplication } from "./runtime-application.ts";
 import { sandboxLeasePrefix } from "./sandbox-lease.ts";
 import { ServiceRegistry } from "./service-registry.ts";
 import { appendInteractiveSessionEventRecord } from "./session-events.ts";
+import { InteractiveSessionGrantRepository } from "./session-grant-repository.ts";
 import type { InteractiveSessionApplication } from "./interactive-session-application.ts";
 import type { InteractiveSession } from "./session-model.ts";
 import {
@@ -48,6 +49,7 @@ import {
   readInteractiveSessionEventRows,
   readInteractiveSessionRecord,
 } from "./session-repository.ts";
+import { tenancyMode } from "./tenancy.ts";
 
 const openClawPreparationTimeoutMs = 60_000;
 
@@ -142,7 +144,7 @@ export class OpenClawApplication {
       countTranscriptEvents: (sessionId) => countInteractiveSessionEvents(this.env, sessionId),
       sendMessage: (request, session, input) =>
         this.mutationService(request).sendMessage(session, input),
-      stopSession: (request, sessionId) => this.mutationService(request).stopSession(sessionId),
+      stopSession: (request, session) => this.mutationService(request).stopSession(session),
       registerActionSession: (input) => this.githubActions.register(input, this.serviceUser),
       now: () => Date.now(),
       createEmbedTicket: (sessionId, expiresAt) => {
@@ -152,7 +154,8 @@ export class OpenClawApplication {
         }
         return createOpenClawEmbedTicket(secret, sessionId, expiresAt);
       },
-      decorateSession: (session) => this.sessions.present(session, this.serviceUser),
+      decorateSession: (session) =>
+        this.sessions.present(session, openClawAuthorizedUser(this.serviceUser, session)),
       browserUrl: (sessionId) => browserSessionUrl(this.env, sessionId),
       browserEmbedUrl: (sessionId, token) => browserSessionEmbedUrl(this.env, sessionId, token),
       runnerPtyUrl: (sessionId, agentToken) =>
@@ -169,18 +172,34 @@ export class OpenClawApplication {
       });
       const store: OpenClawCreateStore = {
         defaultRuntime: deploymentConfig(this.env).defaultRuntime,
+        privateTenancy: tenancyMode(this.env) === "private",
         now: () => Date.now(),
         preparationSignal: () => AbortSignal.timeout(openClawPreparationTimeoutMs),
-        readRequestSession: async (requestId, requestHash) => {
-          const session = await readOpenClawRequestSession(this.env, requestId, requestHash);
+        readRequestSession: async (requestId, requestHash, compatibility) => {
+          const session = await readOpenClawRequestSession(
+            this.env,
+            requestId,
+            requestHash,
+            compatibility,
+          );
           return session ? this.sessions.present(session, this.serviceUser) : null;
         },
+        resolvePrincipal: (value) =>
+          new InteractiveSessionGrantRepository(this.env).resolvePrincipal(value),
         prepareBranch: (repo, branch, baseBranch, signal) =>
           branches.ensure(repo, branch, baseBranch, signal),
-        createSession: (body, githubToken, options) =>
-          this.sessions
-            .create(this.serviceUser, body, githubToken, options)
-            .then((result) => result.session),
+        createSession: async (body, githubToken, options) => {
+          const createUser = await openClawCreateUser(
+            this.serviceUser,
+            body,
+            (sessionId) => readInteractiveSessionRecord(this.env, sessionId),
+            (sessionId, rootSessionId) =>
+              this.supervision().requireRootScopedSession(sessionId, rootSessionId),
+          );
+          return this.sessions
+            .create(createUser, body, githubToken, options)
+            .then((result) => result.session);
+        },
         audit: (message, now) => this.audit(message, now),
         warn: (event) => console.warn(JSON.stringify(event)),
       };
@@ -199,7 +218,9 @@ export class OpenClawApplication {
       rollbackReservation: (sessionId, createdAt) =>
         this.supervision().rollbackReservation(sessionId, createdAt),
       stopSession: (session) =>
-        this.sessions.mutate(request, this.serviceUser, session.id, "stop").then(() => undefined),
+        this.sessions
+          .mutate(request, openClawAuthorizedUser(this.serviceUser, session), session.id, "stop")
+          .then(() => undefined),
       canReconcileStoppingSession: (sessionId) =>
         canReconcileOpenClawStoppingSession(this.env, sessionId, sandboxLeasePrefix),
       reconcileSession: (session, now) => this.runtime.reconcileById(session.id, now),
@@ -222,10 +243,16 @@ export class OpenClawApplication {
         }),
       audit: (message, now) => this.audit(message, now),
       openTerminal: (session) =>
-        this.dependencies.openTerminal(request, this.serviceUser, session, 120, 34),
-      stopSession: (sessionId) =>
+        this.dependencies.openTerminal(
+          request,
+          openClawAuthorizedUser(this.serviceUser, session),
+          session,
+          120,
+          34,
+        ),
+      stopSession: (session) =>
         this.sessions
-          .mutate(request, this.serviceUser, sessionId, "stop")
+          .mutate(request, openClawAuthorizedUser(this.serviceUser, session), session.id, "stop")
           .then((result) => result.session),
       warn: (event) => console.warn(JSON.stringify(event)),
     };
@@ -247,4 +274,32 @@ function openClawServiceUser(): User {
     allowed: true,
     teams: [],
   };
+}
+
+export function openClawAuthorizedUser(serviceUser: User, session: InteractiveSession): User {
+  return { ...serviceUser, [userServiceSessionAuthority]: session.id };
+}
+
+export async function openClawCreateUser(
+  serviceUser: User,
+  body: OpenClawCrabboxRequest,
+  readSession: (sessionId: string) => Promise<InteractiveSession | null>,
+  requireRootScopedSession: (
+    sessionId: string,
+    rootSessionId: string,
+  ) => Promise<InteractiveSession>,
+): Promise<User> {
+  const parentSessionId = optionalSessionId(body.parentSessionId);
+  if (!parentSessionId) return serviceUser;
+  const candidate = await readSession(parentSessionId);
+  if (!candidate) return serviceUser;
+  const parent = await requireRootScopedSession(
+    parentSessionId,
+    optionalSessionId(body.rootSessionId) || candidate.rootSessionId || candidate.id,
+  );
+  return openClawAuthorizedUser(serviceUser, parent);
+}
+
+function optionalSessionId(value: unknown): string {
+  return typeof value === "string" ? value.trim().slice(0, 120) : "";
 }

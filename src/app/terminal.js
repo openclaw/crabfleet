@@ -244,16 +244,17 @@ export function disposeTerminal(id) {
   restoreScroll();
 }
 
-function shouldConnectLiveTerminal(session) {
-  return (
+export function shouldConnectLiveTerminal(session) {
+  return Boolean(
     isTerminalReadyInteractiveSession(session) &&
     (session.canControl === true ||
+      session.ptyAvailable === true ||
       session.sharedReadOnly === true ||
-      (terminalHubOptions.sharedToken && session.id === terminalHubOptions.sharedSessionId))
+      (terminalHubOptions.sharedToken && session.id === terminalHubOptions.sharedSessionId)),
   );
 }
 
-function canSendTerminalInput(session) {
+export function canSendTerminalInput(session) {
   return (
     isTerminalReadyInteractiveSession(session) &&
     session.canControl === true &&
@@ -280,10 +281,13 @@ function connectTerminalSocket(session, host, term) {
 }
 
 function syncTerminalInputState(session, host, term) {
-  const canInput = canSendTerminalInput(session);
-  host.canInput = canInput;
-  if (host.controller) host.controller.setReadOnly(!canInput);
-  else if (term?.options) term.options.disableStdin = !canInput;
+  applyTerminalInputCapability(host, canSendTerminalInput(session), term);
+}
+
+export function applyTerminalInputCapability(host, canInput, term = host.term) {
+  host.canInput = canInput === true;
+  if (host.controller) host.controller.setReadOnly(!host.canInput);
+  else if (term?.options) term.options.disableStdin = !host.canInput;
 }
 
 function ensureTerminalHub() {
@@ -371,13 +375,26 @@ function handleTerminalHubFrame(frame) {
     }
     return;
   }
-  if (frame.type === TerminalMessageType.ControlRevoked) {
-    host.canInput = false;
-    setTerminalStatus(frame.sessionId, "Read-only PTY");
+  if (
+    frame.type === TerminalMessageType.ControlGranted ||
+    frame.type === TerminalMessageType.ControlRevoked
+  ) {
+    const canInput = frame.type === TerminalMessageType.ControlGranted;
+    applyTerminalInputCapability(host, canInput);
+    setTerminalStatus(frame.sessionId, canInput ? "Live PTY" : "Read-only PTY");
+    if (canInput && host.term?.cols && host.term?.rows) {
+      sendTerminalFrame(
+        frame.sessionId,
+        TerminalMessageType.Resize,
+        encodeResizePayload({ columns: host.term.cols, rows: host.term.rows }),
+      );
+      if (host.focused) focusTerminalWithoutScroll(host);
+    }
     return;
   }
   if (frame.type !== TerminalMessageType.Event) return;
   if (event?.type === "subscribed") {
+    applyTerminalInputCapability(host, event.canInput);
     setTerminalStatus(frame.sessionId, event.canInput ? "Live PTY" : "Read-only PTY");
     if (event.canInput && host.term?.cols && host.term?.rows) {
       terminalHubClient?.send({
