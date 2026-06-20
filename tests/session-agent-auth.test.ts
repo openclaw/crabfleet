@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { sha256 } from "../src/worker/crypto.ts";
-import { userSessionOwnerSubject } from "../src/worker/models.ts";
+import { userServiceSessionAuthority, userSessionOwnerSubject } from "../src/worker/models.ts";
 import {
   AgentSessionAuthenticator,
   agentSessionId,
@@ -85,6 +85,7 @@ test("agent authentication binds request identity and token to one active sessio
   const result = await auth.require(request);
   assert.equal(result.session.id, "IS-agent");
   assert.deepEqual(result.user, {
+    [userServiceSessionAuthority]: "IS-agent",
     subject: "agent:IS-agent",
     login: "session-owner",
     email: null,
@@ -96,7 +97,7 @@ test("agent authentication binds request identity and token to one active sessio
   await assert.rejects(() => auth.require(request, "IS-other"), { message: "unauthorized" });
 });
 
-test("agent authentication separates same-owner authority from the agent principal", async () => {
+test("agent authentication retains only its exact session authority", async () => {
   const request = new Request("https://fleet.example/api/agent/state", {
     headers: {
       authorization: "Bearer agent-token",
@@ -106,7 +107,8 @@ test("agent authentication separates same-owner authority from the agent princip
   const result = await authenticator({ owner_subject: "github:42" }).require(request);
 
   assert.equal(result.user.subject, "agent:IS-agent");
-  assert.equal(result.user[userSessionOwnerSubject], "github:42");
+  assert.equal(result.user[userServiceSessionAuthority], "IS-agent");
+  assert.equal(result.user[userSessionOwnerSubject], undefined);
 });
 
 test("agent authentication rejects missing, invalid, and inactive credentials", async () => {

@@ -13,6 +13,7 @@
 - Bind OpenClaw crabboxes and GitHub Actions sessions to explicit stable human owners in private tenancy, retain service authority only across validated OpenClaw lineage, and keep bootstrap ownership stable across token rotation.
 - Fix local Vite development with `@openclaw/libterminal` by reserving Worker-served Ghostty aliases for production builds and serving the local WASM, icons, and logo without generated placeholders.
 - Keep the mobile navigation and named-access dialog within narrow viewports.
+- Keep each agent credential scoped to its authenticated session and direct children instead of inheriting access to every session owned by the same human.
 - Fix automated Worker deployments by converging the app Custom Domain with the DNS-scoped deployment token instead of requiring zone-route access from the Worker token.
 
 ## 0.2.0 - 2026-06-15

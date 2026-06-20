@@ -254,7 +254,7 @@ Supervision:
 
 - sessions may store `parentSessionId`, `rootSessionId`, `purpose`, and `summary`;
 - built-in Sandboxes receive a scoped agent token;
-- agent APIs allow same-owner state reads, child creation, transcript reads, summary updates, and PTY messaging;
+- session-scoped agent APIs allow reads and PTY messaging for the authenticated session and its direct children, plus child creation, transcript reads, and summary updates;
 - CLI tree, transcript, message, and summary commands use those APIs.
 
 ## Persistence

@@ -8,7 +8,7 @@ import {
   type InteractiveSessionTable,
 } from "./database.ts";
 import type { RuntimeEnv } from "./env.ts";
-import type { User } from "./models.ts";
+import { userServiceSessionAuthority, type User } from "./models.ts";
 import { sessionOwnerSubject, tenancyMode, tenantSubject } from "./tenancy.ts";
 import type { AgentSessionCredential } from "./session-agent-auth.ts";
 import type {
@@ -167,6 +167,8 @@ export async function readVisibleInteractiveSessionRowsForUser(
   if (tenancyMode(env) === "shared") return readVisibleInteractiveSessionRows(env, limit);
   const principalSubject = tenantSubject(user);
   const ownerSubject = sessionOwnerSubject(user);
+  const sessionAuthority = user[userServiceSessionAuthority] || null;
+  const sessionCreator = sessionAuthority ? `session:${sessionAuthority}` : null;
   return database(env)
     .selectFrom("interactive_sessions")
     .selectAll()
@@ -183,6 +185,13 @@ export async function readVisibleInteractiveSessionRowsForUser(
       OR (
         control_expires_at > ${now}
         AND controller_subject = ${principalSubject}
+      )
+      OR (
+        ${sessionAuthority} IS NOT NULL
+        AND (
+          id = ${sessionAuthority}
+          OR (parent_session_id = ${sessionAuthority} AND created_by = ${sessionCreator})
+        )
       )
     )`)
     .orderBy("updated_at", "desc")

@@ -3,7 +3,7 @@ import test from "node:test";
 
 import type { RuntimeEnv } from "../src/worker/env.ts";
 import type { User } from "../src/worker/models.ts";
-import { userSessionOwnerSubject } from "../src/worker/models.ts";
+import { userServiceSessionAuthority } from "../src/worker/models.ts";
 import {
   buildInteractiveSessionReservationValues,
   countInteractiveSessionEvents,
@@ -185,9 +185,9 @@ test("private session reads select only ownership, active grants, or delegated c
   assert.deepEqual(await readVisibleInteractiveSessionRowsForUser(env, current, 12, 1_000), []);
 });
 
-test("agent session reads separate same-owner visibility from agent grants", async () => {
+test("agent session reads are limited to exact authority and direct children", async () => {
   const agent: User = {
-    [userSessionOwnerSubject]: "github:42",
+    [userServiceSessionAuthority]: "IS-agent",
     subject: "agent:IS-agent",
     login: "operator",
     email: null,
@@ -197,11 +197,14 @@ test("agent session reads separate same-owner visibility from agent grants", asy
     teams: [],
   };
   const env = {
-    ...runtimeEnv((_sql, parameters) => {
-      assert.ok(parameters.includes("github:42"));
+    ...runtimeEnv((sql, parameters) => {
+      assert.match(sql, /id =/i);
+      assert.match(sql, /parent_session_id =/i);
+      assert.match(sql, /created_by =/i);
+      assert.equal(parameters.includes("github:42"), false);
       assert.ok(parameters.includes("agent:IS-agent"));
-      assert.equal(parameters.filter((value) => value === "github:42").length, 1);
-      assert.equal(parameters.filter((value) => value === "agent:IS-agent").length, 2);
+      assert.ok(parameters.includes("IS-agent"));
+      assert.ok(parameters.includes("session:IS-agent"));
       return { results: [] };
     }),
     CRABFLEET_TENANCY_MODE: "private",

@@ -448,7 +448,7 @@ Session responses include `ptyAvailable`, the authenticated Worker's authoritati
 
 When the selected runtime profile configures `codexSsh`, a ready `runtime-v1` session response may include `codexSsh: { alias, setupCommand }` for session managers. The alias and optional command are resolved from bounded `{providerResourceId}`, `{workspaceId}`, `{sessionId}`, and `{profile}` placeholders. Alias components use a strict OpenSSH-safe character set. `codexSsh.setupCommand` is an argv-like array whose first and static items use a shell-safe character set and whose dynamic items must each be one complete placeholder; Crabfleet POSIX-shell-quotes every substituted argument so opaque provider identifiers remain data. Missing values, an unsafe resolved alias, or a current profile route that differs from the workspace's immutable registered adapter control plane suppresses the handoff. Shared links and delegated terminal-only controllers never receive it. The command is display/copy data only; Crabfleet never executes it.
 
-Built-in Sandbox sessions receive `CRABFLEET_SESSION_ID`, `CRABFLEET_PARENT_SESSION_ID`, `CRABFLEET_ROOT_SESSION_ID`, `CRABFLEET_AGENT_TOKEN`, and `CRABFLEET_API_URL`. The managed provision hook rotates a fresh agent token in the same durable claim that owns provisioning, then injects that exact token into the Sandbox. The agent token can call the `/api/agent/*` endpoints below for same-owner session discovery, child creation, transcripts, and summary updates.
+Built-in Sandbox sessions receive `CRABFLEET_SESSION_ID`, `CRABFLEET_PARENT_SESSION_ID`, `CRABFLEET_ROOT_SESSION_ID`, `CRABFLEET_AGENT_TOKEN`, and `CRABFLEET_API_URL`. The managed provision hook rotates a fresh agent token in the same durable claim that owns provisioning, then injects that exact token into the Sandbox. The agent token can call the `/api/agent/*` endpoints below for its authenticated session and direct children, including child creation, transcripts, and summary updates; it cannot discover unrelated sessions owned by the same human.
 
 ### POST /api/interactive-sessions/cleanup
 
@@ -574,12 +574,12 @@ Crabfleet-issued session agents use `Authorization: Bearer <CRABFLEET_AGENT_TOKE
 
 - `GET /api/agent/state`: returns app/fleet state plus `{ agent: { sessionId, rootSessionId } }`.
 - `POST /api/agent/interactive-sessions`: creates a child session owned by the same user and linked under the current agent session.
-- `GET /api/agent/interactive-sessions/:id`: reads a visible same-owner session.
+- `GET /api/agent/interactive-sessions/:id`: reads the authenticated session or one of its direct children.
 - `GET /api/agent/interactive-sessions/:id/logs`: returns event logs.
 - `GET /api/agent/interactive-sessions/:id/transcript`: returns the Markdown transcript.
 - `POST /api/agent/interactive-sessions/:id/summary`: updates `purpose` and/or `summary`.
 
-Same-owner terminal steering uses `/api/terminal/ws` with the agent bearer and session ID header; the CLI uses this protocol for `crabfleet message`.
+Session-scoped terminal steering uses `/api/terminal/ws` with the agent bearer and session ID header; the CLI uses this protocol for `crabfleet message`.
 
 ## OpenClaw Service
 

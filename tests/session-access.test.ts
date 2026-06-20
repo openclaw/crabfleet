@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import type { User } from "../src/worker/models.ts";
-import { userSessionOwnerSubject, userTenantSubject } from "../src/worker/models.ts";
+import { userServiceSessionAuthority, userTenantSubject } from "../src/worker/models.ts";
 import {
   canChangeInteractiveSessionMultiplayer,
   canControlInteractiveSession,
@@ -207,11 +207,39 @@ test("private tenancy uses stable subjects for ownership and delegated control",
   assert.equal(access.manage, false);
 });
 
-test("agent same-owner authority does not inherit the owner's grants or delegated control", () => {
+test("agent authority is limited to its session and direct children", () => {
   const agent = user({ subject: "agent:IS-agent", login: "owner" });
-  agent[userSessionOwnerSubject] = "github:42";
-  const owned = interactiveSession(sessionRow({ owner: "owner", owner_subject: "github:42" }), []);
-  assert.equal(canManageInteractiveSession(agent, owned, { mode: "private" }), true);
+  agent[userServiceSessionAuthority] = "IS-agent";
+  const ownSession = interactiveSession(
+    sessionRow({ id: "IS-agent", owner: "owner", owner_subject: "github:42" }),
+    [],
+  );
+  const child = interactiveSession(
+    sessionRow({
+      id: "IS-child",
+      owner_subject: "github:42",
+      parent_session_id: "IS-agent",
+      created_by: "session:IS-agent",
+    }),
+    [],
+  );
+  const sibling = interactiveSession(
+    sessionRow({ id: "IS-sibling", owner: "owner", owner_subject: "github:42" }),
+    [],
+  );
+  const forgedChild = interactiveSession(
+    sessionRow({
+      id: "IS-forged",
+      owner_subject: "github:42",
+      parent_session_id: "IS-sibling",
+      created_by: "session:IS-agent",
+    }),
+    [],
+  );
+  assert.equal(canManageInteractiveSession(agent, ownSession, { mode: "private" }), true);
+  assert.equal(canManageInteractiveSession(agent, child, { mode: "private" }), true);
+  assert.equal(canManageInteractiveSession(agent, sibling, { mode: "private" }), false);
+  assert.equal(canManageInteractiveSession(agent, forgedChild, { mode: "private" }), false);
 
   const foreign = interactiveSession(
     sessionRow({

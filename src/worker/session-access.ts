@@ -86,9 +86,13 @@ export function interactiveSessionAccess(
 ): InteractiveSessionAccess {
   const mode = context.mode ?? "shared";
   const owner = ownsInteractiveSession(user, session, mode);
+  const sessionAuthority = user[userServiceSessionAuthority];
   const serviceCreator =
-    user.subject.startsWith("service:") &&
-    (session.createdBy === user.subject || user[userServiceSessionAuthority] === session.id);
+    (user.subject.startsWith("service:") && session.createdBy === user.subject) ||
+    (Boolean(sessionAuthority) &&
+      (session.id === sessionAuthority ||
+        (session.parentSessionId === sessionAuthority &&
+          session.createdBy === `session:${sessionAuthority}`)));
   const grant = activeInteractiveSessionGrant(user, context.grant, now);
   const delegated =
     delegatedControl &&
