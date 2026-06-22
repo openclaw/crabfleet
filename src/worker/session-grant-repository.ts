@@ -152,17 +152,12 @@ export class InteractiveSessionGrantRepository {
 
   async revoke(sessionId: string, subject: string, now = Date.now()): Promise<boolean> {
     const db = database(this.env);
-    const existing = await db
-      .selectFrom("interactive_session_grants")
-      .select("subject")
+    const deleted = await db
+      .deleteFrom("interactive_session_grants")
       .where("session_id", "=", sessionId)
       .where("subject", "=", subject)
       .executeTakeFirst();
-    if (!existing) return false;
-    const deleteGrant = db
-      .deleteFrom("interactive_session_grants")
-      .where("session_id", "=", sessionId)
-      .where("subject", "=", subject);
+    if (deleted.numDeletedRows < 1n) return false;
     const clearPendingControl = db
       .updateTable("interactive_sessions")
       .set({
@@ -187,7 +182,6 @@ export class InteractiveSessionGrantRepository {
       .set({ updated_at: sql<number>`MAX(updated_at + 1, ${now})` })
       .where("id", "=", sessionId);
     await executeBatch(this.env, [
-      deleteGrant,
       clearPendingControl,
       clearDelegatedControl,
       advanceSessionRevision,
