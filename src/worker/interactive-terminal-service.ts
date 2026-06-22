@@ -245,6 +245,7 @@ export class InteractiveTerminalService {
         this.openUpstream(request, user, session, cols, rows),
       inputPayloads: (subscription, user, payload) =>
         multiplayerTerminalInputPayloads(this.repository, subscription, user, payload),
+      releaseInputState: releaseTerminalInputState,
       markConnectionFailure: async (user, session, message, error) => {
         if (isSandboxLeaseOwnerReconnectError(error)) return;
         const markTerminal =
@@ -549,6 +550,10 @@ function terminalInputState(sessionId: string): TerminalInputState {
     terminalInputStates.set(sessionId, state);
   }
   return state;
+}
+
+function releaseTerminalInputState(sessionId: string): void {
+  terminalInputStates.delete(sessionId);
 }
 
 async function readInteractiveSessionMultiplayerMode(

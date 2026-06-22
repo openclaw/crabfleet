@@ -79,6 +79,7 @@ export type TerminalHubDependencies = {
     user: User | null,
     payload: Uint8Array,
   ): Promise<Array<string | ArrayBuffer | ArrayBufferView>>;
+  releaseInputState(sessionId: string): void;
   markConnectionFailure(
     user: User | null,
     session: InteractiveSession,
@@ -124,6 +125,7 @@ export class TerminalHub {
       const subscription = subscriptions.get(id);
       if (!subscription) return;
       subscriptions.delete(id);
+      this.dependencies.releaseInputState(id);
       subscription.markClosing(reason);
       if (subscription.viewCheck !== null) clearInterval(subscription.viewCheck);
       if (subscription.upstream.readyState < WebSocket.CLOSING) {
@@ -404,7 +406,7 @@ export class TerminalHub {
       const revokeView = () => {
         if (!viewGranted) return;
         viewGranted = false;
-        subscriptions.delete(id);
+        if (subscriptions.delete(id)) this.dependencies.releaseInputState(id);
         if (viewCheck !== null) clearInterval(viewCheck);
         if (upstream.readyState === WebSocket.OPEN) upstream.close(1008, "share revoked");
         sendTerminalJson(client, TerminalMessageType.Error, id, {
@@ -474,7 +476,7 @@ export class TerminalHub {
               [session.attachUrl],
             )
           : "";
-        subscriptions.delete(id);
+        if (subscriptions.delete(id)) this.dependencies.releaseInputState(id);
         if (viewCheck !== null) clearInterval(viewCheck);
         if (!isPassiveTerminalClose(closeReason)) {
           const message = terminalCloseMessage(event.code, safeUpstreamReason);
@@ -490,7 +492,7 @@ export class TerminalHub {
       });
       upstream.addEventListener("error", () => {
         const closeReason = closingReason;
-        subscriptions.delete(id);
+        if (subscriptions.delete(id)) this.dependencies.releaseInputState(id);
         if (viewCheck !== null) clearInterval(viewCheck);
         const message = "terminal unavailable: upstream terminal error";
         if (!isPassiveTerminalClose(closeReason)) {

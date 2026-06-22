@@ -118,6 +118,7 @@ function dependencies(
     async inputPayloads(_subscription, _user, payload) {
       return [payload];
     },
+    releaseInputState() {},
     async markConnectionFailure() {},
     async markDetached() {},
     ...overrides,
@@ -238,6 +239,7 @@ test("terminal hub routes multiplex frames and explicit output acknowledgements"
   const upstream = socket();
   let upgraded = false;
   let connected = 0;
+  const releasedInputStates: string[] = [];
   const hub = new TerminalHub(
     dependencies(client, server, upstream, {
       upgradeResponse() {
@@ -252,6 +254,9 @@ test("terminal hub routes multiplex frames and explicit output acknowledgements"
             connected += 1;
           },
         };
+      },
+      releaseInputState(sessionId) {
+        releasedInputStates.push(sessionId);
       },
     }),
   );
@@ -341,6 +346,7 @@ test("terminal hub routes multiplex frames and explicit output acknowledgements"
   });
   await flushQueues();
   assert.deepEqual(upstream.closed, [{ code: 1000, reason: "unsubscribed" }]);
+  assert.deepEqual(releasedInputStates, [session.id]);
   server.emit("close");
 });
 
