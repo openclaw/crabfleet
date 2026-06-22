@@ -34,7 +34,7 @@
     "preact": "^10.29.2"
   },
   "devDependencies": {
-    "@cloudflare/workers-types": "latest",
+    "@cloudflare/workers-types": "4.20260617.1",
     "@preact/preset-vite": "^2.10.5",
     "@typescript/native-preview": "7.0.0-dev.20260609.1",
     "oxfmt": "^0.54.0",

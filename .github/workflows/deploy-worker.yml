@@ -84,6 +84,10 @@ jobs:
             echo "::error::Set CRABBOX_EMBED_TICKET_SECRET before deploying Crabfleet."
             exit 1
           fi
+          if [ -z "${CRABBOX_OPENCLAW_TOKEN:-}" ]; then
+            echo "::error::Set CRABBOX_OPENCLAW_TOKEN before deploying Crabfleet."
+            exit 1
+          fi
           runtime_token="$(
             node -e '
               const { createHmac } = require("node:crypto");

@@ -63,7 +63,7 @@ jobs:
           /tmp/crabfleet --version
           /tmp/crabfleet --help
           /tmp/crabfleet new --help
-          /tmp/crabfleet login
+          /tmp/crabfleet login --help
 
       - name: Build SSH gateway image
         run: docker build -f Dockerfile.ssh-gateway .

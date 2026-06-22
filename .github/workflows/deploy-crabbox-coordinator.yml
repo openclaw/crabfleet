@@ -96,16 +96,20 @@ jobs:
           test "$deployed" = "1"
           verified=0
           for attempt in $(seq 1 30); do
-            workspace_status="$(
+            if ! workspace_status="$(
               curl --silent --show-error --output /dev/null --write-out '%{http_code}' \
                 --header "Authorization: Bearer $token" \
                 https://crabbox.openclaw.ai/v1/workspaces/deploy-auth-check
-            )"
-            lease_status="$(
+            )"; then
+              workspace_status="000"
+            fi
+            if ! lease_status="$(
               curl --silent --show-error --output /dev/null --write-out '%{http_code}' \
                 --header "Authorization: Bearer $token" \
                 https://crabbox.openclaw.ai/v1/leases
-            )"
+            )"; then
+              lease_status="000"
+            fi
             if [ "$workspace_status" = "404" ] && [ "$lease_status" = "401" ]; then
               verified=$((verified + 1))
               if [ "$verified" = "12" ]; then
