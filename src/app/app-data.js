@@ -561,8 +561,10 @@ export function useAppData({
     try {
       await api("/api/login/token", { method: "POST", body: { token }, authOptional: true });
       await refreshState();
+      return true;
     } catch (error) {
       if (mountedRef.current) setLoginMessage(String(error.message || error));
+      return false;
     }
   }
 

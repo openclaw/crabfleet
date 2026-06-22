@@ -38,6 +38,7 @@ export function LoginScreen({
   onDevIdentity,
 }) {
   const [token, setToken] = useState("");
+  const [submittingToken, setSubmittingToken] = useState(false);
   return (
     <section class="login-screen" hidden={hidden}>
       <a class="login-back" href="/docs/">
@@ -46,10 +47,15 @@ export function LoginScreen({
       <InfrastructureField />
       <form
         class="login-panel"
-        onSubmit={(event) => {
+        onSubmit={async (event) => {
           event.preventDefault();
-          void onToken(token);
-          setToken("");
+          const submittedToken = token;
+          setSubmittingToken(true);
+          try {
+            if ((await onToken(submittedToken)) !== false) setToken("");
+          } finally {
+            setSubmittingToken(false);
+          }
         }}
       >
         <div class="login-brand">
@@ -97,12 +103,12 @@ export function LoginScreen({
                   type="password"
                   name="bootstrap-token"
                   autocomplete="current-password"
-                  disabled={!authMethods.token}
+                  disabled={!authMethods.token || submittingToken}
                   value={token}
                   onInput={(event) => setToken(event.currentTarget.value)}
                 />
               </label>
-              <button type="submit" disabled={!authMethods.token}>
+              <button type="submit" disabled={!authMethods.token || submittingToken}>
                 Use token
               </button>
             </div>
