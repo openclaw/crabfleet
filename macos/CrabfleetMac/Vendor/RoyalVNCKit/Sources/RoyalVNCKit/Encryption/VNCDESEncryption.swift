@@ -6,16 +6,18 @@ import Foundation
 
 import d3des
 
-struct VNCDESEncryption {
-	private static let encryptionLock = NSLock()
+enum D3DESLock {
+	static let shared = NSLock()
+}
 
+struct VNCDESEncryption {
 	static func encrypt(data: Data,
 						key: String) -> Data? {
 		var data = data
 		guard var paddedKey = paddedKey(key) else { return nil }
 
-		encryptionLock.lock()
-		defer { encryptionLock.unlock() }
+		D3DESLock.shared.lock()
+		defer { D3DESLock.shared.unlock() }
 		let success = encrypt(data: &data,
 							  paddedKey: &paddedKey)
 

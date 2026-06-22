@@ -8,8 +8,6 @@ import d3des
 
 extension VNCProtocol.UltraVNCMSLogonIIAuthentication {
 	struct Authentication {
-		private static let encryptionLock = NSLock()
-
         let encryptedCredential: Data
         let publicKey: Data
 
@@ -87,8 +85,8 @@ private extension VNCProtocol.UltraVNCMSLogonIIAuthentication.Authentication {
 
 		var mutableKey = key
 
-		encryptionLock.lock()
-		defer { encryptionLock.unlock() }
+		D3DESLock.shared.lock()
+		defer { D3DESLock.shared.unlock() }
 		let success = mutableKey.withUnsafeMutableBytes { keyBufferPtr in
 			guard let keyPtr = keyBufferPtr.baseAddress?.assumingMemoryBound(to: UInt8.self) else {
 				return false
