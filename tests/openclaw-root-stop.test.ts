@@ -244,3 +244,61 @@ test("OpenClaw root stop rejects non-room roots before recording mutations", asy
   });
   assert.equal(mutated, false);
 });
+
+test("OpenClaw root stop waits for started lifecycle mutations after deadline", async () => {
+  const calls: string[] = [];
+  let releaseStop: (() => void) | null = null;
+  const root = sessionRow({
+    id: "IS-1",
+    root_session_id: "IS-1",
+    created_by: "service:openclaw",
+    status: "stopped",
+  });
+  const child = sessionRow({
+    id: "IS-2",
+    parent_session_id: "IS-1",
+    root_session_id: "IS-1",
+    created_by: "session:IS-1",
+    status: "ready",
+  });
+  const testClock = clock();
+  const service = new OpenClawRootStopService(
+    rootStopStore({
+      readRootRows: async () => [child, root],
+      stopSession: async () => {
+        calls.push("stop:start");
+        testClock.current = 10;
+        await new Promise<void>((resolve) => {
+          releaseStop = resolve;
+        });
+        calls.push("stop:done");
+      },
+      readRootCompletion: async () => ({ total: 2, remaining: 1 }),
+    }),
+    "runtime-adapter",
+    { clock: testClock, deadlineMilliseconds: 5 },
+  );
+
+  const result = service.stop("IS-1");
+  while (!releaseStop) {
+    await new Promise<void>((resolve) => setImmediate(resolve));
+  }
+  assert.deepEqual(calls, ["stop:start"]);
+
+  let settled = false;
+  void result.catch(() => {
+    settled = true;
+  });
+  await Promise.resolve();
+  assert.equal(settled, false);
+
+  releaseStop?.();
+  await assert.rejects(result, (error: unknown) => {
+    assert.equal(
+      typeof error === "object" && error !== null && "status" in error ? error.status : null,
+      503,
+    );
+    return true;
+  });
+  assert.deepEqual(calls, ["stop:start", "stop:done"]);
+});

@@ -138,14 +138,8 @@ export class OpenClawRootStopService {
   private async runBeforeDeadline(deadline: number, operation: () => Promise<void>): Promise<void> {
     const remaining = deadline - this.clock.now();
     if (remaining <= 0) return;
-    await new Promise<void>((resolve) => {
-      const timer = setTimeout(resolve, remaining);
-      void operation()
-        .catch(() => undefined)
-        .finally(() => {
-          clearTimeout(timer);
-          resolve();
-        });
-    });
+    try {
+      await operation();
+    } catch {}
   }
 }
