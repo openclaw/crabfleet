@@ -440,15 +440,19 @@ function TerminalMount({ session, focused, singleSession, drawerOpen }) {
   const ref = useRef(null);
   const hideTimer = useRef(null);
   const mountedSessionId = useRef(null);
+  const mountedEffectKey = useRef("");
   const [visible, setVisible] = useState(focused);
   const provisioning = isProvisioningInteractiveSession(session);
   const localSession = isLocalInteractiveSession(session);
   const endedSession = session.kind === "interactive" && isDeadInteractiveSession(session);
+  const mountKey = terminalMountKey(session);
+  const textKey = terminalText(session);
 
   useLayoutEffect(
     () => () => {
       if (mountedSessionId.current) disposeTerminal(mountedSessionId.current);
       mountedSessionId.current = null;
+      mountedEffectKey.current = "";
     },
     [],
   );
@@ -515,12 +519,26 @@ function TerminalMount({ session, focused, singleSession, drawerOpen }) {
         disposeTerminal(mountedSessionId.current);
         mountedSessionId.current = null;
       }
+      mountedEffectKey.current = "";
       mount.innerHTML = "";
       return;
     }
+    const effectKey = `${mountKey}:${focused ? "focused" : "inline"}:${textKey}`;
+    if (mountedEffectKey.current === effectKey) return;
+    mountedEffectKey.current = effectKey;
     mountedSessionId.current = session.id;
     void mountTerminal(session, mount, { focused });
-  }, [session, focused, drawerOpen, visible, provisioning, localSession, endedSession]);
+  }, [
+    session,
+    focused,
+    drawerOpen,
+    visible,
+    provisioning,
+    localSession,
+    endedSession,
+    mountKey,
+    textKey,
+  ]);
 
   const terminalActive = drawerOpen && visible && !localSession && !provisioning && !endedSession;
 
