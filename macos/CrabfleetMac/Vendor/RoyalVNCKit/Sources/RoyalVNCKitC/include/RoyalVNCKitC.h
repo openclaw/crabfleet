@@ -1,3 +1,6 @@
+#ifndef RoyalVNCKitC_h
+#define RoyalVNCKitC_h
+
 #include <stdlib.h>
 #include <stdio.h>
 #include <stdint.h>
@@ -729,3 +732,5 @@ extern void rvnc_connection_key_down(rvnc_connection_t _Nonnull connection,
  */
 extern void rvnc_connection_key_up(rvnc_connection_t _Nonnull connection,
                                    uint32_t key);
+
+#endif /* RoyalVNCKitC_h */
