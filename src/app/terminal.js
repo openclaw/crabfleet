@@ -43,6 +43,7 @@ let terminalEpoch = 0;
 let terminalHubClient = null;
 let terminalHubOptions = {};
 const terminalHosts = new Map();
+const terminalMountsInFlight = new Map();
 
 export function configureTerminalHub(options) {
   terminalHubOptions = options;
@@ -59,6 +60,11 @@ export async function mountTerminal(session, mount, options = {}) {
   const text = terminalText(session);
   const live = shouldConnectLiveTerminal(session);
   const canInput = canSendTerminalInput(session);
+  const inFlight = terminalMountsInFlight.get(session.id);
+  if (inFlight?.mount === mount && inFlight.live === live) {
+    await inFlight.promise;
+    return mountTerminal(session, mount, options);
+  }
   if (previous?.mount === mount && previous.live === live) {
     previous.focused = Boolean(options.focused);
     syncTerminalInputState(session, previous, previous.term);
@@ -92,6 +98,11 @@ export async function mountTerminal(session, mount, options = {}) {
 
   disposeTerminal(session.id);
   const mountEpoch = terminalEpoch;
+  let finishMount = () => {};
+  const mountPromise = new Promise((resolve) => {
+    finishMount = resolve;
+  });
+  terminalMountsInFlight.set(session.id, { mount, live, promise: mountPromise });
   try {
     mount.innerHTML = "";
     const restoreOpenScroll = preserveScrollPosition(mount);
@@ -148,6 +159,11 @@ export async function mountTerminal(session, mount, options = {}) {
     terminalHosts.set(session.id, { mount, term: null, text, live: false, socket: null });
     setTerminalStatus(session.id, "Text fallback");
     console.warn("Ghostty terminal unavailable", error);
+  } finally {
+    if (terminalMountsInFlight.get(session.id)?.promise === mountPromise) {
+      terminalMountsInFlight.delete(session.id);
+    }
+    finishMount();
   }
 }
 
