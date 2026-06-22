@@ -1,5 +1,5 @@
 import type { AdminMutationStore, AdminPolicy } from "./admin-repository.ts";
-import { badRequest } from "./http.ts";
+import { badRequest, forbidden } from "./http.ts";
 import type { Role, User } from "./models.ts";
 import { githubRepoParts, normalizeRepo } from "./repositories.ts";
 import type { RepoWorkflow } from "./workflow-model.ts";
@@ -39,6 +39,7 @@ export class AdminService {
   }
 
   async updatePolicy(input: AdminPolicyInput, user: User): Promise<AdminPolicy> {
+    requireAdminUser(user);
     const policy = {
       cap: Math.min(200, Math.max(1, Number.isFinite(input.cap) ? Number(input.cap) : 20)),
       retention: oneOf(input.retention, ["14", "30", "60"], "30"),
@@ -55,6 +56,7 @@ export class AdminService {
   }
 
   async evaluateWorkflow(input: AdminWorkflowInput, user: User): Promise<RepoWorkflow> {
+    requireAdminUser(user);
     const repo = normalizeRepo(input.repo) || this.dependencies.preferredRepo;
     await this.dependencies.store.requireRepo(repo);
     const now = this.dependencies.now();
@@ -71,6 +73,7 @@ export class AdminService {
     input: AdminAllowEntryInput,
     user: User,
   ): Promise<{ value: string; role: Role }> {
+    requireAdminUser(user);
     const value = normalizeAllow(input.value);
     if (!value) throw badRequest("allow value is required");
     const role = oneOf(input.role, ["viewer", "maintainer", "owner"], "maintainer") as Role;
@@ -81,6 +84,7 @@ export class AdminService {
   }
 
   async removeAllowEntry(value: string, user: User): Promise<string> {
+    requireAdminUser(user);
     const normalized = normalizeAllow(value);
     const now = this.dependencies.now();
     await this.dependencies.store.removeAllowEntry(normalized);
@@ -89,6 +93,7 @@ export class AdminService {
   }
 
   async addRepo(input: AdminRepoInput, user: User): Promise<string> {
+    requireAdminUser(user);
     const repo = normalizeRepo(input.repo);
     if (!repo) throw badRequest("repo is required");
     if (!githubRepoParts(repo)) throw badRequest("repo must be a GitHub owner/name");
@@ -99,11 +104,20 @@ export class AdminService {
   }
 
   async removeRepo(repo: string, user: User): Promise<string> {
+    requireAdminUser(user);
     const normalized = normalizeRepo(repo);
+    if (!normalized) throw badRequest("repo is required");
+    if (!githubRepoParts(normalized)) throw badRequest("repo must be a GitHub owner/name");
     const now = this.dependencies.now();
     await this.dependencies.store.disableRepo(normalized, now);
     await this.dependencies.audit(user, `repo removed ${normalized}`, now);
     return normalized;
+  }
+}
+
+function requireAdminUser(user: User): void {
+  if (!user.allowed || user.role !== "owner") {
+    throw forbidden("admin owner role required");
   }
 }
 

@@ -77,6 +77,12 @@ jobs:
               exit 2
               ;;
           esac
+          case "$job" in
+            ''|*[!A-Za-z0-9._-]*)
+              echo "Invalid crabbox_job" >&2
+              exit 2
+              ;;
+          esac
           mkdir -p "$HOME/.crabbox/actions"
           state="$HOME/.crabbox/actions/${CRABBOX_ID}.env"
           env_file="$HOME/.crabbox/actions/${CRABBOX_ID}.env.sh"
@@ -117,7 +123,7 @@ jobs:
             ''|*[!0-9]*) minutes=90 ;;
           esac
           stop="$HOME/.crabbox/actions/${CRABBOX_ID}.stop"
-          deadline=$(( $(date +%s) + minutes * 60 ))
+          deadline=$(( $(date +%s) + 10#$minutes * 60 ))
           while [ "$(date +%s)" -lt "$deadline" ]; do
             if [ -f "$stop" ]; then
               exit 0

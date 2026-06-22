@@ -16,6 +16,9 @@ const owner: User = {
   teams: [],
 };
 
+const maintainer: User = { ...owner, role: "maintainer" };
+const disallowedOwner: User = { ...owner, allowed: false };
+
 function workflow(repo: string, status: RepoWorkflow["status"] = "ok"): RepoWorkflow {
   return {
     repo,
@@ -91,6 +94,29 @@ test("admin policy normalizes bounds and records audit after persistence", async
   );
 });
 
+test("admin mutations require an allowed owner before store writes", async () => {
+  const attempts: Array<[string, (service: AdminService, user: User) => Promise<unknown>]> = [
+    ["updatePolicy", (service, user) => service.updatePolicy({ cap: 5 }, user)],
+    ["evaluateWorkflow", (service, user) => service.evaluateWorkflow({}, user)],
+    ["addAllowEntry", (service, user) => service.addAllowEntry({ value: "team/core" }, user)],
+    ["removeAllowEntry", (service, user) => service.removeAllowEntry("team/core", user)],
+    ["addRepo", (service, user) => service.addRepo({ repo: "openclaw/crabfleet" }, user)],
+    ["removeRepo", (service, user) => service.removeRepo("openclaw/crabfleet", user)],
+  ];
+
+  for (const [name, attempt] of attempts) {
+    for (const user of [maintainer, disallowedOwner]) {
+      const calls: string[] = [];
+      const service = new AdminService(dependencies(calls));
+      await assert.rejects(attempt(service, user), (error) => {
+        assert.equal(status(error), 403, name);
+        return true;
+      });
+      assert.deepEqual(calls, [], name);
+    }
+  }
+});
+
 test("admin workflow evaluation validates the preferred repo before refresh", async () => {
   const calls: string[] = [];
   const result = await new AdminService(dependencies(calls)).evaluateWorkflow({}, owner);
@@ -142,6 +168,14 @@ test("admin repository mutations accept one normalized GitHub owner/name", async
   ]);
 
   await assert.rejects(service.addRepo({ repo: "openclaw/crabfleet/extra" }, owner), (error) => {
+    assert.equal(status(error), 400);
+    return true;
+  });
+  await assert.rejects(service.removeRepo("openclaw/crabfleet/extra", owner), (error) => {
+    assert.equal(status(error), 400);
+    return true;
+  });
+  await assert.rejects(service.removeRepo(" ", owner), (error) => {
     assert.equal(status(error), 400);
     return true;
   });
