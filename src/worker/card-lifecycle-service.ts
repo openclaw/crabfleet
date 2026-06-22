@@ -498,11 +498,6 @@ function oneOf<T extends string>(value: unknown, options: readonly T[], fallback
   return options.includes(value as T) ? (value as T) : fallback;
 }
 
-function numberSetting(value: string | undefined, fallback: number): number {
-  const parsed = Number(value);
-  return Number.isFinite(parsed) ? parsed : fallback;
-}
-
 function positiveIntegerSetting(value: string | undefined, fallback: number): number {
   const parsed = Number(value);
   return Number.isSafeInteger(parsed) && parsed >= 1 ? parsed : fallback;
