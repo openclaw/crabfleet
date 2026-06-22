@@ -235,6 +235,36 @@ test("capacity-blocked start records the exact reason without queue evidence", a
   );
 });
 
+test("invalid capacity settings fall back to a positive run cap", async () => {
+  const calls: string[] = [];
+  const current = card();
+  const serviceDependencies = dependencies(calls, () => current);
+  serviceDependencies.readSettings = async () => {
+    calls.push("settings");
+    return { cap: "0", stall_ms: "60000" };
+  };
+  serviceDependencies.store.claimRun = async (input) => {
+    calls.push(`run:claim:${input.runId}:${input.cap}`);
+    return "capacity";
+  };
+
+  await new CardLifecycleService(serviceDependencies).mutate(user, current.id, "start");
+
+  assert.deepEqual(calls, [
+    "card:read:CY-101",
+    "settings",
+    "runs:reconcile:100:-59900:system",
+    "card:read:CY-101",
+    "repo:openclaw/crabfleet",
+    "settings",
+    "workflow:openclaw/crabfleet:100",
+    "run:next:CY-101",
+    "run:claim:CY-101-R1:20",
+    "event:CY-101:operator:capacity blocked at cap 20:100",
+    "card:read:CY-101",
+  ]);
+});
+
 test("pulse on an active run only refreshes the heartbeat", async () => {
   const calls: string[] = [];
   const current = card({ lane: "Running", run: run() });

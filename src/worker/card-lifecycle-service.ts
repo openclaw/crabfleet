@@ -355,7 +355,7 @@ export class CardLifecycleService {
       card;
     await this.dependencies.requireRepo(currentCard.repo);
     const settings = await this.dependencies.readSettings();
-    const cap = numberSetting(settings.cap, 20);
+    const cap = positiveIntegerSetting(settings.cap, 20);
     const existingRun =
       currentCard.run && activeRunStatuses.includes(currentCard.run.status)
         ? currentCard.run
@@ -501,6 +501,11 @@ function oneOf<T extends string>(value: unknown, options: readonly T[], fallback
 function numberSetting(value: string | undefined, fallback: number): number {
   const parsed = Number(value);
   return Number.isFinite(parsed) ? parsed : fallback;
+}
+
+function positiveIntegerSetting(value: string | undefined, fallback: number): number {
+  const parsed = Number(value);
+  return Number.isSafeInteger(parsed) && parsed >= 1 ? parsed : fallback;
 }
 
 function clean(value: unknown, maximum: number): string {
