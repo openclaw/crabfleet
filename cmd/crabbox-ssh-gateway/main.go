@@ -283,11 +283,11 @@ func handleConnWithRelease(
 				continue
 			}
 			go handleSession(channel, requests, permissions, client, func() {
+				sessionSlots.release()
 				select {
 				case sessionDone <- struct{}{}:
 				case <-connectionClosed:
 				}
-				sessionSlots.release()
 			})
 		}
 	}
@@ -666,7 +666,7 @@ func runCommand(ctx context.Context, out io.ReadWriter, perms *ssh.Permissions, 
 		fleettext.WriteSessionSummary(out, session)
 		return 0
 	case "open":
-		fmt.Fprintf(out, "%s/app/\n", client.baseURL)
+		fmt.Fprintf(out, "%s/app/\n", fleettext.Safe(fleettext.SafeMultiline(client.baseURL)))
 		return 0
 	default:
 		fmt.Fprintf(out, "unknown command: %s\n\n", fleettext.Safe(fleettext.SafeMultiline(args[0])))

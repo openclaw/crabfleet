@@ -609,7 +609,11 @@ func (cmd summaryCmd) Run(app *cli, api *fleetapi.Client) error {
 }
 
 func (openCmd) Run(app *cli, _ *fleetapi.Client) error {
-	return openURL(app.API + "/app/")
+	dashboard, err := dashboardURL(app.API)
+	if err != nil {
+		return err
+	}
+	return openURL(dashboard)
 }
 
 func runSSH(app *cli, args ...string) error {
@@ -795,17 +799,56 @@ func isPreRequestNetworkFailure(err error) bool {
 	return strings.Contains(lower, "server gave http response to https client")
 }
 
-func openURL(url string) error {
-	var cmd *exec.Cmd
-	switch runtime.GOOS {
-	case "darwin":
-		cmd = exec.Command("open", url)
-	case "windows":
-		cmd = exec.Command("rundll32", "url.dll,FileProtocolHandler", url)
-	default:
-		cmd = exec.Command("xdg-open", url)
+func openURL(raw string) error {
+	safeURL, err := validateOpenURL(raw)
+	if err != nil {
+		return err
 	}
+	args := openerArgs(runtime.GOOS, safeURL)
+	cmd := exec.Command(args[0], args[1:]...)
 	return cmd.Run()
+}
+
+func openerArgs(goos string, safeURL string) []string {
+	switch goos {
+	case "darwin":
+		return []string{"open", "--", safeURL}
+	case "windows":
+		return []string{"rundll32", "url.dll,FileProtocolHandler", safeURL}
+	default:
+		return []string{"xdg-open", "--", safeURL}
+	}
+}
+
+func dashboardURL(rawAPI string) (string, error) {
+	safeAPI, err := validateOpenURL(rawAPI)
+	if err != nil {
+		return "", err
+	}
+	parsed, err := url.Parse(safeAPI)
+	if err != nil {
+		return "", err
+	}
+	parsed.Path = strings.TrimRight(parsed.Path, "/") + "/app/"
+	parsed.RawPath = ""
+	parsed.RawQuery = ""
+	parsed.Fragment = ""
+	return parsed.String(), nil
+}
+
+func validateOpenURL(raw string) (string, error) {
+	parsed, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
+		return "", fmt.Errorf("invalid URL: %q", raw)
+	}
+	if parsed.User != nil {
+		return "", errors.New("invalid URL: credentials are not allowed")
+	}
+	switch parsed.Scheme {
+	case "https", "http":
+		return parsed.String(), nil
+	}
+	return "", fmt.Errorf("invalid URL scheme: %s", parsed.Scheme)
 }
 
 func openWebVNCURL(raw string) error {

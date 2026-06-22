@@ -431,6 +431,45 @@ func TestSessionChannelsAreBoundedPerConnection(t *testing.T) {
 	}
 }
 
+func TestSessionChannelSlotReleasesBeforeDoneNotification(t *testing.T) {
+	previousChannels := sshSessionChannels
+	previousIdle := sshSessionIdleTimer
+	sshSessionChannels = 1
+	sshSessionIdleTimer = time.Second
+	defer func() {
+		sshSessionChannels = previousChannels
+		sshSessionIdleTimer = previousIdle
+	}()
+
+	addr, cleanup := serveTestSSHGateway(t, testSSHServerConfig(t), nil)
+	defer cleanup()
+	client, err := ssh.Dial("tcp", addr, testSSHClientConfig())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+	first, err := client.NewSession()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := first.Close(); err != nil && !strings.Contains(err.Error(), "EOF") {
+		t.Fatal(err)
+	}
+
+	deadline := time.Now().Add(time.Second)
+	for {
+		replacement, err := client.NewSession()
+		if err == nil {
+			replacement.Close()
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("session slot was not released after close: %v", err)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
 func TestIdleConnectionClosesWithoutSessionChannel(t *testing.T) {
 	previousIdle := sshConnectionIdle
 	previousConnections := sshConnectionSlots
@@ -738,6 +777,32 @@ func TestRunCommandSanitizesUnknownCommand(t *testing.T) {
 		t.Fatalf("unknown command retained terminal controls: %q", got)
 	}
 	if !strings.HasPrefix(got, "unknown command: badcmd\n") {
+		t.Fatalf("output=%q", got)
+	}
+}
+
+func TestRunCommandSanitizesOpenURL(t *testing.T) {
+	permissions := &ssh.Permissions{Extensions: map[string]string{
+		"authorized":  "true",
+		"fingerprint": "SHA256:test",
+		"login":       "operator",
+		"role":        "owner",
+	}}
+	client := &apiClient{
+		baseURL: "https://example.test\x1b]52;c;secret\x07",
+		token:   "gateway-token",
+		client:  http.DefaultClient,
+	}
+	var output bytes.Buffer
+	exit := runCommand(context.Background(), &output, permissions, client, "open", sessionPTY{})
+	if exit != 0 {
+		t.Fatalf("exit=%d output=%q", exit, output.String())
+	}
+	got := output.String()
+	if strings.ContainsAny(got, "\x1b\x07") || strings.Contains(got, "secret") || strings.Contains(got, "]52") {
+		t.Fatalf("open URL retained terminal controls: %q", got)
+	}
+	if got != "https://example.test/app/\n" {
 		t.Fatalf("output=%q", got)
 	}
 }

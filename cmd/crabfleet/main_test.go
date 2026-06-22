@@ -444,6 +444,50 @@ func TestValidateWebVNCURL(t *testing.T) {
 	}
 }
 
+func TestDashboardURLValidatesAPIURL(t *testing.T) {
+	tests := []struct {
+		raw  string
+		want string
+	}{
+		{raw: "https://example.test", want: "https://example.test/app/"},
+		{raw: "https://example.test/base/", want: "https://example.test/base/app/"},
+		{raw: "https://example.test?token=secret", want: "https://example.test/app/"},
+	}
+	for _, tt := range tests {
+		got, err := dashboardURL(tt.raw)
+		if err != nil {
+			t.Fatalf("dashboardURL(%q) = %v", tt.raw, err)
+		}
+		if got != tt.want {
+			t.Fatalf("dashboardURL(%q) = %q, want %q", tt.raw, got, tt.want)
+		}
+	}
+
+	for _, raw := range []string{
+		"/relative",
+		"file:///tmp/dashboard",
+		"https://user@example.test",
+		"://example.test",
+	} {
+		if got, err := dashboardURL(raw); err == nil {
+			t.Fatalf("dashboardURL(%q) = %q, want error", raw, got)
+		}
+	}
+}
+
+func TestOpenerArgsSeparateURLFromOptions(t *testing.T) {
+	raw := "https://example.test/--not-an-option"
+	if got := strings.Join(openerArgs("darwin", raw), "\x00"); got != "open\x00--\x00"+raw {
+		t.Fatalf("darwin opener args = %q", got)
+	}
+	if got := strings.Join(openerArgs("linux", raw), "\x00"); got != "xdg-open\x00--\x00"+raw {
+		t.Fatalf("linux opener args = %q", got)
+	}
+	if got := strings.Join(openerArgs("windows", raw), "\x00"); got != "rundll32\x00url.dll,FileProtocolHandler\x00"+raw {
+		t.Fatalf("windows opener args = %q", got)
+	}
+}
+
 func TestNewVNCFallbackValidatesCapturedURL(t *testing.T) {
 	installOutputSSH(t, "\x1b]52;c;secret\x07\nvnc: http://example.test/not-webvnc\n")
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
