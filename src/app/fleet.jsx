@@ -6,6 +6,7 @@ import {
   fleetCoversInteractiveSessions,
   humanStatus,
   interactiveSessionStatus,
+  isFleetSessionAttention,
   isFleetSessionAttachable,
   isTerminalReadyInteractiveSession,
   runCapabilities,
@@ -21,17 +22,25 @@ export function FleetPage(props) {
   const preferredRepo = deployment.preferredRepo || "openclaw/crabfleet";
   const sessions = props.state.interactiveSessions || [];
   const fleet = props.state.fleet;
-  const totals = fleetCoversInteractiveSessions(fleet, sessions) ? fleet.totals : {};
   const fleetSessionsById = new Map(
     (fleet?.sessions || []).map((session) => [session.id, session]),
   );
+  const fleetSessions = sessions.map((session) => ({
+    ...session,
+    fleet: fleetSessionsById.get(session.id),
+  }));
+  const totals = fleetCoversInteractiveSessions(fleet, sessions) ? fleet.totals : {};
   const groups = groupedFleetSessions(sessions);
   const ownerCount = groups.length;
   const sessionCount = totals.sessions ?? sessions.length;
   const readyCount = totals.ready ?? countStatuses(sessions, ["ready", "attached", "detached"]);
   const provisioningCount =
-    totals.provisioning ?? countStatuses(sessions, ["provisioning", "pending_adapter"]);
-  const failedCount = totals.failed ?? countStatuses(sessions, ["failed"]);
+    totals.provisioning ??
+    fleetSessions.filter(
+      (session) => session.status === "provisioning" && !isFleetSessionAttention(session),
+    ).length;
+  const attentionCount =
+    totals.attention ?? fleetSessions.filter((session) => isFleetSessionAttention(session)).length;
   const stoppedCount =
     totals.stopped ?? countStatuses(sessions, ["stopped", "expired", "unavailable"]);
 
@@ -60,7 +69,7 @@ export function FleetPage(props) {
         <div class="fleet-signal-grid" aria-label="Fleet status summary">
           <Signal label="Live" value={readyCount} tone="live" />
           <Signal label="Starting" value={provisioningCount} tone="provisioning" />
-          <Signal label="Attention" value={failedCount} tone="failed" />
+          <Signal label="Attention" value={attentionCount} tone="failed" />
           <Signal label="People" value={ownerCount} />
           <Signal label="Total" value={sessionCount} />
         </div>
@@ -73,7 +82,7 @@ export function FleetPage(props) {
           sessionCount={sessionCount}
           ready={readyCount}
           provisioning={provisioningCount}
-          failed={failedCount}
+          attention={attentionCount}
           stopped={stoppedCount}
           board={{
             active: props.active,
@@ -160,7 +169,7 @@ function ReadinessPanel({
   sessionCount,
   ready,
   provisioning,
-  failed,
+  attention,
   stopped,
   board,
   cli,
@@ -170,7 +179,7 @@ function ReadinessPanel({
   const statuses = [
     { label: "Ready", value: ready, tone: "live" },
     { label: "Provisioning", value: provisioning, tone: "provisioning" },
-    { label: "Failed", value: failed, tone: "failed" },
+    { label: "Attention", value: attention, tone: "failed" },
     { label: "Stopped", value: stopped, tone: "stopped" },
   ];
   return (
@@ -311,7 +320,12 @@ function FleetBox({ session, openSessionGrid, deleteInteractiveSession, canManag
         {archiveCount ? <span>{archiveCount} logs</span> : null}
         {fleetPolicy?.present ? <span>{fleetPolicy.allowedHostCount} egress</span> : null}
       </div>
-      <p class="fleet-box-event">{session.summary || session.lastEvent || "Waiting for session"}</p>
+      <p class="fleet-box-event">
+        {session.fleet?.attentionReason ||
+          session.summary ||
+          session.lastEvent ||
+          "Waiting for session"}
+      </p>
       {attachable ? (
         <div class="fleet-box-command">
           <code>

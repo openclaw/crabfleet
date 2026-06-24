@@ -3,6 +3,7 @@ import {
   githubActionsRuntime,
   githubActionsRuntimeLabel,
 } from "../github-actions-runtime.ts";
+import { fleetSessionAttentionReason } from "../fleet-attention.ts";
 
 export const lanes = ["Todo", "Running", "Human Review", "Done"];
 export const preferredRepo = "openclaw/crabfleet";
@@ -195,6 +196,9 @@ export function interactiveSessionStatus(session) {
   if (session.status === "stopped" || session.status === "expired") {
     return { label: "Stopped", tone: "stopped" };
   }
+  if (isFleetSessionAttention(session) && provisioningInteractiveStatuses.has(session.status)) {
+    return { label: "Attention", tone: "failed" };
+  }
   if (provisioningInteractiveStatuses.has(session.status)) {
     return { label: "Provisioning", tone: "provisioning" };
   }
@@ -206,6 +210,11 @@ export function interactiveSessionStatus(session) {
     return { label: "Live", tone: "live" };
   }
   return { label: humanStatus(session.status), tone: "" };
+}
+
+export function isFleetSessionAttention(session, now = Date.now()) {
+  if (typeof session?.fleet?.attention === "boolean") return session.fleet.attention;
+  return fleetSessionAttentionReason(session || {}, now) !== null;
 }
 
 export function sessionLogsUrl(id) {

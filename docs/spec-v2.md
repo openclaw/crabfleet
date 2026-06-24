@@ -70,6 +70,7 @@ Fleet state shape:
     "active": 2,
     "ready": 2,
     "provisioning": 0,
+    "attention": 1,
     "failed": 1,
     "stopped": 1,
     "attachable": 2,
@@ -101,6 +102,8 @@ Per-session summary:
 - `owner`
 - `status`
 - `active`
+- `attention`
+- `attentionReason`
 - `attachable`
 - `vnc`
 - `archived`
@@ -120,6 +123,10 @@ Per-session summary:
 - `policy.openAIBaseUrlHost`
 
 `attachable` is true only for terminal-capable `ready`, `attached`, or `detached` sessions with current control and a resolvable Sandbox or valid WSS/literal-loopback WS provider URL.
+
+`totals.provisioning` counts only healthy `provisioning` sessions. `totals.attention` counts failed or stopping sessions, sessions waiting for an adapter, and provisioning sessions with an expired lease, an actionable reconciliation error, or no progress for 15 minutes. `totals.byStatus` preserves the raw lifecycle counts, so a provisioning session needing attention remains present under `byStatus.provisioning` while being excluded from `totals.provisioning`.
+
+Per-session `attention` exposes the same operational classification. `attentionReason` is a bounded, redacted diagnostic for controllers and a generic operator-attention message when provider details are concealed by authorization policy.
 
 ## Security
 

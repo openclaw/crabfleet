@@ -45,6 +45,7 @@ test("interactive session mapping centralizes row names, defaults, and hidden id
   const session = interactiveSession(
     sessionRow({
       capabilities_json: '{"terminal":false}',
+      reconcile_error: "provider unavailable",
       work_state: "running",
     }),
     ["ready"],
@@ -55,6 +56,7 @@ test("interactive session mapping centralizes row names, defaults, and hidden id
   assert.equal(session.attachUrl, null);
   assert.equal(session.multiplayerMode, true);
   assert.equal(session.workState, "running");
+  assert.equal(session.reconciliationNeedsAttention, true);
   assert.deepEqual(session.logs, ["ready"]);
   assert.equal(session.logArchive, archive);
   assert.equal(session[interactiveSessionAdapterControlPlane], "https://adapter.example");

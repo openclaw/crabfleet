@@ -4,6 +4,7 @@ import {
   parseGitHubActionsWorkState,
   type GitHubActionsWorkState,
 } from "../github-actions-runtime.ts";
+import { hasActionableReconciliationError } from "../fleet-attention.ts";
 import type { ResolvedRuntimeProfileCodexSsh } from "../runtime-profiles.ts";
 import type { InteractiveSessionLogArchiveTable, InteractiveSessionRow } from "./database.ts";
 import type { InteractiveRuntime, InteractiveSessionStatus } from "./models.ts";
@@ -63,6 +64,7 @@ export type InteractiveSession = {
   expiresAt: number | null;
   lastReconciledAt: number | null;
   reconcileError: string | null;
+  reconciliationNeedsAttention?: boolean;
   command: string;
   prompt: string;
   purpose: string;
@@ -156,6 +158,7 @@ export function interactiveSession(
     expiresAt: row.expires_at,
     lastReconciledAt: row.last_reconciled_at,
     reconcileError: row.reconcile_error,
+    reconciliationNeedsAttention: hasActionableReconciliationError(row.reconcile_error),
     command: row.command,
     prompt: row.prompt,
     purpose: row.purpose,
