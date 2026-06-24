@@ -54,6 +54,11 @@ struct PrivateMacShareSheet: View {
           detail: phaseDetail,
           isReady: controller.phase.isRunning
         )
+        ShareStatusRow(
+          title: "Crabfleet registry",
+          detail: controller.registryPhase.detail,
+          isReady: controller.registryPhase.isReady
+        )
       }
       .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
 

@@ -18,9 +18,12 @@ Tailscale `100.64.0.0/10` address after confirming a valid identity on the activ
 tailnet. Before the RFB handshake, `tailscale whois` must identify the peer as
 another authorized device owned by the same Tailscale user.
 
-On the receiving Mac, choose Quick Connect, paste the `vnc://100.x.y.z:5901`
-address shown by the host, and leave the password blank. RFB's None security
-type is intentional here: admission and encrypted transport belong to
+When the app has `CRABFLEET_API_URL` and `CRABFLEET_SESSION_COOKIE`, starting a
+share publishes the host's stable Tailscale endpoint to the signed-in user's
+private Fleet registry. The receiving Mac discovers that card and connects
+directly with a blank RFB password. Quick Connect with the displayed
+`vnc://100.x.y.z:5901` address remains available as a fallback. RFB's None
+security type is intentional here: admission and encrypted transport belong to
 Tailscale, and the RFB socket is never bound to Wi-Fi, Ethernet, loopback, or a
 public address. Crabfleet must remain running on the host. The prototype allows
 one peer, captures the primary display at up to 1600×1000 and 15 fps, and does
@@ -55,8 +58,9 @@ swift run --package-path macos/CrabfleetMac CrabfleetMac
 ```
 
 The cookie is accepted only from the process environment and is never persisted
-by the prototype. Production authentication should use a dedicated native OAuth
-or device authorization flow.
+by the prototype. It authenticates both Fleet reads and host registration.
+Production authentication should use a dedicated native OAuth or device
+authorization flow.
 
 The generic connection sheet still targets an already-open VNC endpoint, such
 as the loopback port produced by a Crabbox SSH tunnel. A structured, secret-safe

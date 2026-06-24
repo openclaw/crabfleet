@@ -5,12 +5,15 @@ import type {
   AdminRepoInput,
   AdminWorkflowInput,
 } from "../admin-service.ts";
+import type { DesktopHost, DesktopHostInput } from "../desktop-host-service.ts";
 import { json, notFound, readJson } from "../http.ts";
 import type { User } from "../models.ts";
 
 export type ControlPlaneRouteDependencies = {
   readState(request: Request, user: User): Promise<unknown>;
   readFleet(user: User): Promise<unknown>;
+  registerDesktopHost(user: User, id: string, input: DesktopHostInput): Promise<DesktopHost>;
+  removeDesktopHost(user: User, id: string): Promise<void>;
   searchGitHubRefs(number: unknown): Promise<unknown>;
   createCard(request: Request, user: User): Promise<unknown>;
   readCardRuns(user: User, cardId: string): Promise<unknown[] | null>;
@@ -36,6 +39,22 @@ export async function handleControlPlaneRoute(
   if (request.method === "GET" && url.pathname === "/api/fleet") {
     requireRole(user, "viewer");
     return json({ fleet: await dependencies.readFleet(user) });
+  }
+
+  const desktopHostMatch = url.pathname.match(/^\/api\/desktop-hosts\/([^/]+)$/);
+  if (request.method === "PUT" && desktopHostMatch) {
+    requireRole(user, "viewer");
+    const host = await dependencies.registerDesktopHost(
+      user,
+      decoded(desktopHostMatch[1]),
+      await readJson<DesktopHostInput>(request),
+    );
+    return json({ host });
+  }
+  if (request.method === "DELETE" && desktopHostMatch) {
+    requireRole(user, "viewer");
+    await dependencies.removeDesktopHost(user, decoded(desktopHostMatch[1]));
+    return json({ ok: true });
   }
   if (request.method === "GET" && url.pathname === "/api/github/refs") {
     requireRole(user, "maintainer");

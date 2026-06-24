@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Add private per-user desktop-host registration so native macOS shares appear in Fleet with direct same-tailnet VNC endpoints.
 - Add app-owned macOS desktop hosting with ScreenCaptureKit, bounded Tight/JPEG RFB streaming, Accessibility-authorized input, an exact active-tailnet bind, and same-user Tailscale peer admission without Apple Screen Sharing or a public relay.
 - Add atomically claimed recurring card intervals with constant-time catch-up, crash-recoverable leases, scheduler/API proof, and coalescing for active or capacity-blocked runs, thanks @Jhacarreiro.
 - Reuse `@openclaw/libterminal` for terminal protocol codecs, Worker relays, Ghostty assets, and browser hub transport while keeping Crabfleet authorization and session policy local.

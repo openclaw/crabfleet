@@ -147,6 +147,39 @@ struct FleetAPIState: Decodable {
   let registryAvailable: Bool
   let totals: FleetAPITotals
   let sessions: [FleetAPISession]
+  let desktopHosts: [FleetAPIDesktopHost]?
+}
+
+struct FleetAPIDesktopHost: Decodable {
+  let id: String
+  let owner: String
+  let name: String
+  let address: String
+  let port: Int
+  let createdAt: Double
+  let updatedAt: Double
+
+  func desktopHost() -> RegisteredDesktopHost {
+    .init(
+      id: id,
+      owner: owner,
+      name: name,
+      address: address,
+      port: port,
+      createdAt: Date(timeIntervalSince1970: createdAt / 1_000),
+      updatedAt: Date(timeIntervalSince1970: updatedAt / 1_000)
+    )
+  }
+}
+
+struct RegisteredDesktopHost: Identifiable, Hashable {
+  let id: String
+  let owner: String
+  let name: String
+  let address: String
+  let port: Int
+  let createdAt: Date
+  let updatedAt: Date
 }
 
 struct FleetAPITotals: Decodable {

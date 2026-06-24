@@ -3,6 +3,7 @@ import Foundation
 @MainActor
 final class FleetStore: ObservableObject {
   @Published private(set) var leases: [CrabboxLease] = []
+  @Published private(set) var desktopHosts: [RegisteredDesktopHost] = []
   @Published private(set) var isRefreshing = false
   @Published private(set) var lastUpdated: Date?
   @Published private(set) var notice: String?
@@ -22,7 +23,9 @@ final class FleetStore: ObservableObject {
 
     do {
       if let endpoint = environment["CRABFLEET_API_URL"], !endpoint.isEmpty {
-        leases = try await fetchFleet(endpoint: endpoint)
+        let fleet = try await fetchFleet(endpoint: endpoint)
+        leases = fleet.leases
+        desktopHosts = fleet.desktopHosts
         notice = nil
       } else {
         leases = CrabboxLease.fixtures(currentUser: currentUser)
@@ -37,8 +40,14 @@ final class FleetStore: ObservableObject {
     }
   }
 
-  private func fetchFleet(endpoint: String) async throws -> [CrabboxLease] {
-    guard var url = URL(string: endpoint) else { throw FleetClientError.invalidURL }
+  private func fetchFleet(endpoint: String) async throws -> (
+    leases: [CrabboxLease],
+    desktopHosts: [RegisteredDesktopHost]
+  ) {
+    guard
+      var url = URL(string: endpoint),
+      CrabfleetDesktopRegistration.isSecureAPIURL(url)
+    else { throw FleetClientError.invalidURL }
     if url.path.isEmpty || url.path == "/" {
       url.append(path: "api/fleet")
     }
@@ -56,7 +65,10 @@ final class FleetStore: ObservableObject {
       throw FleetClientError.httpStatus(http.statusCode)
     }
     let envelope = try JSONDecoder().decode(FleetAPIEnvelope.self, from: data)
-    return envelope.fleet.sessions.map { $0.lease() }
+    return (
+      envelope.fleet.sessions.map { $0.lease() },
+      (envelope.fleet.desktopHosts ?? []).map { $0.desktopHost() }
+    )
   }
 }
 

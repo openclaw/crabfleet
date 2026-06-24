@@ -72,6 +72,17 @@ export type FleetStateOptions = {
   productUrl: string;
   registryAvailable?: boolean;
   sandboxAvailable?: boolean | undefined;
+  desktopHosts?: FleetDesktopHostSummary[];
+};
+
+export type FleetDesktopHostSummary = {
+  id: string;
+  owner: string;
+  name: string;
+  address: string;
+  port: number;
+  createdAt: number;
+  updatedAt: number;
 };
 
 export type FleetSessionSummary = {
@@ -122,6 +133,7 @@ export type FleetState = {
   canonicalUrl: string;
   productUrl: string;
   generatedAt: number;
+  desktopHosts: FleetDesktopHostSummary[];
   registryAvailable: boolean;
   egress: {
     defaultHostCount: number;
@@ -206,6 +218,9 @@ export function buildFleetState(
     canonicalUrl: options.canonicalUrl,
     productUrl: options.productUrl,
     generatedAt: options.generatedAt,
+    desktopHosts: [...(options.desktopHosts ?? [])].sort(
+      (a, b) => b.updatedAt - a.updatedAt || a.id.localeCompare(b.id),
+    ),
     registryAvailable: options.registryAvailable ?? true,
     egress: {
       defaultHostCount: options.defaultEgressHosts.length,

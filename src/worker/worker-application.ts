@@ -16,6 +16,8 @@ import { GitHubReferenceService } from "./github-reference-service.ts";
 import { readJson } from "./http.ts";
 import { InteractiveSessionApplication } from "./interactive-session-application.ts";
 import { createInteractiveDesktopService } from "./interactive-desktop-service.ts";
+import { DesktopHostRepository } from "./desktop-host-repository.ts";
+import { DesktopHostService } from "./desktop-host-service.ts";
 import { InteractiveTerminalService } from "./interactive-terminal-service.ts";
 import type { User } from "./models.ts";
 import { isOpenClawEmbedSessionToken } from "./openclaw-embed-access.ts";
@@ -47,6 +49,7 @@ const services = {
   browserSessionCreation: Symbol("browser-session-creation"),
   cardLifecycle: Symbol("card-lifecycle"),
   desktop: Symbol("desktop"),
+  desktopHosts: Symbol("desktop-hosts"),
   githubReference: Symbol("github-reference"),
   sandboxResources: Symbol("sandbox-resources"),
   sharedSessions: Symbol("shared-sessions"),
@@ -136,6 +139,8 @@ export class WorkerApplication {
     return {
       readState: (request, user) => this.readState(request, user, context),
       readFleet: (user) => this.readFleetState(user, undefined, context),
+      registerDesktopHost: (user, id, input) => this.desktopHosts().register(user, id, input),
+      removeDesktopHost: (user, id) => this.desktopHosts().remove(user, id),
       searchGitHubRefs: (number) => this.githubReferenceService().search(number),
       createCard: async (request, user) =>
         this.cardLifecycleService().create(await readJson<CardCreateInput>(request), user),
@@ -295,9 +300,10 @@ export class WorkerApplication {
     if (!sessionRows) {
       await this.runtime.reconcileSessions(Date.now(), context);
     }
-    const [interactiveSessions, policyResult] = await Promise.all([
+    const [interactiveSessions, policyResult, desktopHosts] = await Promise.all([
       sessionRows ? Promise.resolve(sessionRows) : this.sessions.readAll(user),
       readSandboxFleetPolicies(this.env),
+      this.desktopHosts().list(user),
     ]);
     return buildFleetState(interactiveSessions, policyResult.policies, {
       canonicalUrl: browserAppOrigin(this.env),
@@ -306,6 +312,7 @@ export class WorkerApplication {
       generatedAt: Date.now(),
       registryAvailable: policyResult.available,
       sandboxAvailable: Boolean(this.env.SANDBOX),
+      desktopHosts,
     });
   }
 
@@ -443,6 +450,13 @@ export class WorkerApplication {
 
   private adminRepository(): AdminRepository {
     return this.registry.get(services.adminRepository, () => new AdminRepository(this.env));
+  }
+
+  private desktopHosts(): DesktopHostService {
+    return this.registry.get(
+      services.desktopHosts,
+      () => new DesktopHostService(new DesktopHostRepository(this.env)),
+    );
   }
 
   private adminService(): AdminService {

@@ -16,6 +16,75 @@ struct PrivateMacShareTests {
   }
 
   @Test
+  func derivesGenericStableDesktopHostID() {
+    let identity = TailnetIdentity(
+      tailnetName: "example.com",
+      loginName: "operator@example.com",
+      dnsName: "workstation-1.example.ts.net",
+      hostName: "Workstation",
+      ipv4Address: "100.64.12.34",
+      userID: 42
+    )
+    #expect(CrabfleetDesktopRegistration.hostID(identity: identity) == "workstation-1")
+
+    let fallback = TailnetIdentity(
+      tailnetName: identity.tailnetName,
+      loginName: identity.loginName,
+      dnsName: "",
+      hostName: identity.hostName,
+      ipv4Address: identity.ipv4Address,
+      userID: identity.userID
+    )
+    #expect(CrabfleetDesktopRegistration.hostID(identity: fallback) == "mac-100-64-12-34")
+  }
+
+  @Test
+  func acceptsOnlySecureCrabfleetAPIURLs() throws {
+    #expect(
+      CrabfleetDesktopRegistration.isSecureAPIURL(
+        try #require(URL(string: "https://fleet.example/api/fleet"))))
+    #expect(
+      CrabfleetDesktopRegistration.isSecureAPIURL(
+        try #require(URL(string: "http://127.0.0.1:8787"))))
+    #expect(
+      !CrabfleetDesktopRegistration.isSecureAPIURL(
+        try #require(URL(string: "http://fleet.example"))))
+    #expect(
+      !CrabfleetDesktopRegistration.isSecureAPIURL(
+        try #require(URL(string: "https://user@fleet.example"))))
+    #expect(
+      !CrabfleetDesktopRegistration.isSecureAPIURL(
+        try #require(URL(string: "https://fleet.example?token=value"))))
+  }
+
+  @Test
+  func buildsAuthenticatedDesktopRegistrationRequest() throws {
+    let registration = try #require(
+      CrabfleetDesktopRegistration(environment: [
+        "CRABFLEET_API_URL": "https://fleet.example/api/fleet",
+        "CRABFLEET_SESSION_COOKIE": "crabbox_session=secret",
+      ]))
+    let identity = TailnetIdentity(
+      tailnetName: "example.com",
+      loginName: "operator@example.com",
+      dnsName: "workstation-1.example.ts.net",
+      hostName: "Workstation",
+      ipv4Address: "100.64.12.34",
+      userID: 42
+    )
+
+    let request = try registration.registrationRequest(identity: identity, port: 5901)
+    #expect(request.url?.absoluteString == "https://fleet.example/api/desktop-hosts/workstation-1")
+    #expect(request.httpMethod == "PUT")
+    #expect(request.value(forHTTPHeaderField: "Cookie") == "crabbox_session=secret")
+    let body = try #require(request.httpBody)
+    let json = try #require(JSONSerialization.jsonObject(with: body) as? [String: Any])
+    #expect(json["name"] as? String == "Workstation")
+    #expect(json["address"] as? String == "100.64.12.34")
+    #expect(json["port"] as? Int == 5901)
+  }
+
+  @Test
   func rejectsInvalidTailnetAndIdentityFields() throws {
     var value = statusJSON()
     value = value.replacingOccurrences(

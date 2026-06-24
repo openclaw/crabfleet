@@ -78,6 +78,15 @@ struct FleetModelsTests {
           "generatedAt": 1770000000000,
           "registryAvailable": true,
           "totals": { "active": 1, "sessions": 1, "vnc": 1 },
+          "desktopHosts": [{
+            "id": "studio",
+            "owner": "operator",
+            "name": "Mac Studio",
+            "address": "100.68.201.40",
+            "port": 5901,
+            "createdAt": 1769999900000,
+            "updatedAt": 1770000000000
+          }],
           "sessions": [{
             "id": "IS-1",
             "repo": "openclaw/crabfleet",
@@ -104,6 +113,16 @@ struct FleetModelsTests {
     #expect(lease.displayName == "blue-lobster")
     #expect(lease.desktopAvailable)
     #expect(lease.updatedAt.timeIntervalSince1970 == 1_770_000_000)
+    let host = try #require(response.fleet.desktopHosts?.first?.desktopHost())
+    #expect(host.id == "studio")
+    #expect(host.name == "Mac Studio")
+    #expect(host.address == "100.68.201.40")
+    #expect(host.port == 5901)
+
+    let target = DesktopTarget(host: host)
+    #expect(target.endpoint?.host == "100.68.201.40")
+    #expect(target.endpoint?.port == 5901)
+    #expect(target.desktopAvailable)
   }
 
   @Test @MainActor

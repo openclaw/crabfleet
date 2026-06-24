@@ -179,6 +179,22 @@ struct DesktopTarget: Identifiable, Hashable {
     profileID = profile.id
   }
 
+  init(host: RegisteredDesktopHost) {
+    id = "host:\(host.id)"
+    title = host.name
+    subtitle = "\(host.address):\(host.port)"
+    detail = "Registered private desktop"
+    source = .crabfleet
+    status = nil
+    owner = host.owner
+    repository = nil
+    branch = nil
+    updatedAt = host.updatedAt
+    endpoint = .init(host: host.address, port: host.port, username: "")
+    desktopAvailable = true
+    profileID = nil
+  }
+
   func matches(_ query: String) -> Bool {
     let normalized = query.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
     guard !normalized.isEmpty else { return true }

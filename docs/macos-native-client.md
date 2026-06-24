@@ -62,8 +62,10 @@ relay, Cloudflare, or the Crabfleet Worker.
 4. Before sending the RFB banner or any framebuffer data, the app resolves the
    peer through `tailscale whois` and requires an authorized node with the same
    user ID and login as the host.
-5. The receiving Crabfleet app uses Quick Connect with the displayed
-   `vnc://100.x.y.z:5901` address and no VNC password.
+5. With an authenticated Crabfleet API configuration, the host registers its
+   stable endpoint in the signed-in user's private Fleet registry. The receiving
+   app discovers and directly connects that card with no VNC password. Quick
+   Connect with the displayed `vnc://100.x.y.z:5901` address remains a fallback.
 
 After the first Screen Recording grant, restart the bundled app before starting
 the share. Ad-hoc development signatures do not provide a stable TCC identity,
