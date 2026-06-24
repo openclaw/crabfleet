@@ -8,6 +8,7 @@ import {
   isFleetSessionAttachable,
   isTerminalReadyInteractiveSession,
   interactiveSessionStatus,
+  isFleetSessionAttention,
   interactiveCommand,
   linkedInteractiveSessionPlaceholder,
   optimisticInteractiveSession,
@@ -176,6 +177,7 @@ test("interactive lifecycle helpers keep UI and terminal state aligned", () => {
     canControl: false,
     sharedReadOnly: true,
   };
+  const starting = { kind: "interactive", status: "provisioning" };
   const provisioning = { kind: "interactive", status: "pending_adapter" };
   const stopping = { kind: "interactive", status: "stopping" };
   const deleting = { ...stopping, adapter: "runtime-v1" };
@@ -209,10 +211,42 @@ test("interactive lifecycle helpers keep UI and terminal state aligned", () => {
     false,
   );
   assert.deepEqual(interactiveSessionStatus(live), { label: "Live", tone: "live" });
-  assert.deepEqual(interactiveSessionStatus(provisioning), {
+  assert.deepEqual(interactiveSessionStatus(starting), {
     label: "Provisioning",
     tone: "provisioning",
   });
+  assert.deepEqual(interactiveSessionStatus(provisioning), {
+    label: "Attention",
+    tone: "failed",
+  });
+  assert.deepEqual(interactiveSessionStatus({ ...provisioning, fleet: { attention: true } }), {
+    label: "Attention",
+    tone: "failed",
+  });
+  assert.equal(
+    isFleetSessionAttention({ ...provisioning, reconciliationNeedsAttention: true }),
+    true,
+  );
+  assert.equal(
+    isFleetSessionAttention(
+      {
+        ...starting,
+        reconcileError: "runtime adapter create pending",
+        createdAt: 90_000,
+        updatedAt: 95_000,
+      },
+      100_000,
+    ),
+    false,
+  );
+  assert.equal(
+    isFleetSessionAttention({ ...starting, reconcileError: "provider unavailable" }, 100_000),
+    true,
+  );
+  assert.equal(
+    isFleetSessionAttention({ ...starting, createdAt: 1, updatedAt: 2 }, 20 * 60_000),
+    true,
+  );
   assert.equal(isActiveRun(stopping), false);
   assert.deepEqual(interactiveSessionStatus(stopping), {
     label: "Stopping",

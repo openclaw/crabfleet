@@ -99,7 +99,7 @@ test("session presentation hides provider authority from viewers without control
       provider_resource_id: "box-1",
       last_reconciled_at: 90,
       reconcile_error: "private provider state",
-      status: "ready",
+      status: "provisioning",
     }),
     [],
   );
@@ -112,6 +112,7 @@ test("session presentation hides provider authority from viewers without control
   assert.equal(presented.providerResourceId, null);
   assert.equal(presented.lastReconciledAt, null);
   assert.equal(presented.reconcileError, null);
+  assert.equal(presented.reconciliationNeedsAttention, true);
   assert.equal(presented.attachUrl, null);
   assert.equal(presented.vncUrl, null);
   assert.equal(presented.codexSsh, null);

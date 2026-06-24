@@ -1,4 +1,5 @@
 import { normalizedSecureWebSocketUrl } from "./url-security.ts";
+import { fleetSessionAttentionReason } from "./fleet-attention.ts";
 
 export type FleetStatus =
   | "provisioning"
@@ -42,6 +43,9 @@ export type FleetSessionInput = {
   capabilities?: { vnc?: boolean; desktop?: boolean; terminal?: boolean };
   canControl?: boolean;
   ptyAvailable?: boolean;
+  expiresAt?: number | null;
+  reconcileError?: string | null;
+  reconciliationNeedsAttention?: boolean;
   lastEvent: string;
   createdAt: number;
   updatedAt: number;
@@ -108,6 +112,8 @@ export type FleetSessionSummary = {
   completionReason: string | null;
   status: FleetStatus;
   active: boolean;
+  attention: boolean;
+  attentionReason: string | null;
   attachable: boolean;
   vnc: boolean;
   archived: boolean;
@@ -146,6 +152,7 @@ export type FleetState = {
     attachable: number;
     byRuntime: Record<FleetRuntime, number>;
     byStatus: Record<FleetStatus, number>;
+    attention: number;
     failed: number;
     provisioning: number;
     ready: number;
@@ -233,8 +240,11 @@ export function buildFleetState(
       attachable: sessionSummaries.filter((session) => session.attachable).length,
       byRuntime,
       byStatus,
+      attention: sessionSummaries.filter((session) => session.attention).length,
       failed: byStatus.failed,
-      provisioning: byStatus.provisioning + byStatus.pending_adapter,
+      provisioning: sessionSummaries.filter(
+        (session) => session.status === "provisioning" && !session.attention,
+      ).length,
       ready: byStatus.ready + byStatus.attached + byStatus.detached,
       sessions: sessionSummaries.length,
       stopped: byStatus.stopped + byStatus.expired,
@@ -247,10 +257,11 @@ export function buildFleetState(
 export function fleetSessionSummary(
   session: FleetSessionInput,
   policy: FleetSandboxPolicySummary | null,
-  options: Pick<FleetStateOptions, "sandboxAvailable"> = {},
+  options: Pick<FleetStateOptions, "generatedAt" | "sandboxAvailable">,
 ): FleetSessionSummary {
   const sandboxId = sandboxIdFromLeaseId(session.leaseId);
   const archived = Boolean(session.logArchive?.eventCount);
+  const attentionReason = fleetSessionAttentionReason(session, options.generatedAt);
   const terminalCapable =
     session.capabilities?.terminal === true ||
     (session.adapter !== "runtime-v1" && session.capabilities?.terminal !== false);
@@ -277,6 +288,8 @@ export function fleetSessionSummary(
     completionReason: session.completionReason ?? null,
     status: session.status,
     active: !inactiveStatuses.has(session.status),
+    attention: attentionReason !== null,
+    attentionReason,
     attachable:
       terminalCapable &&
       (session.ptyAvailable === true ||

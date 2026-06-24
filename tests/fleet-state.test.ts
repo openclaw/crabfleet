@@ -91,6 +91,7 @@ test("fleet state aggregates sessions and redacted sandbox policies", () => {
   assert.equal(fleet.totals.sessions, 2);
   assert.equal(fleet.totals.active, 1);
   assert.equal(fleet.totals.failed, 1);
+  assert.equal(fleet.totals.attention, 1);
   assert.equal(fleet.totals.ready, 1);
   assert.equal(fleet.totals.archived, 1);
   assert.equal(fleet.totals.attachable, 1);
@@ -121,6 +122,78 @@ test("fleet state aggregates sessions and redacted sandbox policies", () => {
       updatedAt: 50,
     },
   ]);
+});
+
+test("fleet state separates healthy provisioning from sessions needing attention", () => {
+  const generatedAt = 20 * 60_000;
+  const sessions = [
+    {
+      ...baseSession,
+      id: "healthy",
+      status: "provisioning" as const,
+      createdAt: generatedAt - 10_000,
+      updatedAt: generatedAt - 5_000,
+      reconcileError: "runtime adapter create pending",
+    },
+    {
+      ...baseSession,
+      id: "error",
+      status: "provisioning" as const,
+      reconcileError: "runtime adapter control plane differs from workspace registration",
+    },
+    {
+      ...baseSession,
+      id: "stale",
+      status: "provisioning" as const,
+      createdAt: 0,
+      updatedAt: 1,
+    },
+    {
+      ...baseSession,
+      id: "expired",
+      status: "provisioning" as const,
+      expiresAt: generatedAt,
+    },
+    {
+      ...baseSession,
+      id: "pending",
+      status: "pending_adapter" as const,
+    },
+    {
+      ...baseSession,
+      id: "stopping",
+      status: "stopping" as const,
+    },
+    {
+      ...baseSession,
+      id: "redacted-error",
+      status: "provisioning" as const,
+      reconcileError: null,
+      reconciliationNeedsAttention: true,
+    },
+  ];
+  const fleet = buildFleetState(sessions, [], {
+    canonicalUrl: "https://fleet.example",
+    defaultEgressHosts: [],
+    generatedAt,
+    productUrl: "https://product.example",
+  });
+  const byId = new Map(fleet.sessions.map((session) => [session.id, session]));
+
+  assert.equal(fleet.totals.provisioning, 1);
+  assert.equal(fleet.totals.attention, 6);
+  assert.equal(fleet.totals.byStatus.provisioning, 5);
+  assert.equal(fleet.totals.byStatus.pending_adapter, 1);
+  assert.equal(byId.get("healthy")?.attention, false);
+  assert.equal(byId.get("error")?.attentionReason, sessions[1]?.reconcileError);
+  assert.match(byId.get("stale")?.attentionReason ?? "", /15 minutes/);
+  assert.equal(byId.get("expired")?.attentionReason, "Provisioning lease expired");
+  assert.equal(byId.get("pending")?.attention, true);
+  assert.equal(byId.get("stopping")?.attention, true);
+  assert.equal(
+    byId.get("redacted-error")?.attentionReason,
+    "Provisioning needs operator attention",
+  );
 });
 
 test("GitHub Actions sessions are attachable through the Worker relay", () => {
