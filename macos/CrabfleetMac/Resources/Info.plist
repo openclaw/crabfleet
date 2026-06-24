@@ -24,5 +24,7 @@
     <string>14.0</string>
     <key>NSHighResolutionCapable</key>
     <true/>
+    <key>NSLocalNetworkUsageDescription</key>
+    <string>Crabfleet connects to and shares remote desktops only on your private Tailscale network.</string>
 </dict>
 </plist>

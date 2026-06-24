@@ -8,7 +8,8 @@ description: "Scope, integration boundary, and security notes for the native mac
 # Native macOS client experiment
 
 Status: early prototype. The app lives in `macos/CrabfleetMac` and provides a
-SwiftUI fleet browser plus an AppKit-hosted, Metal-rendered VNC surface.
+SwiftUI fleet browser, an AppKit-hosted Metal-rendered VNC surface, and an
+app-owned private desktop host for Mac-to-Mac access.
 
 ## Product shape
 
@@ -26,6 +27,13 @@ SwiftUI fleet browser plus an AppKit-hosted, Metal-rendered VNC surface.
 - RFB 3.3, 3.7, and 3.8 framing is supported, including server-selected RFB
   3.3 None and VNC-password authentication.
 - Client-side fit scaling and rendering use RoyalVNCKit's IOSurface/Metal path.
+- Share This Mac captures the primary display with ScreenCaptureKit and serves
+  RFB 3.8 Tight/JPEG frames without enabling Apple's Screen Sharing daemon.
+- The host binds port 5901 only to a verified Tailscale `100.64.0.0/10` address,
+  requires a valid identity on the active tailnet, and admits only a
+  Tailscale-authorized peer owned by that same user.
+- Remote control is forwarded through Accessibility-authorized CGEvents. Screen
+  Recording and Accessibility remain explicit macOS permissions.
 
 The fork exposes an externally managed clipboard mode, so no VNC connection
 polls or writes `NSPasteboard.general` directly. One app-owned coordinator sends
@@ -39,6 +47,34 @@ fingerprints prevent delayed server echoes from erasing a newer copy without
 retaining clipboard history. Inbound and outbound text is capped at 1 MiB;
 standard RFB clipboard text must encode losslessly as ISO-8859-1, and
 unsupported text is rejected instead of silently becoming empty data.
+
+## Share This Mac
+
+The host path is deliberately app-owned. It does not start, configure, proxy,
+or depend on `screensharingd`, Remote Management, a VNC password, a public
+relay, Cloudflare, or the Crabfleet Worker.
+
+1. Tailscale status must report `BackendState=Running`, a valid active tailnet,
+   an online signed-in user, and a CGNAT address in `100.64.0.0/10`.
+2. The app captures the main display at a bounded even resolution no larger
+   than 1600×1000 and encodes at most 15 Tight/JPEG frames per second.
+3. An RFB listener binds only to that exact Tailscale IPv4 address on port 5901.
+4. Before sending the RFB banner or any framebuffer data, the app resolves the
+   peer through `tailscale whois` and requires an authorized node with the same
+   user ID and login as the host.
+5. The receiving Crabfleet app uses Quick Connect with the displayed
+   `vnc://100.x.y.z:5901` address and no VNC password.
+
+After the first Screen Recording grant, restart the bundled app before starting
+the share. Ad-hoc development signatures do not provide a stable TCC identity,
+so a rebuilt prototype may need permission again; a production-signed build is
+required for durable permission state.
+
+Tailscale supplies the encrypted, ACL-controlled transport and peer identity;
+RFB None authentication is accepted only inside that already-authenticated
+channel. The listener is not reachable on Wi-Fi, Ethernet, loopback, or a public
+address. The host app must remain running, and stopping the share cancels the
+listener and capture stream.
 
 ## License boundary
 
@@ -74,13 +110,20 @@ from the build, or obtain written provenance approval.
 - No input method editor integration.
 - Server-driven framebuffer resize works; client-requested remote resize does
   not exist yet.
-- RoyalVNCKit provides raw TCP only. Production connections must remain bound
-  to loopback behind an authenticated SSH tunnel.
+- RoyalVNCKit provides raw TCP only. Generic production connections must remain
+  bound to loopback behind an authenticated SSH tunnel; Share This Mac is the
+  identity-gated tailnet exception.
 - The hardened prototype negotiates standard VNC password or no-auth security
   only. ARD Diffie-Hellman, UltraVNC MS Logon II, Tight security, and TLS remain
   disabled until their parsers and cryptography are replaced or fully tested.
 - Password authentication uses a process-global DES key schedule. The fork
   serializes that path; replace it before concurrent password-auth sessions.
+- App-owned hosting is primary-display only, single-client, lossy Tight/JPEG,
+  and capped at 1600×1000 and 15 fps.
+- Host-to-client clipboard, audio, multi-display selection, display resize, and
+  unattended launch-at-login are not implemented.
+- A connecting peer must be another device owned by the same Tailscale user.
+  Team-wide or named-user sharing is intentionally unsupported.
 
 ## Next RoyalVNCKit fork requirements
 
@@ -108,6 +151,9 @@ an ephemeral credential without placing secrets in argv, URLs, logs, files, or
 defaults. The process owning that connection should remain foreground and end
 when the viewer closes. Until then, the fleet deck is authoritative only for
 Crabfleet-registered sessions and desktop attachment remains manual.
+
+Share This Mac does not use this Worker/runtime-adapter boundary. It is a local
+Mac-to-Mac path whose only network dependency is the local Tailscale client.
 
 ## Build
 

@@ -1,0 +1,304 @@
+import AppKit
+import Foundation
+import Testing
+
+@testable import CrabfleetMac
+
+struct PrivateMacShareTests {
+  @Test
+  func acceptsOnlineUserOnActiveTailnet() throws {
+    let identity = try TailnetIdentityPolicy.identity(from: statusDocument())
+
+    #expect(identity.tailnetName == "example.com")
+    #expect(identity.loginName == "operator@example.com")
+    #expect(identity.ipv4Address == "100.64.12.34")
+    #expect(identity.vncAddress(port: 5901) == "vnc://100.64.12.34:5901")
+  }
+
+  @Test
+  func rejectsInvalidTailnetAndIdentityFields() throws {
+    var value = statusJSON()
+    value = value.replacingOccurrences(
+      of: #""Name": "example.com""#, with: #""Name": """#)
+    let missingTailnet = try JSONDecoder().decode(
+      TailscaleStatusDocument.self,
+      from: Data(value.utf8)
+    )
+    #expect(throws: PrivateMacShareError.invalidTailnetIdentity) {
+      try TailnetIdentityPolicy.identity(from: missingTailnet)
+    }
+
+    value = statusJSON().replacingOccurrences(
+      of: "operator@example.com",
+      with: ""
+    )
+    let missingUser = try JSONDecoder().decode(
+      TailscaleStatusDocument.self,
+      from: Data(value.utf8)
+    )
+    #expect(throws: PrivateMacShareError.invalidTailnetUser) {
+      try TailnetIdentityPolicy.identity(from: missingUser)
+    }
+  }
+
+  @Test
+  func recognizesOnlyTailscaleIPv4Range() {
+    #expect(TailnetIdentityPolicy.isTailscaleIPv4("100.64.0.1"))
+    #expect(TailnetIdentityPolicy.isTailscaleIPv4("100.127.255.254"))
+    #expect(!TailnetIdentityPolicy.isTailscaleIPv4("100.63.255.255"))
+    #expect(!TailnetIdentityPolicy.isTailscaleIPv4("100.128.0.1"))
+    #expect(!TailnetIdentityPolicy.isTailscaleIPv4("10.0.0.1"))
+    #expect(!TailnetIdentityPolicy.isTailscaleIPv4("100.64.invalid.1.2"))
+    #expect(!TailnetIdentityPolicy.isTailscaleIPv4("100.64..1"))
+  }
+
+  @Test
+  func validatesBoundedTailnetIdentityFields() {
+    #expect(TailnetIdentityPolicy.isValidTailnetName("example.com"))
+    #expect(TailnetIdentityPolicy.isValidTailnetName("example.github"))
+    #expect(!TailnetIdentityPolicy.isValidTailnetName(""))
+    #expect(!TailnetIdentityPolicy.isValidTailnetName(" example.com"))
+    #expect(!TailnetIdentityPolicy.isValidTailnetName("bad\nname"))
+    #expect(!TailnetIdentityPolicy.isValidTailnetName(String(repeating: "a", count: 254)))
+
+    #expect(TailnetIdentityPolicy.isValidLogin("operator@example.com"))
+    #expect(TailnetIdentityPolicy.isValidLogin("github-user"))
+    #expect(!TailnetIdentityPolicy.isValidLogin(""))
+    #expect(!TailnetIdentityPolicy.isValidLogin("github-user "))
+    #expect(!TailnetIdentityPolicy.isValidLogin("bad\u{0}login"))
+    #expect(!TailnetIdentityPolicy.isValidLogin(String(repeating: "a", count: 321)))
+  }
+
+  @Test
+  func authorizesOnlySameTailnetUserAndExactPeerAddress() async throws {
+    let identity = try TailnetIdentityPolicy.identity(from: statusDocument())
+    let accepted = TailnetPeerAuthorizer(
+      runner: StaticTailscaleRunner(output: whoisJSON(login: identity.loginName)),
+      expectedIdentity: identity
+    )
+    #expect(await accepted.authorize(remoteAddress: "100.100.10.20"))
+
+    let otherUser = TailnetPeerAuthorizer(
+      runner: StaticTailscaleRunner(output: whoisJSON(login: "other@example.com")),
+      expectedIdentity: identity
+    )
+    let otherUserID = TailnetPeerAuthorizer(
+      runner: StaticTailscaleRunner(
+        output: whoisJSON(login: identity.loginName, userID: 43)),
+      expectedIdentity: identity
+    )
+    let otherAddress = TailnetPeerAuthorizer(
+      runner: StaticTailscaleRunner(
+        output: whoisJSON(login: identity.loginName, addresses: ["100.100.10.21/32"])),
+      expectedIdentity: identity
+    )
+    let unauthorizedNode = TailnetPeerAuthorizer(
+      runner: StaticTailscaleRunner(
+        output: whoisJSON(login: identity.loginName, machineAuthorized: false)),
+      expectedIdentity: identity
+    )
+    #expect(!(await otherUser.authorize(remoteAddress: "100.100.10.20")))
+    #expect(!(await otherUserID.authorize(remoteAddress: "100.100.10.20")))
+    #expect(!(await otherAddress.authorize(remoteAddress: "100.100.10.20")))
+    #expect(!(await unauthorizedNode.authorize(remoteAddress: "100.100.10.20")))
+    #expect(!(await accepted.authorize(remoteAddress: "192.168.1.4")))
+  }
+
+  @Test
+  func keepsNewestCapturedFrameWhenUpdatesArriveOutOfOrder() async throws {
+    let store = CapturedDesktopFrameStore()
+    await store.update(.init(jpegData: Data([2]), sequence: 2, width: 2, height: 2))
+    await store.update(.init(jpegData: Data([1]), sequence: 1, width: 2, height: 2))
+
+    #expect(await store.latest()?.sequence == 2)
+  }
+
+  @Test
+  func buildsTightJPEGFramebufferUpdate() throws {
+    let jpeg = Data([0xFF, 0xD8, 0xFF, 0xD9])
+    let frame = CapturedDesktopFrame(jpegData: jpeg, sequence: 7, width: 1_600, height: 900)
+    let packet = try RFBWire.tightJPEGUpdate(frame: frame)
+
+    #expect(packet[0] == 0)
+    #expect(packet.readUInt16(at: 2) == 1)
+    #expect(packet.readUInt16(at: 8) == 1_600)
+    #expect(packet.readUInt16(at: 10) == 900)
+    #expect(packet.readInt32(at: 12) == RFBWire.tightEncoding)
+    #expect(packet[16] == 0x90)
+    #expect(packet[17] == 4)
+    #expect(packet.suffix(4) == jpeg)
+  }
+
+  @Test
+  func encodesTightCompactLengths() {
+    #expect(RFBWire.tightCompactLength(0) == Data([0x00]))
+    #expect(RFBWire.tightCompactLength(127) == Data([0x7F]))
+    #expect(RFBWire.tightCompactLength(128) == Data([0x80, 0x01]))
+    #expect(RFBWire.tightCompactLength(16_383) == Data([0xFF, 0x7F]))
+    #expect(RFBWire.tightCompactLength(16_384) == Data([0x80, 0x80, 0x01]))
+  }
+
+  @Test
+  func scalesCaptureWithinBoundedEvenDimensions() {
+    let retina = MacScreenCapture.captureDimensions(sourceWidth: 5_120, sourceHeight: 2_880)
+    #expect(retina.width == 1_600)
+    #expect(retina.height == 900)
+    #expect(retina.width.isMultiple(of: 2))
+    #expect(retina.height.isMultiple(of: 2))
+
+    let small = MacScreenCapture.captureDimensions(sourceWidth: 1_280, sourceHeight: 800)
+    #expect(small.width == 1_280)
+    #expect(small.height == 800)
+  }
+
+  @Test
+  func mapsRFBKeysymsToMacKeys() {
+    #expect(MacRemoteInputController.keyCode(for: 0x61) != nil)
+    #expect(MacRemoteInputController.keyCode(for: 0xFF51) != nil)
+    #expect(MacRemoteInputController.keyCode(for: 0xFFE7) != nil)
+    #expect(MacRemoteInputController.keyCode(for: 0x1F980) == nil)
+  }
+
+  @Test @MainActor
+  func servesRoyalVNCKitOverTheCurrentTailnet() async throws {
+    guard ProcessInfo.processInfo.environment["CRABFLEET_TAILNET_RFB_SMOKE"] == "1" else {
+      return
+    }
+
+    let runner = try SystemTailscaleCommandRunner()
+    let status = try await runner.run(arguments: ["status", "--json"])
+    let document = try JSONDecoder().decode(
+      TailscaleStatusDocument.self,
+      from: Data(status.standardOutput.utf8)
+    )
+    let identity = try TailnetIdentityPolicy.identity(from: document)
+    let capture = MacScreenCapture()
+    let jpeg = try #require(testJPEG())
+    await capture.frameStore.update(
+      .init(jpegData: jpeg, sequence: 1, width: 64, height: 64)
+    )
+
+    let port: UInt16 = 5_909
+    let server = TailnetRFBServer(
+      identity: identity,
+      runner: runner,
+      capture: capture,
+      descriptor: .init(
+        displayID: 0,
+        displayBounds: CGRect(x: 0, y: 0, width: 64, height: 64),
+        frameWidth: 64,
+        frameHeight: 64
+      ),
+      input: NoopRemoteInput(),
+      port: port,
+      eventHandler: { _ in }
+    )
+    try server.start()
+    defer { server.stop() }
+    try await Task.sleep(for: .milliseconds(250))
+
+    let session = VNCSessionController()
+    session.connect(
+      host: identity.ipv4Address,
+      port: port,
+      username: "",
+      password: "",
+      clipboardEnabled: false
+    )
+    defer { session.disconnect() }
+
+    let clock = ContinuousClock()
+    let deadline = clock.now.advanced(by: .seconds(15))
+    while clock.now < deadline {
+      if session.phase == .connected && session.framebufferUpdateCount > 0 { break }
+      try await Task.sleep(for: .milliseconds(25))
+    }
+    #expect(session.phase == .connected)
+    #expect(session.framebufferUpdateCount > 0)
+    #expect(session.framebuffer?.size.width == 64)
+    #expect(session.framebuffer?.size.height == 64)
+  }
+
+  private func statusDocument() throws -> TailscaleStatusDocument {
+    try JSONDecoder().decode(TailscaleStatusDocument.self, from: Data(statusJSON().utf8))
+  }
+
+  private func statusJSON() -> String {
+    """
+    {
+      "BackendState": "Running",
+      "CurrentTailnet": { "Name": "example.com" },
+      "Self": {
+        "DNSName": "workstation.example.ts.net.",
+        "HostName": "Workstation",
+        "Online": true,
+        "TailscaleIPs": ["100.64.12.34", "fd7a:115c:a1e0::1"],
+        "UserID": 42
+      },
+      "User": {
+        "42": { "LoginName": "operator@example.com" }
+      }
+    }
+    """
+  }
+
+  private func whoisJSON(
+    login: String,
+    userID: Int64 = 42,
+    addresses: [String] = ["100.100.10.20/32"],
+    machineAuthorized: Bool = true
+  ) -> String {
+    let encodedAddresses = addresses.map { "\"\($0)\"" }.joined(separator: ", ")
+    return """
+      {
+        "Node": {
+          "Addresses": [\(encodedAddresses)],
+          "MachineAuthorized": \(machineAuthorized),
+          "User": \(userID)
+        },
+        "UserProfile": { "LoginName": "\(login)" }
+      }
+      """
+  }
+
+  private func testJPEG() -> Data? {
+    guard
+      let bitmap = NSBitmapImageRep(
+        bitmapDataPlanes: nil,
+        pixelsWide: 64,
+        pixelsHigh: 64,
+        bitsPerSample: 8,
+        samplesPerPixel: 4,
+        hasAlpha: true,
+        isPlanar: false,
+        colorSpaceName: .deviceRGB,
+        bytesPerRow: 0,
+        bitsPerPixel: 0
+      )
+    else { return nil }
+    bitmap.setColor(
+      NSColor(deviceRed: 0.25, green: 0.9, blue: 0.7, alpha: 1),
+      atX: 16,
+      y: 16
+    )
+    bitmap.setColor(
+      NSColor(deviceRed: 1, green: 0.55, blue: 0.2, alpha: 1),
+      atX: 48,
+      y: 48
+    )
+    return bitmap.representation(using: .jpeg, properties: [.compressionFactor: 0.8])
+  }
+}
+
+private struct StaticTailscaleRunner: TailscaleCommandRunning {
+  let output: String
+
+  func run(arguments: [String]) async throws -> TailscaleCommandResult {
+    .init(standardOutput: output, standardError: "")
+  }
+}
+
+private struct NoopRemoteInput: RemoteInputForwarding {
+  func keyEvent(down: Bool, keysym: UInt32) {}
+  func pointerEvent(buttonMask: UInt8, x: UInt16, y: UInt16) {}
+}
