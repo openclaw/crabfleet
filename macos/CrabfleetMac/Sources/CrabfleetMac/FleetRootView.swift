@@ -5,6 +5,7 @@ struct FleetRootView: View {
   @ObservedObject var store: FleetStore
   @ObservedObject var connections: ConnectionLibrary
   @ObservedObject var sessions: VNCSessionPool
+  @StateObject private var privateShare = PrivateMacShareController()
 
   @Namespace private var desktopTransition
   @Environment(\.accessibilityReduceMotion) private var reduceMotion
@@ -14,6 +15,7 @@ struct FleetRootView: View {
   @State private var focusedTargetID: DesktopTarget.ID?
   @State private var connectionTarget: DesktopTarget?
   @State private var showingQuickConnect = false
+  @State private var showingPrivateShare = false
 
   private var allTargets: [DesktopTarget] {
     let saved = connections.profiles.map(DesktopTarget.init(profile:))
@@ -65,6 +67,7 @@ struct FleetRootView: View {
             targets: allTargets,
             currentUser: store.currentUser,
             notice: store.notice,
+            shareThisMac: { showingPrivateShare = true },
             quickConnect: { showingQuickConnect = true }
           )
           Divider().overlay(.white.opacity(0.07))
@@ -109,6 +112,9 @@ struct FleetRootView: View {
         connections.markConnected(profileID: profile.id)
         focus(target.id)
       }
+    }
+    .sheet(isPresented: $showingPrivateShare) {
+      PrivateMacShareSheet(controller: privateShare)
     }
     .onExitCommand(perform: closeFocus)
     .onChange(of: allTargets.map(\.id)) { _, targetIDs in
@@ -160,6 +166,7 @@ private struct DesktopSourceRail: View {
   let targets: [DesktopTarget]
   let currentUser: String
   let notice: String?
+  let shareThisMac: () -> Void
   let quickConnect: () -> Void
 
   var body: some View {
@@ -214,6 +221,24 @@ private struct DesktopSourceRail: View {
           .padding(.horizontal, 17)
           .padding(.bottom, 13)
       }
+
+      Button(action: shareThisMac) {
+        HStack(spacing: 8) {
+          Image(systemName: "display.and.arrow.down")
+          Text("Share This Mac")
+          Spacer()
+          Image(systemName: "lock.shield")
+            .font(.system(size: 10))
+            .foregroundStyle(.mint)
+        }
+        .font(.system(size: 12, weight: .semibold, design: .rounded))
+        .padding(.horizontal, 12)
+        .frame(height: 36)
+        .background(.mint.opacity(0.07), in: RoundedRectangle(cornerRadius: 8))
+      }
+      .buttonStyle(.plain)
+      .padding(.horizontal, 12)
+      .padding(.bottom, 5)
 
       Button(action: quickConnect) {
         HStack(spacing: 8) {
