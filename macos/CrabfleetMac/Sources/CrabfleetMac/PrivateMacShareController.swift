@@ -4,6 +4,24 @@ import Foundation
 
 @MainActor
 final class PrivateMacShareController: ObservableObject {
+  enum RegistryPhase: Equatable {
+    case notConfigured
+    case registering
+    case registered
+    case failed(String)
+
+    var detail: String {
+      switch self {
+      case .notConfigured: "Not configured"
+      case .registering: "Registering"
+      case .registered: "Published"
+      case .failed(let message): message
+      }
+    }
+
+    var isReady: Bool { self == .registered }
+  }
+
   enum Phase: Equatable {
     case idle
     case starting
@@ -40,14 +58,22 @@ final class PrivateMacShareController: ObservableObject {
   @Published private(set) var connectedPeer: String?
   @Published private(set) var notice: String?
   @Published private(set) var isRefreshing = false
+  @Published private(set) var registryPhase: RegistryPhase
 
   private let runner: (any TailscaleCommandRunning)?
+  private let desktopRegistration: (any DesktopHostRegistering)?
   private let runnerInitializationError: Error?
   private var capture: MacScreenCapture?
   private var server: TailnetRFBServer?
   private var serverGeneration: UUID?
+  private var registrationTask: Task<Void, Never>?
 
-  init(runner: (any TailscaleCommandRunning)? = nil) {
+  init(
+    runner: (any TailscaleCommandRunning)? = nil,
+    desktopRegistration: (any DesktopHostRegistering)? = CrabfleetDesktopRegistration()
+  ) {
+    self.desktopRegistration = desktopRegistration
+    registryPhase = desktopRegistration == nil ? .notConfigured : .registering
     if let runner {
       self.runner = runner
       runnerInitializationError = nil
@@ -102,6 +128,7 @@ final class PrivateMacShareController: ObservableObject {
     phase = .starting
     notice = nil
     connectedPeer = nil
+    registryPhase = desktopRegistration == nil ? .notConfigured : .registering
     await loadIdentity()
     refreshPermissions()
 
@@ -160,6 +187,8 @@ final class PrivateMacShareController: ObservableObject {
     guard phase.isRunning || phase == .failed else { return }
     phase = .stopping
     connectedPeer = nil
+    registrationTask?.cancel()
+    registrationTask = nil
     serverGeneration = nil
     server?.stop()
     server = nil
@@ -222,6 +251,7 @@ final class PrivateMacShareController: ObservableObject {
     case .listening:
       phase = .sharing
       notice = nil
+      registerDesktopHost(generation: generation)
     case .authorizing(let peer):
       phase = .authorizing
       connectedPeer = peer
@@ -233,6 +263,8 @@ final class PrivateMacShareController: ObservableObject {
       phase = .sharing
       connectedPeer = nil
     case .listenerFailed(let message):
+      registrationTask?.cancel()
+      registrationTask = nil
       phase = .failed
       connectedPeer = nil
       notice = PrivateMacShareError.listenerFailed(message).localizedDescription
@@ -246,6 +278,27 @@ final class PrivateMacShareController: ObservableObject {
       phase = .sharing
       connectedPeer = nil
       notice = message
+    }
+  }
+
+  private func registerDesktopHost(generation: UUID) {
+    registrationTask?.cancel()
+    guard let desktopRegistration, let identity else {
+      registryPhase = .notConfigured
+      return
+    }
+    registryPhase = .registering
+    registrationTask = Task { [weak self] in
+      do {
+        try await desktopRegistration.register(identity: identity, port: Self.port)
+        guard !Task.isCancelled, self?.serverGeneration == generation else { return }
+        self?.registryPhase = .registered
+      } catch is CancellationError {
+        return
+      } catch {
+        guard self?.serverGeneration == generation else { return }
+        self?.registryPhase = .failed(error.localizedDescription)
+      }
     }
   }
 }

@@ -793,8 +793,33 @@ Includes:
 - `egress`
 - `totals`
 - `sessions`
+- `desktopHosts`: private registered Tailscale VNC endpoints owned by the signed-in stable subject
 
 Secrets, ciphertext, and token values are never returned.
+
+### PUT /api/desktop-hosts/:id
+
+Registers or updates one private desktop owned by the signed-in viewer. The ID
+is a stable 1-80 character machine identifier. The address must be a canonical
+IPv4 address in Tailscale's `100.64.0.0/10` range; arbitrary LAN and public
+addresses are rejected.
+
+```json
+{
+  "name": "Studio",
+  "address": "100.64.12.34",
+  "port": 5901
+}
+```
+
+The host is visible only to the same stable user, regardless of shared or
+private session-tenancy mode. Re-registering the same ID updates its name,
+address, port, and timestamp while preserving its creation time.
+
+### DELETE /api/desktop-hosts/:id
+
+Removes one registered desktop owned by the signed-in viewer. The route cannot
+remove another user's record with the same ID.
 
 ## Static Routes
 

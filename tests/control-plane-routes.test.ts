@@ -41,6 +41,21 @@ function dependencies(calls: string[]): ControlPlaneRouteDependencies {
       calls.push(`fleet:${user.login}`);
       return { handler: "fleet" };
     },
+    async registerDesktopHost(user, id, input) {
+      calls.push(`desktop-host:register:${user.login}:${id}:${input.name}`);
+      return {
+        id,
+        owner: user.login ?? user.subject,
+        name: String(input.name),
+        address: String(input.address),
+        port: Number(input.port),
+        createdAt: 1,
+        updatedAt: 1,
+      };
+    },
+    async removeDesktopHost(user, id) {
+      calls.push(`desktop-host:remove:${user.login}:${id}`);
+    },
     async searchGitHubRefs(number) {
       calls.push(`github-refs:${number}`);
       return { handler: "github-refs" };
@@ -131,6 +146,42 @@ test("control-plane read and card routes enforce their role boundaries", async (
     assert.equal(status(error), 403);
     return true;
   });
+});
+
+test("desktop host routes register and remove only the authenticated user's host", async () => {
+  const calls: string[] = [];
+  const registered = await dispatch(
+    request("PUT", "/api/desktop-hosts/mac%2Dstudio", {
+      name: "Mac Studio",
+      address: "100.64.1.2",
+      port: 5901,
+    }),
+    viewer,
+    calls,
+  );
+  assert.equal(registered?.status, 200);
+  assert.deepEqual(await registered?.json(), {
+    host: {
+      id: "mac-studio",
+      owner: "viewer",
+      name: "Mac Studio",
+      address: "100.64.1.2",
+      port: 5901,
+      createdAt: 1,
+      updatedAt: 1,
+    },
+  });
+
+  const removed = await dispatch(
+    request("DELETE", "/api/desktop-hosts/mac%2Dstudio"),
+    viewer,
+    calls,
+  );
+  assert.equal(removed?.status, 200);
+  assert.deepEqual(calls, [
+    "desktop-host:register:viewer:mac-studio:Mac Studio",
+    "desktop-host:remove:viewer:mac-studio",
+  ]);
 });
 
 test("card actions derive viewer or maintainer authorization from the action", async () => {

@@ -74,6 +74,17 @@ test("fleet state aggregates sessions and redacted sandbox policies", () => {
       generatedAt: 100,
       productUrl: "https://crabfleet.ai",
       sandboxAvailable: true,
+      desktopHosts: [
+        {
+          id: "studio",
+          owner: "steipete",
+          name: "Studio",
+          address: "100.64.1.2",
+          port: 5901,
+          createdAt: 10,
+          updatedAt: 50,
+        },
+      ],
     },
   );
 
@@ -99,6 +110,17 @@ test("fleet state aggregates sessions and redacted sandbox policies", () => {
   assert.equal(fleet.sessions[1]?.policy.hasGithubToken, true);
   assert.equal(fleet.sessions[1]?.policy.githubCredentialSource, "worker");
   assert.equal(fleet.sessions[1]?.policy.allowedHostCount, 3);
+  assert.deepEqual(fleet.desktopHosts, [
+    {
+      id: "studio",
+      owner: "steipete",
+      name: "Studio",
+      address: "100.64.1.2",
+      port: 5901,
+      createdAt: 10,
+      updatedAt: 50,
+    },
+  ]);
 });
 
 test("GitHub Actions sessions are attachable through the Worker relay", () => {

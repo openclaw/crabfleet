@@ -62,6 +62,17 @@ export type SessionTable = {
   github_token_ciphertext: string | null;
 };
 
+export type DesktopHostTable = {
+  owner_subject: string;
+  id: string;
+  owner: string;
+  name: string;
+  address: string;
+  port: number;
+  created_at: number;
+  updated_at: number;
+};
+
 export type CardTable = {
   id: string;
   title: string;
@@ -327,6 +338,7 @@ export type Database = {
   repos: RepoTable;
   users: UserTable;
   sessions: SessionTable;
+  desktop_hosts: DesktopHostTable;
   cards: CardTable;
   run_attempts: RunAttemptTable;
   interactive_sessions: InteractiveSessionTable;

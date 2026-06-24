@@ -20,7 +20,8 @@ struct FleetRootView: View {
   private var allTargets: [DesktopTarget] {
     let saved = connections.profiles.map(DesktopTarget.init(profile:))
     let fleet = store.leases.map(DesktopTarget.init(lease:))
-    return (saved + fleet).sorted(by: targetSort)
+    let hosts = store.desktopHosts.map(DesktopTarget.init(host:))
+    return (saved + hosts + fleet).sorted(by: targetSort)
   }
 
   private var visibleTargets: [DesktopTarget] {
@@ -30,7 +31,8 @@ struct FleetRootView: View {
       case .all:
         isVisible = true
       case .mine:
-        isVisible = target.source == .saved || target.owner == store.currentUser
+        isVisible =
+          target.source == .saved || target.endpoint != nil || target.owner == store.currentUser
       case .fleet:
         isVisible = target.source == .crabfleet
       case .saved:
@@ -54,7 +56,7 @@ struct FleetRootView: View {
           session: sessions.session(for: target.id),
           sessions: sessions,
           namespace: desktopTransition,
-          connect: { connectionTarget = target },
+          connect: { connect(target) },
           disconnect: { sessions.disconnect(targetID: target.id) },
           switchTo: focus,
           close: closeFocus
@@ -139,12 +141,36 @@ struct FleetRootView: View {
 
   private func focus(_ targetID: DesktopTarget.ID) {
     sessions.focus(targetID: targetID)
+    if let target = allTargets.first(where: { $0.id == targetID }),
+      target.source == .crabfleet,
+      target.endpoint != nil,
+      !sessions.session(for: targetID).phase.isConnectedOrConnecting
+    {
+      connect(target)
+    }
     let animation: Animation =
       reduceMotion
       ? .easeOut(duration: 0.12)
       : .spring(response: 0.24, dampingFraction: 0.9)
     withAnimation(animation) {
       focusedTargetID = targetID
+    }
+  }
+
+  private func connect(_ target: DesktopTarget) {
+    if target.source == .crabfleet, let endpoint = target.endpoint {
+      sessions.connect(
+        targetID: target.id,
+        request: .init(
+          host: endpoint.host,
+          port: endpoint.port,
+          username: endpoint.username,
+          password: "",
+          clipboardEnabled: false
+        )
+      )
+    } else {
+      connectionTarget = target
     }
   }
 
@@ -265,7 +291,8 @@ private struct DesktopSourceRail: View {
   private func count(for scope: DesktopScope) -> Int {
     switch scope {
     case .all: targets.count
-    case .mine: targets.filter { $0.source == .saved || $0.owner == currentUser }.count
+    case .mine:
+      targets.filter { $0.source == .saved || $0.endpoint != nil || $0.owner == currentUser }.count
     case .fleet: targets.filter { $0.source == .crabfleet }.count
     case .saved: targets.filter { $0.source == .saved }.count
     }
