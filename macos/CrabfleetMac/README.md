@@ -34,6 +34,15 @@ macOS makes captured frames available. Ad-hoc development signatures can cause
 macOS to ask again after a rebuild; production signing is required for a stable
 permission identity.
 
+For an unattended host, launch the bundled app with `--share-this-mac`, or set
+`CRABFLEET_AUTO_SHARE=1`. Crabfleet requests any missing Screen Recording and
+Accessibility permissions, waits up to five minutes for them to be granted,
+and then starts the same tailnet-only RFB listener used by the in-app control:
+
+```sh
+/Applications/Crabfleet.app/Contents/MacOS/CrabfleetMac --share-this-mac
+```
+
 ## Build
 
 ```sh

@@ -6,6 +6,20 @@ import Testing
 
 struct PrivateMacShareTests {
   @Test
+  func recognizesExplicitPrivateShareLaunchMode() {
+    #expect(
+      PrivateMacShareLaunchMode.isEnabled(
+        arguments: ["CrabfleetMac", "--share-this-mac"], environment: [:]))
+    #expect(
+      PrivateMacShareLaunchMode.isEnabled(
+        arguments: ["CrabfleetMac"], environment: ["CRABFLEET_AUTO_SHARE": "1"]))
+    #expect(
+      !PrivateMacShareLaunchMode.isEnabled(
+        arguments: ["CrabfleetMac"], environment: ["CRABFLEET_AUTO_SHARE": "true"]))
+    #expect(!PrivateMacShareLaunchMode.isEnabled(arguments: ["CrabfleetMac"], environment: [:]))
+  }
+
+  @Test
   func acceptsOnlineUserOnActiveTailnet() throws {
     let identity = try TailnetIdentityPolicy.identity(from: statusDocument())
 
