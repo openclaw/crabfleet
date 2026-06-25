@@ -14,6 +14,26 @@ enum PrivateMacShareLaunchMode {
   }
 }
 
+enum VNCConnectionLaunchMode {
+  static let argument = "--connect"
+  static let environmentKey = "CRABFLEET_AUTO_CONNECT"
+
+  static func address(
+    arguments: [String] = ProcessInfo.processInfo.arguments,
+    environment: [String: String] = ProcessInfo.processInfo.environment
+  ) throws -> VNCAddress? {
+    let rawValue: String?
+    if let argumentIndex = arguments.dropFirst().firstIndex(of: argument) {
+      let valueIndex = arguments.index(after: argumentIndex)
+      rawValue = valueIndex < arguments.endIndex ? arguments[valueIndex] : ""
+    } else {
+      rawValue = environment[environmentKey]
+    }
+    guard let rawValue else { return nil }
+    return try VNCAddress.parse(rawValue)
+  }
+}
+
 @MainActor
 final class CrabfleetApplicationDelegate: NSObject, NSApplicationDelegate {
   private var shareController: PrivateMacShareController?
@@ -79,13 +99,15 @@ struct CrabfleetMacApp: App {
   @StateObject private var fleetStore = FleetStore()
   @StateObject private var connectionLibrary = ConnectionLibrary()
   @StateObject private var sessionPool = VNCSessionPool()
+  private let launchConnection = try? VNCConnectionLaunchMode.address()
 
   var body: some Scene {
     Window("Crabfleet", id: "main") {
       CrabfleetAppRoot(
         fleetStore: fleetStore,
         connectionLibrary: connectionLibrary,
-        sessionPool: sessionPool
+        sessionPool: sessionPool,
+        launchConnection: launchConnection
       )
     }
     .defaultSize(width: 1_360, height: 860)
@@ -107,6 +129,7 @@ private struct CrabfleetAppRoot: View {
   @ObservedObject var fleetStore: FleetStore
   @ObservedObject var connectionLibrary: ConnectionLibrary
   @ObservedObject var sessionPool: VNCSessionPool
+  let launchConnection: VNCAddress?
 
   @Environment(\.scenePhase) private var scenePhase
 
@@ -114,7 +137,8 @@ private struct CrabfleetAppRoot: View {
     FleetRootView(
       store: fleetStore,
       connections: connectionLibrary,
-      sessions: sessionPool
+      sessions: sessionPool,
+      launchConnection: launchConnection
     )
     .frame(minWidth: 1_080, minHeight: 680)
     .preferredColorScheme(.dark)

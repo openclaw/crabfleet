@@ -5,6 +5,7 @@ struct FleetRootView: View {
   @ObservedObject var store: FleetStore
   @ObservedObject var connections: ConnectionLibrary
   @ObservedObject var sessions: VNCSessionPool
+  let launchConnection: VNCAddress?
   @StateObject private var privateShare = PrivateMacShareController()
 
   @Namespace private var desktopTransition
@@ -16,6 +17,7 @@ struct FleetRootView: View {
   @State private var connectionTarget: DesktopTarget?
   @State private var showingQuickConnect = false
   @State private var showingPrivateShare = false
+  @State private var didHandleLaunchConnection = false
 
   private var allTargets: [DesktopTarget] {
     let saved = connections.profiles.map(DesktopTarget.init(profile:))
@@ -118,6 +120,7 @@ struct FleetRootView: View {
     .sheet(isPresented: $showingPrivateShare) {
       PrivateMacShareSheet(controller: privateShare)
     }
+    .onAppear(perform: connectLaunchConnectionIfNeeded)
     .onExitCommand(perform: closeFocus)
     .onChange(of: allTargets.map(\.id)) { _, targetIDs in
       sessions.reconcile(validTargetIDs: Set(targetIDs))
@@ -172,6 +175,29 @@ struct FleetRootView: View {
     } else {
       connectionTarget = target
     }
+  }
+
+  private func connectLaunchConnectionIfNeeded() {
+    guard !didHandleLaunchConnection, let launchConnection else { return }
+    didHandleLaunchConnection = true
+    let profile = connections.save(
+      name: launchConnection.displayValue,
+      address: launchConnection,
+      favorite: true
+    )
+    let target = DesktopTarget(profile: profile)
+    focus(target.id)
+    sessions.connect(
+      targetID: target.id,
+      request: .init(
+        host: launchConnection.host,
+        port: launchConnection.port,
+        username: launchConnection.username,
+        password: "",
+        clipboardEnabled: false
+      )
+    )
+    connections.markConnected(profileID: profile.id)
   }
 
   private func closeFocus() {

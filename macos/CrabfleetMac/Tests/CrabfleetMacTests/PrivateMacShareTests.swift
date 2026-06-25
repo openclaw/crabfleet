@@ -20,6 +20,42 @@ struct PrivateMacShareTests {
   }
 
   @Test
+  func parsesExplicitVNCConnectionLaunchMode() throws {
+    let explicitAddress = try VNCConnectionLaunchMode.address(
+      arguments: ["CrabfleetMac", "--connect", "vnc://100.64.0.8:5901"],
+      environment: ["CRABFLEET_AUTO_CONNECT": "vnc://ignored.example:5900"]
+    )
+    let explicit = try #require(explicitAddress)
+    #expect(explicit.host == "100.64.0.8")
+    #expect(explicit.port == 5_901)
+
+    let environmentAddress = try VNCConnectionLaunchMode.address(
+      arguments: ["CrabfleetMac"],
+      environment: ["CRABFLEET_AUTO_CONNECT": "viewer.example:5999"]
+    )
+    let environment = try #require(environmentAddress)
+    #expect(environment.host == "viewer.example")
+    #expect(environment.port == 5_999)
+    #expect(
+      try VNCConnectionLaunchMode.address(
+        arguments: ["CrabfleetMac"], environment: [:]) == nil)
+  }
+
+  @Test
+  func rejectsMissingOrCredentialedVNCConnectionLaunchAddress() {
+    #expect(throws: VNCAddressError.missingHost) {
+      try VNCConnectionLaunchMode.address(
+        arguments: ["CrabfleetMac", "--connect"], environment: [:])
+    }
+    #expect(throws: VNCAddressError.embeddedPassword) {
+      try VNCConnectionLaunchMode.address(
+        arguments: ["CrabfleetMac", "--connect", "vnc://user:secret@example.test"],
+        environment: [:]
+      )
+    }
+  }
+
+  @Test
   func acceptsOnlineUserOnActiveTailnet() throws {
     let identity = try TailnetIdentityPolicy.identity(from: statusDocument())
 
