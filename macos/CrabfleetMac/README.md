@@ -43,6 +43,15 @@ and then starts the same tailnet-only RFB listener used by the in-app control:
 /Applications/Crabfleet.app/Contents/MacOS/CrabfleetMac --share-this-mac
 ```
 
+To open a no-password VNC endpoint immediately, use `--connect` or set
+`CRABFLEET_AUTO_CONNECT`. The address is saved as a favorite and focused when
+the app opens. Embedded passwords are rejected:
+
+```sh
+/Applications/Crabfleet.app/Contents/MacOS/CrabfleetMac \
+  --connect vnc://100.64.0.8:5901
+```
+
 ## Build
 
 ```sh
