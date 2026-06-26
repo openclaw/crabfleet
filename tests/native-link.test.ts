@@ -121,6 +121,7 @@ test("trusted-proxy native approval uses asserted identity and exact Origin with
   assert.equal(get.status, 200);
   assert.equal(get.headers.has("set-cookie"), false);
   assert.match(get.headers.get("content-security-policy") ?? "", /frame-ancestors 'none'/);
+  assert.equal(get.headers.get("referrer-policy"), "same-origin");
   assert.equal(get.headers.get("x-frame-options"), "DENY");
   const csrf = (await get.text()).match(/name="csrf" value="([^"]+)"/)?.[1];
   assert.ok(csrf);

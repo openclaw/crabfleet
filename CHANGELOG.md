@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Preserve the real same-origin `Origin` header on browser-approved native Mac authorization forms so Chromium can complete the device link without weakening CSRF validation.
 - Connect desktop-capable Crabbox Fleet leases directly in the macOS app through the installed CLI's foreground, loopback-only native VNC handoff, with helper teardown tied to viewer lifecycle.
 - Classify stalled or errored workspace provisioning as attention, exclude it from the Starting count, and surface the redacted reconciliation reason in Fleet.
 - Add private per-user desktop-host registration so native macOS shares appear in Fleet with direct same-tailnet VNC endpoints.
