@@ -48,6 +48,11 @@ struct NativeAccessToken: Equatable, Sendable {
   let user: NativeAPIUser
 }
 
+enum NativeAuthorizationStart: Equatable, Sendable {
+  case device(NativeDeviceAuthorization)
+  case approved(NativeAccessToken)
+}
+
 enum NativeTokenExchange: Equatable, Sendable {
   case pending
   case approved(NativeAccessToken)
@@ -55,13 +60,23 @@ enum NativeTokenExchange: Equatable, Sendable {
 
 protocol NativeAPIClientProtocol: AnyObject {
   var origin: DeploymentOrigin { get }
+  func beginAuthorization(clientName: String) async throws -> NativeAuthorizationStart
   func createDeviceAuthorization(clientName: String) async throws -> NativeDeviceAuthorization
   func exchangeDeviceCode(_ deviceCode: String) async throws -> NativeTokenExchange
   func session(accessToken: String) async throws -> NativeAPISession
   func fleet(accessToken: String) async throws -> NativeAPIFleet
+  func refreshCredential(accessToken: String) async throws -> String?
   func revoke(accessToken: String) async throws
   @MainActor
   func close()
+}
+
+extension NativeAPIClientProtocol {
+  func beginAuthorization(clientName: String) async throws -> NativeAuthorizationStart {
+    .device(try await createDeviceAuthorization(clientName: clientName))
+  }
+
+  func refreshCredential(accessToken: String) async throws -> String? { nil }
 }
 
 protocol HTTPDataTransport {
@@ -291,6 +306,7 @@ final class NativeAPIClient: NativeAPIClientProtocol {
   let origin: DeploymentOrigin
 
   private let transport: HTTPDataTransport
+  private let oauthAuthorizer: OAuthGatewayAuthorizing
   private let encoder = JSONEncoder()
   private let decoder = JSONDecoder()
   private let maximumResponseBytes = 5 * 1_024 * 1_024
@@ -299,10 +315,12 @@ final class NativeAPIClient: NativeAPIClientProtocol {
 
   init(
     origin: DeploymentOrigin,
-    transport: HTTPDataTransport = RejectingRedirectURLSessionTransport()
+    transport: HTTPDataTransport = RejectingRedirectURLSessionTransport(),
+    oauthAuthorizer: OAuthGatewayAuthorizing = OAuthGatewayAuthorizer()
   ) {
     self.origin = origin
     self.transport = transport
+    self.oauthAuthorizer = oauthAuthorizer
   }
 
   deinit {
@@ -318,6 +336,26 @@ final class NativeAPIClient: NativeAPIClientProtocol {
     isClosed = true
     lifecycleLock.unlock()
     transport.close()
+  }
+
+  func beginAuthorization(clientName: String) async throws -> NativeAuthorizationStart {
+    do {
+      return .device(try await createDeviceAuthorization(clientName: clientName))
+    } catch NativeAPIError.redirectRejected {
+      let token = try await oauthAuthorizer.authorize(origin: origin, transport: transport)
+      return .approved(
+        .init(
+          value: NativeStoredCredential.oauth(token),
+          expiresAt: token.expiresAt,
+          user: .init(
+            subject: "oauth:pending",
+            login: nil,
+            email: nil,
+            name: nil,
+            role: "viewer"
+          )
+        ))
+    }
   }
 
   func createDeviceAuthorization(clientName: String) async throws -> NativeDeviceAuthorization {
@@ -381,21 +419,39 @@ final class NativeAPIClient: NativeAPIClientProtocol {
   }
 
   func session(accessToken: String) async throws -> NativeAPISession {
+    let credential = NativeStoredCredential(accessToken)
     let response = try await request(
-      path: "/api/native/v1/session",
+      path: credential.kind == .oauth
+        ? "/mcp/crabfleet/native/v1/session"
+        : "/api/native/v1/session",
       method: "GET",
-      accessToken: accessToken
+      accessToken: credential.value
     )
     guard response.statusCode == 200 else { throw error(for: response) }
+    if credential.kind == .oauth {
+      let payload = try decode(OAuthSessionResponse.self, from: response.data)
+      return .init(
+        user: payload.user,
+        deployment: .init(
+          label: origin.url.host,
+          canonicalUrl: origin.displayValue,
+          productUrl: nil,
+          sshHost: nil
+        )
+      )
+    }
     let payload = try decode(SessionResponse.self, from: response.data)
     return .init(user: payload.user, deployment: payload.deployment)
   }
 
   func fleet(accessToken: String) async throws -> NativeAPIFleet {
+    let credential = NativeStoredCredential(accessToken)
     let response = try await request(
-      path: "/api/native/v1/fleet",
+      path: credential.kind == .oauth
+        ? "/mcp/crabfleet/native/v1/fleet"
+        : "/api/native/v1/fleet",
       method: "GET",
-      accessToken: accessToken
+      accessToken: credential.value
     )
     guard response.statusCode == 200 else { throw error(for: response) }
     let payload = try decode(FleetAPIEnvelope.self, from: response.data)
@@ -405,11 +461,63 @@ final class NativeAPIClient: NativeAPIClientProtocol {
     )
   }
 
+  func refreshCredential(accessToken: String) async throws -> String? {
+    let credential = NativeStoredCredential(accessToken)
+    guard credential.kind == .oauth, let token = credential.oauthToken,
+      token.refreshToken != nil, token.tokenEndpoint != nil,
+      token.resources.allSatisfy(origin.contains)
+    else {
+      return nil
+    }
+    do {
+      let refreshed = try await oauthAuthorizer.refresh(token: token, transport: transport)
+      return NativeStoredCredential.oauth(refreshed)
+    } catch OAuthGatewayError.tokenEndpoint(_, let error) where error == "invalid_grant" {
+      throw NativeAPIError.unauthorized
+    }
+  }
+
   func revoke(accessToken: String) async throws {
+    let credential = NativeStoredCredential(accessToken)
+    if credential.kind == .oauth {
+      guard let oauthToken = credential.oauthToken,
+        !oauthToken.clientID.isEmpty,
+        let endpoint = credential.oauthRevocationEndpoint
+      else {
+        return
+      }
+      var firstError: Error?
+      do {
+        try await oauthAuthorizer.revoke(
+          token: credential.value,
+          tokenTypeHint: "access_token",
+          clientID: oauthToken.clientID,
+          endpoint: endpoint,
+          transport: transport
+        )
+      } catch {
+        firstError = error
+      }
+      if let refreshToken = oauthToken.refreshToken {
+        do {
+          try await oauthAuthorizer.revoke(
+            token: refreshToken,
+            tokenTypeHint: "refresh_token",
+            clientID: oauthToken.clientID,
+            endpoint: endpoint,
+            transport: transport
+          )
+        } catch {
+          if firstError == nil { firstError = error }
+        }
+      }
+      if let firstError { throw firstError }
+      return
+    }
     let response = try await request(
       path: "/api/native/v1/auth/token",
       method: "DELETE",
-      accessToken: accessToken
+      accessToken: credential.value
     )
     if response.statusCode == 401 { return }
     guard (200..<300).contains(response.statusCode) else { throw error(for: response) }
@@ -547,6 +655,197 @@ private struct TokenResponse: Decodable {
 private struct SessionResponse: Decodable {
   let user: NativeAPIUser
   let deployment: NativeAPIDeployment
+}
+
+private struct OAuthSessionResponse: Decodable {
+  let user: NativeAPIUser
+}
+
+private struct NativeStoredCredential {
+  enum Kind {
+    case device
+    case oauth
+  }
+
+  private static let legacyOAuthPrefix = "crabfleet-oauth-v1:"
+  private static let legacyMetadataOAuthPrefix = "crabfleet-oauth-v2:"
+  private static let oauthPrefix = "crabfleet-oauth-v3:"
+
+  let kind: Kind
+  let value: String
+  let oauthToken: OAuthGatewayAccessToken?
+
+  var oauthRevocationEndpoint: URL? { oauthToken?.revocationEndpoint }
+
+  init(_ storedValue: String) {
+    if storedValue.hasPrefix(Self.oauthPrefix) {
+      kind = .oauth
+      if let payload = Self.decodePayload(String(storedValue.dropFirst(Self.oauthPrefix.count))) {
+        value = payload.accessToken
+        oauthToken = .init(
+          value: payload.accessToken,
+          expiresAt: Date(timeIntervalSince1970: payload.expiresAt),
+          clientID: payload.clientID,
+          tokenEndpoint: URL(string: payload.tokenEndpoint),
+          revocationEndpoint: payload.revocationEndpoint.flatMap(URL.init(string:)),
+          refreshToken: payload.refreshToken,
+          scope: payload.scope,
+          resources: payload.resources.compactMap(URL.init(string:)),
+          expectedAudiences: payload.expectedAudiences
+        )
+      } else {
+        value = ""
+        oauthToken = nil
+      }
+    } else if storedValue.hasPrefix(Self.legacyMetadataOAuthPrefix) {
+      kind = .oauth
+      if let payload = Self.decodeLegacyMetadataPayload(
+        String(storedValue.dropFirst(Self.legacyMetadataOAuthPrefix.count))
+      ) {
+        value = payload.accessToken
+        oauthToken = .init(
+          value: payload.accessToken,
+          expiresAt: .distantPast,
+          clientID: payload.clientID,
+          revocationEndpoint: payload.revocationEndpoint.flatMap(URL.init(string:))
+        )
+      } else {
+        value = ""
+        oauthToken = nil
+      }
+    } else if storedValue.hasPrefix(Self.legacyOAuthPrefix) {
+      kind = .oauth
+      value = String(storedValue.dropFirst(Self.legacyOAuthPrefix.count))
+      oauthToken = .init(value: value, expiresAt: .distantPast)
+    } else {
+      kind = .device
+      value = storedValue
+      oauthToken = nil
+    }
+  }
+
+  static func oauth(_ token: OAuthGatewayAccessToken) -> String {
+    guard !token.clientID.isEmpty, let tokenEndpoint = token.tokenEndpoint else {
+      if !token.clientID.isEmpty {
+        let payload = LegacyMetadataOAuthPayload(
+          accessToken: token.value,
+          clientID: token.clientID,
+          revocationEndpoint: token.revocationEndpoint?.absoluteString
+        )
+        if let data = try? JSONEncoder().encode(payload) {
+          return legacyMetadataOAuthPrefix + data.base64EncodedString()
+        }
+      }
+      return legacyOAuthPrefix + token.value
+    }
+    let payload = OAuthPayload(
+      accessToken: token.value,
+      expiresAt: token.expiresAt.timeIntervalSince1970,
+      clientID: token.clientID,
+      tokenEndpoint: tokenEndpoint.absoluteString,
+      revocationEndpoint: token.revocationEndpoint?.absoluteString,
+      refreshToken: token.refreshToken,
+      scope: token.scope,
+      resources: token.resources.map(\.absoluteString),
+      expectedAudiences: token.expectedAudiences
+    )
+    guard let data = try? JSONEncoder().encode(payload) else {
+      return legacyOAuthPrefix + token.value
+    }
+    return oauthPrefix + data.base64EncodedString()
+  }
+
+  private static func decodePayload(_ value: String) -> OAuthPayload? {
+    guard let data = Data(base64Encoded: value),
+      let payload = try? JSONDecoder().decode(OAuthPayload.self, from: data),
+      !payload.accessToken.isEmpty,
+      !payload.clientID.isEmpty,
+      payload.accessToken.utf8.count <= 16 * 1_024,
+      payload.clientID.utf8.count <= 512,
+      payload.expiresAt.isFinite,
+      payload.expiresAt > 0,
+      payload.refreshToken.map({ !$0.isEmpty && $0.utf8.count <= 16 * 1_024 }) != false,
+      validScope(payload.scope),
+      secureURL(payload.tokenEndpoint) != nil,
+      payload.resources.count <= 2,
+      payload.resources.allSatisfy({ protectedResourceURL($0) != nil }),
+      payload.expectedAudiences.count <= 4,
+      payload.expectedAudiences.allSatisfy({ !$0.isEmpty && $0.utf8.count <= 1_024 })
+    else {
+      return nil
+    }
+    if let endpoint = payload.revocationEndpoint, secureURL(endpoint) == nil {
+      return nil
+    }
+    return payload
+  }
+
+  private static func decodeLegacyMetadataPayload(_ value: String) -> LegacyMetadataOAuthPayload? {
+    guard let data = Data(base64Encoded: value),
+      let payload = try? JSONDecoder().decode(LegacyMetadataOAuthPayload.self, from: data),
+      !payload.accessToken.isEmpty,
+      !payload.clientID.isEmpty,
+      payload.accessToken.utf8.count <= 16 * 1_024,
+      payload.clientID.utf8.count <= 512
+    else { return nil }
+    if let endpoint = payload.revocationEndpoint, secureURL(endpoint) == nil {
+      return nil
+    }
+    return payload
+  }
+
+  private static func secureURL(_ value: String) -> URL? {
+    guard let url = URL(string: value),
+      url.scheme?.lowercased() == "https",
+      url.host?.isEmpty == false,
+      url.user == nil,
+      url.password == nil,
+      url.fragment == nil
+    else { return nil }
+    return url
+  }
+
+  private static func protectedResourceURL(_ value: String) -> URL? {
+    guard let url = URL(string: value),
+      let scheme = url.scheme?.lowercased(),
+      let host = url.host?.lowercased(),
+      !host.isEmpty,
+      scheme == "https" || (scheme == "http" && ["localhost", "127.0.0.1", "::1"].contains(host)),
+      url.user == nil,
+      url.password == nil,
+      url.query == nil,
+      url.fragment == nil
+    else { return nil }
+    return url
+  }
+
+  private static func validScope(_ value: String) -> Bool {
+    let tokens = value.split(separator: " ", omittingEmptySubsequences: false)
+    return value.utf8.count <= 1_024 && (value.isEmpty || tokens.count <= 9)
+      && tokens.allSatisfy { token in
+        !token.isEmpty && token.utf8.count <= 512 && token.utf8.allSatisfy { byte in
+          byte == 0x21 || (0x23...0x5B).contains(byte) || (0x5D...0x7E).contains(byte)
+        }
+      }
+  }
+
+  private struct OAuthPayload: Codable {
+    let accessToken: String
+    let expiresAt: TimeInterval
+    let clientID: String
+    let tokenEndpoint: String
+    let revocationEndpoint: String?
+    let refreshToken: String?
+    let scope: String
+    let resources: [String]
+    let expectedAudiences: [String]
+  }
+
+  private struct LegacyMetadataOAuthPayload: Codable {
+    let accessToken: String
+    let clientID: String
+    let revocationEndpoint: String?
+  }
 }
 
 private struct ErrorResponse: Decodable {

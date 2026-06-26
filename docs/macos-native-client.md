@@ -153,6 +153,28 @@ fails, the existing connection is kept so the user can retry instead of
 silently orphaning a restorable credential. Switching deployments applies the
 same local-cleanup fence.
 
+When a deployment gateway redirects the initial device request, the client can
+instead follow the same-origin `resource_metadata` URL in the protected route's
+Bearer challenge and its explicit read-only scope, dynamically register a
+public client, use authorization-code PKCE, and receive the callback on the
+exact loopback redirect URI returned by registration. The resulting gateway
+bearer and optional refresh grant are
+stored under the same deployment-scoped Keychain policy and are sent only to
+`/mcp/crabfleet/native/v1/session` and `/mcp/crabfleet/native/v1/fleet`.
+The client requires each RFC 9728 route challenge to identify its exact
+protected resource and requests both identifiers. For gateways that return
+authorization-server metadata directly, a `resource` field is rejected and an
+explicit `api://` scope must match the issued JWT's `aud` claim before use.
+The app asks for explicit trust before contacting any OAuth provider origin
+outside the deployment itself and rejects oversized aggregate scope lists
+before registration.
+An unauthorized read rotates an available refresh grant in Keychain before one
+retry; a rejected refresh grant expires the saved connection.
+Those gateway routes must authenticate the user, strip the gateway bearer
+before proxying, and map only those exact read methods to Crabfleet's
+authenticated `/api/session` and `/api/fleet` routes. Unknown paths, queries,
+mutations, and WebSocket upgrades remain closed.
+
 Saved and ad-hoc VNC profiles are also available through an explicit local-only
 mode. That mode does not contact a deployment, synthesize Fleet data, or create
 an API credential; the user can return to deployment sign-in at any time.

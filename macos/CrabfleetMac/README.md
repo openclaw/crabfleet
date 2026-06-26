@@ -96,6 +96,21 @@ pass only those exact method/path combinations directly to Crabfleet without
 redirecting them through browser SSO; `/native/link/*` remains a normal
 browser-authenticated approval page. A proxy-only deployment must also configure
 `CRABBOX_TOKEN_ENCRYPTION_KEY` for the one-time token handoff.
+
+Alternatively, a gateway that supports OAuth 2.0 dynamic client registration
+and PKCE may advertise a same-origin `resource_metadata` URL in its Bearer
+challenge with an explicit read-only scope and expose exact authenticated GET
+routes at `/mcp/crabfleet/native/v1/session` and
+`/mcp/crabfleet/native/v1/fleet`. The gateway must remove its OAuth bearer
+before mapping those routes to Crabfleet's trusted authenticated
+`/api/session` and `/api/fleet` reads. The app uses only the registration-
+provided literal-loopback callback, asks for explicit trust before contacting
+provider origins outside the deployment, stores the resulting bearer and
+refresh grant in Keychain, rotates refresh grants before retrying unauthorized
+reads, and does not import browser cookies.
+Each RFC 9728 challenge must identify its exact protected read. Direct
+authorization-server metadata is accepted only without a `resource` field and
+for an explicit `api://` scope whose audience matches the issued JWT.
 The localhost-only development identity cannot issue a native device token;
 test the native flow with a normal configured browser-authentication method.
 

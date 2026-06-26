@@ -193,6 +193,31 @@ asserted identity to bearer requests. Every `/native/link/*` browser route
 remains behind browser SSO and Crabfleet's normal browser authentication; do
 not add a wildcard `/api/native/*` bypass.
 
+If a gateway cannot bypass browser SSO for exact routes but supports OAuth 2.0
+dynamic client registration and authorization-code PKCE, it may instead return
+a Bearer challenge whose same-origin `resource_metadata` describes the protected
+resource and authorization server and whose `scope` names the required read-only
+scope, plus these two exact authenticated reads:
+
+- `GET /mcp/crabfleet/native/v1/session`
+- `GET /mcp/crabfleet/native/v1/fleet`
+
+Both challenges must resolve to the same authorization server. RFC 9728
+metadata identifies each exact challenged route, and the client requests both
+resource identifiers. A compatibility profile may return authorization-server
+metadata directly only when it omits a `resource` field and its explicit
+`api://` scope can be matched to the issued JWT's `aud` claim before the bearer
+is sent to either route. Scope lists must
+remain within the client's advertised aggregate limit. Before contacting an
+OAuth issuer or endpoint outside the deployment origin, the client requires
+explicit user trust for that provider origin.
+
+The gateway must consume and strip its OAuth bearer, assert the authenticated
+browser identity through the deployment's trusted-proxy boundary, and map the
+two reads to `/api/session` and `/api/fleet`. It must reject queries, mutations,
+unknown suffixes, and WebSocket upgrades under that prefix. This alternative
+does not expose Crabfleet's device-code or token endpoints through the gateway.
+
 ## Public Endpoints
 
 ### GET /healthz

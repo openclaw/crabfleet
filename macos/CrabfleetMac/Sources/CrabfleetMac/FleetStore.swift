@@ -117,9 +117,15 @@ final class FleetStore: ObservableObject {
       let api = clientFactory(origin)
       client = api
       credential = .init(origin: origin, token: token)
-      let validatedSession = try await api.session(accessToken: token)
+      let validatedSession = try await authenticatedRead(
+        api: api,
+        token: token,
+        origin: origin,
+        generation: generation,
+        operation: api.session(accessToken:)
+      )
       guard isCurrent(generation) else { return }
-      applySession(validatedSession)
+      applySession(validatedSession.value)
       connectionPhase = .connected
       await refresh(expectedGeneration: generation)
     } catch {
@@ -204,10 +210,16 @@ final class FleetStore: ObservableObject {
       connectionError = nil
       connectionPhase = .restoring
       do {
-        let validatedSession = try await api.session(accessToken: token)
+        let validatedSession = try await authenticatedRead(
+          api: api,
+          token: token,
+          origin: origin,
+          generation: generation,
+          operation: api.session(accessToken:)
+        )
         try Task.checkCancellation()
         guard isCurrent(generation) else { return }
-        applySession(validatedSession)
+        applySession(validatedSession.value)
         connectionPhase = .connected
         authorizationTask = nil
         await refresh(expectedGeneration: generation)
@@ -291,10 +303,16 @@ final class FleetStore: ObservableObject {
     }
 
     do {
-      let refreshedFleet = try await client.fleet(accessToken: accessToken)
+      let refreshedFleet = try await authenticatedRead(
+        api: client,
+        token: accessToken,
+        origin: connectedOrigin,
+        generation: expectedGeneration,
+        operation: client.fleet(accessToken:)
+      )
       guard isCurrent(expectedGeneration), refreshOperationID == operationID else { return }
-      leases = refreshedFleet.leases
-      desktopHosts = refreshedFleet.desktopHosts
+      leases = refreshedFleet.value.leases
+      desktopHosts = refreshedFleet.value.desktopHosts
       notice = nil
       lastUpdated = now()
     } catch NativeAPIError.unauthorized {
@@ -317,11 +335,55 @@ final class FleetStore: ObservableObject {
     guard isCurrent(generation), client === api else { return }
     connectionPhase = .requestingAuthorization
     do {
-      let authorization = try await api.createDeviceAuthorization(
+      let start = try await api.beginAuthorization(
         clientName: "Crabfleet for macOS"
       )
-      try Task.checkCancellation()
-      guard isCurrent(generation) else { return }
+      if Task.isCancelled {
+        if case .approved(let approved) = start {
+          await revokeInFreshTask(approved.value, using: api)
+        }
+        throw CancellationError()
+      }
+      guard isCurrent(generation) else {
+        if case .approved(let approved) = start {
+          await revokeInFreshTask(approved.value, using: api)
+        }
+        return
+      }
+      if case .approved(let approved) = start {
+        var provisionalCredential = approved.value
+        do {
+          let validatedSession = try await validateOAuthApprovedSession(
+            api: api,
+            token: approved.value,
+            expiresAt: approved.expiresAt,
+            origin: origin,
+            generation: generation
+          )
+          provisionalCredential = validatedSession.credential
+          if Task.isCancelled {
+            throw CancellationError()
+          }
+          guard isCurrent(generation) else {
+            await revokeInFreshTask(provisionalCredential, using: api)
+            return
+          }
+          try tokenStore.save(provisionalCredential, for: origin)
+          credential = .init(origin: origin, token: provisionalCredential)
+          applySession(validatedSession.value)
+          verificationURL = nil
+          connectionPhase = .connected
+          authorizationTask = nil
+          await refresh(expectedGeneration: generation)
+          return
+        } catch {
+          await revokeInFreshTask(provisionalCredential, using: api)
+          throw error
+        }
+      }
+      guard case .device(let authorization) = start else {
+        throw NativeAPIError.invalidResponse
+      }
       verificationURL = authorization.verificationURL
       connectionPhase = .waitingForApproval
       guard openURL(authorization.verificationURL) else {
@@ -392,6 +454,117 @@ final class FleetStore: ObservableObject {
   private func applySession(_ session: NativeAPISession) {
     self.session = session
     currentUser = session.user.login ?? session.user.email ?? session.user.subject
+  }
+
+  private func authenticatedRead<Value>(
+    api: NativeAPIClientProtocol,
+    token: String,
+    origin: DeploymentOrigin,
+    generation: UInt64,
+    persistRotatedCredential: Bool = true,
+    preserveRotatedCredentialOnTransientFailure: Bool = false,
+    operation: (String) async throws -> Value
+  ) async throws -> (value: Value, credential: String) {
+    try Task.checkCancellation()
+    guard isCurrent(generation), client === api, connectedOrigin == origin else {
+      throw CancellationError()
+    }
+    do {
+      return (try await operation(token), token)
+    } catch NativeAPIError.unauthorized {
+      try Task.checkCancellation()
+      guard isCurrent(generation), client === api, connectedOrigin == origin else {
+        throw CancellationError()
+      }
+      guard let refreshed = try await api.refreshCredential(accessToken: token) else {
+        throw NativeAPIError.unauthorized
+      }
+      var adopted = false
+      do {
+        try Task.checkCancellation()
+        guard isCurrent(generation), client === api, connectedOrigin == origin else {
+          throw CancellationError()
+        }
+        if persistRotatedCredential {
+          try tokenStore.save(refreshed, for: origin)
+          credential = .init(origin: origin, token: refreshed)
+          adopted = true
+        }
+        return (try await operation(refreshed), refreshed)
+      } catch {
+        if !adopted,
+          preserveRotatedCredentialOnTransientFailure,
+          transientAuthRequestError(error)
+        {
+          throw RotatedCredentialReadError(credential: refreshed, underlying: error)
+        }
+        if !adopted || (error as? NativeAPIError) == .unauthorized {
+          await revokeInFreshTask(refreshed, using: api)
+        }
+        throw error
+      }
+    }
+  }
+
+  private func validateOAuthApprovedSession(
+    api: NativeAPIClientProtocol,
+    token: String,
+    expiresAt: Date,
+    origin: DeploymentOrigin,
+    generation: UInt64
+  ) async throws -> (value: NativeAPISession, credential: String) {
+    let deadline = min(expiresAt, now().addingTimeInterval(60))
+    var currentCredential = token
+    var hasProvisionalRotation = false
+    while now() < deadline {
+      let validationError: Error
+      do {
+        return try await authenticatedRead(
+          api: api,
+          token: currentCredential,
+          origin: origin,
+          generation: generation,
+          persistRotatedCredential: false,
+          preserveRotatedCredentialOnTransientFailure: true,
+          operation: api.session(accessToken:)
+        )
+      } catch let rotated as RotatedCredentialReadError {
+        if hasProvisionalRotation {
+          await revokeInFreshTask(currentCredential, using: api)
+        }
+        currentCredential = rotated.credential
+        hasProvisionalRotation = true
+        validationError = rotated.underlying
+      } catch is CancellationError {
+        if hasProvisionalRotation {
+          await revokeInFreshTask(currentCredential, using: api)
+        }
+        throw CancellationError()
+      } catch {
+        validationError = error
+      }
+      guard transientAuthRequestError(validationError) else {
+        if hasProvisionalRotation {
+          await revokeInFreshTask(currentCredential, using: api)
+        }
+        throw validationError
+      }
+      let remaining = deadline.timeIntervalSince(now())
+      guard remaining > 0 else { break }
+      connectionError = "Authorization succeeded. Waiting for the deployment session API…"
+      do {
+        try await sleep(.seconds(min(5, remaining)))
+      } catch {
+        if hasProvisionalRotation {
+          await revokeInFreshTask(currentCredential, using: api)
+        }
+        throw error
+      }
+    }
+    if hasProvisionalRotation {
+      await revokeInFreshTask(currentCredential, using: api)
+    }
+    throw NativeAPIError.authorizationExpired
   }
 
   private func handleConnectionFailure(_ error: Error, expectedGeneration: UInt64) async {
@@ -569,4 +742,9 @@ enum FleetConnectionError: LocalizedError {
   var errorDescription: String? {
     "The authorization page could not be opened."
   }
+}
+
+private struct RotatedCredentialReadError: Error {
+  let credential: String
+  let underlying: Error
 }

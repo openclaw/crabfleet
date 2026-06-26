@@ -88,6 +88,404 @@ struct NativeConnectionTests {
   }
 
   @Test
+  func nativeAPIFallsBackToOAuthGatewayAndUsesItsReadIngress() async throws {
+    let origin = try DeploymentOrigin("https://fleet.example.test")
+    var requests: [URLRequest] = []
+    let transport = RecordingHTTPTransport { request in
+      requests.append(request)
+      if request.url?.path == "/api/native/v1/auth/device" {
+        return (Data(), httpResponse(url: request.url!, status: 302))
+      }
+      #expect(request.url?.path == "/mcp/crabfleet/native/v1/session")
+      #expect(
+        ["Bearer gateway-token", "Bearer rotated-token"].contains(
+          request.value(forHTTPHeaderField: "Authorization")
+        )
+      )
+      return (
+        Data(
+          """
+          {
+            "user": {
+              "subject": "proxy:operator@example.test",
+              "login": "operator",
+              "email": "operator@example.test",
+              "name": "Operator",
+              "role": "viewer"
+            },
+            "auth": { "trustedProxy": true }
+          }
+          """.utf8
+        ),
+        httpResponse(url: request.url!, status: 200)
+      )
+    }
+    let authorizer = StubOAuthGatewayAuthorizer(
+      result: .success(
+        .init(
+          value: "gateway-token",
+          expiresAt: Date().addingTimeInterval(3_600),
+          clientID: "native-client",
+          tokenEndpoint: URL(string: "https://login.example.test/token"),
+          revocationEndpoint: URL(string: "https://login.example.test/revoke"),
+          refreshToken: "refresh-token",
+          scope: "fleet.read",
+          resource: URL(string: "https://fleet.example.test/mcp/crabfleet/native/v1/session")
+        ))
+    )
+    authorizer.refreshResult = .success(
+      .init(
+        value: "rotated-token",
+        expiresAt: Date().addingTimeInterval(3_600),
+        clientID: "native-client",
+        tokenEndpoint: URL(string: "https://login.example.test/token"),
+        revocationEndpoint: URL(string: "https://login.example.test/revoke"),
+        refreshToken: "rotated-refresh-token",
+        scope: "fleet.read",
+        resource: URL(string: "https://fleet.example.test/mcp/crabfleet/native/v1/session")
+      ))
+    let client = NativeAPIClient(
+      origin: origin,
+      transport: transport,
+      oauthAuthorizer: authorizer
+    )
+
+    let start = try await client.beginAuthorization(clientName: "Test Mac")
+    guard case .approved(let token) = start else {
+      Issue.record("Expected OAuth approval")
+      return
+    }
+    let session = try await client.session(accessToken: token.value)
+
+    #expect(authorizer.origins == [origin])
+    #expect(requests.map { $0.url?.path } == [
+      "/api/native/v1/auth/device",
+      "/mcp/crabfleet/native/v1/session",
+    ])
+    #expect(session.user.login == "operator")
+    #expect(session.deployment.canonicalUrl == origin.displayValue)
+
+    let rotatedCredential = try #require(
+      try await client.refreshCredential(accessToken: token.value)
+    )
+    _ = try await client.session(accessToken: rotatedCredential)
+    try await client.revoke(accessToken: rotatedCredential)
+
+    #expect(requests.count == 3)
+    #expect(authorizer.refreshedTokens.map(\.refreshToken) == ["refresh-token"])
+    #expect(authorizer.revokedTokens == ["rotated-token", "rotated-refresh-token"])
+    #expect(authorizer.revokedTokenTypeHints == ["access_token", "refresh_token"])
+  }
+
+  @Test
+  func oauthDiscoveryRequiresExplicitTrustBeforeContactingAnExternalIssuer() async throws {
+    let origin = try DeploymentOrigin("https://fleet.example.test")
+    let metadataURL = try #require(URL(string: "https://fleet.example.test/oauth/metadata"))
+    let untrustedIssuer = try #require(URL(string: "https://127.0.0.1"))
+    var requests: [URL] = []
+    let transport = RecordingHTTPTransport { request in
+      let url = try #require(request.url)
+      requests.append(url)
+      if url.path == "/mcp/crabfleet/native/v1/session" {
+        return (
+          Data(),
+          httpResponse(
+            url: url,
+            status: 401,
+            headers: [
+              "WWW-Authenticate":
+                "Bearer resource_metadata=\"\(metadataURL.absoluteString)\", scope=\"api://fleet.example.test/read\""
+            ]
+          )
+        )
+      }
+      #expect(url == metadataURL)
+      return (
+        Data(
+          """
+          {
+            "issuer": "\(untrustedIssuer.absoluteString)",
+            "authorization_endpoint": "\(untrustedIssuer.absoluteString)/authorize",
+            "token_endpoint": "\(untrustedIssuer.absoluteString)/token",
+            "registration_endpoint": "\(untrustedIssuer.absoluteString)/register",
+            "scopes_supported": ["api://fleet.example.test/read"],
+            "code_challenge_methods_supported": ["S256"]
+          }
+          """.utf8
+        ),
+        httpResponse(url: url, status: 200)
+      )
+    }
+    let trust = StubOAuthEndpointTrustConfirmer(approved: false)
+    let authorizer = OAuthGatewayAuthorizer(endpointTrust: trust)
+
+    await #expect(throws: OAuthGatewayError.untrustedEndpoint) {
+      try await authorizer.authorize(origin: origin, transport: transport)
+    }
+
+    #expect(requests == [
+      try origin.endpoint("/mcp/crabfleet/native/v1/session"),
+      metadataURL,
+    ])
+    #expect(trust.endpoints == [untrustedIssuer])
+  }
+
+  @Test
+  func oauthDiscoveryRejectsMergedScopesThatCannotBeStored() async throws {
+    let origin = try DeploymentOrigin("https://fleet.example.test")
+    let metadataURL = try #require(URL(string: "https://fleet.example.test/oauth/metadata"))
+    let scopePrefix = "api://audience.example.test/"
+    let firstScope = scopePrefix + String(
+      repeating: "a",
+      count: 512 - scopePrefix.utf8.count
+    )
+    let secondScope = scopePrefix + String(
+      repeating: "b",
+      count: 512 - scopePrefix.utf8.count
+    )
+    var requests: [URL] = []
+    let transport = RecordingHTTPTransport { request in
+      let url = try #require(request.url)
+      requests.append(url)
+      let scope: String
+      switch url.path {
+      case "/mcp/crabfleet/native/v1/session": scope = firstScope
+      case "/mcp/crabfleet/native/v1/fleet": scope = secondScope
+      case metadataURL.path:
+        return (
+          Data(
+            """
+            {
+              "issuer": "\(origin.displayValue)",
+              "authorization_endpoint": "\(origin.displayValue)/authorize",
+              "token_endpoint": "\(origin.displayValue)/token",
+              "registration_endpoint": "\(origin.displayValue)/register",
+              "scopes_supported": ["\(firstScope)", "\(secondScope)"],
+              "code_challenge_methods_supported": ["S256"]
+            }
+            """.utf8
+          ),
+          httpResponse(url: url, status: 200)
+        )
+      default:
+        Issue.record("Unexpected OAuth request: \(url)")
+        throw NativeAPIError.invalidResponse
+      }
+      return (
+        Data(),
+        httpResponse(
+          url: url,
+          status: 401,
+          headers: [
+            "WWW-Authenticate":
+              "Bearer resource_metadata=\"\(metadataURL.absoluteString)\", scope=\"\(scope)\""
+          ]
+        )
+      )
+    }
+    let trust = StubOAuthEndpointTrustConfirmer(approved: true)
+    let authorizer = OAuthGatewayAuthorizer(endpointTrust: trust)
+
+    await #expect(throws: OAuthGatewayError.invalidMetadata) {
+      try await authorizer.authorize(origin: origin, transport: transport)
+    }
+
+    #expect(requests.map(\.path) == [
+      "/mcp/crabfleet/native/v1/session",
+      metadataURL.path,
+      "/mcp/crabfleet/native/v1/fleet",
+      metadataURL.path,
+    ])
+    #expect(trust.endpoints.isEmpty)
+  }
+
+  @Test
+  func oauthDiscoveryAcceptsDistinctExactProtectedResources() async throws {
+    let origin = try DeploymentOrigin("https://fleet.example.test")
+    let sessionURL = try origin.endpoint("/mcp/crabfleet/native/v1/session")
+    let fleetURL = try origin.endpoint("/mcp/crabfleet/native/v1/fleet")
+    let sessionMetadataURL = try origin.endpoint("/oauth/session-metadata")
+    let fleetMetadataURL = try origin.endpoint("/oauth/fleet-metadata")
+    var requests: [URL] = []
+    let transport = RecordingHTTPTransport { request in
+      let url = try #require(request.url)
+      requests.append(url)
+      if url == sessionURL || url == fleetURL {
+        let metadataURL = url == sessionURL ? sessionMetadataURL : fleetMetadataURL
+        return (
+          Data(),
+          httpResponse(
+            url: url,
+            status: 401,
+            headers: [
+              "WWW-Authenticate":
+                "Bearer resource_metadata=\"\(metadataURL.absoluteString)\", scope=\"fleet.read\""
+            ]
+          )
+        )
+      }
+      if url == sessionMetadataURL || url == fleetMetadataURL {
+        let resource = url == sessionMetadataURL ? sessionURL : fleetURL
+        return (
+          Data(
+            """
+            {
+              "resource": "\(resource.absoluteString)",
+              "authorization_servers": ["\(origin.displayValue)"]
+            }
+            """.utf8
+          ),
+          httpResponse(url: url, status: 200)
+        )
+      }
+      if url.path == "/.well-known/oauth-authorization-server" {
+        return (
+          Data(
+            """
+            {
+              "issuer": "\(origin.displayValue)",
+              "authorization_endpoint": "\(origin.displayValue)/authorize",
+              "token_endpoint": "\(origin.displayValue)/token",
+              "registration_endpoint": "\(origin.displayValue)/register",
+              "scopes_supported": ["fleet.read"],
+              "code_challenge_methods_supported": ["S256"]
+            }
+            """.utf8
+          ),
+          httpResponse(url: url, status: 200)
+        )
+      }
+      #expect(url.path == "/register")
+      return (Data(), httpResponse(url: url, status: 418))
+    }
+    let authorizer = OAuthGatewayAuthorizer(
+      endpointTrust: StubOAuthEndpointTrustConfirmer(approved: true)
+    )
+
+    await #expect(throws: OAuthGatewayError.httpStatus(418)) {
+      try await authorizer.authorize(origin: origin, transport: transport)
+    }
+
+    #expect(requests.last?.path == "/register")
+    #expect(requests.contains(sessionMetadataURL))
+    #expect(requests.contains(fleetMetadataURL))
+  }
+
+  @Test
+  func directOAuthMetadataCannotDisableAudienceMatchingWithAResourceField() async throws {
+    let origin = try DeploymentOrigin("https://fleet.example.test")
+    let metadataURL = try origin.endpoint("/oauth/metadata")
+    var requests: [URL] = []
+    let transport = RecordingHTTPTransport { request in
+      let url = try #require(request.url)
+      requests.append(url)
+      if url.path == "/mcp/crabfleet/native/v1/session" {
+        return (
+          Data(),
+          httpResponse(
+            url: url,
+            status: 401,
+            headers: [
+              "WWW-Authenticate":
+                "Bearer resource_metadata=\"\(metadataURL.absoluteString)\", scope=\"api://fleet.example.test/read\""
+            ]
+          )
+        )
+      }
+      #expect(url == metadataURL)
+      return (
+        Data(
+          """
+          {
+            "issuer": "\(origin.displayValue)",
+            "resource": "\(origin.displayValue)/mcp/crabfleet/native/v1/session",
+            "authorization_endpoint": "\(origin.displayValue)/authorize",
+            "token_endpoint": "\(origin.displayValue)/token",
+            "registration_endpoint": "\(origin.displayValue)/register",
+            "scopes_supported": ["api://fleet.example.test/read"],
+            "code_challenge_methods_supported": ["S256"]
+          }
+          """.utf8
+        ),
+        httpResponse(url: url, status: 200)
+      )
+    }
+    let trust = StubOAuthEndpointTrustConfirmer(approved: true)
+
+    await #expect(throws: OAuthGatewayError.invalidMetadata) {
+      try await OAuthGatewayAuthorizer(endpointTrust: trust)
+        .authorize(origin: origin, transport: transport)
+    }
+
+    #expect(requests.count == 2)
+    #expect(trust.endpoints.isEmpty)
+  }
+
+  @Test
+  func oauthDiscoveryReservesStoredScopeCapacityForOfflineAccess() async throws {
+    let origin = try DeploymentOrigin("https://fleet.example.test")
+    let metadataURL = try origin.endpoint("/oauth/metadata")
+    let scopePrefix = "api://audience.example.test/"
+    let firstScope = scopePrefix + String(
+      repeating: "a",
+      count: 505 - scopePrefix.utf8.count
+    )
+    let secondScope = scopePrefix + String(
+      repeating: "b",
+      count: 505 - scopePrefix.utf8.count
+    )
+    let challengeScope = "\(firstScope) \(secondScope)"
+    var requests: [URL] = []
+    let transport = RecordingHTTPTransport { request in
+      let url = try #require(request.url)
+      requests.append(url)
+      if url.path.hasPrefix("/mcp/crabfleet/native/v1/") {
+        return (
+          Data(),
+          httpResponse(
+            url: url,
+            status: 401,
+            headers: [
+              "WWW-Authenticate":
+                "Bearer resource_metadata=\"\(metadataURL.absoluteString)\", scope=\"\(challengeScope)\""
+            ]
+          )
+        )
+      }
+      #expect(url == metadataURL)
+      return (
+        Data(
+          """
+          {
+            "issuer": "\(origin.displayValue)",
+            "authorization_endpoint": "\(origin.displayValue)/authorize",
+            "token_endpoint": "\(origin.displayValue)/token",
+            "registration_endpoint": "\(origin.displayValue)/register",
+            "scopes_supported": ["\(firstScope)", "\(secondScope)", "offline_access"],
+            "code_challenge_methods_supported": ["S256"],
+            "grant_types_supported": ["authorization_code", "refresh_token"]
+          }
+          """.utf8
+        ),
+        httpResponse(url: url, status: 200)
+      )
+    }
+
+    await #expect(throws: OAuthGatewayError.invalidMetadata) {
+      try await OAuthGatewayAuthorizer(
+        endpointTrust: StubOAuthEndpointTrustConfirmer(approved: true)
+      ).authorize(origin: origin, transport: transport)
+    }
+
+    #expect(requests.map(\.path) == [
+      "/mcp/crabfleet/native/v1/session",
+      metadataURL.path,
+      "/mcp/crabfleet/native/v1/fleet",
+      metadataURL.path,
+    ])
+  }
+
+  @Test
   func nativeAPIRevokesThroughAuthTokenEndpoint() async throws {
     let origin = try DeploymentOrigin("https://fleet.example.test")
     let transport = RecordingHTTPTransport { request in
@@ -241,6 +639,60 @@ struct NativeConnectionTests {
   }
 
   @Test
+  func unauthorizedOAuthReadRotatesAndPersistsCredentialBeforeRetry() async throws {
+    let origin = try DeploymentOrigin("https://fleet.example.test")
+    let origins = MemoryOriginStore(value: origin.displayValue)
+    let tokens = MemoryTokenStore(values: [origin.displayValue: "expired-oauth-credential"])
+    let api = StubNativeAPIClient(origin: origin)
+    api.sessionResults = [
+      .failure(NativeAPIError.unauthorized),
+      .success(testSession()),
+    ]
+    api.refreshResults = [.success("rotated-oauth-credential")]
+    api.fleetResult = .success(testFleet())
+    let store = FleetStore(
+      environment: [:],
+      originStore: origins,
+      tokenStore: tokens,
+      clientFactory: { _ in api },
+      openURL: { _ in false }
+    )
+
+    await store.restore()
+
+    #expect(store.connectionPhase == .connected)
+    #expect(api.refreshedTokens == ["expired-oauth-credential"])
+    #expect(api.sessionTokens == ["expired-oauth-credential", "rotated-oauth-credential"])
+    #expect(api.fleetTokens == ["rotated-oauth-credential"])
+    #expect(tokens.values[origin.displayValue] == "rotated-oauth-credential")
+  }
+
+  @Test
+  func failedRefreshCredentialAdoptionRevokesTheRotatedGrant() async throws {
+    let origin = try DeploymentOrigin("https://fleet.example.test")
+    let origins = MemoryOriginStore(value: origin.displayValue)
+    let tokens = MemoryTokenStore(values: [origin.displayValue: "expired-oauth-credential"])
+    tokens.saveError = TestTokenStoreError.unavailable
+    let api = StubNativeAPIClient(origin: origin)
+    api.sessionResult = .failure(NativeAPIError.unauthorized)
+    api.refreshResults = [.success("unadopted-rotated-credential")]
+    let store = FleetStore(
+      environment: [:],
+      originStore: origins,
+      tokenStore: tokens,
+      clientFactory: { _ in api },
+      openURL: { _ in false }
+    )
+
+    await store.restore()
+
+    #expect(store.connectionPhase == .failed)
+    #expect(api.sessionTokens == ["expired-oauth-credential"])
+    #expect(api.revokedTokens == ["unadopted-rotated-credential"])
+    #expect(tokens.values[origin.displayValue] == "expired-oauth-credential")
+  }
+
+  @Test
   func reentrantRestoreNeverPairsAnOldTokenWithANewOrigin() async throws {
     let oldOrigin = try DeploymentOrigin("https://old-fleet.example.test")
     let newOrigin = try DeploymentOrigin("https://new-fleet.example.test")
@@ -345,7 +797,10 @@ struct NativeConnectionTests {
             user: testSession().user
           )))
     ]
-    api.sessionResult = .success(testSession())
+    api.sessionResults = [
+      .failure(NativeAPIError.httpStatus(503, "temporarily unavailable")),
+      .success(testSession()),
+    ]
     api.fleetResult = .success(testFleet())
     var openedURL: URL?
     let store = FleetStore(
@@ -377,6 +832,165 @@ struct NativeConnectionTests {
     #expect(api.lifecycleEvents == ["revoke-start", "revoke-finish", "close"])
     #expect(tokens.values[origin.displayValue] == nil)
     #expect(store.leases.isEmpty)
+  }
+
+  @Test
+  func directOAuthApprovalStoresCredentialWithoutOpeningAnotherBrowser() async throws {
+    let origin = try DeploymentOrigin("https://fleet.example.test")
+    let origins = MemoryOriginStore()
+    let tokens = MemoryTokenStore()
+    let api = StubNativeAPIClient(origin: origin)
+    api.beginResult = .success(
+      .approved(
+        .init(
+          value: "crabfleet-oauth-v1:gateway-token",
+          expiresAt: Date().addingTimeInterval(3_600),
+          user: testSession().user
+        )))
+    api.sessionResults = [
+      .failure(NativeAPIError.httpStatus(503, "temporarily unavailable")),
+      .success(testSession()),
+    ]
+    api.fleetResult = .success(testFleet())
+    var openedURLs: [URL] = []
+    let store = FleetStore(
+      environment: [:],
+      originStore: origins,
+      tokenStore: tokens,
+      clientFactory: { _ in api },
+      openURL: {
+        openedURLs.append($0)
+        return true
+      },
+      sleep: { _ in }
+    )
+
+    store.connect(to: origin.displayValue)
+    try await waitUntil { store.connectionPhase == .connected }
+
+    #expect(openedURLs.isEmpty)
+    #expect(tokens.values[origin.displayValue] == "crabfleet-oauth-v1:gateway-token")
+    #expect(api.sessionTokens == [
+      "crabfleet-oauth-v1:gateway-token",
+      "crabfleet-oauth-v1:gateway-token",
+    ])
+    #expect(store.currentUser == "operator")
+    #expect(store.leases.map(\.id) == ["IS-live"])
+  }
+
+  @Test
+  func directOAuthValidationCarriesRotationAcrossTransientRetry() async throws {
+    let origin = try DeploymentOrigin("https://fleet.example.test")
+    let tokens = MemoryTokenStore()
+    let api = StubNativeAPIClient(origin: origin)
+    api.beginResult = .success(
+      .approved(
+        .init(
+          value: "initial-oauth-credential",
+          expiresAt: Date().addingTimeInterval(3_600),
+          user: testSession().user
+        )))
+    api.sessionResults = [
+      .failure(NativeAPIError.unauthorized),
+      .failure(NativeAPIError.httpStatus(503, "temporarily unavailable")),
+      .success(testSession()),
+    ]
+    api.refreshResults = [.success("rotated-oauth-credential")]
+    api.fleetResult = .success(testFleet())
+    let store = FleetStore(
+      environment: [:],
+      originStore: MemoryOriginStore(),
+      tokenStore: tokens,
+      clientFactory: { _ in api },
+      openURL: { _ in true },
+      sleep: { _ in }
+    )
+
+    store.connect(to: origin.displayValue)
+    try await waitUntil { store.connectionPhase == .connected }
+
+    #expect(api.sessionTokens == [
+      "initial-oauth-credential",
+      "rotated-oauth-credential",
+      "rotated-oauth-credential",
+    ])
+    #expect(api.revokedTokens.isEmpty)
+    #expect(tokens.values[origin.displayValue] == "rotated-oauth-credential")
+  }
+
+  @Test
+  func cancellationAfterDirectOAuthApprovalRevokesTheIssuedToken() async throws {
+    let origin = try DeploymentOrigin("https://fleet.example.test")
+    let api = StubNativeAPIClient(origin: origin)
+    var authorizationStarted = false
+    var authorizationContinuation: CheckedContinuation<NativeAuthorizationStart, Error>?
+    api.beginHandler = { _ in
+      authorizationStarted = true
+      return try await withCheckedThrowingContinuation { continuation in
+        authorizationContinuation = continuation
+      }
+    }
+    let store = FleetStore(
+      environment: [:],
+      originStore: MemoryOriginStore(),
+      tokenStore: MemoryTokenStore(),
+      clientFactory: { _ in api },
+      openURL: { _ in true }
+    )
+
+    store.connect(to: origin.displayValue)
+    try await waitUntil { authorizationStarted }
+    store.cancelAuthorization()
+    let continuation = try #require(authorizationContinuation)
+    continuation.resume(
+      returning: .approved(
+        .init(
+          value: "oauth-token",
+          expiresAt: Date().addingTimeInterval(3_600),
+          user: testSession().user
+        )))
+
+    try await waitUntil { api.revokedTokens == ["oauth-token"] }
+    try await waitUntil { api.closeCount == 1 }
+    #expect(store.connectionPhase == .disconnected)
+  }
+
+  @Test
+  func cancellationDuringDirectOAuthRetryRevokesTheRotatedGrant() async throws {
+    let origin = try DeploymentOrigin("https://fleet.example.test")
+    let tokens = MemoryTokenStore()
+    let api = StubNativeAPIClient(origin: origin)
+    api.beginResult = .success(
+      .approved(
+        .init(
+          value: "initial-oauth-credential",
+          expiresAt: Date().addingTimeInterval(3_600),
+          user: testSession().user
+        )))
+    api.refreshResults = [.success("rotated-oauth-credential")]
+    api.sessionHandler = { token in
+      if token == "initial-oauth-credential" {
+        throw NativeAPIError.unauthorized
+      }
+      try await Task.sleep(for: .seconds(60))
+      return testSession()
+    }
+    let store = FleetStore(
+      environment: [:],
+      originStore: MemoryOriginStore(),
+      tokenStore: tokens,
+      clientFactory: { _ in api },
+      openURL: { _ in true }
+    )
+
+    store.connect(to: origin.displayValue)
+    try await waitUntil { api.sessionTokens.contains("rotated-oauth-credential") }
+    store.cancelAuthorization()
+
+    try await waitUntil { api.closeCount == 1 }
+    #expect(api.revokedTokens == ["rotated-oauth-credential", "initial-oauth-credential"])
+    #expect(tokens.values[origin.displayValue] == nil)
+    #expect(store.connectionPhase == .disconnected)
   }
 
   @Test
@@ -987,9 +1601,67 @@ private final class RecordingHTTPTransport: HTTPDataTransport {
   }
 }
 
+private final class StubOAuthGatewayAuthorizer: OAuthGatewayAuthorizing {
+  let result: Result<OAuthGatewayAccessToken, Error>
+  var refreshResult: Result<OAuthGatewayAccessToken, Error> = .failure(
+    OAuthGatewayError.invalidResponse
+  )
+  private(set) var origins: [DeploymentOrigin] = []
+  private(set) var refreshedTokens: [OAuthGatewayAccessToken] = []
+  private(set) var revokedTokens: [String] = []
+  private(set) var revokedTokenTypeHints: [String] = []
+
+  init(result: Result<OAuthGatewayAccessToken, Error>) {
+    self.result = result
+  }
+
+  func authorize(
+    origin: DeploymentOrigin,
+    transport: HTTPDataTransport
+  ) async throws -> OAuthGatewayAccessToken {
+    origins.append(origin)
+    return try result.get()
+  }
+
+  func refresh(
+    token: OAuthGatewayAccessToken,
+    transport: HTTPDataTransport
+  ) async throws -> OAuthGatewayAccessToken {
+    refreshedTokens.append(token)
+    return try refreshResult.get()
+  }
+
+  func revoke(
+    token: String,
+    tokenTypeHint: String,
+    clientID: String,
+    endpoint: URL,
+    transport: HTTPDataTransport
+  ) async throws {
+    revokedTokens.append(token)
+    revokedTokenTypeHints.append(tokenTypeHint)
+  }
+}
+
+private final class StubOAuthEndpointTrustConfirmer: OAuthEndpointTrustConfirming {
+  let approved: Bool
+  private(set) var endpoints: [URL] = []
+
+  init(approved: Bool) {
+    self.approved = approved
+  }
+
+  func confirm(endpoint: URL, deployment: DeploymentOrigin) async -> Bool {
+    endpoints.append(endpoint)
+    return approved
+  }
+}
+
 @MainActor
 private final class StubNativeAPIClient: NativeAPIClientProtocol {
   let origin: DeploymentOrigin
+  var beginResult: Result<NativeAuthorizationStart, Error>?
+  var beginHandler: ((String) async throws -> NativeAuthorizationStart)?
   var deviceResult: Result<NativeDeviceAuthorization, Error> = .failure(NativeAPIError.invalidResponse)
   var exchangeResults: [Result<NativeTokenExchange, Error>] = []
   var sessionResult: Result<NativeAPISession, Error> = .failure(NativeAPIError.invalidResponse)
@@ -999,6 +1671,8 @@ private final class StubNativeAPIClient: NativeAPIClientProtocol {
   var fleetHandler: (() async throws -> NativeAPIFleet)?
   var sessionTokens: [String] = []
   var fleetTokens: [String] = []
+  var refreshResults: [Result<String?, Error>] = []
+  var refreshedTokens: [String] = []
   var revokedTokens: [String] = []
   var revokeWasCancelled: [Bool] = []
   var revokeHandler: ((String) async throws -> Void)?
@@ -1009,6 +1683,12 @@ private final class StubNativeAPIClient: NativeAPIClientProtocol {
 
   init(origin: DeploymentOrigin) {
     self.origin = origin
+  }
+
+  func beginAuthorization(clientName: String) async throws -> NativeAuthorizationStart {
+    if let beginHandler { return try await beginHandler(clientName) }
+    if let beginResult { return try beginResult.get() }
+    return .device(try await createDeviceAuthorization(clientName: clientName))
   }
 
   func createDeviceAuthorization(clientName: String) async throws -> NativeDeviceAuthorization {
@@ -1033,6 +1713,12 @@ private final class StubNativeAPIClient: NativeAPIClientProtocol {
     fleetTokens.append(accessToken)
     if let fleetHandler { return try await fleetHandler() }
     return try fleetResult.get()
+  }
+
+  func refreshCredential(accessToken: String) async throws -> String? {
+    refreshedTokens.append(accessToken)
+    guard !refreshResults.isEmpty else { return nil }
+    return try refreshResults.removeFirst().get()
   }
 
   func revoke(accessToken: String) async throws {
@@ -1099,12 +1785,18 @@ private enum TestTokenStoreError: LocalizedError {
   var errorDescription: String? { "test Keychain unavailable" }
 }
 
-private func httpResponse(url: URL, status: Int) -> HTTPURLResponse {
-  HTTPURLResponse(
+private func httpResponse(
+  url: URL,
+  status: Int,
+  headers: [String: String] = [:]
+) -> HTTPURLResponse {
+  var responseHeaders = ["Content-Type": "application/json"]
+  responseHeaders.merge(headers) { _, replacement in replacement }
+  return HTTPURLResponse(
     url: url,
     statusCode: status,
     httpVersion: "HTTP/1.1",
-    headerFields: ["Content-Type": "application/json"]
+    headerFields: responseHeaders
   )!
 }
 

@@ -38,10 +38,15 @@ struct DeploymentConnectionView: View {
               detail: "Checking the saved credential with \(hostLabel)."
             )
           case .requestingAuthorization:
-            ProgressPanel(
-              title: "Starting secure sign-in",
-              detail: "Asking \(hostLabel) for a browser authorization."
-            )
+            VStack(alignment: .leading, spacing: 14) {
+              ProgressPanel(
+                title: "Starting secure sign-in",
+                detail: "Complete the browser authorization for \(hostLabel)."
+              )
+              Button("Cancel") { store.cancelAuthorization() }
+                .keyboardShortcut(.cancelAction)
+                .frame(maxWidth: .infinity, alignment: .trailing)
+            }
           case .waitingForApproval:
             browserApproval
           case .disconnecting:

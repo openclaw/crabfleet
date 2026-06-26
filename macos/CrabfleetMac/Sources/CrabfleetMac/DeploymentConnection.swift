@@ -110,7 +110,7 @@ protocol APIAccessTokenStoring {
 }
 
 struct KeychainAPIAccessTokenStore: APIAccessTokenStoring {
-  private let service = "org.openclaw.crabfleet.mac.api-token"
+  private let service = "org.openclaw.crabfleet.mac.api-token.v2"
 
   func load(for origin: DeploymentOrigin) throws -> String? {
     var query = baseQuery(for: origin)
