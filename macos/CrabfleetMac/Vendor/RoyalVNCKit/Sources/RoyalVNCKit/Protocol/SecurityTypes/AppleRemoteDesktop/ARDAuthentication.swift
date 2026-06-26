@@ -6,7 +6,7 @@ import Foundation
 
 extension VNCProtocol {
 	struct ARDAuthentication: VNCSecurityType {
-		static let supportedKeySize: UInt16 = 128
+		static let supportedKeySizes: ClosedRange<UInt16> = 128...512
 		static let authenticationType = VNCAuthenticationType.appleRemoteDesktop
 		let authenticationType: VNCAuthenticationType = Self.authenticationType
 
@@ -20,7 +20,7 @@ extension VNCProtocol {
 						  prime: Data,
 						  peerKey: Data) {
 			guard generator.count == 2,
-				  keySize == Self.supportedKeySize else {
+				  Self.supportedKeySizes.contains(keySize) else {
 				return nil
 			}
 
@@ -42,7 +42,7 @@ extension VNCProtocol.ARDAuthentication {
 	static func receive(connection: NetworkConnectionReading) async throws -> Self {
 		let generator = try await connection.readBuffered(length: 2)
 		let keySize = try await connection.readUInt16()
-		guard keySize == Self.supportedKeySize else {
+		guard Self.supportedKeySizes.contains(keySize) else {
 			throw VNCError.protocol(.invalidData)
 		}
 		let prime = try await connection.readBuffered(length: .init(keySize))

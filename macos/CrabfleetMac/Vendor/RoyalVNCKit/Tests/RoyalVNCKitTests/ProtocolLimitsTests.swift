@@ -78,6 +78,26 @@ struct ProtocolLimitsTests {
   }
 
   @Test
+  func acceptsBoundedVariableAppleRemoteDesktopKeySizes() async throws {
+    let keySize = UInt16(256)
+    var generator = UInt16(2).bigEndian
+    var wireKeySize = keySize.bigEndian
+    var data = Data()
+    withUnsafeBytes(of: &generator) { data.append(contentsOf: $0) }
+    withUnsafeBytes(of: &wireKeySize) { data.append(contentsOf: $0) }
+    data.append(Data(repeating: 0xA5, count: Int(keySize)))
+    data.append(Data(repeating: 0x5A, count: Int(keySize)))
+
+    let authentication = try await VNCProtocol.ARDAuthentication.receive(
+      connection: BufferConnection(data)
+    )
+
+    #expect(authentication.keySize == keySize)
+    #expect(authentication.prime.count == Int(keySize))
+    #expect(authentication.peerKey.count == Int(keySize))
+  }
+
+  @Test
   func capsAppleRemoteDesktopCredentialsAtValidUTF8Boundaries() {
     let ascii = VNCProtocol.ARDAuthentication.Authentication.credentialBytes(
       for: String(repeating: "a", count: 80)
