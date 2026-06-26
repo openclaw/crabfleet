@@ -6,6 +6,120 @@ import Testing
 
 struct FleetModelsTests {
   @Test
+  func startsAndStopsBoundedCrabboxNativeHandoff() async throws {
+    let directory = FileManager.default.temporaryDirectory
+      .appendingPathComponent("CrabfleetMacTests.\(UUID().uuidString)")
+    try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let executable = directory.appendingPathComponent("crabbox")
+    let pidFile = directory.appendingPathComponent("helper.pid")
+    let drainFile = directory.appendingPathComponent("stderr-drained")
+    try Data(
+      """
+      #!/bin/sh
+      trap '' TERM
+      printf '%s' "$$" > '\(pidFile.path)'
+      printf '%s\\n' '{"schema":"crabbox/vnc-handoff/v1","host":"127.0.0.1","port":15901,"username":"dev","password":"secret"}'
+      dd if=/dev/zero bs=131072 count=1 2>/dev/null | cat >&2
+      : > '\(drainFile.path)'
+      while :; do sleep 1; done
+      """.utf8
+    ).write(to: executable)
+    try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: executable.path)
+
+    var bridge: CrabboxVNCBridge? = try await CrabboxVNCBridge.start(
+      leaseID: "cloud/project/box-42",
+      executableURL: executable,
+      timeout: 2
+    )
+    #expect(bridge?.request.host == "127.0.0.1")
+    #expect(bridge?.request.port == 15901)
+    #expect(bridge?.request.username == "dev")
+    #expect(bridge?.request.password == "secret")
+    #expect(
+      await waitUntil(timeout: .seconds(2)) {
+        FileManager.default.fileExists(atPath: drainFile.path)
+      }
+    )
+
+    let pid = try #require(
+      Int(String(contentsOf: pidFile, encoding: .utf8))
+    )
+    #expect(Darwin.kill(Int32(pid), 0) == 0)
+    bridge?.stop()
+    bridge = nil
+
+    let deadline = Date().addingTimeInterval(3)
+    while Darwin.kill(Int32(pid), 0) == 0 && Date() < deadline {
+      try await Task.sleep(for: .milliseconds(50))
+    }
+    #expect(Darwin.kill(Int32(pid), 0) != 0)
+  }
+
+  @Test @MainActor
+  func revokingNativeAccessStopsPendingCrabboxBridge() async throws {
+    let directory = FileManager.default.temporaryDirectory
+      .appendingPathComponent("CrabfleetMacTests.\(UUID().uuidString)")
+    try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let executable = directory.appendingPathComponent("crabbox")
+    let pidFile = directory.appendingPathComponent("helper.pid")
+    try Data(
+      """
+      #!/bin/sh
+      trap '' TERM
+      printf '%s' "$$" > '\(pidFile.path)'
+      while :; do sleep 1; done
+      """.utf8
+    ).write(to: executable)
+    try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: executable.path)
+
+    let pool = VNCSessionPool()
+    pool.connectCrabbox(
+      targetID: "fleet-native",
+      leaseID: "cbx_native123",
+      executableURL: executable
+    )
+    let launched = await waitUntil(timeout: .seconds(2)) {
+      FileManager.default.fileExists(atPath: pidFile.path)
+    }
+    let pid = try #require(
+      launched ? Int(String(contentsOf: pidFile, encoding: .utf8)) : nil
+    )
+
+    pool.reconcile(validTargetIDs: ["fleet-native"], nativeLeaseIDs: [:])
+    let stopped = await waitUntil(timeout: .seconds(3)) {
+      Darwin.kill(Int32(pid), 0) != 0
+    }
+    #expect(stopped)
+  }
+
+  @Test
+  func rejectsNonLoopbackCrabboxNativeHandoff() async throws {
+    let directory = FileManager.default.temporaryDirectory
+      .appendingPathComponent("CrabfleetMacTests.\(UUID().uuidString)")
+    try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let executable = directory.appendingPathComponent("crabbox")
+    try Data(
+      """
+      #!/bin/sh
+      printf '%s\\n' '{"schema":"crabbox/vnc-handoff/v1","host":"desktop.example","port":5900,"username":"","password":"secret"}'
+      sleep 5
+      """.utf8
+    ).write(to: executable)
+    try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: executable.path)
+
+    await #expect(throws: CrabboxVNCBridgeError.invalidHandoff) {
+      _ = try await CrabboxVNCBridge.start(
+        leaseID: "cbx_native123",
+        executableURL: executable,
+        timeout: 2
+      )
+    }
+  }
+
+  @Test
   func parsesGenericVNCAddresses() throws {
     let direct = try VNCAddress.parse("workstation.example:5907")
     #expect(direct.host == "workstation.example")
@@ -64,6 +178,7 @@ struct FleetModelsTests {
     let lease = CrabboxLease(
       id: "IS-248",
       leaseID: "blue-lobster",
+      nativeVncLeaseID: nil,
       owner: "operator",
       repository: "openclaw/crabfleet",
       branch: "codex/native-fleet",
@@ -91,7 +206,7 @@ struct FleetModelsTests {
         "fleet": {
           "generatedAt": 1770000000000,
           "registryAvailable": true,
-          "totals": { "active": 1, "sessions": 1, "vnc": 1 },
+          "totals": { "active": 1, "sessions": 1, "vnc": 0 },
           "desktopHosts": [{
             "id": "studio",
             "owner": "operator",
@@ -111,8 +226,9 @@ struct FleetModelsTests {
             "summary": "test session",
             "status": "ready",
             "attachable": true,
-            "vnc": true,
+            "vnc": false,
             "leaseId": "blue-lobster",
+            "nativeVncLeaseId": "cbx_native123",
             "lastEvent": "ready",
             "updatedAt": 1770000000000
           }]
@@ -137,6 +253,9 @@ struct FleetModelsTests {
     #expect(target.endpoint?.host == "100.68.201.40")
     #expect(target.endpoint?.port == 5901)
     #expect(target.desktopAvailable)
+
+    let fleetTarget = DesktopTarget(lease: lease)
+    #expect(fleetTarget.nativeVncLeaseID == "cbx_native123")
   }
 
   @Test @MainActor

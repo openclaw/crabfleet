@@ -156,7 +156,7 @@ An optional `CRABFLEET_RUNTIME_PROFILES_JSON` allowlist exposes generic Crabbox 
 `CRABBOX_RUNTIME_ADAPTER_URL`, or the mutually exclusive profile-routed `CRABBOX_RUNTIME_ADAPTER_URL_TEMPLATE`, enables the provider-neutral lifecycle contract:
 
 - `POST /v1/workspaces`: idempotent create using an immutable namespaced ID and request snapshot.
-- `GET /v1/workspaces/:id`: inspect status, capabilities, expiry, provider identity, and terminal connection.
+- `GET /v1/workspaces/:id`: inspect status, capabilities, expiry, provider identity, and terminal connection. Native-only VNC uses a separate `nativeVnc` capability and does not imply the browser desktop endpoint.
 - `DELETE /v1/workspaces/:id`: release the provider workspace.
 - `POST /v1/workspaces/:id/connections/desktop`: mint a short-lived desktop URL.
 

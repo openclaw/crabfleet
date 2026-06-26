@@ -22,6 +22,15 @@ test("runtime capabilities use runtime defaults and honor explicit booleans only
     logs: true,
     artifacts: true,
   });
+  assert.deepEqual(runtimeCapabilities("container", '{"nativeVnc":true}'), {
+    terminal: true,
+    takeover: false,
+    vnc: false,
+    desktop: false,
+    nativeVnc: true,
+    logs: true,
+    artifacts: true,
+  });
   assert.deepEqual(runtimeCapabilities("container", '{"terminal":"yes","logs":null}'), {
     terminal: true,
     takeover: false,

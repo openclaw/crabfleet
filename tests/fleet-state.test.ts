@@ -237,16 +237,18 @@ test("sandbox lease parser ignores non-sandbox leases", () => {
   assert.equal(sandboxIdFromLeaseId(null), null);
 });
 
-test("fleet VNC availability follows adapter capabilities without persisting a URL", () => {
+test("fleet exposes native VNC identity separately from browser VNC", () => {
   const fleet = buildFleetState(
     [
       {
         ...baseSession,
         runtime: "crabbox",
         adapter: "runtime-v1",
+        providerResourceId: "cbx_native123",
+        canControl: true,
         leaseId: "provider/resource",
         vncUrl: null,
-        capabilities: { terminal: true, desktop: true, vnc: true },
+        capabilities: { terminal: true, desktop: false, vnc: false, nativeVnc: true },
       },
     ],
     [],
@@ -258,8 +260,84 @@ test("fleet VNC availability follows adapter capabilities without persisting a U
     },
   );
 
-  assert.equal(fleet.totals.vnc, 1);
-  assert.equal(fleet.sessions[0]?.vnc, true);
+  assert.equal(fleet.totals.vnc, 0);
+  assert.equal(fleet.sessions[0]?.vnc, false);
+  assert.equal(fleet.sessions[0]?.nativeVncLeaseId, "cbx_native123");
+});
+
+test("fleet omits native VNC identity for non-Crabbox runtimes", () => {
+  const fleet = buildFleetState(
+    [
+      {
+        ...baseSession,
+        runtime: "container",
+        adapter: "runtime-v1",
+        providerResourceId: "container-native123",
+        canControl: true,
+        capabilities: { terminal: true, desktop: false, vnc: false, nativeVnc: true },
+      },
+    ],
+    [],
+    {
+      canonicalUrl: "https://fleet.example",
+      defaultEgressHosts: [],
+      generatedAt: 100,
+      productUrl: "https://product.example",
+    },
+  );
+
+  assert.equal(fleet.sessions[0]?.nativeVncLeaseId, null);
+});
+
+test("fleet omits native VNC lease identity without control", () => {
+  const fleet = buildFleetState(
+    [
+      {
+        ...baseSession,
+        runtime: "crabbox",
+        adapter: "runtime-v1",
+        providerResourceId: "cbx_hidden",
+        canControl: false,
+        leaseId: null,
+        vncUrl: null,
+        capabilities: { terminal: true, desktop: false, vnc: false, nativeVnc: true },
+      },
+    ],
+    [],
+    {
+      canonicalUrl: "https://fleet.example",
+      defaultEgressHosts: [],
+      generatedAt: 100,
+      productUrl: "https://product.example",
+    },
+  );
+
+  assert.equal(fleet.sessions[0]?.nativeVncLeaseId, null);
+});
+
+test("fleet omits stale native VNC lease identity after stop", () => {
+  const fleet = buildFleetState(
+    [
+      {
+        ...baseSession,
+        runtime: "crabbox",
+        adapter: "runtime-v1",
+        providerResourceId: "cbx_stopped",
+        canControl: true,
+        status: "stopped",
+        capabilities: { terminal: true, desktop: false, vnc: false, nativeVnc: true },
+      },
+    ],
+    [],
+    {
+      canonicalUrl: "https://fleet.example",
+      defaultEgressHosts: [],
+      generatedAt: 100,
+      productUrl: "https://product.example",
+    },
+  );
+
+  assert.equal(fleet.sessions[0]?.nativeVncLeaseId, null);
 });
 
 test("stopping sessions are inactive and not attachable", () => {

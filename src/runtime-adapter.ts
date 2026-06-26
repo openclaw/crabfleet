@@ -22,6 +22,7 @@ export type AdapterCapabilities = {
   takeover: boolean;
   vnc: boolean;
   desktop: boolean;
+  nativeVnc?: boolean;
   logs: boolean;
   artifacts: boolean;
 };
@@ -669,6 +670,7 @@ function adapterCapabilities(value: unknown): AdapterCapabilities | null {
       takeover: features.has("takeover"),
       vnc: features.has("vnc") || features.has("webvnc") || features.has("desktop"),
       desktop: features.has("desktop") || features.has("vnc") || features.has("webvnc"),
+      nativeVnc: features.has("native-vnc"),
       artifacts: features.has("artifacts"),
     };
   }
@@ -698,6 +700,11 @@ function adapterCapabilityOverlay(value: unknown): Partial<AdapterCapabilities> 
     overlay.desktop = desktopAvailable;
     overlay.vnc = desktopAvailable;
   }
+  const nativeVnc = firstPresentField([
+    [capabilities, "nativeVnc"],
+    [capabilities, "native_vnc"],
+  ]);
+  if (nativeVnc.present) overlay.nativeVnc = booleanValue(nativeVnc.value);
   const logs = firstPresentField([[capabilities, "logs"]]);
   if (logs.present) overlay.logs = booleanValue(logs.value);
   const artifacts = firstPresentField([[capabilities, "artifacts"]]);

@@ -124,6 +124,7 @@ test("adapter workspace id stays distinct from provider resource id", () => {
       takeover: false,
       vnc: true,
       desktop: true,
+      nativeVnc: true,
       logs: false,
       artifacts: false,
       browser: true,
@@ -140,6 +141,7 @@ test("adapter workspace id stays distinct from provider resource id", () => {
   assert.equal(result?.capabilities?.terminal, true);
   assert.equal(result?.capabilities?.desktop, true);
   assert.equal(result?.capabilities?.vnc, true);
+  assert.equal(result?.capabilities?.nativeVnc, true);
   assert.equal(result?.terminalCapabilityInferred, false);
   assert.equal(result?.message, "[workspace] is ready as [workspace]");
   assert.deepEqual(
@@ -158,6 +160,7 @@ test("adapter workspace id stays distinct from provider resource id", () => {
       takeover: false,
       vnc: true,
       desktop: true,
+      nativeVnc: true,
       logs: false,
       artifacts: false,
     },

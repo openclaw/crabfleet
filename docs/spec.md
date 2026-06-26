@@ -38,7 +38,7 @@ Crabfleet currently does not:
 - call ClawSweeper;
 - discover arbitrary processes or machines that were not registered as sessions;
 - preserve raw terminal byte recordings or arbitrary artifacts in R2;
-- provide a native raw-RFB connection contract to the macOS prototype.
+- expose raw provider VNC credentials or endpoints through the Worker.
 
 Those boundaries are deliberate. This document describes shipped behavior, not an aspirational orchestration layer.
 
@@ -367,7 +367,7 @@ The Go gateway maps linked SSH keys to Worker API identities and provides intera
 
 ### Native macOS Prototype
 
-`macos/CrabfleetMac` is an experimental SwiftUI/AppKit/Metal VNC client. It can open saved or ad-hoc VNC endpoints in a local-only mode with no deployment dependency. For Fleet data, a user enters a deployment URL, approves a short-lived device link in an authenticated browser, and receives a 24-hour `fleet:read` token for the versioned native session and Fleet endpoints. The app stores that token per deployment origin in Keychain, rejects redirects, and has no browser-cookie or fixture fallback. Automatic raw-RFB connection setup from a Fleet lease is not yet a shipped Worker/Crabbox contract.
+`macos/CrabfleetMac` is an experimental SwiftUI/AppKit/Metal VNC client. It can open saved or ad-hoc VNC endpoints in a local-only mode with no deployment dependency. For Fleet data, a user enters a deployment URL, approves a short-lived device link in an authenticated browser, and receives a 24-hour `fleet:read` token for the versioned native session and Fleet endpoints. The app stores that token per deployment origin in Keychain, rejects redirects, and has no browser-cookie or fixture fallback. For controllable desktop-capable Crabbox sessions, Fleet exposes only the non-secret provider lease identifier. The app launches the installed Crabbox CLI's versioned foreground handoff, reads a bounded loopback endpoint and ephemeral VNC credential from its private stdout pipe, and terminates that helper when the viewer disconnects.
 
 ## Deployment
 

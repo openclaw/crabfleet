@@ -214,17 +214,19 @@ team state, and the deployment allowlist before handoff and on every native API
 use. The encrypted GitHub credential used for those checks remains server-side
 and is never exposed to the app.
 
-The app still accepts a manual loopback host, port, and in-memory credential for
+The app also accepts a manual loopback host, port, and in-memory credential for
 the actual RFB connection. The Worker browser endpoint
 `/api/interactive-sessions/:id/vnc` redirects to browser/noVNC desktop
 connections; it is not a raw-RFB contract for native clients.
 
-Automatic native connection still needs one narrow, versioned contract that
-creates an authenticated tunnel or proxy and returns a loopback endpoint plus
-an ephemeral credential without placing secrets in argv, URLs, logs, files, or
-defaults. The process owning that connection should remain foreground and end
-when the viewer closes. Until then, the fleet deck is authoritative only for
-Crabfleet-registered sessions and desktop attachment remains manual.
+For a controllable desktop-capable Crabbox lease, the native Fleet response
+includes its non-secret provider lease identifier. The app starts the installed
+`crabbox vnc --native-handoff` helper directly, consumes one bounded JSON line
+from a private stdout pipe, and connects only to the returned IPv4 loopback
+endpoint. The helper owns the SSH tunnel in the foreground. Closing, replacing,
+evicting, or losing the VNC session terminates that helper and tunnel. The VNC
+password remains in process memory and never enters argv, a URL, defaults, or a
+file. Manual entry remains the fallback for non-Crabbox targets.
 
 Share This Mac does not use this Worker/runtime-adapter boundary. It is a local
 Mac-to-Mac path whose only network dependency is the local Tailscale client.

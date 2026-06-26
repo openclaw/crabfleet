@@ -14,6 +14,7 @@ export type RuntimeCapabilities = {
   takeover: boolean;
   vnc: boolean;
   desktop: boolean;
+  nativeVnc?: boolean;
   logs: boolean;
   artifacts: boolean;
 };
@@ -232,6 +233,7 @@ export function runtimeCapabilities(runtime: string, value: string): RuntimeCapa
     takeover: booleanCapability(parsed.takeover, fallback.takeover),
     vnc: booleanCapability(parsed.vnc, fallback.vnc),
     desktop: booleanCapability(parsed.desktop, fallback.desktop),
+    ...(typeof parsed.nativeVnc === "boolean" ? { nativeVnc: parsed.nativeVnc } : {}),
     logs: booleanCapability(parsed.logs, fallback.logs),
     artifacts: booleanCapability(parsed.artifacts, fallback.artifacts),
   };

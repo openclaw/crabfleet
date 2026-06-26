@@ -53,6 +53,12 @@ struct FleetRootView: View {
     return allTargets.first { $0.id == focusedTargetID }
   }
 
+  private var targetConnectionStates: [DesktopTargetConnectionState] {
+    allTargets.map {
+      DesktopTargetConnectionState(id: $0.id, nativeVncLeaseID: $0.nativeVncLeaseID)
+    }
+  }
+
   var body: some View {
     ZStack {
       if let target = focusedTarget {
@@ -130,8 +136,14 @@ struct FleetRootView: View {
     }
     .onAppear(perform: connectLaunchConnectionIfNeeded)
     .onExitCommand(perform: closeFocus)
-    .onChange(of: allTargets.map(\.id)) { _, targetIDs in
-      sessions.reconcile(validTargetIDs: Set(targetIDs))
+    .onChange(of: targetConnectionStates) { _, targetStates in
+      let targetIDs = Set(targetStates.map(\.id))
+      let nativeLeaseIDs = Dictionary(
+        uniqueKeysWithValues: targetStates.compactMap { state in
+          state.nativeVncLeaseID.map { (state.id, $0) }
+        }
+      )
+      sessions.reconcile(validTargetIDs: targetIDs, nativeLeaseIDs: nativeLeaseIDs)
       if let focusedTargetID, !targetIDs.contains(focusedTargetID) {
         self.focusedTargetID = nil
         sessions.focus(targetID: nil)
@@ -154,7 +166,7 @@ struct FleetRootView: View {
     sessions.focus(targetID: targetID)
     if let target = allTargets.first(where: { $0.id == targetID }),
       target.source == .crabfleet,
-      target.endpoint != nil,
+      (target.endpoint != nil || target.nativeVncLeaseID != nil),
       !sessions.session(for: targetID).phase.isConnectedOrConnecting
     {
       connect(target)
@@ -169,7 +181,9 @@ struct FleetRootView: View {
   }
 
   private func connect(_ target: DesktopTarget) {
-    if target.source == .crabfleet, let endpoint = target.endpoint {
+    if target.source == .crabfleet, let leaseID = target.nativeVncLeaseID {
+      sessions.connectCrabbox(targetID: target.id, leaseID: leaseID)
+    } else if target.source == .crabfleet, let endpoint = target.endpoint {
       sessions.connect(
         targetID: target.id,
         request: .init(
@@ -219,6 +233,11 @@ struct FleetRootView: View {
       focusedTargetID = nil
     }
   }
+}
+
+private struct DesktopTargetConnectionState: Equatable {
+  let id: String
+  let nativeVncLeaseID: String?
 }
 
 private struct DesktopSourceRail: View {
