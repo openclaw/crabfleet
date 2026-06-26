@@ -9,6 +9,7 @@
 - Add browser-approved native macOS device linking with live GitHub authorization checks, 24-hour read-only Fleet tokens, deployment-scoped Keychain storage, and real Fleet data instead of preview fixtures or raw session cookies.
 - Let the macOS app fall back to OAuth 2.0 discovery, explicit external-provider trust, dynamic client registration, PKCE, a loopback callback, audience matching, and a fresh Keychain namespace with refresh-token rotation when an identity gateway protects Crabfleet's exact read-only native session and Fleet ingress.
 - Add app-owned macOS desktop hosting with ScreenCaptureKit, bounded Tight/JPEG RFB streaming, Accessibility-authorized input, an exact active-tailnet bind, and same-user Tailscale peer admission without Apple Screen Sharing or a public relay.
+- Let app-owned macOS desktop hosting start in view-only mode with Screen Recording alone; Accessibility is now optional and enables remote keyboard and pointer input.
 - Add atomically claimed recurring card intervals with constant-time catch-up, crash-recoverable leases, scheduler/API proof, and coalescing for active or capacity-blocked runs, thanks @Jhacarreiro.
 - Reuse `@openclaw/libterminal` for terminal protocol codecs, Worker relays, Ghostty assets, and browser hub transport while keeping Crabfleet authorization and session policy local.
 - Update `@openclaw/libterminal` to 0.3.1 for terminal lifecycle, Worker asset generation, and package-validation fixes.

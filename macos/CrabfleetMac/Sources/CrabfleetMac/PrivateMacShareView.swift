@@ -43,7 +43,9 @@ struct PrivateMacShareSheet: View {
         }
         ShareStatusRow(
           title: "Remote control",
-          detail: controller.accessibilityGranted ? "Accessibility allowed" : "Permission required",
+          detail: controller.accessibilityGranted
+            ? "Accessibility allowed"
+            : "Optional · view-only without it",
           isReady: controller.accessibilityGranted,
           actionTitle: controller.accessibilityGranted ? nil : "Allow"
         ) {

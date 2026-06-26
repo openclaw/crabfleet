@@ -6,6 +6,25 @@ import Testing
 
 struct PrivateMacShareTests {
   @Test
+  func privateShareCanStartViewOnlyWithoutAccessibility() {
+    #expect(
+      PrivateMacSharePermissionPolicy.canStart(
+        identityAvailable: true,
+        screenRecordingGranted: true
+      ))
+    #expect(
+      !PrivateMacSharePermissionPolicy.canStart(
+        identityAvailable: false,
+        screenRecordingGranted: true
+      ))
+    #expect(
+      !PrivateMacSharePermissionPolicy.canStart(
+        identityAvailable: true,
+        screenRecordingGranted: false
+      ))
+  }
+
+  @Test
   func recognizesExplicitPrivateShareLaunchMode() {
     #expect(
       PrivateMacShareLaunchMode.isEnabled(

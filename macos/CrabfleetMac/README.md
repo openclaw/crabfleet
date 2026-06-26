@@ -13,7 +13,8 @@ See the design note for the remaining zero-copy live-mosaic work.
 `Share This Mac` adds the missing server half without using Apple's Screen
 Sharing service. ScreenCaptureKit captures the primary display, Crabfleet sends
 bounded Tight/JPEG RFB updates, and Accessibility-authorized CGEvents forward
-keyboard and pointer input. The listener binds only to the Mac's verified
+keyboard and pointer input when that optional permission is granted. Screen
+Recording alone starts a view-only share. The listener binds only to the Mac's verified
 Tailscale `100.64.0.0/10` address after confirming a valid identity on the active
 tailnet. Before the RFB handshake, `tailscale whois` must identify the peer as
 another authorized device owned by the same Tailscale user.
@@ -35,9 +36,10 @@ macOS to ask again after a rebuild; production signing is required for a stable
 permission identity.
 
 For an unattended host, launch the bundled app with `--share-this-mac`, or set
-`CRABFLEET_AUTO_SHARE=1`. Crabfleet requests any missing Screen Recording and
-Accessibility permissions, waits up to five minutes for them to be granted,
-and then starts the same tailnet-only RFB listener used by the in-app control:
+`CRABFLEET_AUTO_SHARE=1`. Crabfleet requests missing Screen Recording access,
+waits up to five minutes for it to be granted, and then starts the same
+tailnet-only RFB listener used by the in-app control. Accessibility can be
+granted separately when remote keyboard and pointer control are needed:
 
 ```sh
 /Applications/Crabfleet.app/Contents/MacOS/CrabfleetMac --share-this-mac

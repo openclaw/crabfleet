@@ -32,8 +32,9 @@ app-owned private desktop host for Mac-to-Mac access.
 - The host binds port 5901 only to a verified Tailscale `100.64.0.0/10` address,
   requires a valid identity on the active tailnet, and admits only a
   Tailscale-authorized peer owned by that same user.
-- Remote control is forwarded through Accessibility-authorized CGEvents. Screen
-  Recording and Accessibility remain explicit macOS permissions.
+- Screen Recording is the only permission required for view-only sharing.
+  Remote control is forwarded through Accessibility-authorized CGEvents when
+  that optional permission is granted.
 
 The fork exposes an externally managed clipboard mode, so no VNC connection
 polls or writes `NSPasteboard.general` directly. One app-owned coordinator sends
@@ -71,6 +72,9 @@ After the first Screen Recording grant, restart the bundled app before starting
 the share. Ad-hoc development signatures do not provide a stable TCC identity,
 so a rebuilt prototype may need permission again; a production-signed build is
 required for durable permission state.
+
+Accessibility is not required to start the listener. Without it, Crabfleet
+serves a view-only desktop and discards remote keyboard and pointer events.
 
 Tailscale supplies the encrypted, ACL-controlled transport and peer identity;
 RFB None authentication is accepted only inside that already-authenticated

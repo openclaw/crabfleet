@@ -60,9 +60,6 @@ final class CrabfleetApplicationDelegate: NSObject, NSApplicationDelegate {
     if !controller.screenRecordingGranted {
       await controller.requestScreenRecordingPermission()
     }
-    if !controller.accessibilityGranted {
-      controller.requestAccessibilityPermission()
-    }
 
     let clock = ContinuousClock()
     let deadline = clock.now.advanced(by: .seconds(300))
@@ -83,7 +80,6 @@ final class CrabfleetApplicationDelegate: NSObject, NSApplicationDelegate {
 
     let missing = [
       controller.screenRecordingGranted ? nil : "Screen Recording",
-      controller.accessibilityGranted ? nil : "Accessibility",
     ].compactMap { $0 }
     report("private share waiting for \(missing.joined(separator: " and ")) permission")
   }

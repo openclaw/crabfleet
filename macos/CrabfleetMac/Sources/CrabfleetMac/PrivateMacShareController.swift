@@ -2,6 +2,15 @@ import AppKit
 import CoreGraphics
 import Foundation
 
+enum PrivateMacSharePermissionPolicy {
+  static func canStart(
+    identityAvailable: Bool,
+    screenRecordingGranted: Bool
+  ) -> Bool {
+    identityAvailable && screenRecordingGranted
+  }
+}
+
 @MainActor
 final class PrivateMacShareController: ObservableObject {
   enum RegistryPhase: Equatable {
@@ -93,7 +102,11 @@ final class PrivateMacShareController: ObservableObject {
   }
 
   var canStart: Bool {
-    phase == .idle && identity != nil && screenRecordingGranted && accessibilityGranted
+    phase == .idle
+      && PrivateMacSharePermissionPolicy.canStart(
+        identityAvailable: identity != nil,
+        screenRecordingGranted: screenRecordingGranted
+      )
   }
 
   func refresh() async {
@@ -140,11 +153,6 @@ final class PrivateMacShareController: ObservableObject {
     guard screenRecordingGranted else {
       phase = .idle
       notice = PrivateMacShareError.screenRecordingDenied.localizedDescription
-      return
-    }
-    guard accessibilityGranted else {
-      phase = .idle
-      notice = PrivateMacShareError.accessibilityDenied.localizedDescription
       return
     }
     guard let runner else {
@@ -250,7 +258,9 @@ final class PrivateMacShareController: ObservableObject {
     switch event {
     case .listening:
       phase = .sharing
-      notice = nil
+      notice = accessibilityGranted
+        ? nil
+        : "View-only sharing is ready. Allow Accessibility to enable remote control."
       registerDesktopHost(generation: generation)
     case .authorizing(let peer):
       phase = .authorizing
