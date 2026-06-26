@@ -22,6 +22,7 @@ export type FleetSessionInput = {
   branch: string;
   runtime: FleetRuntime;
   adapter?: string | null;
+  providerResourceId?: string | null;
   owner: string;
   createdBy?: string;
   purpose?: string;
@@ -40,7 +41,12 @@ export type FleetSessionInput = {
   leaseId: string | null;
   attachUrl: string | null;
   vncUrl: string | null;
-  capabilities?: { vnc?: boolean; desktop?: boolean; terminal?: boolean };
+  capabilities?: {
+    vnc?: boolean;
+    desktop?: boolean;
+    nativeVnc?: boolean;
+    terminal?: boolean;
+  };
   canControl?: boolean;
   ptyAvailable?: boolean;
   expiresAt?: number | null;
@@ -119,6 +125,7 @@ export type FleetSessionSummary = {
   archived: boolean;
   logEvents: number;
   leaseId: string | null;
+  nativeVncLeaseId: string | null;
   sandboxId: string | null;
   lastEvent: string;
   createdAt: number;
@@ -309,6 +316,12 @@ export function fleetSessionSummary(
     archived,
     logEvents: session.logArchive?.eventCount ?? session.logs?.length ?? 0,
     leaseId: session.leaseId,
+    nativeVncLeaseId:
+      session.adapter === "runtime-v1" &&
+      session.canControl === true &&
+      session.capabilities?.nativeVnc === true
+        ? (session.providerResourceId ?? null)
+        : null,
     sandboxId,
     lastEvent: session.lastEvent,
     createdAt: session.createdAt,

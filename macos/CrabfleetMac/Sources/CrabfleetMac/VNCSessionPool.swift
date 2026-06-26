@@ -9,6 +9,10 @@ final class VNCSessionPool: ObservableObject {
 
   private let maximumLiveSessions: Int
   private var sessions: [String: VNCSessionController] = [:]
+  private var crabboxBridges: [String: CrabboxVNCBridge] = [:]
+  private var crabboxBridgeTasks: [String: Task<Void, Never>] = [:]
+  private var crabboxBridgeGenerations: [String: UUID] = [:]
+  private var phaseObservers: [String: AnyCancellable] = [:]
   private var lastUsedAt: [String: Date] = [:]
   private var isApplicationActive = true
 
@@ -29,10 +33,53 @@ final class VNCSessionPool: ObservableObject {
     )
     session.setApplicationActive(isApplicationActive)
     sessions[targetID] = session
+    phaseObservers[targetID] = session.$phase
+      .dropFirst()
+      .sink { [weak self] phase in
+        guard !phase.isConnectedOrConnecting else { return }
+        self?.stopCrabboxBridge(targetID: targetID)
+      }
     return session
   }
 
   func connect(targetID: String, request: VNCConnectionRequest) {
+    stopCrabboxBridge(targetID: targetID)
+    connectDirect(targetID: targetID, request: request)
+  }
+
+  func connectCrabbox(targetID: String, leaseID: String) {
+    stopCrabboxBridge(targetID: targetID)
+    enforceLiveSessionBudget(excluding: targetID)
+    let generation = UUID()
+    crabboxBridgeGenerations[targetID] = generation
+    session(for: targetID).beginConnecting(endpoint: "Crabbox secure tunnel")
+    let task = Task { [weak self] in
+      do {
+        let bridge = try await CrabboxVNCBridge.start(leaseID: leaseID)
+        guard
+          let self,
+          self.crabboxBridgeGenerations[targetID] == generation,
+          !Task.isCancelled
+        else {
+          bridge.stop()
+          return
+        }
+        self.crabboxBridgeTasks[targetID] = nil
+        self.crabboxBridges[targetID] = bridge
+        self.connectDirect(targetID: targetID, request: bridge.request)
+      } catch is CancellationError {
+        return
+      } catch {
+        guard let self, self.crabboxBridgeGenerations[targetID] == generation else { return }
+        self.crabboxBridgeTasks[targetID] = nil
+        self.crabboxBridgeGenerations[targetID] = nil
+        self.session(for: targetID).failConnection(error.localizedDescription)
+      }
+    }
+    crabboxBridgeTasks[targetID] = task
+  }
+
+  private func connectDirect(targetID: String, request: VNCConnectionRequest) {
     enforceLiveSessionBudget(excluding: targetID)
     clipboardCoordinator.reset(targetID: targetID)
 
@@ -68,6 +115,7 @@ final class VNCSessionPool: ObservableObject {
   }
 
   func disconnect(targetID: String) {
+    stopCrabboxBridge(targetID: targetID)
     guard let session = sessions[targetID] else { return }
     session.disconnect()
     clipboardCoordinator.reset(targetID: targetID)
@@ -79,6 +127,9 @@ final class VNCSessionPool: ObservableObject {
 
   func disconnectAll() {
     focus(targetID: nil)
+    for targetID in Set(crabboxBridges.keys).union(crabboxBridgeTasks.keys) {
+      stopCrabboxBridge(targetID: targetID)
+    }
     for session in sessions.values {
       session.disconnect()
     }
@@ -95,8 +146,10 @@ final class VNCSessionPool: ObservableObject {
     let staleTargetIDs = sessions.keys.filter { !validTargetIDs.contains($0) }
     for targetID in staleTargetIDs {
       sessions[targetID]?.disconnect()
+      stopCrabboxBridge(targetID: targetID)
       sessions[targetID] = nil
       lastUsedAt[targetID] = nil
+      phaseObservers[targetID] = nil
       clipboardCoordinator.forget(targetID: targetID)
     }
     if let focusedSessionID, staleTargetIDs.contains(focusedSessionID) {
@@ -118,8 +171,17 @@ final class VNCSessionPool: ObservableObject {
       }
 
     if let evictionTargetID {
+      stopCrabboxBridge(targetID: evictionTargetID)
       sessions[evictionTargetID]?.disconnect()
       clipboardCoordinator.reset(targetID: evictionTargetID)
     }
+  }
+
+  private func stopCrabboxBridge(targetID: String) {
+    crabboxBridgeGenerations[targetID] = nil
+    crabboxBridgeTasks[targetID]?.cancel()
+    crabboxBridgeTasks[targetID] = nil
+    crabboxBridges[targetID]?.stop()
+    crabboxBridges[targetID] = nil
   }
 }

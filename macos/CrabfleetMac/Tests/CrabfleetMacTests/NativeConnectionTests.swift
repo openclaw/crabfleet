@@ -1833,6 +1833,7 @@ private func testLease(id: String = "IS-live") -> CrabboxLease {
   .init(
     id: id,
     leaseID: "live-crab",
+    nativeVncLeaseID: nil,
     owner: "operator",
     repository: "openclaw/crabfleet",
     branch: "main",

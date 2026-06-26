@@ -154,7 +154,7 @@ struct FleetRootView: View {
     sessions.focus(targetID: targetID)
     if let target = allTargets.first(where: { $0.id == targetID }),
       target.source == .crabfleet,
-      target.endpoint != nil,
+      (target.endpoint != nil || target.nativeVncLeaseID != nil),
       !sessions.session(for: targetID).phase.isConnectedOrConnecting
     {
       connect(target)
@@ -169,7 +169,9 @@ struct FleetRootView: View {
   }
 
   private func connect(_ target: DesktopTarget) {
-    if target.source == .crabfleet, let endpoint = target.endpoint {
+    if target.source == .crabfleet, let leaseID = target.nativeVncLeaseID {
+      sessions.connectCrabbox(targetID: target.id, leaseID: leaseID)
+    } else if target.source == .crabfleet, let endpoint = target.endpoint {
       sessions.connect(
         targetID: target.id,
         request: .init(

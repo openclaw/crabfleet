@@ -146,6 +146,7 @@ struct DesktopTarget: Identifiable, Hashable {
   let endpoint: VNCAddress?
   let desktopAvailable: Bool
   let profileID: String?
+  let nativeVncLeaseID: String?
 
   init(lease: CrabboxLease) {
     id = "fleet:\(lease.id)"
@@ -161,6 +162,7 @@ struct DesktopTarget: Identifiable, Hashable {
     endpoint = nil
     desktopAvailable = lease.desktopAvailable
     profileID = nil
+    nativeVncLeaseID = lease.nativeVncLeaseID
   }
 
   init(profile: VNCConnectionProfile) {
@@ -177,6 +179,7 @@ struct DesktopTarget: Identifiable, Hashable {
     endpoint = profile.address
     desktopAvailable = true
     profileID = profile.id
+    nativeVncLeaseID = nil
   }
 
   init(host: RegisteredDesktopHost) {
@@ -193,6 +196,7 @@ struct DesktopTarget: Identifiable, Hashable {
     endpoint = .init(host: host.address, port: host.port, username: "")
     desktopAvailable = true
     profileID = nil
+    nativeVncLeaseID = nil
   }
 
   func matches(_ query: String) -> Bool {

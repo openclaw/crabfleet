@@ -26,6 +26,7 @@ enum LeaseStatus: String, Codable, CaseIterable {
 struct CrabboxLease: Identifiable, Hashable {
   let id: String
   let leaseID: String?
+  let nativeVncLeaseID: String?
   let owner: String
   let repository: String
   let branch: String
@@ -117,6 +118,7 @@ struct FleetAPISession: Decodable {
   let attachable: Bool
   let vnc: Bool
   let leaseId: String?
+  let nativeVncLeaseId: String?
   let lastEvent: String
   let updatedAt: Double
 
@@ -124,6 +126,7 @@ struct FleetAPISession: Decodable {
     .init(
       id: id,
       leaseID: leaseId,
+      nativeVncLeaseID: nativeVncLeaseId,
       owner: owner,
       repository: repo,
       branch: branch,
@@ -133,7 +136,7 @@ struct FleetAPISession: Decodable {
       summary: summary,
       lastEvent: lastEvent,
       updatedAt: Date(timeIntervalSince1970: updatedAt / 1_000),
-      desktopAvailable: vnc,
+      desktopAvailable: vnc || nativeVncLeaseId != nil,
       terminalAvailable: attachable
     )
   }
