@@ -22,6 +22,8 @@ const nativeLinkHtmlHeaders = {
   "cache-control": "no-store",
   "content-security-policy":
     "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'",
+  // A no-referrer policy serializes same-origin form POSTs as Origin: null in Chromium.
+  "referrer-policy": "same-origin",
   "x-frame-options": "DENY",
 };
 
