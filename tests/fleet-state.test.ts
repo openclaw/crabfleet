@@ -291,6 +291,31 @@ test("fleet omits native VNC lease identity without control", () => {
   assert.equal(fleet.sessions[0]?.nativeVncLeaseId, null);
 });
 
+test("fleet omits stale native VNC lease identity after stop", () => {
+  const fleet = buildFleetState(
+    [
+      {
+        ...baseSession,
+        runtime: "crabbox",
+        adapter: "runtime-v1",
+        providerResourceId: "cbx_stopped",
+        canControl: true,
+        status: "stopped",
+        capabilities: { terminal: true, desktop: false, vnc: false, nativeVnc: true },
+      },
+    ],
+    [],
+    {
+      canonicalUrl: "https://fleet.example",
+      defaultEgressHosts: [],
+      generatedAt: 100,
+      productUrl: "https://product.example",
+    },
+  );
+
+  assert.equal(fleet.sessions[0]?.nativeVncLeaseId, null);
+});
+
 test("stopping sessions are inactive and not attachable", () => {
   const fleet = buildFleetState(
     [

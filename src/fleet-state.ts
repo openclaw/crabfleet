@@ -319,6 +319,7 @@ export function fleetSessionSummary(
     nativeVncLeaseId:
       session.adapter === "runtime-v1" &&
       session.canControl === true &&
+      ptyReadyStatuses.has(session.status) &&
       session.capabilities?.nativeVnc === true
         ? (session.providerResourceId ?? null)
         : null,
