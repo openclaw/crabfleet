@@ -12,25 +12,40 @@ struct FleetModelsTests {
     try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
     defer { try? FileManager.default.removeItem(at: directory) }
     let executable = directory.appendingPathComponent("crabbox")
+    let pidFile = directory.appendingPathComponent("helper.pid")
     try Data(
       """
       #!/bin/sh
+      trap '' TERM
+      printf '%s' "$$" > '\(pidFile.path)'
       printf '%s\\n' '{"schema":"crabbox/vnc-handoff/v1","host":"127.0.0.1","port":15901,"username":"dev","password":"secret"}'
       while :; do sleep 1; done
       """.utf8
     ).write(to: executable)
     try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: executable.path)
 
-    let bridge = try await CrabboxVNCBridge.start(
-      leaseID: "cbx_native123",
+    var bridge: CrabboxVNCBridge? = try await CrabboxVNCBridge.start(
+      leaseID: "cloud/project/box-42",
       executableURL: executable,
       timeout: 2
     )
-    #expect(bridge.request.host == "127.0.0.1")
-    #expect(bridge.request.port == 15901)
-    #expect(bridge.request.username == "dev")
-    #expect(bridge.request.password == "secret")
-    bridge.stop()
+    #expect(bridge?.request.host == "127.0.0.1")
+    #expect(bridge?.request.port == 15901)
+    #expect(bridge?.request.username == "dev")
+    #expect(bridge?.request.password == "secret")
+
+    let pid = try #require(
+      Int(String(contentsOf: pidFile, encoding: .utf8))
+    )
+    #expect(Darwin.kill(Int32(pid), 0) == 0)
+    bridge?.stop()
+    bridge = nil
+
+    let deadline = Date().addingTimeInterval(3)
+    while Darwin.kill(Int32(pid), 0) == 0 && Date() < deadline {
+      try await Task.sleep(for: .milliseconds(50))
+    }
+    #expect(Darwin.kill(Int32(pid), 0) != 0)
   }
 
   @Test

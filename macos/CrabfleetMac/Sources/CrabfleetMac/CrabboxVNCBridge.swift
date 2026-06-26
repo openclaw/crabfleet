@@ -87,8 +87,11 @@ final class CrabboxVNCBridge: @unchecked Sendable {
     if process.isRunning {
       process.terminate()
       let pid = process.processIdentifier
-      DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 1) { [weak process] in
-        guard let process, process.isRunning else { return }
+      // Keep Process alive until the fallback runs. The session pool drops the
+      // bridge immediately after stop(), and a weak capture could orphan a
+      // helper that ignores SIGTERM.
+      DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 1) { [process] in
+        guard process.isRunning else { return }
         _ = Darwin.kill(pid, SIGKILL)
       }
     }
@@ -224,10 +227,10 @@ final class CrabboxVNCBridge: @unchecked Sendable {
   }
 
   private static func validLeaseID(_ value: String) -> Bool {
-    !value.isEmpty && value.utf8.count <= 200 && value.utf8.allSatisfy {
-      (0x30...0x39).contains($0) || (0x41...0x5A).contains($0) ||
-        (0x61...0x7A).contains($0) || [0x2E, 0x5F, 0x2D].contains($0)
-    }
+    !value.isEmpty &&
+      value.utf8.count <= 200 &&
+      value.trimmingCharacters(in: .whitespacesAndNewlines) == value &&
+      value.unicodeScalars.allSatisfy { !CharacterSet.controlCharacters.contains($0) }
   }
 
   private static func terminate(_ process: Process) {
