@@ -318,6 +318,7 @@ export function fleetSessionSummary(
     leaseId: session.leaseId,
     nativeVncLeaseId:
       session.adapter === "runtime-v1" &&
+      session.runtime === "crabbox" &&
       session.canControl === true &&
       ptyReadyStatuses.has(session.status) &&
       session.capabilities?.nativeVnc === true

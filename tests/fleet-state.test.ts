@@ -265,6 +265,30 @@ test("fleet exposes native VNC identity separately from browser VNC", () => {
   assert.equal(fleet.sessions[0]?.nativeVncLeaseId, "cbx_native123");
 });
 
+test("fleet omits native VNC identity for non-Crabbox runtimes", () => {
+  const fleet = buildFleetState(
+    [
+      {
+        ...baseSession,
+        runtime: "container",
+        adapter: "runtime-v1",
+        providerResourceId: "container-native123",
+        canControl: true,
+        capabilities: { terminal: true, desktop: false, vnc: false, nativeVnc: true },
+      },
+    ],
+    [],
+    {
+      canonicalUrl: "https://fleet.example",
+      defaultEgressHosts: [],
+      generatedAt: 100,
+      productUrl: "https://product.example",
+    },
+  );
+
+  assert.equal(fleet.sessions[0]?.nativeVncLeaseId, null);
+});
+
 test("fleet omits native VNC lease identity without control", () => {
   const fleet = buildFleetState(
     [
