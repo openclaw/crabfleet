@@ -107,6 +107,31 @@ extension VNCConnection {
 
 		return usernamePasswordCredential
 	}
+
+	func delegatePrefersUsernameAuthentication(
+		_ authenticationType: VNCAuthenticationType
+	) async -> Bool {
+		await withCheckedContinuation { continuation in
+			DispatchQueue.main.async { [weak self] in
+				guard let self, let delegate = self.delegate else {
+					continuation.resume(returning: false)
+					return
+				}
+#if canImport(ObjectiveC)
+				let prefersUsername = delegate.connection?(
+					self,
+					prefersUsernameAuthentication: authenticationType
+				) ?? false
+#else
+				let prefersUsername = delegate.connection(
+					self,
+					prefersUsernameAuthentication: authenticationType
+				)
+#endif
+				continuation.resume(returning: prefersUsername)
+			}
+		}
+	}
 }
 
 private extension VNCConnection {

@@ -23,6 +23,14 @@ public protocol VNCConnectionDelegate: AnyObject {
 					completion: @escaping (_ credential: VNCCredential?) -> Void)
 
 #if canImport(ObjectiveC)
+	@objc optional func connection(_ connection: VNCConnection,
+					prefersUsernameAuthentication authenticationType: VNCAuthenticationType) -> Bool
+#else
+	func connection(_ connection: VNCConnection,
+					prefersUsernameAuthentication authenticationType: VNCAuthenticationType) -> Bool
+#endif
+
+#if canImport(ObjectiveC)
     @objc
 #endif
 	func connection(_ connection: VNCConnection,
@@ -48,3 +56,12 @@ public protocol VNCConnectionDelegate: AnyObject {
 	func connection(_ connection: VNCConnection,
 					didUpdateCursor cursor: VNCCursor)
 }
+
+#if !canImport(ObjectiveC)
+public extension VNCConnectionDelegate {
+	func connection(_ connection: VNCConnection,
+					prefersUsernameAuthentication authenticationType: VNCAuthenticationType) -> Bool {
+		false
+	}
+}
+#endif

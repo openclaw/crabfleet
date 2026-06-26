@@ -124,7 +124,12 @@ private extension VNCConnection {
 	}
 
 	func decideSecurityType(supportedTypes: VNCProtocol.SecurityTypes) async throws {
-		guard let chosenSecurityType = supportedTypes.preferredClientSecurityType else {
+		let prefersUsernameAuthentication = await delegatePrefersUsernameAuthentication(
+			.appleRemoteDesktop
+		)
+		guard let chosenSecurityType = supportedTypes.preferredClientSecurityType(
+			prefersUsernameAuthentication: prefersUsernameAuthentication
+		) else {
 			throw VNCError.authentication(.clientCouldNotDecideOnSecurityType)
 		}
 

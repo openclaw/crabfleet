@@ -111,9 +111,14 @@ extension VNCProtocol.SecurityTypes {
 		})
 	}
 
-	var preferredClientSecurityType: VNCProtocol.SecurityType? {
+	func preferredClientSecurityType(
+		prefersUsernameAuthentication: Bool = false
+	) -> VNCProtocol.SecurityType? {
 		let offered = securityTypes
-		return [VNCProtocol.SecurityType.diffieHellman, .vnc, .none]
+		let preference: [VNCProtocol.SecurityType] = prefersUsernameAuthentication
+			? [.diffieHellman, .vnc, .none]
+			: [.vnc, .diffieHellman, .none]
+		return preference
 			.first(where: offered.contains)
 	}
 }

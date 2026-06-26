@@ -175,7 +175,7 @@ private struct CrabfleetAppRoot: View {
     }
     .frame(minWidth: 1_080, minHeight: 680)
     .preferredColorScheme(.dark)
-    .task {
+    .task(id: localOnly) {
       if !localOnly {
         await fleetStore.restore()
       }

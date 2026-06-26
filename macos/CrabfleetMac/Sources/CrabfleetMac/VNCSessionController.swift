@@ -271,6 +271,14 @@ extension VNCSessionController: VNCConnectionDelegate {
     }
   }
 
+  func connection(
+    _ connection: VNCConnection,
+    prefersUsernameAuthentication authenticationType: VNCAuthenticationType
+  ) -> Bool {
+    authenticationType.requiresUsername
+      && !(credentials(for: connection)?.username.isEmpty ?? true)
+  }
+
   func connection(_ connection: VNCConnection, didCreateFramebuffer framebuffer: VNCFramebuffer) {
     publish(framebuffer, from: connection)
   }

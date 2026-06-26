@@ -52,16 +52,22 @@ struct ProtocolLimitsTests {
     let macOSScreenSharing = try #require(
       VNCProtocol.SecurityTypes(data: Data([30, 33, 36, 35]))
     )
-    #expect(macOSScreenSharing.preferredClientSecurityType == .diffieHellman)
+    #expect(macOSScreenSharing.preferredClientSecurityType() == .diffieHellman)
 
     let conventionalVNC = try #require(VNCProtocol.SecurityTypes(data: Data([1, 2])))
-    #expect(conventionalVNC.preferredClientSecurityType == .vnc)
+    #expect(conventionalVNC.preferredClientSecurityType() == .vnc)
 
     let passwordless = try #require(VNCProtocol.SecurityTypes(data: Data([1])))
-    #expect(passwordless.preferredClientSecurityType == VNCProtocol.SecurityType.none)
+    #expect(passwordless.preferredClientSecurityType() == VNCProtocol.SecurityType.none)
 
     let unsupported = try #require(VNCProtocol.SecurityTypes(data: Data([33, 36, 35])))
-    #expect(unsupported.preferredClientSecurityType == nil)
+    #expect(unsupported.preferredClientSecurityType() == nil)
+
+    let mixed = try #require(VNCProtocol.SecurityTypes(data: Data([30, 2, 1])))
+    #expect(mixed.preferredClientSecurityType() == .vnc)
+    #expect(
+      mixed.preferredClientSecurityType(prefersUsernameAuthentication: true) == .diffieHellman
+    )
   }
 
   @Test
