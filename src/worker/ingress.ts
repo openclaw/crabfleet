@@ -36,6 +36,7 @@ export function enforceWorkerIngressAuth(ingress: WorkerIngress): void {
 
 export function usesIndependentServiceAuth(request: Request): boolean {
   const pathname = new URL(request.url).pathname;
+  if (usesNativeServiceAuth(request.method, pathname)) return true;
   if (pathname === "/api/terminal/ws") {
     const headers = request.headers;
     const hasAuthorization = Boolean(headers.get("authorization"));
@@ -45,5 +46,15 @@ export function usesIndependentServiceAuth(request: Request): boolean {
   }
   return ["/api/ssh/", "/api/agent/", "/api/openclaw/", "/api/provision/"].some((prefix) =>
     pathname.startsWith(prefix),
+  );
+}
+
+function usesNativeServiceAuth(method: string, pathname: string): boolean {
+  return (
+    (method === "POST" &&
+      (pathname === "/api/native/v1/auth/device" || pathname === "/api/native/v1/auth/token")) ||
+    (method === "DELETE" && pathname === "/api/native/v1/auth/token") ||
+    (method === "GET" &&
+      (pathname === "/api/native/v1/session" || pathname === "/api/native/v1/fleet"))
   );
 }

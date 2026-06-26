@@ -61,7 +61,21 @@ struct FleetModelsTests {
 
   @Test
   func searchMatchesLeaseIdentityAndRepository() {
-    let lease = CrabboxLease.fixtures(currentUser: "operator")[0]
+    let lease = CrabboxLease(
+      id: "IS-248",
+      leaseID: "blue-lobster",
+      owner: "operator",
+      repository: "openclaw/crabfleet",
+      branch: "codex/native-fleet",
+      runtime: "crabbox",
+      status: .attached,
+      purpose: "Native fleet client",
+      summary: "Building the Metal-backed macOS viewer",
+      lastEvent: "Workspace active",
+      updatedAt: .now,
+      desktopAvailable: true,
+      terminalAvailable: true
+    )
 
     #expect(lease.matches("blue-lobster"))
     #expect(lease.matches("CRABFLEET"))

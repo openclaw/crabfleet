@@ -14,6 +14,12 @@ export type ScheduledRecurringCardDependencies = {
   reportError(error: unknown): void;
 };
 
+export type ScheduledNativeAuthPruningDependencies = {
+  now(): number;
+  prune(now: number): Promise<void>;
+  reportError(error: unknown): void;
+};
+
 export function scheduleInteractiveSessionReconciliation(
   context: ScheduledExecutionContext,
   dependencies: ScheduledReconciliationDependencies,
@@ -31,6 +37,17 @@ export function scheduleRecurringCardTick(
 ): void {
   context.waitUntil(
     dependencies.run(dependencies.now()).catch((error) => {
+      dependencies.reportError(error);
+    }),
+  );
+}
+
+export function scheduleNativeAuthPruning(
+  context: ScheduledExecutionContext,
+  dependencies: ScheduledNativeAuthPruningDependencies,
+): void {
+  context.waitUntil(
+    dependencies.prune(dependencies.now()).catch((error) => {
       dependencies.reportError(error);
     }),
   );

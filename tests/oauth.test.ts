@@ -4,11 +4,16 @@ import { test } from "node:test";
 import {
   githubOAuthCallbackRequestMatches,
   githubOAuthCanonicalLoginUrl,
+  githubOAuthCanonicalNativeLinkUrl,
   githubOAuthCanonicalSshLinkUrl,
   githubOAuthRedirectUri,
 } from "../src/oauth.ts";
 import { githubCallback, githubLogin } from "../src/worker/github-auth.ts";
-import { refreshGitHubUser, type Fetcher } from "../src/worker/github.ts";
+import {
+  refreshGitHubUser,
+  refreshGitHubUserWithEvidence,
+  type Fetcher,
+} from "../src/worker/github.ts";
 import type { RuntimeEnv } from "../src/worker/env.ts";
 
 test("githubOAuthRedirectUri uses configured callback when present", () => {
@@ -123,6 +128,27 @@ test("SSH link state canonicalizes before host-only OAuth cookies", async () => 
   const linkSource = source.slice(linkStart, linkEnd);
   assert.match(linkSource, /githubOAuthCanonicalSshLinkUrl/);
   assert.ok(linkSource.indexOf("canonicalLinkUrl") < linkSource.indexOf("sshLinkCookie"));
+  assert.match(linkSource, /redirect\("\/login\/github\?flow=ssh"/);
+});
+
+test("native link state canonicalizes to the authoritative OAuth origin", () => {
+  const configured = "https://fleet.example/auth/github/callback";
+  assert.equal(
+    githubOAuthCanonicalNativeLinkUrl(
+      "https://alias.example/native/link/code%2Fwith%2Fslashes",
+      "code/with/slashes",
+      configured,
+    ),
+    "https://fleet.example/native/link/code%2Fwith%2Fslashes",
+  );
+  assert.equal(
+    githubOAuthCanonicalNativeLinkUrl(
+      "https://fleet.example/native/link/code%2Fwith%2Fslashes",
+      "code/with/slashes",
+      configured,
+    ),
+    null,
+  );
 });
 
 test("OAuth initiation and token exchange share the authoritative callback", async () => {
@@ -173,6 +199,69 @@ test("OAuth initiation and token exchange share the authoritative callback", asy
   assert.equal(exchangeBody?.redirect_uri, "https://fleet.example/auth/github/callback");
 });
 
+test("OAuth state binds the intended link flow instead of stale competing cookies", async () => {
+  const env = {
+    DB: oauthDatabase(),
+    GITHUB_CLIENT_ID: "client-id",
+    GITHUB_CLIENT_SECRET: "client-secret",
+    GITHUB_REDIRECT_URI: "https://fleet.example/auth/github/callback",
+  } as RuntimeEnv;
+  const fetcher: Fetcher = async (input) => {
+    const url = new URL(String(input));
+    if (url.hostname === "github.com") return Response.json({ access_token: "github-token" });
+    if (url.pathname.endsWith("/user/emails") || url.pathname.endsWith("/user/teams")) {
+      return Response.json([]);
+    }
+    if (url.pathname.includes("/memberships/orgs/")) {
+      return Response.json({ state: "active" });
+    }
+    return Response.json({ id: 42, login: "owner", email: null, name: "Owner" });
+  };
+
+  for (const { query, pendingCookies, expected } of [
+    {
+      query: "?flow=native",
+      pendingCookies: "crabbox_ssh_link=stale-ssh; crabbox_native_link=new-native",
+      expected: "/native/link/new-native",
+    },
+    {
+      query: "?flow=ssh",
+      pendingCookies: "crabbox_ssh_link=new-ssh; crabbox_native_link=stale-native",
+      expected: "/ssh/link/new-ssh",
+    },
+    {
+      query: "",
+      pendingCookies: "crabbox_ssh_link=stale-ssh; crabbox_native_link=stale-native",
+      expected: "/app?login=github",
+    },
+  ]) {
+    const login = await githubLogin(
+      new Request(`https://fleet.example/login/github${query}`, {
+        headers: { cookie: pendingCookies },
+      }),
+      env,
+    );
+    const authorize = new URL(login.headers.get("location") ?? "");
+    const state = authorize.searchParams.get("state");
+    const stateCookie = login.headers.get("set-cookie")?.split(";", 1)[0];
+    assert.ok(state);
+    assert.ok(stateCookie);
+    assert.equal(state.includes("new-native"), false);
+    assert.equal(state.includes("new-ssh"), false);
+
+    const callback = await githubCallback(
+      new Request(
+        `https://fleet.example/auth/github/callback?code=code&state=${encodeURIComponent(state)}`,
+        { headers: { cookie: `${stateCookie}; ${pendingCookies}` } },
+      ),
+      env,
+      fetcher,
+    );
+    assert.equal(callback.status, 302);
+    assert.equal(callback.headers.get("location"), expected);
+  }
+});
+
 test("GitHub membership refresh builds one normalized organization identity", async () => {
   const fetcher: Fetcher = async (input) => {
     const url = new URL(String(input));
@@ -202,3 +291,48 @@ test("GitHub membership refresh builds one normalized organization identity", as
     },
   );
 });
+
+test("GitHub membership refresh reports incomplete email evidence without breaking callers", async () => {
+  const fetcher: Fetcher = async (input) => {
+    const url = new URL(String(input));
+    if (url.pathname.endsWith("/user/emails")) {
+      return new Response("unavailable", { status: 503 });
+    }
+    if (url.pathname.endsWith("/user/teams")) return Response.json([]);
+    if (url.pathname.includes("/memberships/orgs/")) {
+      return Response.json({ state: "active" });
+    }
+    return Response.json({ id: 42, login: "Owner", email: null, name: "Owner Name" });
+  };
+  const env = { GITHUB_ORG: "OpenClaw" } as RuntimeEnv;
+
+  const evidence = await refreshGitHubUserWithEvidence(env, "token", fetcher);
+  assert.equal(evidence.emailLookupComplete, false);
+  assert.equal(evidence.user?.subject, "github:42");
+  assert.equal(evidence.user?.email, null);
+  assert.deepEqual(await refreshGitHubUser(env, "token", fetcher), evidence.user);
+});
+
+function oauthDatabase(): D1Database {
+  return {
+    prepare(sql: string) {
+      return {
+        bind() {
+          return {
+            async all() {
+              return {
+                results: /from "allow_entries"/iu.test(sql)
+                  ? [{ value: "@owner", role: "viewer" }]
+                  : [],
+                meta: { changes: 0 },
+              };
+            },
+            async run() {
+              return { meta: { changes: 1 } };
+            },
+          };
+        },
+      };
+    },
+  } as unknown as D1Database;
+}

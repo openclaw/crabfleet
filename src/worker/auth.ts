@@ -117,6 +117,46 @@ export async function authorize(env: RuntimeEnv, user: User): Promise<User> {
   return { ...user, role: role ?? "viewer", allowed: role !== null };
 }
 
+export async function reauthorizeStoredUser(env: RuntimeEnv, user: User): Promise<User> {
+  if (user.subject.startsWith("bootstrap:")) {
+    if (!env.CRABBOX_BOOTSTRAP_TOKEN || user.subject !== (await bootstrapSubject(env))) {
+      throw forbidden("user is no longer authorized");
+    }
+    return user;
+  }
+  if (user.subject.startsWith("dev:")) {
+    throw forbidden("development identities cannot authorize stored clients");
+  }
+  if (user.subject.startsWith("github:") && (!env.GITHUB_CLIENT_ID || !env.GITHUB_CLIENT_SECRET)) {
+    throw forbidden("GitHub authentication is no longer configured");
+  }
+  if (user.subject.startsWith("proxy:") && !trustedProxyConfigured(env)) {
+    throw forbidden("trusted proxy authentication is no longer configured");
+  }
+
+  const allowlisted = await authorize(env, user);
+  const automaticRole = user.subject.startsWith("proxy:")
+    ? trustedProxyAutomaticRole(env.CRABFLEET_TRUSTED_PROXY_AUTO_ROLE)
+    : null;
+  if (
+    user.subject.startsWith("proxy:") &&
+    env.CRABFLEET_TRUSTED_PROXY_AUTO_ROLE &&
+    !automaticRole
+  ) {
+    throw forbidden("trusted proxy automatic role is invalid");
+  }
+  const authorized = allowlisted.allowed
+    ? allowlisted
+    : automaticRole
+      ? { ...user, role: automaticRole, allowed: true }
+      : allowlisted;
+  if (!authorized.allowed) throw forbidden("user is no longer allowlisted");
+  if (authorized.role !== user.role || authorized.allowed !== user.allowed) {
+    await upsertUser(env, authorized, Date.now());
+  }
+  return authorized;
+}
+
 export async function upsertUser(env: RuntimeEnv, user: User, now: number): Promise<void> {
   const row = {
     subject: user.subject,

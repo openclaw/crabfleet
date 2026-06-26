@@ -4,6 +4,9 @@
 
 - Classify stalled or errored workspace provisioning as attention, exclude it from the Starting count, and surface the redacted reconciliation reason in Fleet.
 - Add private per-user desktop-host registration so native macOS shares appear in Fleet with direct same-tailnet VNC endpoints.
+- Let the macOS app use saved and ad-hoc VNC connections without requiring a deployment session.
+- Negotiate Apple Remote Desktop authentication with current macOS Screen Sharing servers.
+- Add browser-approved native macOS device linking with live GitHub authorization checks, 24-hour read-only Fleet tokens, deployment-scoped Keychain storage, and real Fleet data instead of preview fixtures or raw session cookies.
 - Add app-owned macOS desktop hosting with ScreenCaptureKit, bounded Tight/JPEG RFB streaming, Accessibility-authorized input, an exact active-tailnet bind, and same-user Tailscale peer admission without Apple Screen Sharing or a public relay.
 - Add atomically claimed recurring card intervals with constant-time catch-up, crash-recoverable leases, scheduler/API proof, and coalescing for active or capacity-blocked runs, thanks @Jhacarreiro.
 - Reuse `@openclaw/libterminal` for terminal protocol codecs, Worker relays, Ghostty assets, and browser hub transport while keeping Crabfleet authorization and session policy local.

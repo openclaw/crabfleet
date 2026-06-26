@@ -116,7 +116,7 @@ export class SshGateway {
       );
     }
 
-    return redirect("/login/github", {
+    return redirect("/login/github?flow=ssh", {
       "set-cookie": cookie(request, sshLinkCookie, code, sshLinkSeconds),
     });
   }

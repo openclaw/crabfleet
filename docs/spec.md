@@ -55,7 +55,8 @@ Fleet is the default authenticated page. It groups visible interactive sessions 
 - GitHub Actions work state;
 - redacted Sandbox egress-policy registration.
 
-Fleet state is available through `/api/fleet` and inside `/api/state`.
+Fleet state is available through `/api/fleet`, inside `/api/state`, and through
+the bearer-authenticated read-only `/api/native/v1/fleet` contract.
 
 ### Interactive Session
 
@@ -114,15 +115,17 @@ Roles:
 
 Authorization layers:
 
-1. authenticate by GitHub OAuth, bootstrap token, trusted reverse proxy, linked SSH key, or scoped service token;
+1. authenticate by GitHub OAuth, bootstrap token, trusted reverse proxy, linked SSH key, scoped service token, or a browser-approved native device token;
 2. verify active OpenClaw org membership for GitHub users;
 3. resolve direct user/email or team allowlist role, or a configured trusted-proxy automatic `viewer`/`maintainer` role;
 4. enforce enabled repository access;
 5. apply action-specific ownership/control checks.
 
-GitHub sessions last 15 minutes. Bootstrap sessions last 1 hour. Browser sessions are not silently refreshed; expiry requires authentication again.
+GitHub sessions last 15 minutes. Bootstrap sessions last 1 hour. Browser sessions are not silently refreshed; expiry requires authentication again. Native device tokens last 24 hours, carry only `fleet:read`, and are revocable independently from the approving browser session.
 
 Trusted-proxy identity is accepted only on the exact configured backend origin with the shared secret and configured identity header. The asserted identity needs a direct allowlist entry unless `CRABFLEET_TRUSTED_PROXY_AUTO_ROLE` is exactly `viewer` or `maintainer`; malformed or elevated automatic roles fail closed. Mutation and WebSocket requests also prove the public origin. Proxy assertions and upstream credentials are stripped before downstream routing.
+
+A trusted identity gateway bypasses browser SSO only for the exact native API method/path set: device creation and token polling, native bearer session/Fleet reads, and native bearer revocation. `/native/link/*` remains browser-authenticated and CSRF-protected; a GET never authorizes a device.
 
 ## Runtime Backends
 
@@ -264,6 +267,7 @@ Supervision:
 Primary tables cover:
 
 - users, sessions, allowlist, repositories, workflow configs;
+- pending native device links and hashed, expiring native access tokens;
 - cards, run attempts, card events, changes;
 - interactive sessions, events, stable owner subjects, and expiring named grants;
 - share/control state and supervision metadata;
@@ -363,7 +367,7 @@ The Go gateway maps linked SSH keys to Worker API identities and provides intera
 
 ### Native macOS Prototype
 
-`macos/CrabfleetMac` is an experimental SwiftUI/AppKit/Metal VNC client. It can read `/api/fleet` and connect to a manually supplied local VNC endpoint. Automatic raw-RFB connection setup is not yet a shipped Worker/Crabbox contract.
+`macos/CrabfleetMac` is an experimental SwiftUI/AppKit/Metal VNC client. It can open saved or ad-hoc VNC endpoints in a local-only mode with no deployment dependency. For Fleet data, a user enters a deployment URL, approves a short-lived device link in an authenticated browser, and receives a 24-hour `fleet:read` token for the versioned native session and Fleet endpoints. The app stores that token per deployment origin in Keychain, rejects redirects, and has no browser-cookie or fixture fallback. Automatic raw-RFB connection setup from a Fleet lease is not yet a shipped Worker/Crabbox contract.
 
 ## Deployment
 
@@ -392,6 +396,7 @@ Every push to `main` runs checks, tests, builds, migrations, deploys, and endpoi
 
 - No raw application secrets in D1, R2 event bodies, Fleet state, adapter messages, or client URLs.
 - Service credentials are scoped to their routes and never accepted as browser identity.
+- Native device and browser-link codes are stored hashed, expire after 10 minutes, and can approve or hand off a bearer only once. The issued bearer exists as encrypted ciphertext only until that handoff, is stored by hash thereafter, is limited to `fleet:read`, expires after 24 hours, and is revocable without an external identity-provider round trip. GitHub grants keep only an encrypted server-side OAuth credential for live membership, team, and allowlist revalidation; revocation erases it, scheduled cleanup deletes expired native credential rows, and an approved but unclaimed grant is removed with its 10-minute device link.
 - Adapter requests reject redirects and cross-origin credential movement.
 - Provider URLs and messages are bounded, validated, and redacted before persistence.
 - Workspace IDs and immutable create requests are fenced against replay and adoption.

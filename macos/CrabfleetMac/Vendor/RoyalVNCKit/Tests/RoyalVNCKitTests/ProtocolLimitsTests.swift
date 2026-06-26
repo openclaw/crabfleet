@@ -48,6 +48,71 @@ struct ProtocolLimitsTests {
   }
 
   @Test
+  func prefersAppleRemoteDesktopAuthenticationWhenTheServerOffersIt() throws {
+    let macOSScreenSharing = try #require(
+      VNCProtocol.SecurityTypes(data: Data([30, 33, 36, 35]))
+    )
+    #expect(macOSScreenSharing.preferredClientSecurityType == .diffieHellman)
+
+    let conventionalVNC = try #require(VNCProtocol.SecurityTypes(data: Data([1, 2])))
+    #expect(conventionalVNC.preferredClientSecurityType == .vnc)
+
+    let passwordless = try #require(VNCProtocol.SecurityTypes(data: Data([1])))
+    #expect(passwordless.preferredClientSecurityType == VNCProtocol.SecurityType.none)
+
+    let unsupported = try #require(VNCProtocol.SecurityTypes(data: Data([33, 36, 35])))
+    #expect(unsupported.preferredClientSecurityType == nil)
+  }
+
+  @Test
+  func rejectsUnsupportedAppleRemoteDesktopKeySizesBeforeReadingKeyMaterial() async {
+    var generator = UInt16(2).bigEndian
+    var oversizedKey = UInt16.max.bigEndian
+    var data = Data()
+    withUnsafeBytes(of: &generator) { data.append(contentsOf: $0) }
+    withUnsafeBytes(of: &oversizedKey) { data.append(contentsOf: $0) }
+
+    await #expect(throws: (any Error).self) {
+      try await VNCProtocol.ARDAuthentication.receive(connection: BufferConnection(data))
+    }
+  }
+
+  @Test
+  func capsAppleRemoteDesktopCredentialsAtValidUTF8Boundaries() {
+    let ascii = VNCProtocol.ARDAuthentication.Authentication.credentialBytes(
+      for: String(repeating: "a", count: 80)
+    )
+    #expect(ascii.count == 63)
+
+    let multibyte = VNCProtocol.ARDAuthentication.Authentication.credentialBytes(
+      for: String(repeating: "🦀", count: 16)
+    )
+    #expect(multibyte.count == 60)
+    #expect(String(data: multibyte, encoding: .utf8) == String(repeating: "🦀", count: 15))
+  }
+
+  @Test
+  func padsAppleRemoteDesktopDHValuesToTheAdvertisedWireWidth() {
+    let shortKey = Data([0x12, 0x34])
+    #expect(
+      VNCProtocol.ARDAuthentication.DiffieHellmanKeyAgreement.leftPadded(shortKey, to: 4)
+        == Data([0, 0, 0x12, 0x34])
+    )
+    #expect(
+      VNCProtocol.ARDAuthentication.DiffieHellmanKeyAgreement.leftPadded(shortKey, to: 1)
+        == nil
+    )
+
+    let shortSharedSecret = Data([0xAB])
+    #expect(
+      VNCProtocol.ARDAuthentication.DiffieHellmanKeyAgreement.leftPadded(
+        shortSharedSecret,
+        to: 4
+      ) == Data([0, 0, 0, 0xAB])
+    )
+  }
+
+  @Test
   func rejectsUnknownLegacyRFB33SecurityType() async {
     var rawValue = UInt32(99).bigEndian
     let data = withUnsafeBytes(of: &rawValue) { Data($0) }

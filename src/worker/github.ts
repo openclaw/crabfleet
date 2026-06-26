@@ -3,6 +3,11 @@ import type { User } from "./models.ts";
 
 export type Fetcher = (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
 
+export type GitHubUserRefreshEvidence = {
+  user: User | null;
+  emailLookupComplete: boolean;
+};
+
 type GitHubProfile = {
   id: number;
   login: string;
@@ -144,15 +149,25 @@ export async function refreshGitHubUser(
   token: string,
   fetcher: Fetcher = fetch,
 ): Promise<User | null> {
+  return (await refreshGitHubUserWithEvidence(env, token, fetcher)).user;
+}
+
+export async function refreshGitHubUserWithEvidence(
+  env: RuntimeEnv,
+  token: string,
+  fetcher: Fetcher = fetch,
+): Promise<GitHubUserRefreshEvidence> {
   const org = env.GITHUB_ORG ?? "openclaw";
-  const [githubUser, emails, membership, teamRows] = await Promise.all([
+  const [githubUser, emailLookup, membership, teamRows] = await Promise.all([
     githubFetch<GitHubProfile>("/user", token, undefined, fetcher),
     githubFetch<Array<{ email: string; primary: boolean; verified: boolean }>>(
       "/user/emails",
       token,
       undefined,
       fetcher,
-    ).catch(() => []),
+    )
+      .then((emails) => ({ emails, complete: true }))
+      .catch(() => ({ emails: [], complete: false })),
     githubFetch<{ state: string }>(
       `/user/memberships/orgs/${org}`,
       token,
@@ -168,22 +183,27 @@ export async function refreshGitHubUser(
       fetcher,
     ),
   ]);
-  if (membership?.state !== "active") return null;
+  if (membership?.state !== "active") {
+    return { user: null, emailLookupComplete: emailLookup.complete };
+  }
   const email =
     githubUser.email ??
-    emails.find((item) => item.primary && item.verified)?.email ??
-    emails.find((item) => item.verified)?.email ??
+    emailLookup.emails.find((item) => item.primary && item.verified)?.email ??
+    emailLookup.emails.find((item) => item.verified)?.email ??
     null;
   const teams = teamRows
     .filter((team) => (team.organization?.login ?? "").toLowerCase() === org.toLowerCase())
     .map((team) => `@${org}/${team.slug}`);
   return {
-    subject: `github:${githubUser.id}`,
-    login: githubUser.login,
-    email,
-    name: githubUser.name,
-    role: "viewer",
-    allowed: false,
-    teams,
+    user: {
+      subject: `github:${githubUser.id}`,
+      login: githubUser.login,
+      email,
+      name: githubUser.name,
+      role: "viewer",
+      allowed: false,
+      teams,
+    },
+    emailLookupComplete: emailLookup.complete,
   };
 }

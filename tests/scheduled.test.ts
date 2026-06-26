@@ -3,6 +3,7 @@ import test from "node:test";
 
 import {
   scheduleInteractiveSessionReconciliation,
+  scheduleNativeAuthPruning,
   scheduleRecurringCardTick,
   type ScheduledExecutionContext,
 } from "../src/worker/scheduled.ts";
@@ -95,4 +96,26 @@ test("scheduled recurring cards report failures without rejecting waitUntil", as
 
   await assert.doesNotReject(tasks[0]);
   assert.deepEqual(reported, [failure]);
+});
+
+test("scheduled native auth cleanup prunes expired credentials", async () => {
+  const tasks: Promise<unknown>[] = [];
+  const calls: string[] = [];
+
+  scheduleNativeAuthPruning(context(tasks), {
+    now: () => {
+      calls.push("now");
+      return 987;
+    },
+    prune: async (now) => {
+      calls.push(`prune:${now}`);
+    },
+    reportError: () => {
+      calls.push("error");
+    },
+  });
+
+  assert.equal(tasks.length, 1);
+  await tasks[0];
+  assert.deepEqual(calls, ["now", "prune:987"]);
 });

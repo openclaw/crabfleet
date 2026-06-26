@@ -6,6 +6,10 @@ struct FleetRootView: View {
   @ObservedObject var connections: ConnectionLibrary
   @ObservedObject var sessions: VNCSessionPool
   let launchConnection: VNCAddress?
+  let deploymentLabel: String
+  let accountLabel: String
+  let disconnectLabel: String
+  let disconnectDeployment: () -> Void
   @StateObject private var privateShare = PrivateMacShareController()
 
   @Namespace private var desktopTransition
@@ -71,6 +75,10 @@ struct FleetRootView: View {
             targets: allTargets,
             currentUser: store.currentUser,
             notice: store.notice,
+            deploymentLabel: deploymentLabel,
+            accountLabel: accountLabel,
+            disconnectLabel: disconnectLabel,
+            disconnectDeployment: disconnectDeployment,
             shareThisMac: { showingPrivateShare = true },
             quickConnect: { showingQuickConnect = true }
           )
@@ -218,6 +226,10 @@ private struct DesktopSourceRail: View {
   let targets: [DesktopTarget]
   let currentUser: String
   let notice: String?
+  let deploymentLabel: String
+  let accountLabel: String
+  let disconnectLabel: String
+  let disconnectDeployment: () -> Void
   let shareThisMac: () -> Void
   let quickConnect: () -> Void
 
@@ -264,6 +276,41 @@ private struct DesktopSourceRail: View {
       .padding(.horizontal, 9)
 
       Spacer()
+
+      Menu {
+        Text(accountLabel)
+        Divider()
+        Button(disconnectLabel, role: .destructive, action: disconnectDeployment)
+      } label: {
+        HStack(spacing: 9) {
+          ZStack {
+            Circle().fill(.mint.opacity(0.13))
+            Image(systemName: "network")
+              .font(.system(size: 10, weight: .semibold))
+              .foregroundStyle(.mint)
+          }
+          .frame(width: 27, height: 27)
+          VStack(alignment: .leading, spacing: 1) {
+            Text(deploymentLabel)
+              .font(.system(size: 10, weight: .semibold, design: .rounded))
+              .lineLimit(1)
+            Text(accountLabel)
+              .font(.system(size: 8, weight: .medium, design: .rounded))
+              .foregroundStyle(.tertiary)
+              .lineLimit(1)
+          }
+          Spacer()
+          Image(systemName: "chevron.up.chevron.down")
+            .font(.system(size: 8, weight: .semibold))
+            .foregroundStyle(.tertiary)
+        }
+        .padding(.horizontal, 10)
+        .frame(height: 40)
+        .background(.white.opacity(0.045), in: RoundedRectangle(cornerRadius: 8))
+      }
+      .menuStyle(.borderlessButton)
+      .padding(.horizontal, 12)
+      .padding(.bottom, 10)
 
       if let notice {
         Text(notice)

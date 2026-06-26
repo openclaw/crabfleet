@@ -19,9 +19,9 @@ extension VNCProtocol.ARDAuthentication {
             self.publicKey = publicKey
         }
 
-        init?(agreement: DiffieHellmanKeyAgreement,
-              username: String,
-              password: String) {
+		init?(agreement: DiffieHellmanKeyAgreement,
+			  username: String,
+			  password: String) {
             // Get MD5 hash of shared secret
 			let secretHash = agreement.secretKey.md5Hash()
 
@@ -48,64 +48,19 @@ extension VNCProtocol.ARDAuthentication {
 
             guard randomCredsDataSuccess else { return nil }
 
-			let usernameLength = username.utf8.count
-			let passwordLength = password.utf8.count
+			let usernameBytes = Self.credentialBytes(for: username)
+			let passwordBytes = Self.credentialBytes(for: password)
+			let passwordOffset = credArraySize / 2
 
-			let maxLength = 63
-
-			// Cap length at 63 as index is 0
-			let cappedUsername = usernameLength > maxLength
-				? String(username[username.startIndex..<username.index(username.startIndex, offsetBy: maxLength)])
-				: username
-
-			let cappedUsernameLength = cappedUsername.utf8.count
-
-			let cappedPassword = passwordLength > maxLength
-				? String(password[password.startIndex..<password.index(password.startIndex, offsetBy: maxLength)])
-				: password
-
-			let cappedPasswordLength = cappedPassword.utf8.count
-
-            // Convert username and password strings into C strings
-            let usernameC = cappedUsername.utf8CString
-            let passwordC = cappedPassword.utf8CString
-
-			// Merge username and password into single array
-			let fillCredsSuccess = creds.withUnsafeMutableBytes {
-				guard let credsBytes = $0.baseAddress else { return false }
-
-				let copyUsernameSuccess = usernameC.withUnsafeBytes { usernameCBytesPtr in
-					guard let usernameCBytes = usernameCBytesPtr.baseAddress else { return false }
-
-					credsBytes.copyMemory(from: usernameCBytes,
-										  byteCount: cappedUsernameLength)
-
-					return true
-				}
-
-				guard copyUsernameSuccess else { return false }
-
-				let copyPasswordSuccess = passwordC.withUnsafeBytes { passwordCBytesPtr in
-					guard let passwordCBytes = passwordCBytesPtr.baseAddress else { return false }
-
-					let credsBytesStartingAtPassword = credsBytes.advanced(by: credArraySize / 2)
-
-					credsBytesStartingAtPassword.copyMemory(from: passwordCBytes,
-															byteCount: cappedPasswordLength)
-
-					return true
-				}
-
-				guard copyPasswordSuccess else { return false }
-
-				return true
-			}
-
-			guard fillCredsSuccess else { return nil }
+			creds.replaceSubrange(0..<usernameBytes.count, with: usernameBytes)
+			creds.replaceSubrange(
+				passwordOffset..<(passwordOffset + passwordBytes.count),
+				with: passwordBytes
+			)
 
 			// Add null bytes to indicate end of c string
-			creds[cappedUsernameLength] = 0
-			creds[(credArraySize / 2) + cappedPasswordLength] = 0
+			creds[usernameBytes.count] = 0
+			creds[passwordOffset + passwordBytes.count] = 0
 
 			guard let cipherText = creds.aes128ECBEncrypted(withKey: secretHash) else {
 				return nil
@@ -114,5 +69,19 @@ extension VNCProtocol.ARDAuthentication {
             self.init(cipherText: cipherText,
                       publicKey: agreement.publicKey)
         }
+
+		static func credentialBytes(for value: String) -> Data {
+			let maximumBytes = 63
+			var result = Data()
+			result.reserveCapacity(min(value.utf8.count, maximumBytes))
+
+			for character in value {
+				let bytes = String(character).utf8
+				guard result.count + bytes.count <= maximumBytes else { break }
+				result.append(contentsOf: bytes)
+			}
+
+			return result
+		}
     }
 }

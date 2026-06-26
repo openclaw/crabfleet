@@ -19,6 +19,7 @@ import { handlePublicAuthRoute, handleSessionAuthRoute } from "./worker/routes/a
 import { handleBrowserSessionRoute } from "./worker/routes/browser-sessions";
 import { handleControlPlaneRoute } from "./worker/routes/control-plane";
 import { handleOpenClawRoute } from "./worker/routes/openclaw";
+import { handleNativeRoute } from "./worker/routes/native";
 import { handleProvisioningRoute } from "./worker/routes/provisioning";
 import { handleSessionIngressRoute } from "./worker/routes/session-ingress";
 import { handleServiceSessionRoute } from "./worker/routes/service-sessions";
@@ -26,6 +27,7 @@ import { terminalAssetResponse } from "./worker/terminal-assets";
 import { sandboxPlaceholderOpenAIKey } from "./worker/sandbox-outbound";
 import { sandboxOutbound } from "./worker/sandbox-outbound-service";
 import { WorkerApplication } from "./worker/worker-application";
+import { handleNativeLink } from "./worker/native-link";
 
 type SandboxClassWithOutbound = {
   outbound?: typeof sandboxOutbound;
@@ -122,6 +124,8 @@ export default {
         githubCallback: (authRequest) => githubCallback(authRequest, env),
         sshLink: (authRequest, code, requestAuth) =>
           application.sshGateway().link(authRequest, code, requestAuth),
+        nativeLink: (authRequest, code, requestAuth) =>
+          handleNativeLink(authRequest, code, requestAuth, env, application.nativeAuth()),
         tokenLogin: (authRequest) => tokenLogin(authRequest, env),
         devIdentityLogin: (authRequest) => devIdentityLogin(authRequest, env),
         logout: (authRequest) => logout(authRequest, env),
@@ -209,6 +213,14 @@ async function api(
     application.sessionIngressRoutes(requestAuth),
   );
   if (sessionIngressResponse) return sessionIngressResponse;
+
+  const nativeResponse = await handleNativeRoute(
+    request,
+    url,
+    requestAuth,
+    application.nativeRoutes(context),
+  );
+  if (nativeResponse) return nativeResponse;
 
   const user = await requireUser(request, env, requestAuth);
 

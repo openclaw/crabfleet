@@ -13,6 +13,7 @@ connection state, and legacy DES use; suppresses clipboard echoes; releases
 held input on focus loss; exposes externally managed clipboard delivery/send;
 coalesces inbound clipboard delivery; paces framebuffer pulls; renders an
 attached warm framebuffer immediately; negotiates RFB 3.3/3.7/3.8 security
-framing; validates palette ranges; and materializes bounded framebuffer
+framing; prefers supported Apple Remote Desktop authentication when macOS
+Screen Sharing advertises it; validates palette ranges; and materializes bounded framebuffer
 previews. Keep product changes in the Crabfleet target; keep this fork small
 and suitable for upstreaming.

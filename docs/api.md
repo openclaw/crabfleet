@@ -23,6 +23,176 @@ Deployments may instead accept a trusted reverse-proxy identity when all trusted
 
 `CRABFLEET_TENANCY_MODE` defaults to `private`. Private API reads return only cards and sessions owned by the authenticated stable subject, plus sessions covered by an unexpired named grant or delegated-control lease. Global roles do not bypass this boundary. Set the mode to exact `shared` only for the legacy team-wide visibility contract.
 
+## Native Device Link
+
+The versioned native API gives the macOS client read-only access to the Fleet
+registry without copying a browser cookie. Device links expire after 10 minutes.
+The resulting bearer lasts 24 hours, has the exact `fleet:read` scope, and is
+accepted only by the native session, Fleet, and revocation endpoints. All
+responses use `cache-control: no-store`; timestamps are Unix epoch milliseconds.
+The one-time bearer handoff is encrypted with `CRABBOX_TOKEN_ENCRYPTION_KEY`,
+falling back to `GITHUB_CLIENT_SECRET` when GitHub OAuth is configured. A
+trusted-proxy-only deployment must set the explicit encryption key before
+native device approval can succeed. GitHub-approved grants also retain the
+approving session's OAuth credential as encrypted ciphertext on the native
+token row so membership and team access can be refreshed throughout the
+grant. That credential is never returned to the native app and is erased when
+the token is revoked. The scheduled Worker cleanup deletes expired device-link
+and access-token rows even when no later authorization request arrives;
+approved grants that are never polled are deleted with the 10-minute device
+link instead of retaining their encrypted GitHub credential for 24 hours.
+
+### POST /api/native/v1/auth/device
+
+Starts an unauthenticated device link. `clientName` is required and limited to
+120 characters.
+
+```json
+{
+  "clientName": "Crabfleet for macOS"
+}
+```
+
+Returns `201`:
+
+```json
+{
+  "deviceCode": "<one-time-device-secret>",
+  "verificationUri": "https://fleet.example/native/link/<one-time-link-secret>",
+  "expiresAt": 1782288600000,
+  "intervalSeconds": 5
+}
+```
+
+The app opens `verificationUri` in the user's browser. A `GET /native/link/:code`
+never approves the device: it requires a normal browser-authenticated `viewer`
+and renders a confirmation form. A `POST /native/link/:code` requires that
+browser session and the exact configured public origin. Cookie-authenticated
+deployments also require the link-bound CSRF cookie; trusted-proxy deployments
+use their asserted browser identity plus exact-Origin enforcement because the
+Worker strips upstream cookies. Development identities cannot approve native
+clients. When `GITHUB_REDIRECT_URI` names another authoritative origin, the
+link redirects there before lookup or cookie creation. An expired or
+already-used link returns `410`.
+
+When the trusted-proxy public origin is also the OAuth callback origin, an
+already authenticated proxy request is served on the configured backend origin
+rather than redirected back through its browser-visible origin. This avoids a
+proxy-to-Worker canonicalization loop while the form's unsafe request still
+requires the exact public `Origin`. A genuinely separate OAuth callback origin
+still receives one canonical redirect before lookup or cookie creation.
+
+### POST /api/native/v1/auth/token
+
+Polls the device link without browser credentials:
+
+```json
+{
+  "deviceCode": "<one-time-device-secret>"
+}
+```
+
+While approval is pending, the endpoint returns `202`, includes
+`Retry-After: 5`, and returns:
+
+```json
+{
+  "status": "pending"
+}
+```
+
+Polling before the advertised interval returns `429`, includes the same
+`Retry-After`, and returns `{ "error": "slow_down" }`. After approval, one
+poll consumes the device code and returns `200`:
+
+```json
+{
+  "accessToken": "<native-bearer-secret>",
+  "tokenType": "Bearer",
+  "expiresAt": 1782374400000,
+  "user": {
+    "subject": "github:1234",
+    "login": "octocat",
+    "email": null,
+    "name": "Octo Cat",
+    "role": "viewer",
+    "allowed": true,
+    "teams": []
+  }
+}
+```
+
+Invalid, expired, consumed, or no-longer-authorized device codes return `401`.
+Transient GitHub membership-refresh failures return retryable `503` without
+consuming the approved device code; clients may continue polling until the
+original link expiry.
+
+### GET /api/native/v1/session
+
+Requires `Authorization: Bearer <native-bearer-secret>`. Returns the currently
+authorized user and public deployment metadata:
+
+```json
+{
+  "user": {
+    "subject": "github:1234",
+    "login": "octocat",
+    "email": null,
+    "name": "Octo Cat",
+    "role": "viewer",
+    "allowed": true,
+    "teams": []
+  },
+  "deployment": {
+    "label": "Crabfleet",
+    "canonicalUrl": "https://fleet.example",
+    "productUrl": "https://product.example",
+    "sshHost": "ssh.example"
+  }
+}
+```
+
+### GET /api/native/v1/fleet
+
+Requires the native bearer and returns the same tenant-filtered, redacted
+`{ "fleet": ... }` envelope as `GET /api/fleet`. It does not return an attach
+credential, native RFB endpoint, or mutation authority.
+
+### DELETE /api/native/v1/auth/token
+
+Requires the native bearer, revokes that token without depending on an external
+identity-provider refresh, and returns:
+
+```json
+{
+  "ok": true
+}
+```
+
+Expired, revoked, malformed, or ambiguous proxy-plus-bearer credentials return a
+uniform `401` from every bearer-authenticated native endpoint. Each use also
+rechecks the stored user against current deployment authorization. GitHub
+grants additionally refresh active organization membership and current teams
+before the device-code handoff and every bearer use. Inactive membership,
+identity mismatch, invalid GitHub credentials, or allowlist denial revokes the
+native token and clears its encrypted GitHub credential. A transient GitHub
+failure or incomplete email lookup returns retryable `503` without destroying
+the grant or granting access from stale identity data.
+
+Trusted identity gateways must bypass browser SSO only for this exact native API
+method/path set:
+
+- `POST /api/native/v1/auth/device`
+- `POST /api/native/v1/auth/token`
+- `DELETE /api/native/v1/auth/token`
+- `GET /api/native/v1/session`
+- `GET /api/native/v1/fleet`
+
+They must pass those requests directly to Crabfleet and must not add a competing
+asserted identity to bearer requests. Every `/native/link/*` browser route
+remains behind browser SSO and Crabfleet's normal browser authentication; do
+not add a wildcard `/api/native/*` bypass.
+
 ## Public Endpoints
 
 ### GET /healthz
@@ -68,7 +238,7 @@ Returns the bootstrap owner user and sets `crabbox_session`.
 
 Starts GitHub OAuth with `read:user read:org repo`.
 
-When `GITHUB_REDIRECT_URI` is configured, that validated HTTPS callback is authoritative for both authorization and token exchange. Login and SSH-link requests received on another origin redirect to the configured origin before any host-only state cookie is created, preserving the pending SSH code through callback. Without the binding, Crabfleet uses the request-origin callback; insecure non-loopback HTTP origins are rejected.
+When `GITHUB_REDIRECT_URI` is configured, that validated HTTPS callback is authoritative for both authorization and token exchange. Login, SSH-link, and native-link requests received on another origin redirect to the configured origin before any host-only state cookie is created, preserving the pending link code through callback. Without the binding, Crabfleet uses the request-origin callback; insecure non-loopback HTTP origins are rejected.
 
 ### GET /auth/github/callback
 

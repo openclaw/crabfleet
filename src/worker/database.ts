@@ -73,6 +73,34 @@ export type DesktopHostTable = {
   updated_at: number;
 };
 
+export type NativeDeviceAuthorizationTable = {
+  device_code_hash: string;
+  link_code_hash: string;
+  client_name: string;
+  remote_ip: string | null;
+  subject: string | null;
+  access_token_hash: string | null;
+  access_token_ciphertext: string | null;
+  access_token_expires_at: number | null;
+  expires_at: number;
+  next_poll_at: number;
+  approved_at: number | null;
+  consumed_at: number | null;
+  created_at: number;
+};
+
+export type NativeAccessTokenTable = {
+  token_hash: string;
+  subject: string;
+  scope: string;
+  client_name: string;
+  github_token_ciphertext: string | null;
+  expires_at: number;
+  created_at: number;
+  last_used_at: number;
+  revoked_at: number | null;
+};
+
 export type CardTable = {
   id: string;
   title: string;
@@ -339,6 +367,8 @@ export type Database = {
   users: UserTable;
   sessions: SessionTable;
   desktop_hosts: DesktopHostTable;
+  native_device_authorizations: NativeDeviceAuthorizationTable;
+  native_access_tokens: NativeAccessTokenTable;
   cards: CardTable;
   run_attempts: RunAttemptTable;
   interactive_sessions: InteractiveSessionTable;

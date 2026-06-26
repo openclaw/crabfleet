@@ -206,7 +206,7 @@ The Crabbox namespace cutover intentionally has no old-name compatibility. Exist
 - `GITHUB_REDIRECT_URI` – Optional authoritative GitHub OAuth callback URL; when set it must be an absolute HTTPS URL with no credentials, query, or fragment and the exact `/auth/github/callback` path. Requests on another host restart login on this configured origin. When absent, the callback defaults to the HTTPS request origin (or literal-loopback HTTP for local development).
 - `GITHUB_ORG` – GitHub org for membership check (default: `openclaw`)
 - `GITHUB_TOKEN` – GitHub token for all enabled repo issue/PR previews and private repo `CRABBOX.md` refreshes (optional; public/default repo paths work without it)
-- `CRABBOX_TOKEN_ENCRYPTION_KEY` – Optional encryption key for per-session GitHub OAuth tokens; defaults to `GITHUB_CLIENT_SECRET`
+- `CRABBOX_TOKEN_ENCRYPTION_KEY` – Encryption key for per-session GitHub OAuth tokens, one-time native device-token handoff, and native GitHub membership-revalidation credentials; defaults to `GITHUB_CLIENT_SECRET`, but must be set explicitly for native auth on trusted-proxy-only deployments
 - `CRABBOX_INTERACTIVE_PROVISION_TOKEN` – Required bearer token for the built-in Sandbox provision, PTY, and stop endpoints
 - `CRABBOX_STANDALONE_SANDBOX_TTL_SECONDS` – Optional built-in standalone Sandbox lifetime, default `14400`, bounded to 300–86400 seconds
 - `CRABBOX_RUNTIME_ADAPTER_URL` – Optional fixed base URL for the versioned workspace lifecycle adapter; mutually exclusive with `CRABBOX_RUNTIME_ADAPTER_URL_TEMPLATE` and becomes immutable registration identity for each created lifecycle. Nested base paths are preserved; raw query or fragment delimiters are rejected.

@@ -7,9 +7,18 @@ import { authorize, createSession, githubSessionSeconds, upsertUser } from "./au
 import type { RuntimeEnv } from "./env.ts";
 import { refreshGitHubUser, type Fetcher } from "./github.ts";
 import { cookie, cookies, redirect, serviceUnavailable, text } from "./http.ts";
+import { nativeLinkCookie } from "./native-link.ts";
 
 const oauthStateCookie = "crabbox_oauth_state";
+const oauthFlowParameter = "flow";
 export const sshLinkCookie = "crabbox_ssh_link";
+
+type OAuthReturnTarget = { kind: "ssh" | "native"; code: string };
+type OAuthStateBinding = {
+  nonce: string;
+  returnTo: OAuthReturnTarget | null;
+  legacy: boolean;
+};
 
 export async function githubLogin(request: Request, env: RuntimeEnv): Promise<Response> {
   if (!env.GITHUB_CLIENT_ID || !env.GITHUB_CLIENT_SECRET) {
@@ -22,12 +31,17 @@ export async function githubLogin(request: Request, env: RuntimeEnv): Promise<Re
   if (canonicalLoginUrl) {
     return redirect(canonicalLoginUrl, { "cache-control": "no-store" });
   }
-  const state = crypto.randomUUID();
+  const nonce = crypto.randomUUID();
+  const state = JSON.stringify({
+    version: 1,
+    nonce,
+    returnTo: requestedOAuthReturnTarget(url, cookies(request)),
+  });
   const target = new URL("https://github.com/login/oauth/authorize");
   target.searchParams.set("client_id", env.GITHUB_CLIENT_ID);
   target.searchParams.set("redirect_uri", redirectUri);
   target.searchParams.set("scope", "read:user read:org repo");
-  target.searchParams.set("state", state);
+  target.searchParams.set("state", nonce);
 
   return redirect(target.toString(), {
     "set-cookie": cookie(request, oauthStateCookie, state, 600),
@@ -55,7 +69,9 @@ export async function githubCallback(
   }
   const code = url.searchParams.get("code");
   const state = url.searchParams.get("state");
-  if (!code || !state || state !== cookies(request).get(oauthStateCookie)) {
+  const requestCookies = cookies(request);
+  const stateBinding = readOAuthStateBinding(requestCookies.get(oauthStateCookie));
+  if (!code || !state || !stateBinding || state !== stateBinding.nonce) {
     return text("Invalid OAuth state.\n", "text/plain; charset=utf-8", {}, 400);
   }
 
@@ -115,11 +131,67 @@ export async function githubCallback(
     githubSessionSeconds,
     tokenBody.access_token,
   );
-  const pendingSshCode = cookies(request).get(sshLinkCookie);
+  const returnTo = stateBinding.legacy
+    ? legacyOAuthReturnTarget(requestCookies)
+    : stateBinding.returnTo;
   return redirect(
-    pendingSshCode ? `/ssh/link/${encodeURIComponent(pendingSshCode)}` : "/app?login=github",
+    returnTo?.kind === "ssh"
+      ? `/ssh/link/${encodeURIComponent(returnTo.code)}`
+      : returnTo?.kind === "native"
+        ? `/native/link/${encodeURIComponent(returnTo.code)}`
+        : "/app?login=github",
     {
       "set-cookie": session,
     },
   );
+}
+
+function requestedOAuthReturnTarget(
+  url: URL,
+  requestCookies: ReadonlyMap<string, string>,
+): OAuthReturnTarget | null {
+  const kind = url.searchParams.get(oauthFlowParameter);
+  if (kind !== "ssh" && kind !== "native") return null;
+  const code = requestCookies.get(kind === "ssh" ? sshLinkCookie : nativeLinkCookie);
+  return validOAuthLinkCode(code) ? { kind, code } : null;
+}
+
+function readOAuthStateBinding(value: string | undefined): OAuthStateBinding | null {
+  if (!value) return null;
+  try {
+    const decoded: unknown = JSON.parse(value);
+    if (!decoded || typeof decoded !== "object" || Array.isArray(decoded)) return null;
+    const parsed = decoded as {
+      version?: unknown;
+      nonce?: unknown;
+      returnTo?: { kind?: unknown; code?: unknown } | null;
+    };
+    if (parsed.version !== 1 || !validOAuthNonce(parsed.nonce)) return null;
+    if (parsed.returnTo === null) {
+      return { nonce: parsed.nonce, returnTo: null, legacy: false };
+    }
+    const kind = parsed.returnTo?.kind;
+    const code = parsed.returnTo?.code;
+    if ((kind !== "ssh" && kind !== "native") || !validOAuthLinkCode(code)) return null;
+    return { nonce: parsed.nonce, returnTo: { kind, code }, legacy: false };
+  } catch {
+    return validOAuthNonce(value) ? { nonce: value, returnTo: null, legacy: true } : null;
+  }
+}
+
+function legacyOAuthReturnTarget(
+  requestCookies: ReadonlyMap<string, string>,
+): OAuthReturnTarget | null {
+  const sshCode = requestCookies.get(sshLinkCookie);
+  if (validOAuthLinkCode(sshCode)) return { kind: "ssh", code: sshCode };
+  const nativeCode = requestCookies.get(nativeLinkCookie);
+  return validOAuthLinkCode(nativeCode) ? { kind: "native", code: nativeCode } : null;
+}
+
+function validOAuthNonce(value: unknown): value is string {
+  return typeof value === "string" && value.length > 0 && value.length <= 200 && !/\s/u.test(value);
+}
+
+function validOAuthLinkCode(value: unknown): value is string {
+  return typeof value === "string" && value.length > 0 && value.length <= 500 && !/\s/u.test(value);
 }

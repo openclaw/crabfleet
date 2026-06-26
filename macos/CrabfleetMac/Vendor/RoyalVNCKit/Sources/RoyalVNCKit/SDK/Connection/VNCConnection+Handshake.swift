@@ -74,7 +74,7 @@ private extension VNCConnection {
 			)
 			throw VNCError.authentication(.serverOfferedNoAuthTypes(reason: reason))
 		}
-		guard securityType == .vnc || securityType == .none else {
+		guard securityType == .diffieHellman || securityType == .vnc || securityType == .none else {
 			throw VNCError.authentication(.clientCouldNotDecideOnSecurityType)
 		}
 
@@ -124,20 +124,7 @@ private extension VNCConnection {
 	}
 
 	func decideSecurityType(supportedTypes: VNCProtocol.SecurityTypes) async throws {
-		let chosenSecurityType: VNCProtocol.SecurityType
-
-		let supportedSecurityTypes = supportedTypes.securityTypes
-
-		if supportedSecurityTypes.contains(.vnc) {
-			chosenSecurityType = .vnc
-		} else if supportedSecurityTypes.contains(.none) {
-			chosenSecurityType = .none
-		} else {
-			chosenSecurityType = .invalid
-		}
-
-		guard chosenSecurityType != .invalid,
-			  supportedTypes.securityTypes.contains(chosenSecurityType) else {
+		guard let chosenSecurityType = supportedTypes.preferredClientSecurityType else {
 			throw VNCError.authentication(.clientCouldNotDecideOnSecurityType)
 		}
 

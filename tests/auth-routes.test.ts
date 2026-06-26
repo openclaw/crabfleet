@@ -29,6 +29,10 @@ function dependencies(calls: string[]): PublicAuthRouteDependencies {
       calls.push(`ssh-link:${code}:${auth.kind}`);
       return response("ssh-link");
     },
+    async nativeLink(_request, code, auth) {
+      calls.push(`native-link:${code}:${auth.kind}`);
+      return response("native-link");
+    },
     async tokenLogin() {
       calls.push("token-login");
       return response("token-login");
@@ -53,6 +57,7 @@ test("public auth routes dispatch exact paths and methods", async () => {
     ["GET", "/login/github", "github-login"],
     ["GET", "/auth/github/callback", "github-callback"],
     ["POST", "/ssh/link/code%2Fvalue", "ssh-link"],
+    ["GET", "/native/link/code%2Fvalue", "native-link"],
     ["POST", "/api/login/token", "token-login"],
     ["POST", "/api/login/dev", "dev-login"],
     ["POST", "/api/logout", "logout"],
@@ -71,8 +76,8 @@ test("public auth routes dispatch exact paths and methods", async () => {
 
     assert.equal(result?.headers.get("x-handler"), expected);
     assert.equal(calls.length, 1);
-    if (expected === "ssh-link") {
-      assert.equal(calls[0], "ssh-link:code/value:disabled");
+    if (expected === "ssh-link" || expected === "native-link") {
+      assert.equal(calls[0], `${expected}:code/value:disabled`);
     } else {
       assert.equal(calls[0], expected);
     }

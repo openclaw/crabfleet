@@ -10,6 +10,11 @@ extension VNCProtocol.ARDAuthentication {
 		let privateKey: Data
 		let secretKey: Data
 
+		static func leftPadded(_ value: Data, to length: Int) -> Data? {
+			guard length > 0, value.count <= length else { return nil }
+			return Data(repeating: 0, count: length - value.count) + value
+		}
+
 		init?(prime: Data,
 			  generator: Data,
 			  peerKey: Data,
@@ -27,8 +32,9 @@ extension VNCProtocol.ARDAuthentication {
 			}
 
 			guard let secretKey = Self.computeSharedKey(prime: prime,
-														peerKey: peerKey,
-														privateKey: keyPair.privateKey),
+												peerKey: peerKey,
+												privateKey: keyPair.privateKey,
+												keyLength: keyLength),
 				  !secretKey.isEmpty else {
 				return nil
 			}
@@ -75,14 +81,14 @@ private extension VNCProtocol.ARDAuthentication.DiffieHellmanKeyAgreement {
 			return nil
 		}
 
-		// Check key lengths of generated private and public DH keys
-		guard bigPrivKey.bytesCount == keyLength,
-			  bigPubKey.bytesCount == keyLength else {
+		guard bigPrivKey.bytesCount <= keyLength,
+			  bigPubKey.bytesCount <= keyLength else {
 			return nil
 		}
 
 		guard let privKey = bigPrivKey.bigEndianData(),
-			  let pubKey = bigPubKey.bigEndianData() else {
+			  let minimalPubKey = bigPubKey.bigEndianData(),
+			  let pubKey = leftPadded(minimalPubKey, to: keyLength) else {
 			return nil
 		}
 
@@ -94,7 +100,8 @@ private extension VNCProtocol.ARDAuthentication.DiffieHellmanKeyAgreement {
 
 	static func computeSharedKey(prime: Data,
 								 peerKey: Data,
-								 privateKey: Data) -> Data? {
+								 privateKey: Data,
+								 keyLength: Int) -> Data? {
 		guard let bigPrime = BigNum(data: prime),
 			  let bigPrivKey = BigNum(data: privateKey),
 			  let bigPeerKey = BigNum(data: peerKey) else {
@@ -112,7 +119,8 @@ private extension VNCProtocol.ARDAuthentication.DiffieHellmanKeyAgreement {
 			return nil
 		}
 
-		guard let sharedKey = bigSharedKey.bigEndianData() else {
+		guard let minimalSharedKey = bigSharedKey.bigEndianData(),
+			  let sharedKey = leftPadded(minimalSharedKey, to: keyLength) else {
 			return nil
 		}
 

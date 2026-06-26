@@ -141,9 +141,55 @@ Keep further changes narrow and upstreamable:
 
 ## Integration boundary
 
-The prototype reads Crabfleet's authenticated `/api/fleet` registry and accepts
-a manual loopback host, port, and in-memory credential for the actual RFB
-connection. The Worker browser endpoint
+The prototype connects to a user-entered Crabfleet deployment through the
+versioned native API. It creates a short-lived device authorization, opens the
+same-origin `/native/link/*` page for browser approval, exchanges the approved
+device code for a 24-hour `fleet:read` bearer, validates the native session, and
+reads `/api/native/v1/fleet`. The deployment URL is persisted as a preference;
+the bearer is stored per exact origin in Keychain with a this-device-only,
+when-unlocked accessibility policy. Disconnect removes the local Keychain item
+synchronously before starting best-effort server revocation; if local removal
+fails, the existing connection is kept so the user can retry instead of
+silently orphaning a restorable credential. Switching deployments applies the
+same local-cleanup fence.
+
+Saved and ad-hoc VNC profiles are also available through an explicit local-only
+mode. That mode does not contact a deployment, synthesize Fleet data, or create
+an API credential; the user can return to deployment sign-in at any time.
+
+Native requests do not accept, persist, or replay the browser's
+`crabbox_session` cookie. There is no fixture fallback: without a valid native
+credential, deployment Fleet data remains disconnected. API redirects are rejected so a
+bearer cannot follow a deployment or proxy redirect to another origin. Response
+bodies are accumulated incrementally and the URL session is canceled as soon
+as a body crosses the 5 MiB limit. While an approved device code remains valid,
+the app retries transient network and `503` failures without opening a second
+browser approval, including transient session validation after the token
+handoff. Cancellation or permanent validation failure revokes a handed-off
+token from a fresh cleanup task. The device-link bearer exposes only the current
+user's redacted, tenant-visible Fleet registry; it cannot mutate sessions,
+attach terminals, mint desktop connections, or call the browser REST surface.
+Retired deployment clients finish their cleanup and explicitly invalidate the
+delegate-backed URL session so reconnects do not retain old network stacks.
+
+Deployments behind a trusted identity proxy must route only these exact native
+requests to Crabfleet without browser-SSO interception:
+
+- `POST /api/native/v1/auth/device`
+- `POST /api/native/v1/auth/token`
+- `DELETE /api/native/v1/auth/token`
+- `GET /api/native/v1/session`
+- `GET /api/native/v1/fleet`
+
+`/native/link/*` stays browser-authenticated: approval uses the signed-in
+browser identity and never trusts identity asserted by the native app.
+GitHub-approved grants are rechecked against live organization membership,
+team state, and the deployment allowlist before handoff and on every native API
+use. The encrypted GitHub credential used for those checks remains server-side
+and is never exposed to the app.
+
+The app still accepts a manual loopback host, port, and in-memory credential for
+the actual RFB connection. The Worker browser endpoint
 `/api/interactive-sessions/:id/vnc` redirects to browser/noVNC desktop
 connections; it is not a raw-RFB contract for native clients.
 

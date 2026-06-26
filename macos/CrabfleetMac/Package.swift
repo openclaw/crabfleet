@@ -21,6 +21,9 @@ let package = Package(
       ],
       swiftSettings: [
         .swiftLanguageMode(.v5)
+      ],
+      linkerSettings: [
+        .linkedFramework("Security")
       ]
     ),
     .testTarget(

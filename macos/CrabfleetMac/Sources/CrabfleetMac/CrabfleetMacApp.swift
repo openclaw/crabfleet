@@ -119,6 +119,7 @@ struct CrabfleetMacApp: App {
         Button("Refresh Fleet") {
           Task { await fleetStore.refresh() }
         }
+        .disabled(!fleetStore.isConnected)
         .keyboardShortcut("r", modifiers: [.command])
       }
     }
@@ -132,21 +133,62 @@ private struct CrabfleetAppRoot: View {
   let launchConnection: VNCAddress?
 
   @Environment(\.scenePhase) private var scenePhase
+  @State private var localOnly: Bool
+
+  init(
+    fleetStore: FleetStore,
+    connectionLibrary: ConnectionLibrary,
+    sessionPool: VNCSessionPool,
+    launchConnection: VNCAddress?
+  ) {
+    self.fleetStore = fleetStore
+    self.connectionLibrary = connectionLibrary
+    self.sessionPool = sessionPool
+    self.launchConnection = launchConnection
+    _localOnly = State(
+      initialValue: ProcessInfo.processInfo.environment["CRABFLEET_LOCAL_ONLY"] == "1"
+        || launchConnection != nil
+    )
+  }
 
   var body: some View {
-    FleetRootView(
-      store: fleetStore,
-      connections: connectionLibrary,
-      sessions: sessionPool,
-      launchConnection: launchConnection
-    )
+    Group {
+      if fleetStore.isConnected || localOnly {
+        FleetRootView(
+          store: fleetStore,
+          connections: connectionLibrary,
+          sessions: sessionPool,
+          launchConnection: launchConnection,
+          deploymentLabel: fleetStore.isConnected ? fleetStore.deploymentLabel : "Local VNC",
+          accountLabel: fleetStore.isConnected ? fleetStore.accountLabel : NSUserName(),
+          disconnectLabel: fleetStore.isConnected
+            ? "Disconnect Deployment"
+            : "Return to Deployment Sign-In",
+          disconnectDeployment: leaveCurrentMode
+        )
+      } else {
+        DeploymentConnectionView(
+          store: fleetStore,
+          useLocalConnections: { localOnly = true }
+        )
+      }
+    }
     .frame(minWidth: 1_080, minHeight: 680)
     .preferredColorScheme(.dark)
     .task {
-      await fleetStore.refresh()
+      if !localOnly {
+        await fleetStore.restore()
+      }
     }
     .onChange(of: scenePhase) { _, phase in
       sessionPool.setApplicationActive(phase == .active)
     }
+  }
+
+  private func leaveCurrentMode() {
+    if fleetStore.isConnected {
+      fleetStore.disconnect()
+    }
+    localOnly = false
   }
 }

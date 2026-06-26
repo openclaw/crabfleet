@@ -12,6 +12,7 @@ import {
   devIdentityId,
   logout,
   parseRole,
+  reauthorizeStoredUser,
   requireRole,
   requireUser,
   sessionGitHubToken,
@@ -125,6 +126,31 @@ test("development sessions are invalidated when the local login gate is unavaila
       error.status === 401,
   );
   assert.equal(deletedTokenHash, await sha256(token));
+});
+
+test("stored users are rejected when their source authentication is disabled", async () => {
+  const env = runtimeEnv({} as D1Database);
+  for (const subject of ["dev:operator", "github:42", "proxy:operator@example.com"]) {
+    await assert.rejects(
+      reauthorizeStoredUser(env, user({ subject, allowed: true })),
+      (error: unknown) =>
+        error instanceof Error &&
+        "status" in error &&
+        error.status === 403 &&
+        /no longer|cannot authorize/.test(error.message),
+    );
+  }
+  await assert.rejects(
+    reauthorizeStoredUser(
+      runtimeEnv({} as D1Database, { CRABFLEET_DEV_LOGIN_ENABLED: "true" }),
+      user({ subject: "dev:operator", allowed: true }),
+    ),
+    (error: unknown) =>
+      error instanceof Error &&
+      "status" in error &&
+      error.status === 403 &&
+      /cannot authorize stored clients/.test(error.message),
+  );
 });
 
 test("session GitHub credentials are bound to the authenticated subject", async () => {

@@ -66,19 +66,43 @@ pnpm macos:bundle
 needs an Xcode app target, hardened-runtime signing, notarization, and
 third-party notices.
 
-Without configuration, the app uses representative preview data. To read the
-current Crabfleet fleet endpoint during development:
+On first launch, enter the public URL of the Crabfleet deployment. The app
+requests a device link, opens the deployment's approval page in the default
+browser, and waits for an already signed-in Crabfleet user to approve it. After
+approval, the app receives a 24-hour bearer scoped only to `fleet:read`, stores
+it for that exact deployment origin in the macOS Keychain, and loads the live
+Fleet registry. The saved deployment URL is not a credential.
+
+The app starts disconnected when it has no approved credential. It does not
+fall back to preview fixtures, accept a raw `crabbox_session` cookie, or copy a
+browser cookie into native storage. Disconnect removes the Keychain credential
+before best-effort server revocation; a local Keychain failure keeps the
+connection available for retry. `CRABFLEET_API_URL` may prefill the deployment
+URL for local development, but authentication still uses browser approval:
 
 ```sh
 CRABFLEET_API_URL=https://example.test \
-CRABFLEET_SESSION_COOKIE='crabbox_session=…' \
 swift run --package-path macos/CrabfleetMac CrabfleetMac
 ```
 
-The cookie is accepted only from the process environment and is never persisted
-by the prototype. It authenticates both Fleet reads and host registration.
-Production authentication should use a dedicated native OAuth or device
-authorization flow.
+Saved and ad-hoc VNC connections do not require a deployment. Choose **Use
+Local VNC Only** on the connection screen, then use Quick Connect or a saved
+profile. Return to deployment sign-in from the account menu. Debug builds may
+start directly in this mode with `CRABFLEET_LOCAL_ONLY=1`.
+
+The deployment must expose the native device, token, session, and Fleet routes
+described in [`docs/api.md`](../../docs/api.md). A trusted identity proxy must
+pass only those exact method/path combinations directly to Crabfleet without
+redirecting them through browser SSO; `/native/link/*` remains a normal
+browser-authenticated approval page. A proxy-only deployment must also configure
+`CRABBOX_TOKEN_ENCRYPTION_KEY` for the one-time token handoff.
+The localhost-only development identity cannot issue a native device token;
+test the native flow with a normal configured browser-authentication method.
+
+`CRABFLEET_SESSION_COOKIE` is accepted only from the process environment for
+`Share This Mac` host registration and is never persisted. Fleet reads always
+use the deployment-scoped native bearer; the browser cookie is never copied
+into native storage.
 
 The generic connection sheet still targets an already-open VNC endpoint, such
 as the loopback port produced by a Crabbox SSH tunnel. A structured, secret-safe

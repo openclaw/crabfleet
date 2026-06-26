@@ -5,6 +5,11 @@ export type PublicAuthRouteDependencies = {
   githubLogin(request: Request): Promise<Response>;
   githubCallback(request: Request): Promise<Response>;
   sshLink(request: Request, code: string, requestAuth: TrustedProxyAuthResult): Promise<Response>;
+  nativeLink(
+    request: Request,
+    code: string,
+    requestAuth: TrustedProxyAuthResult,
+  ): Promise<Response>;
   tokenLogin(request: Request): Promise<Response>;
   devIdentityLogin(request: Request): Promise<Response>;
   logout(request: Request): Promise<Response>;
@@ -30,6 +35,14 @@ export async function handlePublicAuthRoute(
   const sshLinkMatch = url.pathname.match(/^\/ssh\/link\/([^/]+)$/);
   if (sshLinkMatch && (request.method === "GET" || request.method === "POST")) {
     return dependencies.sshLink(request, decodeURIComponent(sshLinkMatch[1] ?? ""), requestAuth);
+  }
+  const nativeLinkMatch = url.pathname.match(/^\/native\/link\/([^/]+)$/);
+  if (nativeLinkMatch && (request.method === "GET" || request.method === "POST")) {
+    return dependencies.nativeLink(
+      request,
+      decodeURIComponent(nativeLinkMatch[1] ?? ""),
+      requestAuth,
+    );
   }
   if (request.method === "POST" && url.pathname === "/api/login/token") {
     return dependencies.tokenLogin(request);

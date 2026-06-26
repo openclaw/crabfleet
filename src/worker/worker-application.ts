@@ -8,7 +8,12 @@ import { BrowserSessionCreationService } from "./browser-session-creation.ts";
 import { CardLifecycleService, type CardCreateInput } from "./card-lifecycle-service.ts";
 import { CardRepository } from "./card-repository.ts";
 import { sha256 } from "./crypto.ts";
-import { browserAppOrigin, clientDeploymentConfig, deploymentConfig } from "./deployment.ts";
+import {
+  browserAppOrigin,
+  clientDeploymentConfig,
+  deploymentConfig,
+  publicDeploymentConfig,
+} from "./deployment.ts";
 import type { RuntimeEnv } from "./env.ts";
 import { githubHeaders } from "./github.ts";
 import { GitHubActionsApplication } from "./github-actions-application.ts";
@@ -20,17 +25,19 @@ import { DesktopHostRepository } from "./desktop-host-repository.ts";
 import { DesktopHostService } from "./desktop-host-service.ts";
 import { InteractiveTerminalService } from "./interactive-terminal-service.ts";
 import type { User } from "./models.ts";
+import { createNativeAuthService, type NativeAuthService } from "./native-auth.ts";
 import { isOpenClawEmbedSessionToken } from "./openclaw-embed-access.ts";
 import { OpenClawApplication } from "./openclaw-application.ts";
 import { normalizeRepo, sortRepos } from "./repositories.ts";
 import type { BrowserSessionRouteDependencies } from "./routes/browser-sessions.ts";
 import type { ControlPlaneRouteDependencies } from "./routes/control-plane.ts";
 import type { ProvisioningRouteDependencies } from "./routes/provisioning.ts";
+import type { NativeRouteDependencies } from "./routes/native.ts";
 import type { SessionIngressRouteDependencies } from "./routes/session-ingress.ts";
 import type { ServiceSessionRouteDependencies } from "./routes/service-sessions.ts";
 import { RuntimeApplication, runtimeAdapterReconcileIntervalMs } from "./runtime-application.ts";
 import { defaultSandboxEgressHosts } from "./sandbox-outbound.ts";
-import { scheduleRecurringCardTick } from "./scheduled.ts";
+import { scheduleNativeAuthPruning, scheduleRecurringCardTick } from "./scheduled.ts";
 import { createSandboxSessionResourceService } from "./sandbox-session-resources.ts";
 import { ServiceRegistry } from "./service-registry.ts";
 import type { InteractiveSession } from "./session-model.ts";
@@ -55,6 +62,7 @@ const services = {
   sharedSessions: Symbol("shared-sessions"),
   sshGateway: Symbol("ssh-gateway"),
   terminal: Symbol("terminal"),
+  nativeAuth: Symbol("native-auth"),
   workflow: Symbol("workflow"),
 };
 
@@ -115,6 +123,13 @@ export class WorkerApplication {
         console.error("scheduled recurring card tick failed", error);
       },
     });
+    scheduleNativeAuthPruning(context, {
+      now: Date.now,
+      prune: (now) => this.nativeAuth().pruneExpired(now),
+      reportError: (error) => {
+        console.error("scheduled native auth pruning failed", error);
+      },
+    });
   }
 
   provisioningRoutes(): ProvisioningRouteDependencies {
@@ -167,6 +182,22 @@ export class WorkerApplication {
         await admin.removeRepo(repo, user);
       },
     };
+  }
+
+  nativeRoutes(context: ExecutionContext): NativeRouteDependencies {
+    const auth = this.nativeAuth();
+    return {
+      startDevice: (clientName, remoteIp) => auth.start(clientName, remoteIp),
+      pollToken: (deviceCode) => auth.poll(deviceCode),
+      requireUser: (request) => auth.authenticate(request),
+      revokeToken: (request) => auth.revoke(request),
+      readFleet: (user) => this.readFleetState(user, undefined, context),
+      deployment: publicDeploymentConfig(this.env),
+    };
+  }
+
+  nativeAuth(): NativeAuthService {
+    return this.registry.get(services.nativeAuth, () => createNativeAuthService(this.env));
   }
 
   browserSessionRoutes(): BrowserSessionRouteDependencies {

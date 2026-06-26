@@ -170,3 +170,35 @@ test("disabled proxy mode leaves ordinary requests routable but rejects assertio
     { message: "unauthorized" },
   );
 });
+
+test("native service ingress bypass is limited to exact methods and paths", () => {
+  for (const [method, pathname] of [
+    ["POST", "/api/native/v1/auth/device"],
+    ["POST", "/api/native/v1/auth/token"],
+    ["DELETE", "/api/native/v1/auth/token"],
+    ["GET", "/api/native/v1/session"],
+    ["GET", "/api/native/v1/fleet"],
+  ]) {
+    const ingress = prepareWorkerIngress(
+      new Request(`https://backend.example${pathname}`, { method }),
+      env,
+    );
+    assert.equal(ingress.independentServiceAuth, true);
+    assert.doesNotThrow(() => enforceWorkerIngressAuth(ingress));
+  }
+
+  for (const [method, pathname] of [
+    ["GET", "/api/native/v1/auth/device"],
+    ["GET", "/api/native/v1/auth/token"],
+    ["POST", "/api/native/v1/fleet"],
+    ["GET", "/api/native/v1/unknown"],
+    ["POST", "/native/link/code"],
+  ]) {
+    const ingress = prepareWorkerIngress(
+      new Request(`https://backend.example${pathname}`, { method }),
+      env,
+    );
+    assert.equal(ingress.independentServiceAuth, false);
+    assert.throws(() => enforceWorkerIngressAuth(ingress), { message: "unauthorized" });
+  }
+});

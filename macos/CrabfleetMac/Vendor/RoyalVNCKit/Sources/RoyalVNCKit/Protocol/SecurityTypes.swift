@@ -66,7 +66,7 @@ extension VNCProtocol {
 		let data: Data
 		let authTypes: [UInt8]
 
-		fileprivate init?(data: Data) {
+		init?(data: Data) {
 			self.data = data
 			self.authTypes = [UInt8](data)
 		}
@@ -109,5 +109,11 @@ extension VNCProtocol.SecurityTypes {
 
 			return type
 		})
+	}
+
+	var preferredClientSecurityType: VNCProtocol.SecurityType? {
+		let offered = securityTypes
+		return [VNCProtocol.SecurityType.diffieHellman, .vnc, .none]
+			.first(where: offered.contains)
 	}
 }
