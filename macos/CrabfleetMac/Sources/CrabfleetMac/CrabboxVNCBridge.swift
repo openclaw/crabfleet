@@ -95,6 +95,8 @@ final class CrabboxVNCBridge: @unchecked Sendable {
         _ = Darwin.kill(pid, SIGKILL)
       }
     }
+    stdout.fileHandleForReading.readabilityHandler = nil
+    stderr.fileHandleForReading.readabilityHandler = nil
     stdout.fileHandleForReading.closeFile()
     stderr.fileHandleForReading.closeFile()
   }
@@ -144,6 +146,8 @@ final class CrabboxVNCBridge: @unchecked Sendable {
       else {
         throw CrabboxVNCBridgeError.invalidHandoff
       }
+      drain(stdout)
+      drain(stderr)
       return CrabboxVNCBridge(
         process: process,
         stdout: stdout,
@@ -223,6 +227,12 @@ final class CrabboxVNCBridge: @unchecked Sendable {
     })
     return candidates.first { $0.hasPrefix("/") && FileManager.default.isExecutableFile(atPath: $0) }.map {
       URL(fileURLWithPath: $0)
+    }
+  }
+
+  private static func drain(_ pipe: Pipe) {
+    pipe.fileHandleForReading.readabilityHandler = { handle in
+      _ = handle.availableData
     }
   }
 

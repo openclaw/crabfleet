@@ -12,6 +12,7 @@ final class VNCSessionPool: ObservableObject {
   private var crabboxBridges: [String: CrabboxVNCBridge] = [:]
   private var crabboxBridgeTasks: [String: Task<Void, Never>] = [:]
   private var crabboxBridgeGenerations: [String: UUID] = [:]
+  private var crabboxBridgeLeaseIDs: [String: String] = [:]
   private var phaseObservers: [String: AnyCancellable] = [:]
   private var lastUsedAt: [String: Date] = [:]
   private var isApplicationActive = true
@@ -47,15 +48,19 @@ final class VNCSessionPool: ObservableObject {
     connectDirect(targetID: targetID, request: request)
   }
 
-  func connectCrabbox(targetID: String, leaseID: String) {
+  func connectCrabbox(targetID: String, leaseID: String, executableURL: URL? = nil) {
     stopCrabboxBridge(targetID: targetID)
     enforceLiveSessionBudget(excluding: targetID)
     let generation = UUID()
     crabboxBridgeGenerations[targetID] = generation
+    crabboxBridgeLeaseIDs[targetID] = leaseID
     session(for: targetID).beginConnecting(endpoint: "Crabbox secure tunnel")
     let task = Task { [weak self] in
       do {
-        let bridge = try await CrabboxVNCBridge.start(leaseID: leaseID)
+        let bridge = try await CrabboxVNCBridge.start(
+          leaseID: leaseID,
+          executableURL: executableURL
+        )
         guard
           let self,
           self.crabboxBridgeGenerations[targetID] == generation,
@@ -142,7 +147,13 @@ final class VNCSessionPool: ObservableObject {
     }
   }
 
-  func reconcile(validTargetIDs: Set<String>) {
+  func reconcile(validTargetIDs: Set<String>, nativeLeaseIDs: [String: String]) {
+    let crabboxTargetIDs = Set(crabboxBridges.keys).union(crabboxBridgeTasks.keys)
+    for targetID in crabboxTargetIDs
+    where nativeLeaseIDs[targetID] != crabboxBridgeLeaseIDs[targetID] {
+      disconnect(targetID: targetID)
+    }
+
     let staleTargetIDs = sessions.keys.filter { !validTargetIDs.contains($0) }
     for targetID in staleTargetIDs {
       sessions[targetID]?.disconnect()
@@ -179,6 +190,7 @@ final class VNCSessionPool: ObservableObject {
 
   private func stopCrabboxBridge(targetID: String) {
     crabboxBridgeGenerations[targetID] = nil
+    crabboxBridgeLeaseIDs[targetID] = nil
     crabboxBridgeTasks[targetID]?.cancel()
     crabboxBridgeTasks[targetID] = nil
     crabboxBridges[targetID]?.stop()

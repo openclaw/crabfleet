@@ -13,12 +13,15 @@ struct FleetModelsTests {
     defer { try? FileManager.default.removeItem(at: directory) }
     let executable = directory.appendingPathComponent("crabbox")
     let pidFile = directory.appendingPathComponent("helper.pid")
+    let drainFile = directory.appendingPathComponent("stderr-drained")
     try Data(
       """
       #!/bin/sh
       trap '' TERM
       printf '%s' "$$" > '\(pidFile.path)'
       printf '%s\\n' '{"schema":"crabbox/vnc-handoff/v1","host":"127.0.0.1","port":15901,"username":"dev","password":"secret"}'
+      dd if=/dev/zero bs=131072 count=1 2>/dev/null | cat >&2
+      : > '\(drainFile.path)'
       while :; do sleep 1; done
       """.utf8
     ).write(to: executable)
@@ -33,6 +36,11 @@ struct FleetModelsTests {
     #expect(bridge?.request.port == 15901)
     #expect(bridge?.request.username == "dev")
     #expect(bridge?.request.password == "secret")
+    #expect(
+      await waitUntil(timeout: .seconds(2)) {
+        FileManager.default.fileExists(atPath: drainFile.path)
+      }
+    )
 
     let pid = try #require(
       Int(String(contentsOf: pidFile, encoding: .utf8))
@@ -46,6 +54,44 @@ struct FleetModelsTests {
       try await Task.sleep(for: .milliseconds(50))
     }
     #expect(Darwin.kill(Int32(pid), 0) != 0)
+  }
+
+  @Test @MainActor
+  func revokingNativeAccessStopsPendingCrabboxBridge() async throws {
+    let directory = FileManager.default.temporaryDirectory
+      .appendingPathComponent("CrabfleetMacTests.\(UUID().uuidString)")
+    try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let executable = directory.appendingPathComponent("crabbox")
+    let pidFile = directory.appendingPathComponent("helper.pid")
+    try Data(
+      """
+      #!/bin/sh
+      trap '' TERM
+      printf '%s' "$$" > '\(pidFile.path)'
+      while :; do sleep 1; done
+      """.utf8
+    ).write(to: executable)
+    try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: executable.path)
+
+    let pool = VNCSessionPool()
+    pool.connectCrabbox(
+      targetID: "fleet-native",
+      leaseID: "cbx_native123",
+      executableURL: executable
+    )
+    let launched = await waitUntil(timeout: .seconds(2)) {
+      FileManager.default.fileExists(atPath: pidFile.path)
+    }
+    let pid = try #require(
+      launched ? Int(String(contentsOf: pidFile, encoding: .utf8)) : nil
+    )
+
+    pool.reconcile(validTargetIDs: ["fleet-native"], nativeLeaseIDs: [:])
+    let stopped = await waitUntil(timeout: .seconds(3)) {
+      Darwin.kill(Int32(pid), 0) != 0
+    }
+    #expect(stopped)
   }
 
   @Test
