@@ -3,6 +3,31 @@ import Combine
 import RoyalVNCKit
 import SwiftUI
 
+struct VNCViewportSize: Equatable {
+  let width: UInt16
+  let height: UInt16
+
+  static func fitting(_ size: CGSize, backingScale: CGFloat = 1) -> Self? {
+    guard size.width.isFinite, size.height.isFinite,
+      backingScale.isFinite, backingScale > 0
+    else {
+      return nil
+    }
+
+    let pixelSize = CGSize(
+      width: size.width * backingScale,
+      height: size.height * backingScale
+    )
+    guard pixelSize.width >= 320, pixelSize.height >= 240 else { return nil }
+
+    let maximum = CGSize(width: 2_560, height: 1_600)
+    let fitScale = min(1, maximum.width / pixelSize.width, maximum.height / pixelSize.height)
+    let width = max(320, Int((pixelSize.width * fitScale).rounded(.down)) & ~1)
+    let height = max(240, Int((pixelSize.height * fitScale).rounded(.down)) & ~1)
+    return Self(width: UInt16(width), height: UInt16(height))
+  }
+}
+
 @MainActor
 final class VNCSessionController: NSObject, ObservableObject {
   enum Phase: Equatable {
@@ -188,6 +213,11 @@ final class VNCSessionController: NSObject, ObservableObject {
     }
   }
 
+  @discardableResult
+  func requestDesktopSize(_ size: VNCViewportSize) -> Bool {
+    connection?.requestDesktopSize(width: size.width, height: size.height) ?? false
+  }
+
   private func applyFramebufferUpdatePolicy(to connection: VNCConnection) {
     if !isApplicationActive {
       connection.setFramebufferUpdatePolicy(.maximumFPS(0.5))
@@ -220,7 +250,8 @@ final class VNCSessionController: NSObject, ObservableObject {
 
   private func captureThumbnail() {
     guard !isPresentingLiveSurface,
-          let image = framebuffer?.snapshot(maxPixelSize: CGSize(width: 640, height: 360)) else {
+      let image = framebuffer?.snapshot(maxPixelSize: CGSize(width: 640, height: 360))
+    else {
       return
     }
     thumbnail = image
@@ -383,6 +414,9 @@ final class RemoteDesktopContainerView: NSView {
   private weak var displayedConnection: VNCConnection?
   private weak var originalDelegate: VNCConnectionDelegate?
   private var displayedRevision: Int?
+  private var resizeWorkItem: DispatchWorkItem?
+  private var pendingResizeSize: VNCViewportSize?
+  private var lastRequestedSize: VNCViewportSize?
   fileprivate weak var session: VNCSessionController?
   var isInteractive = true
 
@@ -390,7 +424,6 @@ final class RemoteDesktopContainerView: NSView {
     super.init(frame: frameRect)
     wantsLayer = true
     layer?.backgroundColor = NSColor.black.cgColor
-    layer?.cornerRadius = 9
     layer?.masksToBounds = true
   }
 
@@ -401,6 +434,16 @@ final class RemoteDesktopContainerView: NSView {
 
   override func hitTest(_ point: NSPoint) -> NSView? {
     isInteractive ? super.hitTest(point) : nil
+  }
+
+  override func layout() {
+    super.layout()
+    scheduleDesktopResize()
+  }
+
+  override func viewDidChangeBackingProperties() {
+    super.viewDidChangeBackingProperties()
+    scheduleDesktopResize()
   }
 
   func show(
@@ -426,6 +469,7 @@ final class RemoteDesktopContainerView: NSView {
     originalDelegate = delegate
     displayedRevision = revision
     session = delegate as? VNCSessionController
+    scheduleDesktopResize()
 
     DispatchQueue.main.async { [weak self, weak remoteView] in
       guard self?.isInteractive == true else { return }
@@ -434,6 +478,10 @@ final class RemoteDesktopContainerView: NSView {
   }
 
   func clear() {
+    resizeWorkItem?.cancel()
+    resizeWorkItem = nil
+    pendingResizeSize = nil
+    lastRequestedSize = nil
     session?.setLiveSurfacePresented(false)
     if let framebufferView, displayedConnection?.delegate === framebufferView {
       displayedConnection?.delegate = originalDelegate
@@ -445,5 +493,36 @@ final class RemoteDesktopContainerView: NSView {
     originalDelegate = nil
     displayedRevision = nil
     session = nil
+  }
+
+  private func scheduleDesktopResize() {
+    guard isInteractive,
+      session?.phase == .connected,
+      let targetSize = VNCViewportSize.fitting(
+        bounds.size,
+        backingScale: window?.backingScaleFactor ?? 1
+      )
+    else { return }
+
+    if targetSize == lastRequestedSize {
+      pendingResizeSize = nil
+      resizeWorkItem?.cancel()
+      resizeWorkItem = nil
+      return
+    }
+
+    pendingResizeSize = targetSize
+    guard resizeWorkItem == nil else { return }
+
+    let workItem = DispatchWorkItem { [weak self] in
+      guard let self else { return }
+      self.resizeWorkItem = nil
+      guard let pendingSize = self.pendingResizeSize else { return }
+      self.pendingResizeSize = nil
+      guard self.session?.requestDesktopSize(pendingSize) == true else { return }
+      self.lastRequestedSize = pendingSize
+    }
+    resizeWorkItem = workItem
+    DispatchQueue.main.asyncAfter(deadline: .now() + 0.08, execute: workItem)
   }
 }

@@ -40,6 +40,37 @@ public extension VNCConnection {
 							screens: framebuffer.screens,
 							pixelFormat: newPixelFormat)
 	}
+
+	/// Requests a single-screen desktop matching the viewer viewport.
+	/// Returns false until the server advertises ExtendedDesktopSize support.
+	@discardableResult
+	func requestDesktopSize(width: UInt16, height: UInt16) -> Bool {
+		guard connectionState.status == .connected,
+			  width > 0,
+			  height > 0,
+			  let framebuffer,
+			  framebuffer.supportsDesktopResize,
+			  let screen = framebuffer.screens.first else {
+			return false
+		}
+
+		let requestedScreen = VNCProtocol.Screen(
+			id: screen.id,
+			xPosition: 0,
+			yPosition: 0,
+			width: width,
+			height: height,
+			flags: screen.flags
+		)
+		enqueueDesktopSizeMessage(
+			VNCProtocol.SetDesktopSize(
+				width: width,
+				height: height,
+				screens: [requestedScreen]
+			)
+		)
+		return true
+	}
 }
 
 // MARK: - Mouse Input

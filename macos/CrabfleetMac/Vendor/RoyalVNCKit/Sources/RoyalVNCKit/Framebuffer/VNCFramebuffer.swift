@@ -63,6 +63,9 @@ public final class VNCFramebuffer: NSObjectOrAnyObject {
 #endif
 	public private(set) var screens: [VNCScreen]
 
+	/// Whether the server has advertised ExtendedDesktopSize support.
+	public private(set) var supportsDesktopResize = false
+
     /// The color depth of the framebuffer.
 #if canImport(ObjectiveC)
 	@objc
@@ -343,6 +346,10 @@ public extension VNCFramebuffer {
 
 // MARK: - Internal API
 extension VNCFramebuffer {
+	func enableDesktopResize() {
+		supportsDesktopResize = true
+	}
+
 	func update(region: VNCRegion,
 				data: inout Data) {
 		logger.logDebug("Framebuffer Update Region \(region)")

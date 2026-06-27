@@ -41,9 +41,10 @@ extension VNCProtocol.ExtendedDesktopSizeEncoding {
 		let reasonNum = rectangle.xPosition
 		let userRequestedChangeStatusNum = rectangle.yPosition
 
-		// If reason is nil, it indicates a server-side change
-		_ = Reason(rawValue: reasonNum)
-		_ = UserRequestedChangeStatus(rawValue: userRequestedChangeStatusNum)
+		let reason = Reason(rawValue: reasonNum)
+		let userRequestedChangeStatus = UserRequestedChangeStatus(
+			rawValue: userRequestedChangeStatusNum
+		)
 
 		let newSize = rectangle.region.size
 
@@ -56,6 +57,14 @@ extension VNCProtocol.ExtendedDesktopSizeEncoding {
 			let screen = try await VNCProtocol.Screen.receive(connection: connection)
 
 			screens.append(screen)
+		}
+
+		framebuffer.enableDesktopResize()
+
+		// A rejected client resize describes the attempted layout, not a new framebuffer.
+		guard reason != .changedBecauseClientRequestedIt
+			|| userRequestedChangeStatus == .noError else {
+			return
 		}
 
 		framebuffer.resize(to: newSize,

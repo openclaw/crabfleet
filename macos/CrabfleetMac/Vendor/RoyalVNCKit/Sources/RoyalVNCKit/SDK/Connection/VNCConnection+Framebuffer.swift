@@ -51,7 +51,10 @@ extension VNCConnection {
 			return
 		}
 
-        self.framebuffer?.delegate = nil
+		self.framebuffer?.delegate = nil
+		if self.framebuffer?.supportsDesktopResize == true {
+			newFramebuffer.enableDesktopResize()
+		}
 
 		newFramebuffer.delegate = self
 
