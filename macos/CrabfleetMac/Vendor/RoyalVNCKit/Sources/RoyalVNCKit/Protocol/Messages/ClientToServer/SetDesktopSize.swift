@@ -15,7 +15,7 @@ extension VNCProtocol {
 
 extension VNCProtocol.SetDesktopSize {
 	var data: Data {
-		let length = 10 + screens.count * 16
+		let length = 8 + screens.count * 16
 		var data = Data(capacity: length)
 
 		data.append(messageType)
@@ -23,7 +23,7 @@ extension VNCProtocol.SetDesktopSize {
 		data.append(width, bigEndian: true)
 		data.append(height, bigEndian: true)
 		data.append(UInt8(screens.count))
-		data.appendPadding(length: 3)
+		data.appendPadding()
 
 		for screen in screens {
 			data.append(screen.id, bigEndian: true)
