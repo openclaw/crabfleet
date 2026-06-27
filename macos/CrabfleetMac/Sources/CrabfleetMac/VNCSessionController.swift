@@ -415,6 +415,7 @@ final class RemoteDesktopContainerView: NSView {
   private weak var originalDelegate: VNCConnectionDelegate?
   private var displayedRevision: Int?
   private var resizeWorkItem: DispatchWorkItem?
+  private var pendingResizeSize: VNCViewportSize?
   private var lastRequestedSize: VNCViewportSize?
   fileprivate weak var session: VNCSessionController?
   var isInteractive = true
@@ -423,7 +424,7 @@ final class RemoteDesktopContainerView: NSView {
     super.init(frame: frameRect)
     wantsLayer = true
     layer?.backgroundColor = NSColor.black.cgColor
-    layer?.masksToBounds = false
+    layer?.masksToBounds = true
   }
 
   @available(*, unavailable)
@@ -479,6 +480,7 @@ final class RemoteDesktopContainerView: NSView {
   func clear() {
     resizeWorkItem?.cancel()
     resizeWorkItem = nil
+    pendingResizeSize = nil
     lastRequestedSize = nil
     session?.setLiveSurfacePresented(false)
     if let framebufferView, displayedConnection?.delegate === framebufferView {
@@ -499,18 +501,28 @@ final class RemoteDesktopContainerView: NSView {
       let targetSize = VNCViewportSize.fitting(
         bounds.size,
         backingScale: window?.backingScaleFactor ?? 1
-      ),
-      targetSize != lastRequestedSize
+      )
     else { return }
 
-    resizeWorkItem?.cancel()
+    if targetSize == lastRequestedSize {
+      pendingResizeSize = nil
+      resizeWorkItem?.cancel()
+      resizeWorkItem = nil
+      return
+    }
+
+    pendingResizeSize = targetSize
+    guard resizeWorkItem == nil else { return }
+
     let workItem = DispatchWorkItem { [weak self] in
-      guard let self, self.bounds.width > 0, self.bounds.height > 0 else { return }
+      guard let self else { return }
       self.resizeWorkItem = nil
-      guard self.session?.requestDesktopSize(targetSize) == true else { return }
-      self.lastRequestedSize = targetSize
+      guard let pendingSize = self.pendingResizeSize else { return }
+      self.pendingResizeSize = nil
+      guard self.session?.requestDesktopSize(pendingSize) == true else { return }
+      self.lastRequestedSize = pendingSize
     }
     resizeWorkItem = workItem
-    DispatchQueue.main.asyncAfter(deadline: .now() + 0.18, execute: workItem)
+    DispatchQueue.main.asyncAfter(deadline: .now() + 0.08, execute: workItem)
   }
 }
