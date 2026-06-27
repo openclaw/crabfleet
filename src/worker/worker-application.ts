@@ -277,7 +277,8 @@ export class WorkerApplication {
         requireRole(user, "viewer");
         return user;
       },
-      requireAgentUser: async (request) => (await this.githubActions.authenticate(request)).user,
+      requireAgentUser: async (request, sessionId) =>
+        (await this.githubActions.authenticate(request, sessionId)).user,
       readFreshSession: (user, sessionId) => this.sessions.readFreshForUser(user, sessionId),
       presentSession: (session, user) => this.sessions.presentVisibleForUser(session, user),
       mutateSession: (request, user, sessionId, action) =>

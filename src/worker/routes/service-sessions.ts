@@ -15,7 +15,7 @@ export type ServiceSessionRouteDependencies = {
   updateAgentWorkState(request: Request, sessionId: string): Promise<unknown>;
   openAgentRunnerPty(request: Request, sessionId: string): Promise<Response>;
   requireSshViewer(request: Request): Promise<User>;
-  requireAgentUser(request: Request): Promise<User>;
+  requireAgentUser(request: Request, sessionId: string): Promise<User>;
   readFreshSession(user: User, sessionId: string): Promise<InteractiveSession | null>;
   presentSession(session: InteractiveSession, user: User): Promise<InteractiveSession | null>;
   mutateSession(request: Request, user: User, sessionId: string, action: string): Promise<unknown>;
@@ -70,7 +70,9 @@ export async function handleServiceSessionRoute(
   return handleInteractiveSessionResourceRoute(request, url, {
     basePath: `/api/${principal}/interactive-sessions`,
     requireUser:
-      principal === "ssh" ? dependencies.requireSshViewer : dependencies.requireAgentUser,
+      principal === "ssh"
+        ? dependencies.requireSshViewer
+        : (request) => dependencies.requireAgentUser(request, sessionId),
     readFreshSession: dependencies.readFreshSession,
     presentSession: dependencies.presentSession,
     readLogs: dependencies.readLogs,

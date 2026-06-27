@@ -64,8 +64,8 @@ function dependencies(calls: string[]): ServiceSessionRouteDependencies {
       calls.push("auth:ssh");
       return sshUser;
     },
-    async requireAgentUser() {
-      calls.push("auth:agent");
+    async requireAgentUser(_request: Request, sessionId: string) {
+      calls.push(`auth:agent:${sessionId}`);
       return agentUser;
     },
     async readFreshSession(user: User, sessionId: string) {
@@ -157,7 +157,7 @@ test("service-session routes share read, log, transcript, and summary behavior b
     ],
     [
       request("GET", "/api/agent/interactive-sessions/IS%2F2"),
-      ["auth:agent", "read:agent-user:IS/2", "present:IS/2:agent-user"],
+      ["auth:agent:IS/2", "read:agent-user:IS/2", "present:IS/2:agent-user"],
     ],
     [
       request("GET", "/api/ssh/interactive-sessions/IS%2F2/logs"),
@@ -165,7 +165,7 @@ test("service-session routes share read, log, transcript, and summary behavior b
     ],
     [
       request("GET", "/api/agent/interactive-sessions/IS%2F2/logs"),
-      ["auth:agent", "logs:agent-user:IS/2"],
+      ["auth:agent:IS/2", "logs:agent-user:IS/2"],
     ],
     [
       request("POST", "/api/ssh/interactive-sessions/IS%2F2/summary", {}),
@@ -173,7 +173,7 @@ test("service-session routes share read, log, transcript, and summary behavior b
     ],
     [
       request("POST", "/api/agent/interactive-sessions/IS%2F2/summary", {}),
-      ["auth:agent", "summary:agent-user:IS/2"],
+      ["auth:agent:IS/2", "summary:agent-user:IS/2"],
     ],
   ];
 
@@ -191,7 +191,7 @@ test("service-session routes share read, log, transcript, and summary behavior b
     );
     assert.equal(result?.headers.get("x-handler"), "transcript");
     assert.deepEqual(calls, [
-      `auth:${principal}`,
+      principal === "ssh" ? "auth:ssh" : "auth:agent:IS/2",
       `transcript:${principal === "ssh" ? "ssh-user" : "agent-user"}:IS/2`,
     ]);
   }
