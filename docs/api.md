@@ -158,6 +158,16 @@ Requires the native bearer and returns the same tenant-filtered, redacted
 `{ "fleet": ... }` envelope as `GET /api/fleet`. It does not return an attach
 credential, native RFB endpoint, or mutation authority.
 
+### POST /api/native/v1/sessions/:id/native-vnc
+
+Requires the native bearer, a current controllable Crabbox runtime-adapter
+session, and `capabilities.nativeVnc=true`. Crabfleet asks the session's
+registered adapter for a one-minute, single-use grant and returns it with
+`Cache-Control: no-store`. Fleet exposes the Crabfleet session ID for this
+request instead of the provider lease ID. The macOS app sends the grant ticket
+to the installed Crabbox CLI on stdin; the ticket is never placed in argv or a
+URL.
+
 ### DELETE /api/native/v1/auth/token
 
 Requires the native bearer, revokes that token without depending on an external
@@ -187,6 +197,7 @@ method/path set:
 - `DELETE /api/native/v1/auth/token`
 - `GET /api/native/v1/session`
 - `GET /api/native/v1/fleet`
+- `POST /api/native/v1/sessions/IS-<number>/native-vnc`
 
 They must pass those requests directly to Crabfleet and must not add a competing
 asserted identity to bearer requests. Every `/native/link/*` browser route
@@ -201,6 +212,7 @@ scope, plus these two exact authenticated reads:
 
 - `GET /mcp/crabfleet/native/v1/session`
 - `GET /mcp/crabfleet/native/v1/fleet`
+- `POST /mcp/crabfleet/native/v1/sessions/IS-<number>/native-vnc`
 
 Both challenges must resolve to the same authorization server. RFC 9728
 metadata identifies each exact challenged route, and the client requests both
@@ -495,6 +507,7 @@ Crabfleet authenticates every adapter request with `Authorization: Bearer CRABBO
 - `GET /v1/workspaces/:id`: inspect current status, capabilities, terminal URL, expiry, and provider resource identity. Status-only responses preserve previously stored capabilities and expiry; explicit `null` clears those fields. Active external sessions are reconciled in bounded batches; state responses wait only for a short foreground budget while remaining work continues in the Worker background.
 - `DELETE /v1/workspaces/:id`: stop/release. Crabfleet enters `stopping` before calling the adapter and marks the session stopped only after `204`, `404`, or a valid exact-ID terminal response confirms release; malformed successful bodies remain `stopping`. Plain-text and malformed-JSON responses are read once and sanitized before their evidence is retained. An explicit stop whose ownership claim loses returns success only when the exact workspace is already stopping or terminal; otherwise it returns a lifecycle conflict.
 - `POST /v1/workspaces/:id/connections/desktop`: mint a current transient desktop URL. The request has no body. `expiresAt` is optional; when present it must be in the future and no more than 15 minutes away. Accepted HTTPS URLs are treated as opaque signed connection material and redirected byte-for-byte without URL normalization. After minting, Crabfleet re-reads the exact current session status, control grant, capabilities, and registered adapter identity before redirecting; a concurrent stop, revocation, capability withdrawal, or lifecycle replacement discards the URL and denies access.
+- `POST /v1/workspaces/:id/connections/native-vnc`: mint a short-lived, single-use native VNC grant. The response must use the `crabbox/native-vnc-grant/v1` schema, an HTTPS broker URL (literal loopback HTTP is allowed for development), the exact opaque lease ID, a 32-byte-hex `native_vnc_` ticket, and an expiry no more than two minutes away. Crabfleet never exposes the provider lease ID in Fleet state and requests this grant only after revalidating current session control and the persisted adapter identity.
 
 `CRABBOX_RUNTIME_ADAPTER_NAMESPACE` is required and must remain stable for the deployment. It prevents workspace and idempotency collisions when an adapter serves more than one Crabfleet tenant. The adapter workspace `id` is an immutable lifecycle route key and remains separate from an opaque `providerResourceId`; the provider identity is never interpreted as a Sandbox lease ID. Create, inspect, and stop responses must echo the byte-exact requested DNS-safe `id`; whitespace normalization is not accepted. Responses use `status`, `id`, optional `providerResourceId`, `attachUrl`, `capabilities`, `expiresAt`, and `message`. The optional `capabilities.nativeVnc` flag advertises a native-client handoff without asserting that the browser desktop endpoint exists; `vnc` and `desktop` remain the browser endpoint capability. Only a literal `null` clears a previously stored expiry; a malformed non-null timestamp invalidates the response. A terminal URL implies terminal capability only when the response omits a terminal capability; an explicit `terminal: false` wins. Supported status values include `provisioning`, `ready`, `stopping`, `stopped`, `expired`, and `failed`. Every session-bound provider DELETE is gated on the persisted create ambiguity marker being clear.
 

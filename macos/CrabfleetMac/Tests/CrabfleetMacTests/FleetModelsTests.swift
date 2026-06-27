@@ -4,6 +4,17 @@ import Testing
 
 @testable import CrabfleetMac
 
+private let nativeVNCTicket = "native_vnc_0123456789abcdef0123456789abcdef"
+
+private func nativeVNCGrant(leaseID: String = "cbx_native123") -> NativeVNCGrant {
+  .init(
+    brokerURL: URL(string: "https://crabbox.example.test")!,
+    leaseID: leaseID,
+    ticket: nativeVNCTicket,
+    expiresAt: Date().addingTimeInterval(60)
+  )
+}
+
 struct FleetModelsTests {
   @Test
   func startsAndStopsBoundedCrabboxNativeHandoff() async throws {
@@ -14,10 +25,15 @@ struct FleetModelsTests {
     let executable = directory.appendingPathComponent("crabbox")
     let pidFile = directory.appendingPathComponent("helper.pid")
     let drainFile = directory.appendingPathComponent("stderr-drained")
+    let ticketFile = directory.appendingPathComponent("ticket")
+    let argumentsFile = directory.appendingPathComponent("arguments")
     try Data(
       """
       #!/bin/sh
       trap '' TERM
+      IFS= read -r ticket
+      printf '%s' "$ticket" > '\(ticketFile.path)'
+      printf '%s\n' "$@" > '\(argumentsFile.path)'
       printf '%s' "$$" > '\(pidFile.path)'
       printf '%s\\n' '{"schema":"crabbox/vnc-handoff/v1","host":"127.0.0.1","port":15901,"username":"dev","password":"secret"}'
       dd if=/dev/zero bs=131072 count=1 2>/dev/null | cat >&2
@@ -28,7 +44,7 @@ struct FleetModelsTests {
     try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: executable.path)
 
     var bridge: CrabboxVNCBridge? = try await CrabboxVNCBridge.start(
-      leaseID: "cloud/project/box-42",
+      grant: nativeVNCGrant(leaseID: "cloud/project/box-42"),
       executableURL: executable,
       timeout: 2
     )
@@ -36,6 +52,11 @@ struct FleetModelsTests {
     #expect(bridge?.request.port == 15901)
     #expect(bridge?.request.username == "dev")
     #expect(bridge?.request.password == "secret")
+    #expect(try String(contentsOf: ticketFile, encoding: .utf8) == nativeVNCTicket)
+    let arguments = try String(contentsOf: argumentsFile, encoding: .utf8)
+    #expect(arguments.contains("--native-grant-url"))
+    #expect(arguments.contains("--native-grant-stdin"))
+    #expect(!arguments.contains(nativeVNCTicket))
     #expect(
       await waitUntil(timeout: .seconds(2)) {
         FileManager.default.fileExists(atPath: drainFile.path)
@@ -68,6 +89,7 @@ struct FleetModelsTests {
       """
       #!/bin/sh
       trap '' TERM
+      IFS= read -r ticket
       printf '%s' "$$" > '\(pidFile.path)'
       while :; do sleep 1; done
       """.utf8
@@ -77,8 +99,9 @@ struct FleetModelsTests {
     let pool = VNCSessionPool()
     pool.connectCrabbox(
       targetID: "fleet-native",
-      leaseID: "cbx_native123",
-      executableURL: executable
+      sessionID: "IS-257",
+      executableURL: executable,
+      grant: { nativeVNCGrant() }
     )
     let launched = await waitUntil(timeout: .seconds(2)) {
       FileManager.default.fileExists(atPath: pidFile.path)
@@ -87,7 +110,7 @@ struct FleetModelsTests {
       launched ? Int(String(contentsOf: pidFile, encoding: .utf8)) : nil
     )
 
-    pool.reconcile(validTargetIDs: ["fleet-native"], nativeLeaseIDs: [:])
+    pool.reconcile(validTargetIDs: ["fleet-native"], nativeSessionIDs: [:])
     let stopped = await waitUntil(timeout: .seconds(3)) {
       Darwin.kill(Int32(pid), 0) != 0
     }
@@ -112,7 +135,7 @@ struct FleetModelsTests {
 
     await #expect(throws: CrabboxVNCBridgeError.invalidHandoff) {
       _ = try await CrabboxVNCBridge.start(
-        leaseID: "cbx_native123",
+        grant: nativeVNCGrant(),
         executableURL: executable,
         timeout: 2
       )
@@ -178,7 +201,7 @@ struct FleetModelsTests {
     let lease = CrabboxLease(
       id: "IS-248",
       leaseID: "blue-lobster",
-      nativeVncLeaseID: nil,
+      nativeVncSessionID: nil,
       owner: "operator",
       repository: "openclaw/crabfleet",
       branch: "codex/native-fleet",
@@ -228,7 +251,7 @@ struct FleetModelsTests {
             "attachable": true,
             "vnc": false,
             "leaseId": "blue-lobster",
-            "nativeVncLeaseId": "cbx_native123",
+            "nativeVncSessionId": "IS-257",
             "lastEvent": "ready",
             "updatedAt": 1770000000000
           }]
@@ -255,7 +278,7 @@ struct FleetModelsTests {
     #expect(target.desktopAvailable)
 
     let fleetTarget = DesktopTarget(lease: lease)
-    #expect(fleetTarget.nativeVncLeaseID == "cbx_native123")
+    #expect(fleetTarget.nativeVncSessionID == "IS-257")
   }
 
   @Test @MainActor

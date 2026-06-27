@@ -284,6 +284,34 @@ final class FleetStore: ObservableObject {
     await refresh(expectedGeneration: connectionGeneration)
   }
 
+  func nativeVNCGrant(sessionID: String) async throws -> NativeVNCGrant {
+    let generation = connectionGeneration
+    guard let client, let connectedOrigin, let credential,
+      credential.origin == connectedOrigin,
+      client.origin == connectedOrigin,
+      connectionPhase == .connected
+    else {
+      throw NativeAPIError.unauthorized
+    }
+    do {
+      return try await authenticatedRead(
+        api: client,
+        token: credential.token,
+        origin: connectedOrigin,
+        generation: generation,
+        operation: { token in
+          try await client.nativeVNCGrant(sessionID: sessionID, accessToken: token)
+        }
+      ).value
+    } catch NativeAPIError.unauthorized {
+      await expireCredential(
+        message: NativeAPIError.unauthorized.localizedDescription,
+        expectedGeneration: generation
+      )
+      throw NativeAPIError.unauthorized
+    }
+  }
+
   private func refresh(expectedGeneration: UInt64) async {
     guard isCurrent(expectedGeneration), !isRefreshing, let client, let connectedOrigin,
       let credential, credential.origin == connectedOrigin, client.origin == connectedOrigin,

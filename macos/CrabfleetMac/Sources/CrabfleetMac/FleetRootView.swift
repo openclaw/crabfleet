@@ -55,7 +55,7 @@ struct FleetRootView: View {
 
   private var targetConnectionStates: [DesktopTargetConnectionState] {
     allTargets.map {
-      DesktopTargetConnectionState(id: $0.id, nativeVncLeaseID: $0.nativeVncLeaseID)
+      DesktopTargetConnectionState(id: $0.id, nativeVncSessionID: $0.nativeVncSessionID)
     }
   }
 
@@ -138,12 +138,12 @@ struct FleetRootView: View {
     .onExitCommand(perform: closeFocus)
     .onChange(of: targetConnectionStates) { _, targetStates in
       let targetIDs = Set(targetStates.map(\.id))
-      let nativeLeaseIDs = Dictionary(
+      let nativeSessionIDs = Dictionary(
         uniqueKeysWithValues: targetStates.compactMap { state in
-          state.nativeVncLeaseID.map { (state.id, $0) }
+          state.nativeVncSessionID.map { (state.id, $0) }
         }
       )
-      sessions.reconcile(validTargetIDs: targetIDs, nativeLeaseIDs: nativeLeaseIDs)
+      sessions.reconcile(validTargetIDs: targetIDs, nativeSessionIDs: nativeSessionIDs)
       if let focusedTargetID, !targetIDs.contains(focusedTargetID) {
         self.focusedTargetID = nil
         sessions.focus(targetID: nil)
@@ -166,7 +166,7 @@ struct FleetRootView: View {
     sessions.focus(targetID: targetID)
     if let target = allTargets.first(where: { $0.id == targetID }),
       target.source == .crabfleet,
-      (target.endpoint != nil || target.nativeVncLeaseID != nil),
+      (target.endpoint != nil || target.nativeVncSessionID != nil),
       !sessions.session(for: targetID).phase.isConnectedOrConnecting
     {
       connect(target)
@@ -181,8 +181,10 @@ struct FleetRootView: View {
   }
 
   private func connect(_ target: DesktopTarget) {
-    if target.source == .crabfleet, let leaseID = target.nativeVncLeaseID {
-      sessions.connectCrabbox(targetID: target.id, leaseID: leaseID)
+    if target.source == .crabfleet, let sessionID = target.nativeVncSessionID {
+      sessions.connectCrabbox(targetID: target.id, sessionID: sessionID) {
+        try await store.nativeVNCGrant(sessionID: sessionID)
+      }
     } else if target.source == .crabfleet, let endpoint = target.endpoint {
       sessions.connect(
         targetID: target.id,
@@ -237,7 +239,7 @@ struct FleetRootView: View {
 
 private struct DesktopTargetConnectionState: Equatable {
   let id: String
-  let nativeVncLeaseID: String?
+  let nativeVncSessionID: String?
 }
 
 private struct DesktopSourceRail: View {

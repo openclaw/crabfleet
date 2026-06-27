@@ -59,6 +59,13 @@ export type AdapterDesktopConnection = {
   expiresAtPresent: boolean;
 };
 
+export type AdapterNativeVNCGrant = {
+  brokerUrl: string;
+  leaseId: string;
+  ticket: string;
+  expiresAt: number;
+};
+
 export type AdapterCreateInput = {
   namespace: string;
   id: string;
@@ -216,6 +223,10 @@ export function runtimeAdapterWorkspaceUrl(base: string, adapterWorkspaceId: str
 
 export function runtimeAdapterDesktopUrl(base: string, adapterWorkspaceId: string): string {
   return `${runtimeAdapterWorkspaceUrl(base, adapterWorkspaceId)}/connections/desktop`;
+}
+
+export function runtimeAdapterNativeVNCUrl(base: string, adapterWorkspaceId: string): string {
+  return `${runtimeAdapterWorkspaceUrl(base, adapterWorkspaceId)}/connections/native-vnc`;
 }
 
 export function runtimeAdapterBrowserVncUrl(canonicalUrl: string, sessionId: string): string {
@@ -640,6 +651,32 @@ export function currentAdapterDesktopConnection(
   return connection;
 }
 
+export function parseAdapterNativeVNCGrant(
+  value: unknown,
+  now = Date.now(),
+): AdapterNativeVNCGrant | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const input = value as Record<string, unknown>;
+  const brokerUrl = exactSecureHttpUrl(input.brokerUrl);
+  const leaseId = opaqueNativeVNCValue(input.leaseId, 200);
+  const ticket = typeof input.ticket === "string" ? input.ticket : "";
+  const expiresAt = typeof input.expiresAt === "string" ? Date.parse(input.expiresAt) : NaN;
+  if (
+    input.schema !== "crabbox/native-vnc-grant/v1" ||
+    !brokerUrl ||
+    !leaseId ||
+    !/^native_vnc_[a-f0-9]{32}$/u.test(ticket) ||
+    !Number.isFinite(expiresAt) ||
+    expiresAt <= now ||
+    expiresAt > now + 2 * 60_000
+  ) {
+    return null;
+  }
+  const broker = new URL(brokerUrl);
+  if (broker.search || broker.hash) return null;
+  return { brokerUrl, leaseId, ticket, expiresAt };
+}
+
 export function safeDesktopUrl(value: unknown): string | null {
   return exactSecureHttpUrl(value);
 }
@@ -651,6 +688,15 @@ export function safeWebSocketUrl(value: unknown): string | null {
 function adapterStatus(value: unknown): AdapterSessionStatus | null {
   const normalized = typeof value === "string" ? value.trim().toLowerCase() : "";
   return statusMap[normalized] ?? null;
+}
+
+function opaqueNativeVNCValue(value: unknown, maxLength: number): string | null {
+  if (typeof value !== "string" || value.length < 1 || value.length > maxLength) return null;
+  for (let index = 0; index < value.length; index += 1) {
+    const code = value.charCodeAt(index);
+    if (code <= 0x20 || (code >= 0x7f && code <= 0x9f)) return null;
+  }
+  return value;
 }
 
 function adapterCapabilities(value: unknown): AdapterCapabilities | null {

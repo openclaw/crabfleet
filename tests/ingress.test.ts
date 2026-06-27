@@ -97,6 +97,15 @@ test("missing proxy assertions bypass enforcement only on independent service ro
     assert.equal(ingress.independentServiceAuth, true);
     assert.doesNotThrow(() => enforceWorkerIngressAuth(ingress));
   }
+  const nativeVNC = prepareWorkerIngress(
+    new Request("https://backend.example/api/native/v1/sessions/IS-257/native-vnc", {
+      method: "POST",
+      headers: { authorization: "Bearer native-token" },
+    }),
+    env,
+  );
+  assert.equal(nativeVNC.independentServiceAuth, true);
+  assert.doesNotThrow(() => enforceWorkerIngressAuth(nativeVNC));
 });
 
 test("terminal ingress requires authorization plus an SSH or agent identity", () => {

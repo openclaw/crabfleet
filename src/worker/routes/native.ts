@@ -21,6 +21,7 @@ export type NativeRouteDependencies = {
   requireUser(request: Request): Promise<User>;
   revokeToken(request: Request): Promise<void>;
   readFleet(user: User): Promise<unknown>;
+  createNativeVNCGrant(user: User, sessionId: string): Promise<unknown>;
   deployment: PublicDeploymentConfig;
 };
 
@@ -78,6 +79,18 @@ export async function handleNativeRoute(
     const user = await dependencies.requireUser(request);
     requireRole(user, "viewer");
     return json({ fleet: await dependencies.readFleet(user) });
+  }
+  const nativeVNCMatch = /^\/api\/native\/v1\/sessions\/(IS-[1-9][0-9]*)\/native-vnc$/u.exec(
+    url.pathname,
+  );
+  if (request.method === "POST" && nativeVNCMatch) {
+    rejectAmbiguousProxyBearer(request, requestAuth);
+    const user = await dependencies.requireUser(request);
+    requireRole(user, "viewer");
+    return json(
+      { grant: await dependencies.createNativeVNCGrant(user, nativeVNCMatch[1]!) },
+      { headers: { "cache-control": "no-store" } },
+    );
   }
   return null;
 }

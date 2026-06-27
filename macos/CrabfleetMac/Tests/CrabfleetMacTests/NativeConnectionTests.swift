@@ -88,6 +88,41 @@ struct NativeConnectionTests {
   }
 
   @Test
+  func nativeAPIRequestsShortLivedVNCGrantWithoutLeakingItIntoURL() async throws {
+    let origin = try DeploymentOrigin("https://fleet.example.test")
+    let expiresAt = Date().addingTimeInterval(60)
+    let transport = RecordingHTTPTransport { request in
+      #expect(request.httpMethod == "POST")
+      #expect(request.url?.path == "/api/native/v1/sessions/IS-257/native-vnc")
+      #expect(request.url?.query == nil)
+      #expect(request.value(forHTTPHeaderField: "Authorization") == "Bearer access-token")
+      let body = Data(
+        """
+        {
+          "grant": {
+            "brokerUrl": "https://crabbox.example.test",
+            "leaseId": "cbx_native123",
+            "ticket": "native_vnc_0123456789abcdef0123456789abcdef",
+            "expiresAt": "\(ISO8601DateFormatter().string(from: expiresAt))"
+          }
+        }
+        """.utf8
+      )
+      return (body, httpResponse(url: request.url!, status: 200))
+    }
+    let grant = try await NativeAPIClient(origin: origin, transport: transport)
+      .nativeVNCGrant(sessionID: "IS-257", accessToken: "access-token")
+    #expect(grant.brokerURL.absoluteString == "https://crabbox.example.test")
+    #expect(grant.leaseID == "cbx_native123")
+    #expect(grant.ticket == "native_vnc_0123456789abcdef0123456789abcdef")
+
+    await #expect(throws: NativeAPIError.invalidResponse) {
+      try await NativeAPIClient(origin: origin, transport: transport)
+        .nativeVNCGrant(sessionID: "IS-0", accessToken: "access-token")
+    }
+  }
+
+  @Test
   func nativeAPIFallsBackToOAuthGatewayAndUsesItsReadIngress() async throws {
     let origin = try DeploymentOrigin("https://fleet.example.test")
     var requests: [URLRequest] = []
@@ -1668,6 +1703,8 @@ private final class StubNativeAPIClient: NativeAPIClientProtocol {
   var sessionResults: [Result<NativeAPISession, Error>] = []
   var sessionHandler: ((String) async throws -> NativeAPISession)?
   var fleetResult: Result<NativeAPIFleet, Error> = .failure(NativeAPIError.invalidResponse)
+  var nativeVNCGrantResult: Result<NativeVNCGrant, Error> = .failure(
+    NativeAPIError.invalidResponse)
   var fleetHandler: (() async throws -> NativeAPIFleet)?
   var sessionTokens: [String] = []
   var fleetTokens: [String] = []
@@ -1713,6 +1750,10 @@ private final class StubNativeAPIClient: NativeAPIClientProtocol {
     fleetTokens.append(accessToken)
     if let fleetHandler { return try await fleetHandler() }
     return try fleetResult.get()
+  }
+
+  func nativeVNCGrant(sessionID: String, accessToken: String) async throws -> NativeVNCGrant {
+    try nativeVNCGrantResult.get()
   }
 
   func refreshCredential(accessToken: String) async throws -> String? {
@@ -1833,7 +1874,7 @@ private func testLease(id: String = "IS-live") -> CrabboxLease {
   .init(
     id: id,
     leaseID: "live-crab",
-    nativeVncLeaseID: nil,
+    nativeVncSessionID: nil,
     owner: "operator",
     repository: "openclaw/crabfleet",
     branch: "main",

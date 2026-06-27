@@ -35,6 +35,13 @@ struct NativeAPIFleet: Equatable, Sendable {
   let desktopHosts: [RegisteredDesktopHost]
 }
 
+struct NativeVNCGrant: Equatable, Sendable {
+  let brokerURL: URL
+  let leaseID: String
+  let ticket: String
+  let expiresAt: Date
+}
+
 struct NativeDeviceAuthorization: Equatable, Sendable {
   let deviceCode: String
   let verificationURL: URL
@@ -65,6 +72,7 @@ protocol NativeAPIClientProtocol: AnyObject {
   func exchangeDeviceCode(_ deviceCode: String) async throws -> NativeTokenExchange
   func session(accessToken: String) async throws -> NativeAPISession
   func fleet(accessToken: String) async throws -> NativeAPIFleet
+  func nativeVNCGrant(sessionID: String, accessToken: String) async throws -> NativeVNCGrant
   func refreshCredential(accessToken: String) async throws -> String?
   func revoke(accessToken: String) async throws
   @MainActor
@@ -461,6 +469,38 @@ final class NativeAPIClient: NativeAPIClientProtocol {
     )
   }
 
+  func nativeVNCGrant(sessionID: String, accessToken: String) async throws -> NativeVNCGrant {
+    guard validNativeVNCSessionID(sessionID) else {
+      throw NativeAPIError.invalidResponse
+    }
+    let credential = NativeStoredCredential(accessToken)
+    let prefix = credential.kind == .oauth ? "/mcp/crabfleet/native/v1" : "/api/native/v1"
+    let response = try await request(
+      path: "\(prefix)/sessions/\(sessionID)/native-vnc",
+      method: "POST",
+      accessToken: credential.value
+    )
+    guard response.statusCode == 200 else { throw error(for: response) }
+    let payload = try decode(NativeVNCGrantEnvelope.self, from: response.data).grant
+    guard
+      let brokerURL = URL(string: payload.brokerUrl),
+      validNativeVNCBrokerURL(brokerURL),
+      validOpaqueNativeVNCValue(payload.leaseId, maximumBytes: 200),
+      validNativeVNCTicket(payload.ticket),
+      let expiresAt = ISO8601DateFormatter().date(from: payload.expiresAt),
+      expiresAt > Date(),
+      expiresAt <= Date().addingTimeInterval(120)
+    else {
+      throw NativeAPIError.invalidResponse
+    }
+    return .init(
+      brokerURL: brokerURL,
+      leaseID: payload.leaseId,
+      ticket: payload.ticket,
+      expiresAt: expiresAt
+    )
+  }
+
   func refreshCredential(accessToken: String) async throws -> String? {
     let credential = NativeStoredCredential(accessToken)
     guard credential.kind == .oauth, let token = credential.oauthToken,
@@ -600,6 +640,34 @@ final class NativeAPIClient: NativeAPIClientProtocol {
       && url.fragment == nil
       && url.path.hasPrefix("/native/link/")
   }
+
+  private func validNativeVNCBrokerURL(_ url: URL) -> Bool {
+    guard url.user == nil, url.password == nil, url.query == nil, url.fragment == nil else {
+      return false
+    }
+    if url.scheme == "https" { return true }
+    return url.scheme == "http" && ["localhost", "127.0.0.1", "::1"].contains(url.host ?? "")
+  }
+
+  private func validOpaqueNativeVNCValue(_ value: String, maximumBytes: Int) -> Bool {
+    !value.isEmpty && value.utf8.count <= maximumBytes
+      && value.unicodeScalars.allSatisfy { !CharacterSet.controlCharacters.contains($0) }
+      && value.trimmingCharacters(in: .whitespacesAndNewlines) == value
+  }
+
+  private func validNativeVNCSessionID(_ value: String) -> Bool {
+    guard value.hasPrefix("IS-"), value.count > 3 else { return false }
+    let digits = value.dropFirst(3).utf8
+    return digits.first != 0x30 && digits.allSatisfy { $0 >= 0x30 && $0 <= 0x39 }
+  }
+
+  private func validNativeVNCTicket(_ value: String) -> Bool {
+    let prefix = "native_vnc_"
+    guard value.hasPrefix(prefix), value.utf8.count == prefix.utf8.count + 32 else { return false }
+    return value.dropFirst(prefix.count).utf8.allSatisfy {
+      ($0 >= 0x30 && $0 <= 0x39) || ($0 >= 0x61 && $0 <= 0x66)
+    }
+  }
 }
 
 enum NativeAPIError: LocalizedError, Equatable {
@@ -659,6 +727,17 @@ private struct SessionResponse: Decodable {
 
 private struct OAuthSessionResponse: Decodable {
   let user: NativeAPIUser
+}
+
+private struct NativeVNCGrantEnvelope: Decodable {
+  let grant: NativeVNCGrantResponse
+}
+
+private struct NativeVNCGrantResponse: Decodable {
+  let brokerUrl: String
+  let leaseId: String
+  let ticket: String
+  let expiresAt: String
 }
 
 private struct NativeStoredCredential {
