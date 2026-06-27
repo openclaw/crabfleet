@@ -93,9 +93,14 @@ struct NativeConnectionTests {
     let expiresAt = Date().addingTimeInterval(60)
     let transport = RecordingHTTPTransport { request in
       #expect(request.httpMethod == "POST")
-      #expect(request.url?.path == "/api/native/v1/sessions/IS-257/native-vnc")
+      #expect(request.url?.path == "/api/native/v1/native-vnc")
       #expect(request.url?.query == nil)
       #expect(request.value(forHTTPHeaderField: "Authorization") == "Bearer access-token")
+      let requestBody = try #require(request.httpBody)
+      let requestJSON = try #require(
+        JSONSerialization.jsonObject(with: requestBody) as? [String: String]
+      )
+      #expect(requestJSON == ["sessionId": "IS-257"])
       let body = Data(
         """
         {
@@ -286,6 +291,7 @@ struct NativeConnectionTests {
       switch url.path {
       case "/mcp/crabfleet/native/v1/session": scope = firstScope
       case "/mcp/crabfleet/native/v1/fleet": scope = secondScope
+      case "/mcp/crabfleet/native/v1/native-vnc": scope = secondScope
       case metadataURL.path:
         return (
           Data(
@@ -330,6 +336,8 @@ struct NativeConnectionTests {
       metadataURL.path,
       "/mcp/crabfleet/native/v1/fleet",
       metadataURL.path,
+      "/mcp/crabfleet/native/v1/native-vnc",
+      metadataURL.path,
     ])
     #expect(trust.endpoints.isEmpty)
   }
@@ -339,14 +347,18 @@ struct NativeConnectionTests {
     let origin = try DeploymentOrigin("https://fleet.example.test")
     let sessionURL = try origin.endpoint("/mcp/crabfleet/native/v1/session")
     let fleetURL = try origin.endpoint("/mcp/crabfleet/native/v1/fleet")
+    let nativeVNCURL = try origin.endpoint("/mcp/crabfleet/native/v1/native-vnc")
     let sessionMetadataURL = try origin.endpoint("/oauth/session-metadata")
     let fleetMetadataURL = try origin.endpoint("/oauth/fleet-metadata")
+    let nativeVNCMetadataURL = try origin.endpoint("/oauth/native-vnc-metadata")
     var requests: [URL] = []
     let transport = RecordingHTTPTransport { request in
       let url = try #require(request.url)
       requests.append(url)
-      if url == sessionURL || url == fleetURL {
-        let metadataURL = url == sessionURL ? sessionMetadataURL : fleetMetadataURL
+      if url == sessionURL || url == fleetURL || url == nativeVNCURL {
+        let metadataURL =
+          url == sessionURL
+          ? sessionMetadataURL : (url == fleetURL ? fleetMetadataURL : nativeVNCMetadataURL)
         return (
           Data(),
           httpResponse(
@@ -359,8 +371,10 @@ struct NativeConnectionTests {
           )
         )
       }
-      if url == sessionMetadataURL || url == fleetMetadataURL {
-        let resource = url == sessionMetadataURL ? sessionURL : fleetURL
+      if url == sessionMetadataURL || url == fleetMetadataURL || url == nativeVNCMetadataURL {
+        let resource =
+          url == sessionMetadataURL
+          ? sessionURL : (url == fleetMetadataURL ? fleetURL : nativeVNCURL)
         return (
           Data(
             """
@@ -404,6 +418,7 @@ struct NativeConnectionTests {
     #expect(requests.last?.path == "/register")
     #expect(requests.contains(sessionMetadataURL))
     #expect(requests.contains(fleetMetadataURL))
+    #expect(requests.contains(nativeVNCMetadataURL))
   }
 
   @Test
@@ -516,6 +531,8 @@ struct NativeConnectionTests {
       "/mcp/crabfleet/native/v1/session",
       metadataURL.path,
       "/mcp/crabfleet/native/v1/fleet",
+      metadataURL.path,
+      "/mcp/crabfleet/native/v1/native-vnc",
       metadataURL.path,
     ])
   }

@@ -164,9 +164,10 @@ public client, use authorization-code PKCE, and receive the callback on the
 exact loopback redirect URI returned by registration. The resulting gateway
 bearer and optional refresh grant are
 stored under the same deployment-scoped Keychain policy and are sent only to
-`/mcp/crabfleet/native/v1/session` and `/mcp/crabfleet/native/v1/fleet`.
+`/mcp/crabfleet/native/v1/session`, `/mcp/crabfleet/native/v1/fleet`, and
+`/mcp/crabfleet/native/v1/native-vnc`.
 The client requires each RFC 9728 route challenge to identify its exact
-protected resource and requests both identifiers. For gateways that return
+protected resource and requests all identifiers. For gateways that return
 authorization-server metadata directly, a `resource` field is rejected and an
 explicit `api://` scope must match the issued JWT's `aud` claim before use.
 The app asks for explicit trust before contacting any OAuth provider origin
@@ -176,8 +177,8 @@ An unauthorized read rotates an available refresh grant in Keychain before one
 retry; a rejected refresh grant expires the saved connection.
 Those gateway routes must authenticate the user, strip the gateway bearer
 before proxying, and map only those exact read methods to Crabfleet's
-authenticated `/api/session` and `/api/fleet` routes. Unknown paths, queries,
-mutations, and WebSocket upgrades remain closed.
+authenticated native session, Fleet, and VNC-grant routes. Unknown paths,
+queries, other mutations, and WebSocket upgrades remain closed.
 
 Saved and ad-hoc VNC profiles are also available through an explicit local-only
 mode. That mode does not contact a deployment, synthesize Fleet data, or create

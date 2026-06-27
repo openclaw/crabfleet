@@ -122,6 +122,7 @@ final class OAuthGatewayAuthorizer: OAuthGatewayAuthorizing {
     for path in [
       "/mcp/crabfleet/native/v1/session",
       "/mcp/crabfleet/native/v1/fleet",
+      "/mcp/crabfleet/native/v1/native-vnc",
     ] {
       let challenge = try await discoverResourceChallenge(
         origin: origin,

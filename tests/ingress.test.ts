@@ -98,7 +98,7 @@ test("missing proxy assertions bypass enforcement only on independent service ro
     assert.doesNotThrow(() => enforceWorkerIngressAuth(ingress));
   }
   const nativeVNC = prepareWorkerIngress(
-    new Request("https://backend.example/api/native/v1/sessions/IS-257/native-vnc", {
+    new Request("https://backend.example/api/native/v1/native-vnc", {
       method: "POST",
       headers: { authorization: "Bearer native-token" },
     }),

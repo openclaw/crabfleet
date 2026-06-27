@@ -474,11 +474,13 @@ final class NativeAPIClient: NativeAPIClientProtocol {
       throw NativeAPIError.invalidResponse
     }
     let credential = NativeStoredCredential(accessToken)
-    let prefix = credential.kind == .oauth ? "/mcp/crabfleet/native/v1" : "/api/native/v1"
     let response = try await request(
-      path: "\(prefix)/sessions/\(sessionID)/native-vnc",
+      path: credential.kind == .oauth
+        ? "/mcp/crabfleet/native/v1/native-vnc"
+        : "/api/native/v1/native-vnc",
       method: "POST",
-      accessToken: credential.value
+      accessToken: credential.value,
+      body: NativeVNCGrantRequest(sessionId: sessionID)
     )
     guard response.statusCode == 200 else { throw error(for: response) }
     let payload = try decode(NativeVNCGrantEnvelope.self, from: response.data).grant
@@ -733,6 +735,10 @@ private struct NativeVNCGrantEnvelope: Decodable {
   let grant: NativeVNCGrantResponse
 }
 
+private struct NativeVNCGrantRequest: Encodable {
+  let sessionId: String
+}
+
 private struct NativeVNCGrantResponse: Decodable {
   let brokerUrl: String
   let leaseId: String
@@ -846,7 +852,7 @@ private struct NativeStoredCredential {
       payload.refreshToken.map({ !$0.isEmpty && $0.utf8.count <= 16 * 1_024 }) != false,
       validScope(payload.scope),
       secureURL(payload.tokenEndpoint) != nil,
-      payload.resources.count <= 2,
+      payload.resources.count <= 3,
       payload.resources.allSatisfy({ protectedResourceURL($0) != nil }),
       payload.expectedAudiences.count <= 4,
       payload.expectedAudiences.allSatisfy({ !$0.isEmpty && $0.utf8.count <= 1_024 })

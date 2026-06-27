@@ -102,10 +102,11 @@ browser-authenticated approval page. A proxy-only deployment must also configure
 Alternatively, a gateway that supports OAuth 2.0 dynamic client registration
 and PKCE may advertise a same-origin `resource_metadata` URL in its Bearer
 challenge with an explicit read-only scope and expose exact authenticated GET
-routes at `/mcp/crabfleet/native/v1/session` and
-`/mcp/crabfleet/native/v1/fleet`. The gateway must remove its OAuth bearer
+routes at `/mcp/crabfleet/native/v1/session`,
+`/mcp/crabfleet/native/v1/fleet`, and `/mcp/crabfleet/native/v1/native-vnc`.
+The gateway must remove its OAuth bearer
 before mapping those routes to Crabfleet's trusted authenticated
-`/api/session` and `/api/fleet` reads. The app uses only the registration-
+the exact native session, Fleet, and VNC-grant routes. The app uses only the registration-
 provided literal-loopback callback, asks for explicit trust before contacting
 provider origins outside the deployment, stores the resulting bearer and
 refresh grant in Keychain, rotates refresh grants before retrying unauthorized

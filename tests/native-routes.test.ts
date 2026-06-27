@@ -115,7 +115,7 @@ test("native routes expose device, session, fleet, native VNC, and revoke contra
 
   const vncCalls: string[] = [];
   const vnc = await dispatch(
-    request("POST", "/api/native/v1/sessions/IS-257/native-vnc"),
+    request("POST", "/api/native/v1/native-vnc", { sessionId: "IS-257" }),
     vncCalls,
   );
   assert.equal(vnc?.status, 200);
@@ -125,7 +125,7 @@ test("native routes expose device, session, fleet, native VNC, and revoke contra
       brokerUrl: "https://crabbox.example.test",
       leaseId: "cbx_native123",
       ticket: "native_vnc_0123456789abcdef0123456789abcdef",
-      expiresAt: 660_000,
+      expiresAt: "1970-01-01T00:11:00.000Z",
     },
   });
   assert.deepEqual(vncCalls, ["authenticate", "native-vnc:github:1:IS-257"]);
@@ -183,7 +183,7 @@ test("native bearer routes reject simultaneous trusted-proxy identity", async ()
     ["POST", "/api/native/v1/auth/token"],
     ["GET", "/api/native/v1/session"],
     ["GET", "/api/native/v1/fleet"],
-    ["POST", "/api/native/v1/sessions/IS-257/native-vnc"],
+    ["POST", "/api/native/v1/native-vnc"],
     ["DELETE", "/api/native/v1/auth/token"],
   ]) {
     await assert.rejects(dispatch(request(method, path), [], {}, authenticated), (error) => {
@@ -199,8 +199,8 @@ test("native routes fall through on inexact methods and paths", async () => {
     request("GET", "/api/native/v1/auth/token"),
     request("POST", "/api/native/v1/fleet", {}),
     request("GET", "/api/native/v2/fleet"),
-    request("POST", "/api/native/v1/sessions/IS-0/native-vnc"),
-    request("POST", "/api/native/v1/sessions/IS-257/native-vnc/extra"),
+    request("POST", "/api/native/v1/sessions/IS-257/native-vnc", { sessionId: "IS-257" }),
+    request("POST", "/api/native/v1/native-vnc/extra", { sessionId: "IS-257" }),
   ]) {
     assert.equal(await dispatch(value, []), null);
   }

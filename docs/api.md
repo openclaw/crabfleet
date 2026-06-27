@@ -158,13 +158,14 @@ Requires the native bearer and returns the same tenant-filtered, redacted
 `{ "fleet": ... }` envelope as `GET /api/fleet`. It does not return an attach
 credential, native RFB endpoint, or mutation authority.
 
-### POST /api/native/v1/sessions/:id/native-vnc
+### POST /api/native/v1/native-vnc
 
 Requires the native bearer, a current controllable Crabbox runtime-adapter
 session, and `capabilities.nativeVnc=true`. Crabfleet asks the session's
 registered adapter for a one-minute, single-use grant and returns it with
 `Cache-Control: no-store`. Fleet exposes the Crabfleet session ID for this
-request instead of the provider lease ID. The macOS app sends the grant ticket
+request instead of the provider lease ID; the JSON body is `{ "sessionId": "IS-<number>" }`.
+The macOS app sends the grant ticket
 to the installed Crabbox CLI on stdin; the ticket is never placed in argv or a
 URL.
 
@@ -197,7 +198,7 @@ method/path set:
 - `DELETE /api/native/v1/auth/token`
 - `GET /api/native/v1/session`
 - `GET /api/native/v1/fleet`
-- `POST /api/native/v1/sessions/IS-<number>/native-vnc`
+- `POST /api/native/v1/native-vnc`
 
 They must pass those requests directly to Crabfleet and must not add a competing
 asserted identity to bearer requests. Every `/native/link/*` browser route
@@ -208,14 +209,14 @@ If a gateway cannot bypass browser SSO for exact routes but supports OAuth 2.0
 dynamic client registration and authorization-code PKCE, it may instead return
 a Bearer challenge whose same-origin `resource_metadata` describes the protected
 resource and authorization server and whose `scope` names the required read-only
-scope, plus these two exact authenticated reads:
+scope, plus these exact authenticated operations:
 
 - `GET /mcp/crabfleet/native/v1/session`
 - `GET /mcp/crabfleet/native/v1/fleet`
-- `POST /mcp/crabfleet/native/v1/sessions/IS-<number>/native-vnc`
+- `POST /mcp/crabfleet/native/v1/native-vnc`
 
-Both challenges must resolve to the same authorization server. RFC 9728
-metadata identifies each exact challenged route, and the client requests both
+All three challenges must resolve to the same authorization server. RFC 9728
+metadata identifies each exact challenged route, and the client requests all
 resource identifiers. A compatibility profile may return authorization-server
 metadata directly only when it omits a `resource` field and its explicit
 `api://` scope can be matched to the issued JWT's `aud` claim before the bearer
@@ -226,7 +227,8 @@ explicit user trust for that provider origin.
 
 The gateway must consume and strip its OAuth bearer, assert the authenticated
 browser identity through the deployment's trusted-proxy boundary, and map the
-two reads to `/api/session` and `/api/fleet`. It must reject queries, mutations,
+two reads plus the native VNC grant POST to their exact `/api/native/v1/*`
+counterparts. It must reject queries, other mutations,
 unknown suffixes, and WebSocket upgrades under that prefix. This alternative
 does not expose Crabfleet's device-code or token endpoints through the gateway.
 
