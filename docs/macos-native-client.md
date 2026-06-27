@@ -70,8 +70,9 @@ relay, Cloudflare, or the Crabfleet Worker.
 
 After the first Screen Recording grant, restart the bundled app before starting
 the share. Ad-hoc development signatures do not provide a stable TCC identity,
-so a rebuilt prototype may need permission again; a production-signed build is
-required for durable permission state.
+so a rebuilt prototype may need permission again. Sign every iterative build
+with the same Apple Development or Developer ID identity to preserve the app's
+code requirement and permission identity.
 
 Accessibility is not required to start the listener. Without it, Crabfleet
 serves a view-only desktop and discards remote keyboard and pointer events.
@@ -239,6 +240,16 @@ pnpm macos:test
 pnpm macos:bundle
 ```
 
-The bundle command creates an ad-hoc signed local app for visual testing.
-Production needs an Xcode app target, hardened runtime, signing, notarization,
-and final third-party-notice review.
+The bundle command creates an ad-hoc signed local app for visual testing by
+default. For a stable Screen Recording permission across rebuilds, create or
+synchronize an Apple Development identity in Xcode Settings > Accounts, then
+use it consistently:
+
+```sh
+CODE_SIGN_IDENTITY="Apple Development: Your Name (TEAMID)" pnpm macos:bundle
+```
+
+Production needs a Developer ID Application identity, hardened runtime, secure
+timestamp, notarization, and final third-party-notice review. The bundle script
+enables the signing-side distribution requirements when
+`CODE_SIGN_HARDENED_RUNTIME=1` is set with a Developer ID identity.

@@ -11,10 +11,8 @@ protocol TailscaleCommandRunning: Sendable {
 
 struct SystemTailscaleCommandRunner: TailscaleCommandRunning {
   private static let maximumOutputBytes = 4 * 1_024 * 1_024
-  private static let executableCandidates = [
+  static let executableCandidates = [
     "/Applications/Tailscale.app/Contents/MacOS/Tailscale",
-    "/usr/local/bin/tailscale",
-    "/opt/homebrew/bin/tailscale",
   ]
 
   let executableURL: URL
@@ -22,7 +20,7 @@ struct SystemTailscaleCommandRunner: TailscaleCommandRunning {
   init(fileManager: FileManager = .default) throws {
     guard
       let path = Self.executableCandidates.first(where: {
-        fileManager.isExecutableFile(atPath: $0)
+        Self.isTrustedExecutable(atPath: $0, fileManager: fileManager)
       })
     else {
       throw PrivateMacShareError.tailscaleNotInstalled
@@ -49,12 +47,9 @@ struct SystemTailscaleCommandRunner: TailscaleCommandRunning {
         process.standardError = errorPipe
         process.qualityOfService = .userInitiated
 
-        var environment = ProcessInfo.processInfo.environment
-        for key in environment.keys
-        where key.hasPrefix("TS_") || key.hasPrefix("TAILSCALE_") {
-          environment.removeValue(forKey: key)
-        }
-        process.environment = environment
+        process.environment = Self.commandEnvironment(
+          from: ProcessInfo.processInfo.environment
+        )
 
         readGroup.enter()
         DispatchQueue.global(qos: .userInitiated).async {
@@ -104,6 +99,35 @@ struct SystemTailscaleCommandRunner: TailscaleCommandRunning {
         }
       }
     }
+  }
+
+  static func commandEnvironment(from source: [String: String]) -> [String: String] {
+    var environment = source
+    for key in environment.keys
+    where key.hasPrefix("TS_") || key.hasPrefix("TAILSCALE_") {
+      environment.removeValue(forKey: key)
+    }
+    environment["TAILSCALE_BE_CLI"] = "1"
+    return environment
+  }
+
+  static func isTrustedExecutable(
+    atPath path: String,
+    fileManager: FileManager
+  ) -> Bool {
+    guard
+      fileManager.isExecutableFile(atPath: path),
+      let attributes = try? fileManager.attributesOfItem(atPath: path)
+    else { return false }
+    return isTrustedExecutable(attributes: attributes)
+  }
+
+  static func isTrustedExecutable(attributes: [FileAttributeKey: Any]) -> Bool {
+    guard
+      let ownerID = (attributes[.ownerAccountID] as? NSNumber)?.uint32Value,
+      let permissions = (attributes[.posixPermissions] as? NSNumber)?.uint16Value
+    else { return false }
+    return ownerID == 0 && permissions & 0o022 == 0
   }
 }
 

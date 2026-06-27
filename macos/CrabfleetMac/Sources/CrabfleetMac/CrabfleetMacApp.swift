@@ -57,6 +57,11 @@ final class CrabfleetApplicationDelegate: NSObject, NSApplicationDelegate {
 
   private func startPrivateShare(_ controller: PrivateMacShareController) async {
     await controller.refresh()
+    report(
+      "private share prerequisites: tailnet \(controller.identity == nil ? "unavailable" : "ready"), "
+        + "Screen Recording \(controller.screenRecordingGranted ? "allowed" : "denied")"
+        + (controller.notice.map { ": \($0)" } ?? "")
+    )
     if !controller.screenRecordingGranted {
       await controller.requestScreenRecordingPermission()
     }

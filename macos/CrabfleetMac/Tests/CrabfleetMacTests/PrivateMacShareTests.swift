@@ -6,6 +6,56 @@ import Testing
 
 struct PrivateMacShareTests {
   @Test
+  func launchesOnlyAProtectedTailscaleCLIContext() {
+    #expect(
+      SystemTailscaleCommandRunner.executableCandidates.first
+        == "/Applications/Tailscale.app/Contents/MacOS/Tailscale"
+    )
+    #expect(
+      !SystemTailscaleCommandRunner.executableCandidates.contains(
+        "/opt/homebrew/bin/tailscale"
+      ))
+    #expect(
+      !SystemTailscaleCommandRunner.executableCandidates.contains(
+        "/usr/local/bin/tailscale"
+      ))
+
+    let environment = SystemTailscaleCommandRunner.commandEnvironment(
+      from: [
+        "PATH": "/usr/bin:/bin",
+        "TS_DEBUG": "unsafe",
+        "TAILSCALE_SOCKET": "/tmp/unsafe.sock",
+      ]
+    )
+    #expect(environment["PATH"] == "/usr/bin:/bin")
+    #expect(environment["TS_DEBUG"] == nil)
+    #expect(environment["TAILSCALE_SOCKET"] == nil)
+    #expect(environment["TAILSCALE_BE_CLI"] == "1")
+
+    #expect(
+      SystemTailscaleCommandRunner.isTrustedExecutable(
+        attributes: [
+          .ownerAccountID: NSNumber(value: 0),
+          .posixPermissions: NSNumber(value: 0o755),
+        ]
+      ))
+    #expect(
+      !SystemTailscaleCommandRunner.isTrustedExecutable(
+        attributes: [
+          .ownerAccountID: NSNumber(value: 501),
+          .posixPermissions: NSNumber(value: 0o755),
+        ]
+      ))
+    #expect(
+      !SystemTailscaleCommandRunner.isTrustedExecutable(
+        attributes: [
+          .ownerAccountID: NSNumber(value: 0),
+          .posixPermissions: NSNumber(value: 0o775),
+        ]
+      ))
+  }
+
+  @Test
   func privateShareCanStartViewOnlyWithoutAccessibility() {
     #expect(
       PrivateMacSharePermissionPolicy.canStart(

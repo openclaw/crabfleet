@@ -63,10 +63,26 @@ swift run --package-path macos/CrabfleetMac CrabfleetMac
 pnpm macos:bundle
 ```
 
-`macos:bundle` creates an ad-hoc signed local app at
-`.build/Crabfleet.app` for visual testing. Production distribution still
-needs an Xcode app target, hardened-runtime signing, notarization, and
-third-party notices.
+`macos:bundle` creates an ad-hoc signed local app at `.build/Crabfleet.app` by
+default. Ad-hoc identities change with the executable, so macOS may ask for
+Screen Recording again after each rebuild. Use the same Apple Development or
+Developer ID identity for iterative host builds so the app keeps a stable code
+requirement:
+
+```sh
+CODE_SIGN_IDENTITY="Apple Development: Your Name (TEAMID)" pnpm macos:bundle
+```
+
+Create or synchronize that identity from Xcode Settings > Accounts > Manage
+Certificates. Direct distribution additionally requires a Developer ID
+Application identity, hardened runtime, a secure timestamp, notarization, and
+final third-party notices. The bundle script enables the signing-side
+distribution requirements with:
+
+```sh
+CODE_SIGN_IDENTITY="Developer ID Application: Your Name (TEAMID)" \
+CODE_SIGN_HARDENED_RUNTIME=1 pnpm macos:bundle
+```
 
 On first launch, enter the public URL of the Crabfleet deployment. The app
 requests a device link, opens the deployment's approval page in the default

@@ -3,6 +3,21 @@ set -eu
 
 package_dir=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 configuration=${CONFIGURATION:-debug}
+code_sign_identity=${CODE_SIGN_IDENTITY:--}
+code_sign_hardened_runtime=${CODE_SIGN_HARDENED_RUNTIME:-0}
+
+case "$code_sign_hardened_runtime" in
+    0|1) ;;
+    *)
+        echo "CODE_SIGN_HARDENED_RUNTIME must be 0 or 1" >&2
+        exit 2
+        ;;
+esac
+
+if [ "$code_sign_hardened_runtime" = "1" ] && [ "$code_sign_identity" = "-" ]; then
+    echo "CODE_SIGN_HARDENED_RUNTIME=1 requires CODE_SIGN_IDENTITY" >&2
+    exit 2
+fi
 
 swift build --package-path "$package_dir" --configuration "$configuration"
 build_dir=$(swift build --package-path "$package_dir" --configuration "$configuration" --show-bin-path)
@@ -22,8 +37,16 @@ if [ -d "$resource_bundle" ]; then
     install -m 644 "$resource_bundle/PrivacyInfo.xcprivacy" "$resources_dir/PrivacyInfo.xcprivacy"
 fi
 
-codesign --force --sign - "$macos_dir/libRoyalVNCKit.dylib"
-codesign --force --sign - "$app_dir"
+sign_path() {
+    if [ "$code_sign_hardened_runtime" = "1" ]; then
+        codesign --force --options runtime --timestamp --sign "$code_sign_identity" "$1"
+    else
+        codesign --force --sign "$code_sign_identity" "$1"
+    fi
+}
+
+sign_path "$macos_dir/libRoyalVNCKit.dylib"
+sign_path "$app_dir"
 codesign --verify --deep --strict "$app_dir"
 
 echo "$app_dir"
