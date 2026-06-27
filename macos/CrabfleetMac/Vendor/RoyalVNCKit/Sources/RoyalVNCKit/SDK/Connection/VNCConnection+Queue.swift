@@ -82,6 +82,13 @@ extension VNCConnection {
 		)
 	}
 
+	func enqueueDesktopSizeMessage(_ message: VNCProtocol.SetDesktopSize) {
+		let queuedMessage = QueuedClientMessage(message: message, isCoalescible: true)
+		clientToServerMessageQueue.enqueue(queuedMessage) { queued in
+			queued.isCoalescible && queued.message is VNCProtocol.SetDesktopSize
+		}
+	}
+
 	func currentMouseButtonState() -> VNCProtocol.MousePointerButton {
 		inputStateLock.lock()
 		defer { inputStateLock.unlock() }

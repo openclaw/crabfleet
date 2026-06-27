@@ -17,6 +17,19 @@ private func nativeVNCGrant(leaseID: String = "cbx_native123") -> NativeVNCGrant
 
 struct FleetModelsTests {
   @Test
+  func sizesRemoteDesktopToEvenViewportPixelsWithinPerformanceCap() {
+    #expect(
+      VNCViewportSize.fitting(CGSize(width: 1_361, height: 701))
+        == .init(width: 1_360, height: 700)
+    )
+    #expect(
+      VNCViewportSize.fitting(CGSize(width: 5_120, height: 3_200))
+        == .init(width: 2_560, height: 1_600)
+    )
+    #expect(VNCViewportSize.fitting(CGSize(width: 319, height: 240)) == nil)
+  }
+
+  @Test
   func startsAndStopsBoundedCrabboxNativeHandoff() async throws {
     let directory = FileManager.default.temporaryDirectory
       .appendingPathComponent("CrabfleetMacTests.\(UUID().uuidString)")

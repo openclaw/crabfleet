@@ -3,6 +3,23 @@ import Combine
 import RoyalVNCKit
 import SwiftUI
 
+struct VNCViewportSize: Equatable {
+  let width: UInt16
+  let height: UInt16
+
+  static func fitting(_ size: CGSize) -> Self? {
+    guard size.width.isFinite, size.height.isFinite, size.width >= 320, size.height >= 240 else {
+      return nil
+    }
+
+    let maximum = CGSize(width: 2_560, height: 1_600)
+    let scale = min(1, maximum.width / size.width, maximum.height / size.height)
+    let width = max(320, Int((size.width * scale).rounded(.down)) & ~1)
+    let height = max(240, Int((size.height * scale).rounded(.down)) & ~1)
+    return Self(width: UInt16(width), height: UInt16(height))
+  }
+}
+
 @MainActor
 final class VNCSessionController: NSObject, ObservableObject {
   enum Phase: Equatable {
@@ -186,6 +203,11 @@ final class VNCSessionController: NSObject, ObservableObject {
     if let connection {
       applyFramebufferUpdatePolicy(to: connection)
     }
+  }
+
+  @discardableResult
+  func requestDesktopSize(_ size: VNCViewportSize) -> Bool {
+    connection?.requestDesktopSize(width: size.width, height: size.height) ?? false
   }
 
   private func applyFramebufferUpdatePolicy(to connection: VNCConnection) {
@@ -383,6 +405,8 @@ final class RemoteDesktopContainerView: NSView {
   private weak var displayedConnection: VNCConnection?
   private weak var originalDelegate: VNCConnectionDelegate?
   private var displayedRevision: Int?
+  private var resizeWorkItem: DispatchWorkItem?
+  private var lastRequestedSize: VNCViewportSize?
   fileprivate weak var session: VNCSessionController?
   var isInteractive = true
 
@@ -390,8 +414,7 @@ final class RemoteDesktopContainerView: NSView {
     super.init(frame: frameRect)
     wantsLayer = true
     layer?.backgroundColor = NSColor.black.cgColor
-    layer?.cornerRadius = 9
-    layer?.masksToBounds = true
+    layer?.masksToBounds = false
   }
 
   @available(*, unavailable)
@@ -401,6 +424,16 @@ final class RemoteDesktopContainerView: NSView {
 
   override func hitTest(_ point: NSPoint) -> NSView? {
     isInteractive ? super.hitTest(point) : nil
+  }
+
+  override func layout() {
+    super.layout()
+    scheduleDesktopResize()
+  }
+
+  override func viewDidChangeBackingProperties() {
+    super.viewDidChangeBackingProperties()
+    scheduleDesktopResize()
   }
 
   func show(
@@ -426,6 +459,7 @@ final class RemoteDesktopContainerView: NSView {
     originalDelegate = delegate
     displayedRevision = revision
     session = delegate as? VNCSessionController
+    scheduleDesktopResize()
 
     DispatchQueue.main.async { [weak self, weak remoteView] in
       guard self?.isInteractive == true else { return }
@@ -434,6 +468,9 @@ final class RemoteDesktopContainerView: NSView {
   }
 
   func clear() {
+    resizeWorkItem?.cancel()
+    resizeWorkItem = nil
+    lastRequestedSize = nil
     session?.setLiveSurfacePresented(false)
     if let framebufferView, displayedConnection?.delegate === framebufferView {
       displayedConnection?.delegate = originalDelegate
@@ -445,5 +482,23 @@ final class RemoteDesktopContainerView: NSView {
     originalDelegate = nil
     displayedRevision = nil
     session = nil
+  }
+
+  private func scheduleDesktopResize() {
+    guard isInteractive,
+      session?.phase == .connected,
+      let targetSize = VNCViewportSize.fitting(bounds.size),
+      targetSize != lastRequestedSize
+    else { return }
+
+    resizeWorkItem?.cancel()
+    let workItem = DispatchWorkItem { [weak self] in
+      guard let self, self.bounds.width > 0, self.bounds.height > 0 else { return }
+      self.resizeWorkItem = nil
+      guard self.session?.requestDesktopSize(targetSize) == true else { return }
+      self.lastRequestedSize = targetSize
+    }
+    resizeWorkItem = workItem
+    DispatchQueue.main.asyncAfter(deadline: .now() + 0.18, execute: workItem)
   }
 }

@@ -9,6 +9,27 @@ import AppKit
 
 struct ProtocolLimitsTests {
   @Test
+  func serializesSetDesktopSizeWithOneExtendedScreen() {
+    let screen = VNCProtocol.Screen(
+      id: 0x0102_0304,
+      xPosition: 0,
+      yPosition: 0,
+      width: 1_280,
+      height: 720,
+      flags: 0xAABB_CCDD
+    )
+    let message = VNCProtocol.SetDesktopSize(width: 1_280, height: 720, screens: [screen])
+
+    #expect(
+      message.data == Data([
+        251, 0, 0x05, 0x00, 0x02, 0xD0, 1, 0, 0, 0,
+        0x01, 0x02, 0x03, 0x04, 0, 0, 0, 0, 0x05, 0x00, 0x02, 0xD0,
+        0xAA, 0xBB, 0xCC, 0xDD,
+      ])
+    )
+  }
+
+  @Test
   func negotiatesSupportedRFBVersionsWithoutUsingTheWrongSecurityFraming() {
     let maximum = VNCProtocol.ProtocolVersion(majorVersion: 3, minorVersion: 8)
 

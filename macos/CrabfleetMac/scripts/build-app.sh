@@ -3,8 +3,17 @@ set -eu
 
 package_dir=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 configuration=${CONFIGURATION:-debug}
-code_sign_identity=${CODE_SIGN_IDENTITY:--}
+code_sign_identity=${CODE_SIGN_IDENTITY:-}
 code_sign_hardened_runtime=${CODE_SIGN_HARDENED_RUNTIME:-0}
+
+if [ -z "$code_sign_identity" ] && command -v security >/dev/null 2>&1; then
+    code_sign_identity=$(security find-identity -v -p codesigning 2>/dev/null \
+        | sed -n 's/.*"\(.*\)"/\1/p' \
+        | head -n 1)
+fi
+if [ -z "$code_sign_identity" ]; then
+    code_sign_identity=-
+fi
 
 case "$code_sign_hardened_runtime" in
     0|1) ;;

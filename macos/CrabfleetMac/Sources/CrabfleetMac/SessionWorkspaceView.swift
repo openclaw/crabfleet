@@ -25,24 +25,15 @@ struct DesktopFocusView: View {
       Divider().overlay(.white.opacity(0.07))
 
       ZStack {
-        FocusCanvasBackground()
-
         if session.framebuffer != nil {
           RemoteDesktopView(session: session)
-            .padding(10)
         } else {
+          FocusCanvasBackground()
           FocusPlaceholder(target: target, session: session, connect: connect)
         }
       }
       .frame(maxWidth: .infinity, maxHeight: .infinity)
-      .clipShape(RoundedRectangle(cornerRadius: 13, style: .continuous))
-      .overlay {
-        RoundedRectangle(cornerRadius: 13, style: .continuous)
-          .stroke(.white.opacity(0.09), lineWidth: 1)
-      }
       .matchedGeometryEffect(id: "desktop-\(target.id)", in: namespace, isSource: false)
-      .padding(.horizontal, 11)
-      .padding(.top, 10)
 
       if targets.count > 1 {
         DesktopSwitcher(
@@ -145,8 +136,8 @@ private struct FocusToolbar: View {
           .disabled(!target.desktopAvailable)
       }
     }
-    .padding(.horizontal, 15)
-    .frame(height: 54)
+    .padding(.horizontal, 10)
+    .frame(height: 44)
     .background(Color(red: 0.045, green: 0.049, blue: 0.052))
   }
 
@@ -258,10 +249,10 @@ private struct DesktopSwitcher: View {
         }
       }
       .padding(.horizontal, 12)
-      .padding(.vertical, 8)
+      .padding(.vertical, 4)
     }
     .scrollIndicators(.hidden)
-    .frame(height: 59)
+    .frame(height: 47)
   }
 }
 
@@ -309,7 +300,7 @@ private struct DesktopSwitcherButton: View {
         }
       }
       .padding(.horizontal, 7)
-      .frame(height: 38)
+      .frame(height: 34)
       .background(
         RoundedRectangle(cornerRadius: 7, style: .continuous)
           .fill(isSelected ? Color.white.opacity(0.095) : .white.opacity(0.035))
@@ -345,8 +336,8 @@ private struct FocusStatusBar: View {
     }
     .font(.caption)
     .foregroundStyle(.secondary)
-    .padding(.horizontal, 14)
-    .frame(height: 28)
+    .padding(.horizontal, 10)
+    .frame(height: 22)
   }
 }
 
