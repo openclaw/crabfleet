@@ -93,7 +93,7 @@ Content-Type: application/json
 {"workKey":"openclaw/crabfleet:pr:42","workKind":"pr_repair","repo":"openclaw/crabfleet","branch":"fix/pr-42","owner":"operator@example.test","sourceUrl":"https://github.com/openclaw/crabfleet/pull/42","runUrl":"https://github.com/openclaw/crabfleet/actions/runs/123","purpose":"repair PR 42","summary":"starting repair"}
 ```
 
-The response contains `{session, agentToken, runnerPtyUrl, browserUrl}`. New work keys require `owner` to resolve to one active Crabfleet user; the stable subject owns browser visibility while the OpenClaw service retains lifecycle authority for its session. `runnerPtyUrl` includes the rotated session-scoped query credential and works directly with Node's global `WebSocket`:
+The response contains `{session, agentToken, runnerPtyUrl, browserUrl}`. New registrations and resumes require `owner` to resolve to one active Crabfleet user; resumes must prove the same stable owner subject already recorded on the `workKey`. The stable subject owns browser visibility while the OpenClaw service retains lifecycle authority for its session. `runnerPtyUrl` includes the rotated session-scoped query credential and works directly with Node's global `WebSocket`:
 
 ```js
 const terminal = new WebSocket(runnerPtyUrl);
