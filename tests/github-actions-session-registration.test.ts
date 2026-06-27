@@ -179,7 +179,7 @@ test("GitHub Actions registration requires and persists a stable owner", async (
       workKind: "issue",
       repo: "openclaw/crabfleet",
     }),
-    { message: "owner is required for new GitHub Actions work" },
+    { message: "owner is required for GitHub Actions work" },
   );
 
   const owned = registrationStore();
@@ -212,6 +212,54 @@ test("GitHub Actions work keys cannot transfer between tenant owners", async () 
     }),
     { message: "workKey is already registered to a different owner" },
   );
+});
+
+test("GitHub Actions work keys cannot be resumed without proving the owner", async () => {
+  const existing = sessionRow({
+    id: "IS-owned",
+    runtime: "github_actions",
+    work_key: "issue:owned",
+    owner: "operator@example.test",
+    owner_subject: "github:42",
+  });
+  const { store, state } = registrationStore([existing]);
+
+  await assert.rejects(
+    new GitHubActionsSessionRegistrationService(store).register({
+      workKey: "issue:owned",
+      workKind: "issue",
+      repo: "openclaw/crabfleet",
+    }),
+    { message: "owner is required for GitHub Actions work" },
+  );
+  assert.equal(state.updates.length, 0);
+  assert.deepEqual(state.operations, ["repo:openclaw/crabfleet"]);
+});
+
+test("GitHub Actions work keys can be resumed by the matching owner", async () => {
+  const existing = sessionRow({
+    id: "IS-owned",
+    runtime: "github_actions",
+    work_key: "issue:owned",
+    work_state: "completed",
+    status: "stopped",
+    owner: "operator",
+    owner_subject: "github:42",
+  });
+  const { store, state } = registrationStore([existing]);
+
+  const result = await new GitHubActionsSessionRegistrationService(store).register({
+    workKey: "issue:owned",
+    workKind: "issue",
+    repo: "openclaw/crabfleet",
+    owner: "operator@example.test",
+  });
+
+  assert.equal(result.resumed, true);
+  assert.equal(result.session.id, "IS-owned");
+  assert.equal(state.updates[0]?.values.owner, "operator");
+  assert.equal(state.updates[0]?.values.owner_subject, "github:42");
+  assert.equal(state.updates[0]?.values.agent_token_hash, "agent-token-hash");
 });
 
 test("GitHub Actions rejects work keys without a stable owner", async () => {
@@ -255,6 +303,7 @@ test("resumed work preserves omitted links and resets terminal state", async () 
     workKey: "pull:200",
     workKind: "pull_request",
     repo: "openclaw/crabfleet",
+    owner: "operator@example.test",
   });
 
   assert.equal(result.resumed, true);
@@ -321,6 +370,7 @@ test("registration rejects invalid input and work keys owned by another runtime"
         workKey: "issue:container",
         workKind: "issue",
         repo: "openclaw/crabfleet",
+        owner: "operator@example.test",
       }),
     { message: "workKey is already registered to a different runtime" },
   );
