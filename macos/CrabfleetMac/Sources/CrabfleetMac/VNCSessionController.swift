@@ -7,15 +7,23 @@ struct VNCViewportSize: Equatable {
   let width: UInt16
   let height: UInt16
 
-  static func fitting(_ size: CGSize) -> Self? {
-    guard size.width.isFinite, size.height.isFinite, size.width >= 320, size.height >= 240 else {
+  static func fitting(_ size: CGSize, backingScale: CGFloat = 1) -> Self? {
+    guard size.width.isFinite, size.height.isFinite,
+      backingScale.isFinite, backingScale > 0
+    else {
       return nil
     }
 
+    let pixelSize = CGSize(
+      width: size.width * backingScale,
+      height: size.height * backingScale
+    )
+    guard pixelSize.width >= 320, pixelSize.height >= 240 else { return nil }
+
     let maximum = CGSize(width: 2_560, height: 1_600)
-    let scale = min(1, maximum.width / size.width, maximum.height / size.height)
-    let width = max(320, Int((size.width * scale).rounded(.down)) & ~1)
-    let height = max(240, Int((size.height * scale).rounded(.down)) & ~1)
+    let fitScale = min(1, maximum.width / pixelSize.width, maximum.height / pixelSize.height)
+    let width = max(320, Int((pixelSize.width * fitScale).rounded(.down)) & ~1)
+    let height = max(240, Int((pixelSize.height * fitScale).rounded(.down)) & ~1)
     return Self(width: UInt16(width), height: UInt16(height))
   }
 }
@@ -242,7 +250,8 @@ final class VNCSessionController: NSObject, ObservableObject {
 
   private func captureThumbnail() {
     guard !isPresentingLiveSurface,
-          let image = framebuffer?.snapshot(maxPixelSize: CGSize(width: 640, height: 360)) else {
+      let image = framebuffer?.snapshot(maxPixelSize: CGSize(width: 640, height: 360))
+    else {
       return
     }
     thumbnail = image
@@ -487,7 +496,10 @@ final class RemoteDesktopContainerView: NSView {
   private func scheduleDesktopResize() {
     guard isInteractive,
       session?.phase == .connected,
-      let targetSize = VNCViewportSize.fitting(bounds.size),
+      let targetSize = VNCViewportSize.fitting(
+        bounds.size,
+        backingScale: window?.backingScaleFactor ?? 1
+      ),
       targetSize != lastRequestedSize
     else { return }
 
