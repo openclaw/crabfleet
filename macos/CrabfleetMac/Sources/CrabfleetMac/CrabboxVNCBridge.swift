@@ -57,13 +57,13 @@ final class CrabboxVNCBridge: @unchecked Sendable {
   }
 
   static func start(
-    leaseID: String,
+    grant: NativeVNCGrant,
     executableURL: URL? = nil,
     timeout: TimeInterval = 20
   ) async throws -> CrabboxVNCBridge {
     let worker = Task.detached(priority: .userInitiated) {
       try startSynchronously(
-        leaseID: leaseID,
+        grant: grant,
         executableURL: executableURL,
         timeout: timeout
       )
@@ -106,11 +106,12 @@ final class CrabboxVNCBridge: @unchecked Sendable {
   }
 
   private static func startSynchronously(
-    leaseID: String,
+    grant: NativeVNCGrant,
     executableURL: URL?,
     timeout: TimeInterval
   ) throws -> CrabboxVNCBridge {
-    guard validLeaseID(leaseID) else { throw CrabboxVNCBridgeError.invalidLeaseID }
+    guard validLeaseID(grant.leaseID) else { throw CrabboxVNCBridgeError.invalidLeaseID }
+    guard validGrant(grant) else { throw CrabboxVNCBridgeError.invalidHandoff }
     guard let executable = executableURL ?? resolveExecutable() else {
       throw CrabboxVNCBridgeError.executableNotFound
     }
@@ -118,15 +119,24 @@ final class CrabboxVNCBridge: @unchecked Sendable {
     let process = Process()
     let stdout = Pipe()
     let stderr = Pipe()
+    let stdin = Pipe()
     process.executableURL = executable
-    process.arguments = ["vnc", "--id", leaseID, "--native-handoff"]
-    process.standardInput = FileHandle.nullDevice
+    process.arguments = [
+      "vnc", "--id", grant.leaseID, "--native-handoff",
+      "--native-grant-url", grant.brokerURL.absoluteString,
+      "--native-grant-stdin",
+    ]
+    process.standardInput = stdin
     process.standardOutput = stdout
     process.standardError = stderr
 
     do {
       try process.run()
+      try stdin.fileHandleForWriting.write(contentsOf: Data((grant.ticket + "\n").utf8))
+      try stdin.fileHandleForWriting.close()
     } catch {
+      try? stdin.fileHandleForWriting.close()
+      terminate(process)
       throw CrabboxVNCBridgeError.launchFailed(error.localizedDescription)
     }
 
@@ -241,6 +251,25 @@ final class CrabboxVNCBridge: @unchecked Sendable {
       value.utf8.count <= 200 &&
       value.trimmingCharacters(in: .whitespacesAndNewlines) == value &&
       value.unicodeScalars.allSatisfy { !CharacterSet.controlCharacters.contains($0) }
+  }
+
+  private static func validGrant(_ grant: NativeVNCGrant) -> Bool {
+    let ticketPrefix = "native_vnc_"
+    let ticketSuffix = grant.ticket.dropFirst(ticketPrefix.count)
+    let secureBroker = grant.brokerURL.scheme == "https"
+      || (grant.brokerURL.scheme == "http"
+        && ["localhost", "127.0.0.1", "::1"].contains(grant.brokerURL.host ?? ""))
+    return secureBroker
+      && grant.brokerURL.user == nil
+      && grant.brokerURL.password == nil
+      && grant.brokerURL.query == nil
+      && grant.brokerURL.fragment == nil
+      && grant.ticket.hasPrefix(ticketPrefix)
+      && ticketSuffix.utf8.count == 32
+      && ticketSuffix.utf8.allSatisfy {
+        ($0 >= 0x30 && $0 <= 0x39) || ($0 >= 0x61 && $0 <= 0x66)
+      }
+      && grant.expiresAt > Date()
   }
 
   private static func terminate(_ process: Process) {

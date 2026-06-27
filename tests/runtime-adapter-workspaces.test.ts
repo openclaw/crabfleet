@@ -118,6 +118,50 @@ function runtimeAdapterSession(
   });
 }
 
+test("native VNC grants use the registered adapter and reject malformed credentials", async () => {
+  const calls: Array<{ input: string; init: RequestInit }> = [];
+  const service = new RuntimeAdapterWorkspaceLifecycle(
+    runtimeEnv(),
+    dependencies({
+      now: () => 1_000,
+      async fetch(input, init) {
+        calls.push({ input, init });
+        return Response.json({
+          schema: "crabbox/native-vnc-grant/v1",
+          brokerUrl: "https://crabbox.example.test",
+          leaseId: "cbx_native123",
+          ticket: "native_vnc_0123456789abcdef0123456789abcdef",
+          expiresAt: new Date(61_000).toISOString(),
+        });
+      },
+    }),
+  );
+
+  await assert.doesNotReject(
+    service.createNativeVNCGrant("default", "https://adapter.example.test/", "workspace-1"),
+  );
+  assert.deepEqual(calls, [
+    {
+      input: "https://adapter.example.test/v1/workspaces/workspace-1/connections/native-vnc",
+      init: { method: "POST" },
+    },
+  ]);
+
+  const malformed = new RuntimeAdapterWorkspaceLifecycle(
+    runtimeEnv(),
+    dependencies({
+      now: () => 1_000,
+      async fetch() {
+        return Response.json({ ticket: "secret" });
+      },
+    }),
+  );
+  await assert.rejects(
+    malformed.createNativeVNCGrant("default", "https://adapter.example.test/", "workspace-1"),
+    /invalid native VNC grant/u,
+  );
+});
+
 test("workspace inspection uses the registered control plane and bounded response parser", async () => {
   const requests: Array<{ url: string; method: string | undefined }> = [];
   let parsedResponses = 0;

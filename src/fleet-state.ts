@@ -125,7 +125,7 @@ export type FleetSessionSummary = {
   archived: boolean;
   logEvents: number;
   leaseId: string | null;
-  nativeVncLeaseId: string | null;
+  nativeVncSessionId: string | null;
   sandboxId: string | null;
   lastEvent: string;
   createdAt: number;
@@ -316,13 +316,13 @@ export function fleetSessionSummary(
     archived,
     logEvents: session.logArchive?.eventCount ?? session.logs?.length ?? 0,
     leaseId: session.leaseId,
-    nativeVncLeaseId:
+    nativeVncSessionId:
       session.adapter === "runtime-v1" &&
       session.runtime === "crabbox" &&
       session.canControl === true &&
       ptyReadyStatuses.has(session.status) &&
       session.capabilities?.nativeVnc === true
-        ? (session.providerResourceId ?? null)
+        ? session.id
         : null,
     sandboxId,
     lastEvent: session.lastEvent,

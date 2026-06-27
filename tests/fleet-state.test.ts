@@ -262,7 +262,7 @@ test("fleet exposes native VNC identity separately from browser VNC", () => {
 
   assert.equal(fleet.totals.vnc, 0);
   assert.equal(fleet.sessions[0]?.vnc, false);
-  assert.equal(fleet.sessions[0]?.nativeVncLeaseId, "cbx_native123");
+  assert.equal(fleet.sessions[0]?.nativeVncSessionId, "s1");
 });
 
 test("fleet omits native VNC identity for non-Crabbox runtimes", () => {
@@ -286,7 +286,7 @@ test("fleet omits native VNC identity for non-Crabbox runtimes", () => {
     },
   );
 
-  assert.equal(fleet.sessions[0]?.nativeVncLeaseId, null);
+  assert.equal(fleet.sessions[0]?.nativeVncSessionId, null);
 });
 
 test("fleet omits native VNC lease identity without control", () => {
@@ -312,7 +312,7 @@ test("fleet omits native VNC lease identity without control", () => {
     },
   );
 
-  assert.equal(fleet.sessions[0]?.nativeVncLeaseId, null);
+  assert.equal(fleet.sessions[0]?.nativeVncSessionId, null);
 });
 
 test("fleet omits stale native VNC lease identity after stop", () => {
@@ -337,7 +337,7 @@ test("fleet omits stale native VNC lease identity after stop", () => {
     },
   );
 
-  assert.equal(fleet.sessions[0]?.nativeVncLeaseId, null);
+  assert.equal(fleet.sessions[0]?.nativeVncSessionId, null);
 });
 
 test("stopping sessions are inactive and not attachable", () => {

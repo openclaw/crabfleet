@@ -3,10 +3,12 @@ import { sql } from "kysely";
 import { githubActionsRuntime } from "../github-actions-runtime.ts";
 import {
   adapterWorkspaceIdMatches,
+  parseAdapterNativeVNCGrant,
   parseAdapterWorkspaceResult,
   redactedAdapterResponseMessage,
   runtimeAdapterCollectionUrl,
   runtimeAdapterName,
+  runtimeAdapterNativeVNCUrl,
   runtimeAdapterReplayRequest,
   runtimeAdapterStopOutcome,
   runtimeAdapterWorkspaceIdConflict,
@@ -14,6 +16,7 @@ import {
   shouldReplayRuntimeAdapterCreate,
   validatedRuntimeAdapterCreatePayloadJson,
   type AdapterProvisionRecord,
+  type AdapterNativeVNCGrant,
 } from "../runtime-adapter.ts";
 import { database, type InteractiveSessionRow } from "./database.ts";
 import type { RuntimeEnv } from "./env.ts";
@@ -69,6 +72,35 @@ export class RuntimeAdapterWorkspaceLifecycle {
   constructor(env: RuntimeEnv, dependencies: RuntimeAdapterWorkspaceLifecycleDependencies) {
     this.env = env;
     this.dependencies = dependencies;
+  }
+
+  async createNativeVNCGrant(
+    profile: string,
+    registeredControlPlane: string | null,
+    adapterWorkspaceId: string,
+  ): Promise<AdapterNativeVNCGrant> {
+    const controlPlane = requireRegisteredRuntimeAdapterControlPlane(
+      this.env,
+      profile,
+      registeredControlPlane,
+    );
+    const response = await this.dependencies.fetch(
+      runtimeAdapterNativeVNCUrl(controlPlane, adapterWorkspaceId),
+      { method: "POST" },
+    );
+    const responseBody = await this.dependencies.readResponseBody(response);
+    if (!response.ok) {
+      throw new Error(
+        redactedAdapterResponseMessage(
+          responseBody,
+          `runtime adapter native VNC HTTP ${response.status}`,
+          [adapterWorkspaceId],
+        ),
+      );
+    }
+    const grant = parseAdapterNativeVNCGrant(responseBody, this.dependencies.now());
+    if (!grant) throw new Error("runtime adapter returned an invalid native VNC grant");
+    return grant;
   }
 
   async inspect(

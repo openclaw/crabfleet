@@ -119,13 +119,15 @@ final class OAuthGatewayAuthorizer: OAuthGatewayAuthorizing {
     transport: HTTPDataTransport
   ) async throws -> OAuthGatewayAccessToken {
     var discoveries: [OAuthDiscoveryResult] = []
-    for path in [
-      "/mcp/crabfleet/native/v1/session",
-      "/mcp/crabfleet/native/v1/fleet",
+    for (path, method) in [
+      ("/mcp/crabfleet/native/v1/session", "GET"),
+      ("/mcp/crabfleet/native/v1/fleet", "GET"),
+      ("/mcp/crabfleet/native/v1/native-vnc", "POST"),
     ] {
       let challenge = try await discoverResourceChallenge(
         origin: origin,
         path: path,
+        method: method,
         transport: transport
       )
       let discoveryData = try await dataRequest(
@@ -318,11 +320,12 @@ final class OAuthGatewayAuthorizer: OAuthGatewayAuthorizing {
   private func discoverResourceChallenge(
     origin: DeploymentOrigin,
     path: String,
+    method: String,
     transport: HTTPDataTransport
   ) async throws -> OAuthResourceChallenge {
     let resourceURL = try origin.endpoint(path)
     var request = URLRequest(url: resourceURL)
-    request.httpMethod = "GET"
+    request.httpMethod = method
     request.timeoutInterval = 20
     request.setValue("application/json", forHTTPHeaderField: "Accept")
     let (_, response) = try await transport.data(for: request)

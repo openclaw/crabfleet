@@ -13,6 +13,7 @@ import {
   normalizeAdapterNamespace,
   normalizeAdapterWorkspaceId,
   parseAdapterDesktopConnection,
+  parseAdapterNativeVNCGrant,
   parseAdapterWorkspaceResult,
   redactedAdapterMessage,
   redactedAdapterResponseMessage,
@@ -21,6 +22,7 @@ import {
   runtimeAdapterCreatePayload,
   runtimeAdapterBrowserVncUrl,
   runtimeAdapterDesktopUrl,
+  runtimeAdapterNativeVNCUrl,
   runtimeAdapterReplayRequest,
   retainedRuntimeAdapterFailureMessage,
   runtimeAdapterStopOutcome,
@@ -1354,8 +1356,38 @@ test("adapter workspace paths use the controller id and encode it", () => {
     "https://controller.example/base/v1/workspaces/is-101/connections/desktop",
   );
   assert.equal(
+    runtimeAdapterNativeVNCUrl("https://controller.example/base", "is-101"),
+    "https://controller.example/base/v1/workspaces/is-101/connections/native-vnc",
+  );
+  assert.equal(
     runtimeAdapterBrowserVncUrl("https://fleet.example", "IS/101"),
     "https://fleet.example/api/interactive-sessions/IS%2F101/vnc",
+  );
+});
+
+test("native VNC grants are short-lived, secure, and strictly typed", () => {
+  const now = Date.parse("2026-06-26T00:00:00.000Z");
+  const value = {
+    schema: "crabbox/native-vnc-grant/v1",
+    brokerUrl: "https://crabbox.example.test",
+    leaseId: "cbx_native123",
+    ticket: "native_vnc_0123456789abcdef0123456789abcdef",
+    expiresAt: "2026-06-26T00:01:00.000Z",
+  };
+  assert.deepEqual(parseAdapterNativeVNCGrant(value, now), {
+    brokerUrl: value.brokerUrl,
+    leaseId: value.leaseId,
+    ticket: value.ticket,
+    expiresAt: now + 60_000,
+  });
+  assert.equal(
+    parseAdapterNativeVNCGrant({ ...value, brokerUrl: "http://example.test" }, now),
+    null,
+  );
+  assert.equal(parseAdapterNativeVNCGrant({ ...value, ticket: "native_vnc_secret" }, now), null);
+  assert.equal(
+    parseAdapterNativeVNCGrant({ ...value, expiresAt: "2026-06-26T00:03:00.000Z" }, now),
+    null,
   );
 });
 

@@ -54,6 +54,7 @@ function usesNativeServiceAuth(method: string, pathname: string): boolean {
     (method === "POST" &&
       (pathname === "/api/native/v1/auth/device" || pathname === "/api/native/v1/auth/token")) ||
     (method === "DELETE" && pathname === "/api/native/v1/auth/token") ||
+    (method === "POST" && pathname === "/api/native/v1/native-vnc") ||
     (method === "GET" &&
       (pathname === "/api/native/v1/session" || pathname === "/api/native/v1/fleet"))
   );
