@@ -91,6 +91,8 @@ struct NativeConnectionTests {
   func nativeAPIRequestsShortLivedVNCGrantWithoutLeakingItIntoURL() async throws {
     let origin = try DeploymentOrigin("https://fleet.example.test")
     let expiresAt = Date().addingTimeInterval(60)
+    let expiryFormatter = ISO8601DateFormatter()
+    expiryFormatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
     let transport = RecordingHTTPTransport { request in
       #expect(request.httpMethod == "POST")
       #expect(request.url?.path == "/api/native/v1/native-vnc")
@@ -108,7 +110,7 @@ struct NativeConnectionTests {
             "brokerUrl": "https://crabbox.example.test",
             "leaseId": "cbx_native123",
             "ticket": "native_vnc_0123456789abcdef0123456789abcdef",
-            "expiresAt": "\(ISO8601DateFormatter().string(from: expiresAt))"
+            "expiresAt": "\(expiryFormatter.string(from: expiresAt))"
           }
         }
         """.utf8
@@ -356,6 +358,7 @@ struct NativeConnectionTests {
       let url = try #require(request.url)
       requests.append(url)
       if url == sessionURL || url == fleetURL || url == nativeVNCURL {
+        #expect(request.httpMethod == (url == nativeVNCURL ? "POST" : "GET"))
         let metadataURL =
           url == sessionURL
           ? sessionMetadataURL : (url == fleetURL ? fleetMetadataURL : nativeVNCMetadataURL)

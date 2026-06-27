@@ -489,7 +489,7 @@ final class NativeAPIClient: NativeAPIClientProtocol {
       validNativeVNCBrokerURL(brokerURL),
       validOpaqueNativeVNCValue(payload.leaseId, maximumBytes: 200),
       validNativeVNCTicket(payload.ticket),
-      let expiresAt = ISO8601DateFormatter().date(from: payload.expiresAt),
+      let expiresAt = nativeVNCExpiryDate(payload.expiresAt),
       expiresAt > Date(),
       expiresAt <= Date().addingTimeInterval(120)
     else {
@@ -670,6 +670,12 @@ final class NativeAPIClient: NativeAPIClientProtocol {
       ($0 >= 0x30 && $0 <= 0x39) || ($0 >= 0x61 && $0 <= 0x66)
     }
   }
+}
+
+private func nativeVNCExpiryDate(_ value: String) -> Date? {
+  let fractional = ISO8601DateFormatter()
+  fractional.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+  return fractional.date(from: value) ?? ISO8601DateFormatter().date(from: value)
 }
 
 enum NativeAPIError: LocalizedError, Equatable {
