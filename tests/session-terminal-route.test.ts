@@ -8,6 +8,7 @@ import {
   interactiveTerminalRouteAvailable,
   interactiveTerminalTarget,
   runtimeAdapterTerminalAuthorization,
+  validateTerminalWebSocketOrigin,
 } from "../src/worker/session-terminal-route.ts";
 import { interactiveSession } from "../src/worker/session-model.ts";
 import { sessionRow } from "./helpers/session-row.ts";
@@ -126,4 +127,86 @@ test("terminal headers carry canonical session context", () => {
   assert.equal(headers.get("x-crabbox-repo"), "openclaw/crabfleet");
   assert.equal(headers.get("x-crabbox-runtime"), "crabbox");
   assert.equal(headers.get("authorization"), "Bearer upstream");
+});
+
+test("browser terminal websocket origins must match the browser-visible request origin", () => {
+  const env = { CRABFLEET_CANONICAL_URL: "https://fleet.example" } as RuntimeEnv;
+
+  assert.doesNotThrow(() =>
+    validateTerminalWebSocketOrigin(
+      new Request("https://fleet.example/api/terminal/ws", {
+        headers: { origin: "https://fleet.example", upgrade: "websocket" },
+      }),
+      env,
+      false,
+    ),
+  );
+  assert.doesNotThrow(() =>
+    validateTerminalWebSocketOrigin(
+      new Request("https://tenant.localhost/api/terminal/ws", {
+        headers: { origin: "https://tenant.localhost", upgrade: "websocket" },
+      }),
+      env,
+      false,
+    ),
+  );
+  assert.doesNotThrow(() =>
+    validateTerminalWebSocketOrigin(
+      new Request("https://fleet.example/api/terminal/ws", {
+        headers: { upgrade: "websocket" },
+      }),
+      env,
+      false,
+    ),
+  );
+  assert.throws(
+    () =>
+      validateTerminalWebSocketOrigin(
+        new Request("https://fleet.example/api/terminal/ws", {
+          headers: { origin: "https://attacker.example", upgrade: "websocket" },
+        }),
+        env,
+        false,
+      ),
+    { message: "terminal websocket origin is invalid", status: 403 },
+  );
+  assert.doesNotThrow(() =>
+    validateTerminalWebSocketOrigin(
+      new Request("https://fleet.example/api/terminal/ws", {
+        headers: { origin: "https://attacker.example", upgrade: "websocket" },
+      }),
+      env,
+      true,
+    ),
+  );
+});
+
+test("trusted proxy public origin is the browser terminal websocket origin", () => {
+  const env = {
+    CRABFLEET_TRUSTED_PROXY_ORIGIN: "https://backend.example",
+    CRABFLEET_TRUSTED_PROXY_PUBLIC_ORIGIN: "https://fleet.example",
+    CRABFLEET_TRUSTED_PROXY_SECRET: "proxy-secret",
+    CRABFLEET_TRUSTED_PROXY_USER_HEADER: "x-user",
+  } as RuntimeEnv;
+
+  assert.doesNotThrow(() =>
+    validateTerminalWebSocketOrigin(
+      new Request("https://backend.example/api/terminal/ws", {
+        headers: { origin: "https://fleet.example", upgrade: "websocket" },
+      }),
+      env,
+      false,
+    ),
+  );
+  assert.throws(
+    () =>
+      validateTerminalWebSocketOrigin(
+        new Request("https://backend.example/api/terminal/ws", {
+          headers: { origin: "https://backend.example", upgrade: "websocket" },
+        }),
+        env,
+        false,
+      ),
+    { message: "terminal websocket origin is invalid", status: 403 },
+  );
 });

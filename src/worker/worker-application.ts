@@ -48,7 +48,10 @@ import {
 import { readInteractiveSessionShareCredential } from "./session-repository.ts";
 import { ownsInteractiveSession } from "./session-access.ts";
 import { readSandboxFleetPolicies } from "./session-control-do.ts";
-import { interactiveTerminalRouteAvailable } from "./session-terminal-route.ts";
+import {
+  interactiveTerminalRouteAvailable,
+  validateTerminalWebSocketOrigin,
+} from "./session-terminal-route.ts";
 import { SharedSessionService, type SharedSessionServiceStore } from "./shared-session-service.ts";
 import { SshGateway } from "./ssh-gateway.ts";
 import { createWorkflowService, type WorkflowService } from "./workflow-service.ts";
@@ -147,8 +150,10 @@ export class WorkerApplication {
   sessionIngressRoutes(requestAuth: TrustedProxyAuthResult): SessionIngressRouteDependencies {
     return {
       readSharedSession: (sessionId, token) => this.sharedSessions().read(sessionId, token),
-      openTerminal: async (request) =>
-        this.terminal().open(request, await this.terminalHubUser(request, requestAuth)),
+      openTerminal: async (request) => {
+        validateTerminalWebSocketOrigin(request, this.env, this.isServiceTerminalRequest(request));
+        return this.terminal().open(request, await this.terminalHubUser(request, requestAuth));
+      },
     };
   }
 
@@ -379,6 +384,10 @@ export class WorkerApplication {
       return (await this.githubActions.authenticate(request)).user;
     }
     return optionalUser(request, this.env, requestAuth);
+  }
+
+  private isServiceTerminalRequest(request: Request): boolean {
+    return this.sshGateway().isRequest(request) || this.githubActions.isAgentRequest(request);
   }
 
   private async agentState(request: Request): Promise<Record<string, unknown>> {
