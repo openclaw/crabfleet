@@ -101,8 +101,8 @@ export class GitHubActionsSessionRegistrationService {
     const agentTokenHash = await this.store.hashToken(agentToken);
     const now = this.store.now();
     let existing = await this.store.readByWorkKey(workKey);
-    if (!existing && !resolvedOwner) {
-      throw badRequest("owner is required for new GitHub Actions work");
+    if (!resolvedOwner) {
+      throw badRequest("owner is required for GitHub Actions work");
     }
     const purpose =
       boundedValue(input.purpose, 500) ||
@@ -120,8 +120,8 @@ export class GitHubActionsSessionRegistrationService {
         runUrl,
         purpose,
         summary,
-        owner: resolvedOwner!.actor,
-        ownerSubject: resolvedOwner!.subject,
+        owner: resolvedOwner.actor,
+        ownerSubject: resolvedOwner.subject,
         agentTokenHash,
         now,
       });

@@ -108,18 +108,18 @@ Example:
 }
 ```
 
-Required fields:
+Required fields for both new registrations and resumes:
 
 - `workKey`
 - `workKind`
 - `repo`
+- `owner`, resolved to exactly one active Crabfleet user by login, email, or stable subject
 
-New work keys also require `owner`, resolved to exactly one active Crabfleet user by login, email, or stable subject. Existing owned work keys can resume without repeating it.
+When a request reuses an existing `workKey`, Crabfleet treats it as a resume only after the supplied `owner` resolves to the same stable owner subject already recorded on that work key. Ownerless resumes fail closed with `owner is required for GitHub Actions work` and do not rotate the agent token.
 
 Optional fields:
 
 - `branch`, default `main`
-- `owner` when resuming an existing owned work key
 - `sourceUrl`
 - `runUrl`
 - `purpose`

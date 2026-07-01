@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Require every GitHub Actions session resume to prove the existing stable owner before rotating its agent credential, preventing ownerless `workKey` reuse from taking over another action session, thanks @Hinotoi-agent.
 - Fit the native Mac VNC desktop flush to the available window, continuously synchronize its remote resolution to the viewport and current display pixel density when supported, compact the surrounding controls, and use an available stable signing identity for local app bundles so Keychain access survives rebuilds.
 - Preserve the real same-origin `Origin` header on browser-approved native Mac authorization forms so Chromium can complete the device link without weakening CSRF validation.
 - Connect desktop-capable Crabbox Fleet sessions directly in the macOS app through session-scoped, one-time Crabbox grants and a coordinator-backed VNC relay, without publishing provider lease IDs in Fleet or exposing coordinator SSH keys; grants reach the CLI only on stdin and helper teardown remains tied to viewer lifecycle.

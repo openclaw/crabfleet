@@ -596,7 +596,7 @@ Response:
 }
 ```
 
-Every new work key requires `owner`; it must resolve to exactly one active Crabfleet user by login, email, or stable subject. Existing owned work keys can resume without repeating it, and a work key cannot transfer to a different stable owner. `runnerPtyUrl` is directly usable with Node's global `WebSocket`; no custom headers are required. The query credential is session-scoped, rotates on registration, is stored only as a hash, and is not exposed through viewer/session APIs.
+Every new registration and every resume requires `owner`; it must resolve to exactly one active Crabfleet user by login, email, or stable subject. Existing work keys resume only when the supplied owner resolves to the same stable owner subject already stored on the work key. Ownerless resumes fail closed before token rotation, and a work key cannot transfer to a different stable owner. `runnerPtyUrl` is directly usable with Node's global `WebSocket`; no custom headers are required. The query credential is session-scoped, rotates on registration, is stored only as a hash, and is not exposed through viewer/session APIs.
 
 ### GET /api/agent/interactive-sessions/:id/runner-pty
 
