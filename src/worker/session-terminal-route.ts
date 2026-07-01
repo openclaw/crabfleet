@@ -5,8 +5,9 @@ import {
   runtimeAdapterTerminalOriginMatches,
   safeWebSocketUrl,
 } from "../runtime-adapter.ts";
+import { browserRequestOrigin } from "./deployment.ts";
 import type { RuntimeEnv } from "./env.ts";
-import { bearer } from "./http.ts";
+import { bearer, forbidden } from "./http.ts";
 import {
   requireRegisteredRuntimeAdapterControlPlane,
   runtimeAdapterToken,
@@ -94,4 +95,19 @@ export function interactiveTerminalHeaders(
   });
   if (authorization) headers.set("authorization", authorization);
   return headers;
+}
+
+export function validateTerminalWebSocketOrigin(
+  request: Request,
+  env: RuntimeEnv,
+  serviceAuthenticated: boolean,
+): void {
+  if (serviceAuthenticated) return;
+
+  const origin = request.headers.get("origin");
+  // Browsers send Origin on WebSocket handshakes; originless clients are non-browser transports.
+  if (!origin) return;
+  if (origin !== browserRequestOrigin(request, env)) {
+    throw forbidden("terminal websocket origin is invalid");
+  }
 }
