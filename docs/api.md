@@ -523,6 +523,8 @@ An adapter-reported `failed` workspace is not locally terminal until Crabfleet c
 
 Visible session owner, user with a current named viewer/controller grant, current delegated controller, SSH gateway linked-key identity, scoped session agent, or a public shared-link token for read-only sessions. In shared tenancy mode, legacy maintainer/owner visibility also applies. Multiplex WebSocket endpoint used by the Ghostty WASM session grid, Go CLI, and SSH gateway. One socket can subscribe to multiple interactive sessions, receive PTY output frames, resize terminals, and send input only when the current user has control.
 
+Cookie-authenticated browser handshakes must send an `Origin` that exactly matches the browser-visible request origin, including the configured trusted-proxy public origin when present. Cross-origin browser handshakes fail with `403` before the terminal hub accepts the socket. Authenticated SSH gateway and session-agent clients use their service credentials instead; originless handshakes remain available to non-browser clients.
+
 The wire format is a compact binary frame:
 
 ```text

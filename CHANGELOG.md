@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Reject cross-origin browser terminal WebSocket handshakes before ambient session cookies can reach the terminal hub, while preserving authenticated service clients and originless non-browser clients, thanks @Hinotoi-agent.
 - Require every GitHub Actions session resume to prove the existing stable owner before rotating its agent credential, preventing ownerless `workKey` reuse from taking over another action session, thanks @Hinotoi-agent.
 - Fit the native Mac VNC desktop flush to the available window, continuously synchronize its remote resolution to the viewport and current display pixel density when supported, compact the surrounding controls, and use an available stable signing identity for local app bundles so Keychain access survives rebuilds.
 - Preserve the real same-origin `Origin` header on browser-approved native Mac authorization forms so Chromium can complete the device link without weakening CSRF validation.

@@ -105,6 +105,7 @@ export function validateTerminalWebSocketOrigin(
   if (serviceAuthenticated) return;
 
   const origin = request.headers.get("origin");
+  // Browsers send Origin on WebSocket handshakes; originless clients are non-browser transports.
   if (!origin) return;
   if (origin !== browserRequestOrigin(request, env)) {
     throw forbidden("terminal websocket origin is invalid");
