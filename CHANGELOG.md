@@ -17,8 +17,7 @@
 - Let app-owned macOS desktop hosting start in view-only mode with Screen Recording alone; Accessibility is now optional and enables remote keyboard and pointer input.
 - Use Tailscale's CLI entry point for unattended macOS desktop hosting so background startup can resolve the active tailnet without trying to launch the Tailscale GUI.
 - Let the native macOS bundle use a stable Apple Development or Developer ID signing identity, with optional hardened-runtime timestamping, so privacy grants can survive iterative rebuilds and distribution builds are ready for notarization.
-- Add atomically claimed recurring card intervals with constant-time catch-up, crash-recoverable leases, scheduler/API proof, and coalescing for active or capacity-blocked runs, thanks @Jhacarreiro.
-- Reuse `@openclaw/libterminal` for terminal protocol codecs, Worker relays, Ghostty assets, and browser hub transport while keeping Crabfleet authorization and session policy local.
+- Move browser terminal transport onto the shared `@openclaw/libterminal` hub while keeping Crabfleet authorization and session policy local.
 - Update `@openclaw/libterminal` to 0.3.1 for terminal lifecycle, Worker asset generation, and package-validation fixes.
 - Add private-by-default tenant isolation for cards and sessions, trusted-proxy automatic onboarding, stable owner identities, expiring named viewer/controller grants with UI/API revocation, and current authorization checks across terminal, desktop, diagnostics, checkpoints, logs, transcripts, metadata, cleanup, and child-session paths.
 - Revalidate named principals against current authentication policy, migrate only unambiguous legacy subjects, reject subjectless private control approvals, and scope Fleet policy totals to visible sessions.
@@ -29,6 +28,11 @@
 - Fix local Vite development with `@openclaw/libterminal` by reserving Worker-served Ghostty aliases for production builds and serving the local WASM, icons, and logo without generated placeholders.
 - Keep the mobile navigation and named-access dialog within narrow viewports.
 - Keep each agent credential scoped to its authenticated session and direct children instead of inheriting access to every session owned by the same human.
+
+## 0.2.1 - 2026-06-18
+
+- Add atomically claimed recurring card intervals with constant-time catch-up, crash-recoverable leases, scheduler/API proof, and coalescing for active or capacity-blocked runs, thanks @Jhacarreiro.
+- Reuse `@openclaw/libterminal` for terminal protocol codecs, Worker relays, Ghostty assets, and browser lifecycle while keeping Crabfleet authorization and session policy local.
 - Fix automated Worker deployments by converging the app Custom Domain with the DNS-scoped deployment token instead of requiring zone-route access from the Worker token.
 
 ## 0.2.0 - 2026-06-15
