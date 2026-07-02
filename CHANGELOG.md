@@ -1,5 +1,7 @@
 # Changelog
 
+## Unreleased
+
 ## 0.3.0 - 2026-07-02
 
 - Reject cross-origin browser terminal WebSocket handshakes before ambient session cookies can reach the terminal hub, while preserving authenticated service clients and originless non-browser clients, thanks @Hinotoi-agent.
