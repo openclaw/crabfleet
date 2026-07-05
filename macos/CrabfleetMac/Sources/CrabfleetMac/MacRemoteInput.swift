@@ -5,6 +5,11 @@ import Foundation
 protocol RemoteInputForwarding: Sendable {
   func keyEvent(down: Bool, keysym: UInt32)
   func pointerEvent(buttonMask: UInt8, x: UInt16, y: UInt16)
+  func updateFrameSize(width: Int, height: Int)
+}
+
+extension RemoteInputForwarding {
+  func updateFrameSize(width: Int, height: Int) {}
 }
 
 final class MacRemoteInputController: RemoteInputForwarding, @unchecked Sendable {
@@ -13,10 +18,24 @@ final class MacRemoteInputController: RemoteInputForwarding, @unchecked Sendable
     label: "org.openclaw.crabfleet.remote-input",
     qos: .userInteractive
   )
+  private let frameSizeLock = NSLock()
+  private var frameWidth: Int
+  private var frameHeight: Int
   private var previousButtonMask: UInt8 = 0
 
   init(descriptor: CapturedDisplayDescriptor) {
     self.descriptor = descriptor
+    frameWidth = descriptor.frameWidth
+    frameHeight = descriptor.frameHeight
+  }
+
+  /// Keeps pointer scaling aligned with the announced framebuffer size after
+  /// a client-requested desktop resize.
+  func updateFrameSize(width: Int, height: Int) {
+    frameSizeLock.lock()
+    frameWidth = width
+    frameHeight = height
+    frameSizeLock.unlock()
   }
 
   static var isAccessibilityGranted: Bool {
@@ -105,8 +124,12 @@ final class MacRemoteInputController: RemoteInputForwarding, @unchecked Sendable
   }
 
   private func mappedLocation(x: UInt16, y: UInt16) -> CGPoint {
-    let width = max(descriptor.frameWidth - 1, 1)
-    let height = max(descriptor.frameHeight - 1, 1)
+    frameSizeLock.lock()
+    let currentFrameWidth = frameWidth
+    let currentFrameHeight = frameHeight
+    frameSizeLock.unlock()
+    let width = max(currentFrameWidth - 1, 1)
+    let height = max(currentFrameHeight - 1, 1)
     let xRatio = min(max(CGFloat(x) / CGFloat(width), 0), 1)
     let yRatio = min(max(CGFloat(y) / CGFloat(height), 0), 1)
     return CGPoint(

@@ -253,12 +253,14 @@ public final class VNCConnection: NSObjectOrAnyObject, @unchecked Sendable {
 			VNCPseudoEncodingType.desktopSize.rawValue,
 			VNCPseudoEncodingType.desktopName.rawValue,
 			VNCPseudoEncodingType.cursor.rawValue,
-			// TODO: Implement
-//			VNCPseudoEncodingType.extendedClipboard.rawValue,
 
             // TODO: Make configurable
 			VNCPseudoEncodingType.compressionLevel6.rawValue
 		])
+
+		if settings.clipboardMode != .disabled {
+			encs.append(VNCPseudoEncodingType.extendedClipboard.rawValue)
+		}
 
 		if usesTightEncoding {
             // TODO: Make configurable

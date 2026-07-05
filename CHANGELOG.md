@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- Exchange full UTF-8 clipboard text between the native Mac viewer, Share This Mac hosts, and any Extended Clipboard-capable VNC server by completing the RoyalVNCKit fork's extension stub, keeping Latin-1 cut text as the fallback and dropping malformed extension bodies without tearing down the connection.
+- Add persisted send-only and receive-only clipboard directions to the native viewer's focus toolbar; automatic sync respects the direction while the explicit Send and Get actions keep working.
+- Sync the host Mac's clipboard with the connected peer in both directions during Share This Mac sessions, with a pre-share opt-out, echo suppression, and the shared 1 MiB text bound; previously client cut text was discarded and the host never sent its clipboard.
+- Let Share This Mac capture a chosen display instead of always the primary one.
+- Honor viewer desktop-size requests in Share This Mac by announcing ExtendedDesktopSize, aspect-fitting the request up to the display's native pixel resolution, and re-targeting the live capture, so the shared desktop follows the viewer window.
+- Add a "Start sharing when I log in" toggle that registers the bundled app as a login item and auto-starts the private share for unattended access.
+- Fix Share This Mac connections on current macOS by binding the listener port wide and requiring the exact Tailscale local address per accepted connection before any protocol bytes; the previous required-local-endpoint bind made every accepted connection fail with EADDRINUSE.
+
 ## 0.3.0 - 2026-07-02
 
 - Reject cross-origin browser terminal WebSocket handshakes before ambient session cookies can reach the terminal hub, while preserving authenticated service clients and originless non-browser clients, thanks @Hinotoi-agent.

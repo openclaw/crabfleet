@@ -1,3 +1,4 @@
+import AppKit
 import CoreImage
 import Foundation
 import ImageIO
@@ -33,6 +34,19 @@ struct CapturedDisplayDescriptor: Equatable, Sendable {
   let displayBounds: CGRect
   let frameWidth: Int
   let frameHeight: Int
+  let sourcePixelWidth: Int
+  let sourcePixelHeight: Int
+}
+
+struct ShareableDisplayOption: Identifiable, Equatable, Sendable {
+  let id: CGDirectDisplayID
+  let label: String
+  let width: Int
+  let height: Int
+
+  var detail: String {
+    "\(label) · \(width)×\(height)"
+  }
 }
 
 final class MacScreenCapture: NSObject, @unchecked Sendable {
@@ -49,18 +63,42 @@ final class MacScreenCapture: NSObject, @unchecked Sendable {
   private var sequence: UInt64 = 0
   private var consumerActive = false
   private var stream: SCStream?
+  private var configuration: SCStreamConfiguration?
 
-  func start() async throws -> CapturedDisplayDescriptor {
+  static func availableDisplays() async -> [ShareableDisplayOption] {
+    guard let shareableContent = try? await SCShareableContent.current else { return [] }
+    return shareableContent.displays.enumerated().map { index, display in
+      ShareableDisplayOption(
+        id: display.displayID,
+        label: Self.displayName(for: display.displayID) ?? "Display \(index + 1)",
+        width: display.width,
+        height: display.height
+      )
+    }
+  }
+
+  func start(displayID requestedDisplayID: CGDirectDisplayID? = nil) async throws
+    -> CapturedDisplayDescriptor
+  {
     guard CGPreflightScreenCaptureAccess() else {
       throw PrivateMacShareError.screenRecordingDenied
     }
 
-    let displayID = CGMainDisplayID()
     let shareableContent = try await SCShareableContent.current
-    guard let display = shareableContent.displays.first(where: { $0.displayID == displayID }) else {
+    // Fall back to the main display when a saved selection is disconnected.
+    let display =
+      shareableContent.displays.first(where: { $0.displayID == requestedDisplayID })
+      ?? shareableContent.displays.first(where: { $0.displayID == CGMainDisplayID() })
+    guard let display else {
       throw PrivateMacShareError.captureUnavailable
     }
+    let displayID = display.displayID
 
+    let sourcePixels = Self.sourcePixelDimensions(
+      displayID: displayID,
+      pointWidth: display.width,
+      pointHeight: display.height
+    )
     let dimensions = Self.captureDimensions(
       sourceWidth: display.width, sourceHeight: display.height)
     let configuration = SCStreamConfiguration()
@@ -78,18 +116,32 @@ final class MacScreenCapture: NSObject, @unchecked Sendable {
     try stream.addStreamOutput(self, type: .screen, sampleHandlerQueue: captureQueue)
     try await stream.startCapture()
     self.stream = stream
+    self.configuration = configuration
 
     return CapturedDisplayDescriptor(
       displayID: displayID,
       displayBounds: CGDisplayBounds(displayID),
       frameWidth: dimensions.width,
-      frameHeight: dimensions.height
+      frameHeight: dimensions.height,
+      sourcePixelWidth: sourcePixels.width,
+      sourcePixelHeight: sourcePixels.height
     )
+  }
+
+  /// Re-targets the running stream to a new output size for remote-resize.
+  func updateOutputSize(width: Int, height: Int) async throws {
+    guard let stream, let configuration else {
+      throw PrivateMacShareError.captureUnavailable
+    }
+    configuration.width = width
+    configuration.height = height
+    try await stream.updateConfiguration(configuration)
   }
 
   func stop() async {
     guard let stream else { return }
     self.stream = nil
+    self.configuration = nil
     try? await stream.stopCapture()
     await frameStore.clear()
   }
@@ -112,6 +164,50 @@ final class MacScreenCapture: NSObject, @unchecked Sendable {
     let scaledWidth = max(2, Int((width * scale).rounded(.down)) & ~1)
     let scaledHeight = max(2, Int((height * scale).rounded(.down)) & ~1)
     return (scaledWidth, scaledHeight)
+  }
+
+  /// Aspect-fits the captured display into a client-requested framebuffer
+  /// size, bounded by the display's native pixel resolution and a global cap.
+  static func resizedDimensions(
+    requestedWidth: Int,
+    requestedHeight: Int,
+    sourcePixelWidth: Int,
+    sourcePixelHeight: Int
+  ) -> (width: Int, height: Int) {
+    let maximumWidth = 2_560.0
+    let maximumHeight = 1_600.0
+    let requestWidth = min(max(Double(requestedWidth), 320), maximumWidth)
+    let requestHeight = min(max(Double(requestedHeight), 240), maximumHeight)
+    let sourceWidth = max(Double(sourcePixelWidth), 1)
+    let sourceHeight = max(Double(sourcePixelHeight), 1)
+    let scale = min(1, requestWidth / sourceWidth, requestHeight / sourceHeight)
+    let width = max(2, Int((sourceWidth * scale).rounded(.down)) & ~1)
+    let height = max(2, Int((sourceHeight * scale).rounded(.down)) & ~1)
+    return (width, height)
+  }
+
+  private static func sourcePixelDimensions(
+    displayID: CGDirectDisplayID,
+    pointWidth: Int,
+    pointHeight: Int
+  ) -> (width: Int, height: Int) {
+    guard let mode = CGDisplayCopyDisplayMode(displayID) else {
+      return (pointWidth, pointHeight)
+    }
+    return (mode.pixelWidth, mode.pixelHeight)
+  }
+
+  private static func displayName(for displayID: CGDirectDisplayID) -> String? {
+    for screen in NSScreen.screens {
+      let key = NSDeviceDescriptionKey("NSScreenNumber")
+      guard let number = screen.deviceDescription[key] as? NSNumber,
+        number.uint32Value == displayID
+      else {
+        continue
+      }
+      return screen.localizedName
+    }
+    return nil
   }
 
   private func nextSequence() -> UInt64 {

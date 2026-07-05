@@ -32,6 +32,12 @@ extension VNCConnection: VNCClipboardMonitorDelegate {
 
 		guard settings.clipboardMode == .systemPasteboard else { return }
 
-		enqueueClientCutTextMessage(text)
+		// Route through the extended-aware sender so UTF-8 text reaches
+		// Extended Clipboard servers instead of being dropped as non-Latin-1.
+		do {
+			try sendClipboardText(text)
+		} catch {
+			logger.logWarning("Ignoring unsendable clipboard change: \(error)")
+		}
 	}
 }

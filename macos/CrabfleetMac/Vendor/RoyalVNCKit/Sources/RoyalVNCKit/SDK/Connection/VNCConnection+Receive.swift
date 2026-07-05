@@ -104,10 +104,68 @@ private extension VNCConnection {
 		let serverCutText = try await VNCProtocol.ServerCutText.receive(connection: connection,
 																		logger: logger)
 
-		let text = serverCutText.text
-
 		logger.logDebug("Received Clipboard Text from Server")
 
+		if let extended = serverCutText.extended {
+			await handleExtendedClipboardMessage(extended)
+
+			return
+		}
+
+		// A malformed extended body is dropped, not treated as empty legacy text.
+		guard !serverCutText.isExtended else { return }
+
+		await deliverServerClipboardText(serverCutText.text)
+	}
+
+	func handleExtendedClipboardMessage(_ message: VNCExtendedClipboardMessage) async {
+		guard settings.clipboardMode != .disabled else { return }
+
+		switch message {
+			case .caps(let caps):
+				state.extendedClipboardServerCaps = caps
+
+				// Announce the text format plus every action so servers may
+				// push provide messages without a notify/request round trip.
+				let capsBody = VNCExtendedClipboard.encodeCaps(
+					maximumUnsolicitedTextBytes: UInt32(VNCProtocolLimits.maximumClipboardBytes)
+				)
+
+				enqueueClientToServerMessage(VNCProtocol.ExtendedClientCutText(body: capsBody))
+
+			case .notify(let hasText):
+				guard hasText else { return }
+
+				enqueueClientToServerMessage(VNCProtocol.ExtendedClientCutText(
+					body: VNCExtendedClipboard.encodeRequestText()
+				))
+
+			case .provide(let text):
+				guard let text else { return }
+
+				await deliverServerClipboardText(text)
+
+			case .request(let wantsText):
+				guard wantsText else { return }
+
+				let text = state.lastExtendedClipboardText ?? ""
+
+				guard let body = try? VNCExtendedClipboard.encodeProvide(text: text) else {
+					return
+				}
+
+				enqueueClientToServerMessage(VNCProtocol.ExtendedClientCutText(body: body))
+
+			case .peek:
+				enqueueClientToServerMessage(VNCProtocol.ExtendedClientCutText(
+					body: VNCExtendedClipboard.encodeNotify(
+						hasText: state.lastExtendedClipboardText != nil
+					)
+				))
+		}
+	}
+
+	func deliverServerClipboardText(_ text: String) async {
 		switch settings.clipboardMode {
 			case .disabled:
 				return

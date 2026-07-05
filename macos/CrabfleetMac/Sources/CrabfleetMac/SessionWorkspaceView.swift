@@ -99,6 +99,13 @@ private struct FocusToolbar: View {
             }
             .disabled(!clipboard.hasRemoteClipboard(for: target.id))
             Divider()
+            Picker("Sync Direction", selection: $clipboard.direction) {
+              ForEach(ClipboardCoordinator.SyncDirection.allCases) { direction in
+                Text(direction.title).tag(direction)
+              }
+            }
+            .pickerStyle(.inline)
+            Divider()
             Text(clipboard.state.title)
           } label: {
             FocusControlPill(

@@ -15,5 +15,13 @@ coalesces inbound clipboard delivery; paces framebuffer pulls; renders an
 attached warm framebuffer immediately; negotiates RFB 3.3/3.7/3.8 security
 framing; prefers supported Apple Remote Desktop authentication when macOS
 Screen Sharing advertises it; validates palette ranges; and materializes bounded framebuffer
-previews. Keep product changes in the Crabfleet target; keep this fork small
-and suitable for upstreaming.
+previews.
+
+The fork completes the upstream Extended Clipboard stub (pseudo-encoding
+`0xc0a1e5ce`): the client advertises the extension when clipboard sync is
+enabled, answers server caps, exchanges UTF-8 text through bounded
+notify/request/provide flows with one-shot zlib coding, and transparently
+falls back to Latin-1 cut text against servers without the extension. The
+`VNCExtendedClipboard` codec is public so the application's own RFB host can
+speak the same dialect. Keep product changes in the Crabfleet target; keep
+this fork small and suitable for upstreaming.

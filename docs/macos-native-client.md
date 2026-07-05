@@ -41,12 +41,16 @@ polls or writes `NSPasteboard.general` directly. One app-owned coordinator sends
 only stable local text changes to the focused desktop, baselines rather than
 sending the existing clipboard on focus/connect, suppresses server echoes, and
 quarantines clipboard text received from background desktops. The focus toolbar
-provides explicit Send Clipboard and Get Clipboard recovery actions. Clipboard
+provides explicit Send Clipboard and Get Clipboard recovery actions plus a
+persisted sync direction: bidirectional, send-only, or receive-only. Directional
+modes gate only the automatic flows; the explicit actions still work. Clipboard
 sync remains opt-in. A deliberate local copy supersedes a quarantined value for
 the focused desktop. Versioned pasteboard snapshots and bounded SHA-256 echo
 fingerprints prevent delayed server echoes from erasing a newer copy without
-retaining clipboard history. Inbound and outbound text is capped at 1 MiB;
-standard RFB clipboard text must encode losslessly as ISO-8859-1, and
+retaining clipboard history. Inbound and outbound text is capped at 1 MiB.
+The connection advertises the RFB Extended Clipboard extension and exchanges
+full UTF-8 text with servers that negotiate it; against servers without the
+extension, standard cut text must encode losslessly as ISO-8859-1 and
 unsupported text is rejected instead of silently becoming empty data.
 
 ## Share This Mac
@@ -57,9 +61,18 @@ relay, Cloudflare, or the Crabfleet Worker.
 
 1. Tailscale status must report `BackendState=Running`, a valid active tailnet,
    an online signed-in user, and a CGNAT address in `100.64.0.0/10`.
-2. The app captures the main display at a bounded even resolution no larger
-   than 1600×1000 and encodes at most 15 Tight/JPEG frames per second.
-3. An RFB listener binds only to that exact Tailscale IPv4 address on port 5901.
+2. The app captures the selected display (default: main) at a bounded even
+   resolution no larger than 1600×1000 and encodes at most 15 Tight/JPEG frames
+   per second. When the connected viewer requests a desktop size, the host
+   re-targets the capture to aspect-fit that request up to the display's native
+   pixel resolution (bounded at 2560×1600), so the remote desktop follows the
+   viewer window.
+3. An RFB listener binds port 5901. Binding the Tailscale address directly is
+   not viable on current macOS — accepted Network-framework child connections
+   re-bind a required local endpoint and fail with `EADDRINUSE` — so instead
+   every accepted connection must prove it arrived on the exact Tailscale
+   address before the server emits a single protocol byte; connections on any
+   other interface are dropped immediately.
 4. Before sending the RFB banner or any framebuffer data, the app resolves the
    peer through `tailscale whois` and requires an authorized node with the same
    user ID and login as the host.
@@ -67,6 +80,15 @@ relay, Cloudflare, or the Crabfleet Worker.
    stable endpoint in the signed-in user's private Fleet registry. The receiving
    app discovers and directly connects that card with no VNC password. Quick
    Connect with the displayed `vnc://100.x.y.z:5901` address remains a fallback.
+6. Clipboard sync with the connected peer is on by default and can be disabled
+   before starting the share. Text copied on either Mac lands on the other
+   through Extended Clipboard UTF-8 when the viewer negotiates it, with
+   ISO-8859-1 cut text as the fallback; text that cannot be represented is
+   dropped rather than mangled.
+7. "Start sharing when I log in" registers the bundled app as a login item and
+   persists an auto-share preference, so the Mac comes back reachable after a
+   reboot without manual setup (the equivalent of `--share-this-mac` for
+   unattended hosts).
 
 After the first Screen Recording grant, restart the bundled app before starting
 the share. Ad-hoc development signatures do not provide a stable TCC identity,
@@ -107,16 +129,17 @@ from the build, or obtain written provenance approval.
 
 ## Current viewer limits
 
-- Text clipboard only; the current protocol path is ISO-8859-1, not complete
-  Unicode, image, or file clipboard support.
-- Clipboard mode is bidirectional or off, with explicit Send Clipboard and Get
-  Clipboard recovery. Directional send-only/receive-only modes remain future.
+- Text clipboard only. UTF-8 flows end to end when the server negotiates the
+  Extended Clipboard extension; image and file clipboard formats are not
+  implemented, and servers without the extension remain limited to ISO-8859-1.
 - The fleet deck uses paced framebuffer decoding plus cached previews, not six
   continuously rendering Metal surfaces. A production live mosaic should use
   one app-owned Metal compositor for zero-copy multi-tile rendering.
 - No input method editor integration.
-- Server-driven framebuffer resize works; client-requested remote resize does
-  not exist yet.
+- Client-requested remote resize works against servers that advertise
+  ExtendedDesktopSize, including Share This Mac hosts, which aspect-fit the
+  request instead of adopting arbitrary layouts; multi-screen layout requests
+  remain unsupported.
 - RoyalVNCKit provides raw TCP only. Generic production connections must remain
   bound to loopback behind an authenticated SSH tunnel; Share This Mac is the
   identity-gated tailnet exception.
@@ -125,10 +148,10 @@ from the build, or obtain written provenance approval.
   disabled until their parsers and cryptography are replaced or fully tested.
 - Password authentication uses a process-global DES key schedule. The fork
   serializes that path; replace it before concurrent password-auth sessions.
-- App-owned hosting is primary-display only, single-client, lossy Tight/JPEG,
-  and capped at 1600×1000 and 15 fps.
-- Host-to-client clipboard, audio, multi-display selection, display resize, and
-  unattended launch-at-login are not implemented.
+- App-owned hosting shares one selected display at a time to a single client,
+  as lossy Tight/JPEG at most 15 fps, capped at 1600×1000 until the viewer
+  requests a size (then up to native pixels, bounded at 2560×1600).
+- Audio is not implemented.
 - A connecting peer must be another device owned by the same Tailscale user.
   Team-wide or named-user sharing is intentionally unsupported.
 
@@ -136,8 +159,8 @@ from the build, or obtain written provenance approval.
 
 Keep further changes narrow and upstreamable:
 
-1. UTF-8 extended clipboard negotiation, advertised server limits, images,
-   files, and directional clipboard modes.
+1. Extended clipboard image and file formats on top of the existing UTF-8 text
+   negotiation.
 2. Public read-only framebuffer IOSurface plus update notifications so one
    Metal compositor can render all fleet previews without one drawable and
    command queue per card.
