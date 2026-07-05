@@ -12,6 +12,17 @@ enum PrivateMacShareLaunchMode {
   ) -> Bool {
     arguments.dropFirst().contains(argument) || environment[environmentKey] == "1"
   }
+
+  /// Explicit launch flags plus the persisted "start sharing when I log in"
+  /// preference set from the share sheet.
+  static func isRequested(
+    arguments: [String] = ProcessInfo.processInfo.arguments,
+    environment: [String: String] = ProcessInfo.processInfo.environment,
+    defaults: UserDefaults = .standard
+  ) -> Bool {
+    isEnabled(arguments: arguments, environment: environment)
+      || PrivateMacShareController.isAutoShareRequested(defaults: defaults)
+  }
 }
 
 enum VNCConnectionLaunchMode {
@@ -40,7 +51,7 @@ final class CrabfleetApplicationDelegate: NSObject, NSApplicationDelegate {
   private var autoShareTask: Task<Void, Never>?
 
   func applicationDidFinishLaunching(_ notification: Notification) {
-    guard PrivateMacShareLaunchMode.isEnabled() else { return }
+    guard PrivateMacShareLaunchMode.isRequested() else { return }
     NSApp.activate(ignoringOtherApps: true)
     let controller = PrivateMacShareController()
     shareController = controller

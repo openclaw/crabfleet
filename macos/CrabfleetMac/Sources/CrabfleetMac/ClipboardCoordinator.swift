@@ -32,12 +32,41 @@ final class ClipboardCoordinator: ObservableObject {
     }
   }
 
+  /// Which automatic flows are active; explicit Send/Get actions always work.
+  enum SyncDirection: String, CaseIterable, Identifiable {
+    case bidirectional
+    case sendOnly
+    case receiveOnly
+
+    var id: String { rawValue }
+
+    var title: String {
+      switch self {
+      case .bidirectional: "Send & Receive"
+      case .sendOnly: "Send Only"
+      case .receiveOnly: "Receive Only"
+      }
+    }
+  }
+
+  static let directionDefaultsKey = "org.openclaw.crabfleet.clipboard.direction"
+
   @Published private(set) var state: State = .off
   @Published private(set) var pendingRemoteTargetIDs: Set<String> = []
+
+  @Published var direction: SyncDirection {
+    didSet {
+      defaults.set(direction.rawValue, forKey: Self.directionDefaultsKey)
+      if direction == .receiveOnly {
+        candidate = nil
+      }
+    }
+  }
 
   private weak var focusedSession: (any ClipboardSessionEndpoint)?
   private var focusedTargetID: String?
   private let pasteboard: NSPasteboard
+  private let defaults: UserDefaults
   private let pollingInterval: TimeInterval
   private let originType = NSPasteboard.PasteboardType(
     "org.openclaw.crabfleet.clipboard-origin"
@@ -57,11 +86,16 @@ final class ClipboardCoordinator: ObservableObject {
 
   init(
     pasteboard: NSPasteboard = .general,
-    pollingInterval: TimeInterval = 0.15
+    pollingInterval: TimeInterval = 0.15,
+    defaults: UserDefaults = .standard
   ) {
     self.pasteboard = pasteboard
     self.pollingInterval = pollingInterval
+    self.defaults = defaults
     self.lastObservedChangeCount = pasteboard.changeCount
+    direction =
+      defaults.string(forKey: Self.directionDefaultsKey)
+      .flatMap(SyncDirection.init(rawValue:)) ?? .bidirectional
   }
 
   deinit {
@@ -127,6 +161,14 @@ final class ClipboardCoordinator: ObservableObject {
       focusedSession.isClipboardConnected
     else {
       pendingRemoteTargetIDs.insert(targetID)
+      return
+    }
+
+    // Send-only keeps remote text retrievable through Get Remote Clipboard
+    // without ever writing the Mac pasteboard automatically.
+    guard direction != .sendOnly else {
+      pendingRemoteTargetIDs.insert(targetID)
+      state = .remoteAvailable
       return
     }
 
@@ -221,6 +263,12 @@ final class ClipboardCoordinator: ObservableObject {
     }
     let text = snapshot.text
 
+    guard direction != .receiveOnly else {
+      lastObservedChangeCount = changeCount
+      candidate = nil
+      return
+    }
+
     if candidate?.changeCount == changeCount, candidate?.text == text {
       lastObservedChangeCount = changeCount
       candidate = nil
@@ -281,6 +329,11 @@ final class ClipboardCoordinator: ObservableObject {
       focusedSession.clipboardEnabled,
       focusedSession.isClipboardConnected
     else {
+      return
+    }
+
+    guard direction != .sendOnly else {
+      state = .synced
       return
     }
 

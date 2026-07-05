@@ -64,6 +64,40 @@ struct PrivateMacShareSheet: View {
       }
       .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
 
+      VStack(alignment: .leading, spacing: 10) {
+        if controller.availableDisplays.count > 1 {
+          Picker("Shared display", selection: $controller.selectedDisplayID) {
+            ForEach(controller.availableDisplays) { display in
+              Text(display.detail).tag(display.id)
+            }
+          }
+          .disabled(controller.phase.isRunning)
+          .help(
+            controller.phase.isRunning
+              ? "Stop sharing to switch displays."
+              : "Which display the connected peer sees."
+          )
+        }
+
+        Toggle(
+          "Sync clipboard with the connected device",
+          isOn: $controller.clipboardSyncEnabled
+        )
+        .disabled(controller.phase.isRunning)
+        .help("Text copied on either Mac is available on the other while connected.")
+
+        Toggle(
+          "Start sharing when I log in",
+          isOn: Binding(
+            get: { controller.launchAtLoginEnabled },
+            set: { controller.setLaunchAtLogin($0) }
+          )
+        )
+        .help("Adds Crabfleet as a login item and starts this private share automatically.")
+      }
+      .toggleStyle(.switch)
+      .controlSize(.small)
+
       if controller.phase.isRunning, let address = controller.connectionAddress {
         VStack(alignment: .leading, spacing: 10) {
           Text("CONNECT FROM YOUR OTHER MAC")

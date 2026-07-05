@@ -20,6 +20,8 @@ extension VNCConnection {
 		private var _incrementalUpdatesEnabled = false
 		private var _areContinuousUpdatesSupported = false
 		private var _areContinuousUpdatesEnabled = false
+		private var _extendedClipboardServerCaps: VNCExtendedClipboardCaps?
+		private var _lastExtendedClipboardText: String?
 
 		var disconnectRequested: Bool { withLock { _disconnectRequested } }
 
@@ -76,6 +78,16 @@ extension VNCConnection {
 		var areContinuousUpdatesEnabled: Bool {
 			get { withLock { _areContinuousUpdatesEnabled } }
 			set { withLock { _areContinuousUpdatesEnabled = newValue } }
+		}
+
+		var extendedClipboardServerCaps: VNCExtendedClipboardCaps? {
+			get { withLock { _extendedClipboardServerCaps } }
+			set { withLock { _extendedClipboardServerCaps = newValue } }
+		}
+
+		var lastExtendedClipboardText: String? {
+			get { withLock { _lastExtendedClipboardText } }
+			set { withLock { _lastExtendedClipboardText = newValue } }
 		}
 
 		func requestDisconnect() -> Bool {

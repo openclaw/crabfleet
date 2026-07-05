@@ -308,7 +308,11 @@ struct TailscaleWhoisDocument: Decodable, Sendable {
   }
 }
 
-struct TailnetPeerAuthorizer: Sendable {
+protocol TailnetPeerAuthorizing: Sendable {
+  func authorize(remoteAddress: String) async -> Bool
+}
+
+struct TailnetPeerAuthorizer: TailnetPeerAuthorizing, Sendable {
   let runner: any TailscaleCommandRunning
   let expectedIdentity: TailnetIdentity
 

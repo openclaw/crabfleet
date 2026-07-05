@@ -375,7 +375,9 @@ struct PrivateMacShareTests {
         displayID: 0,
         displayBounds: CGRect(x: 0, y: 0, width: 64, height: 64),
         frameWidth: 64,
-        frameHeight: 64
+        frameHeight: 64,
+        sourcePixelWidth: 64,
+        sourcePixelHeight: 64
       ),
       input: NoopRemoteInput(),
       port: port,
@@ -405,6 +407,106 @@ struct PrivateMacShareTests {
     #expect(session.framebufferUpdateCount > 0)
     #expect(session.framebuffer?.size.width == 64)
     #expect(session.framebuffer?.size.height == 64)
+  }
+
+  @Test @MainActor
+  func syncsUTF8ClipboardAndNegotiatesResizeOverLoopback() async throws {
+    // Full-protocol end-to-end: the production server and the RoyalVNCKit
+    // client exchange handshake, Tight frames, Extended Clipboard, and
+    // ExtendedDesktopSize over a real TCP connection on loopback. The
+    // tailnet-specific pieces (address binding, whois) are injected.
+    let identity = TailnetIdentity(
+      tailnetName: "example.com",
+      loginName: "tester@example.com",
+      dnsName: "workstation.example.ts.net.",
+      hostName: "Workstation",
+      ipv4Address: "127.0.0.1",
+      userID: 42
+    )
+    let capture = MacScreenCapture()
+    let jpeg = try #require(testJPEG())
+    await capture.frameStore.update(
+      .init(jpegData: jpeg, sequence: 1, width: 64, height: 64)
+    )
+
+    let hostPasteboard = NSPasteboard(name: .init("CrabfleetMacTests.host.\(UUID().uuidString)"))
+    hostPasteboard.clearContents()
+    let hostClipboard = HostClipboardBridge(pasteboard: hostPasteboard, pollingInterval: 0.02)
+
+    let port: UInt16 = 5_921
+    let server = TailnetRFBServer(
+      identity: identity,
+      runner: StaticTailscaleRunner(output: ""),
+      capture: capture,
+      descriptor: .init(
+        displayID: 0,
+        displayBounds: CGRect(x: 0, y: 0, width: 64, height: 64),
+        frameWidth: 64,
+        frameHeight: 64,
+        sourcePixelWidth: 256,
+        sourcePixelHeight: 256
+      ),
+      input: NoopRemoteInput(),
+      clipboard: hostClipboard,
+      peerAuthorizer: LoopbackPeerAuthorizer(),
+      port: port,
+      eventHandler: { _ in }
+    )
+    try server.start()
+    defer { server.stop() }
+    try await Task.sleep(for: .milliseconds(250))
+
+    let viewerPasteboard = NSPasteboard(
+      name: .init("CrabfleetMacTests.viewer.\(UUID().uuidString)")
+    )
+    viewerPasteboard.clearContents()
+    let coordinator = ClipboardCoordinator(pasteboard: viewerPasteboard, pollingInterval: 0.02)
+    let session = VNCSessionController(targetID: "smoke", clipboardCoordinator: coordinator)
+    coordinator.focus(session: session, targetID: "smoke")
+    session.connect(
+      host: identity.ipv4Address,
+      port: port,
+      username: "",
+      password: ""
+    )
+    defer { session.disconnect() }
+
+    // The Extended Clipboard caps handshake must complete on the client.
+    try await waitFor { session.connection?.supportsUTF8Clipboard == true }
+
+    // Viewer to host: emoji only survives the extended UTF-8 path.
+    viewerPasteboard.clearContents()
+    viewerPasteboard.setString("client copy 🚀", forType: .string)
+    try await waitFor { hostPasteboard.string(forType: .string) == "client copy 🚀" }
+
+    // Host to server-cut-text: the host push lands on the viewer pasteboard.
+    hostPasteboard.clearContents()
+    hostPasteboard.setString("host copy 🦀", forType: .string)
+    try await waitFor { viewerPasteboard.string(forType: .string) == "host copy 🦀" }
+
+    // The ExtendedDesktopSize announce must unlock client resize requests.
+    try await waitFor { session.requestDesktopSize(.init(width: 128, height: 128)) }
+
+    // The stream must keep flowing after the resize exchange (this test
+    // fixture has no live capture stream, so the server answers the resize
+    // with an out-of-resources status and continues serving frames).
+    let updates = session.framebufferUpdateCount
+    try await waitFor { session.framebufferUpdateCount > updates }
+    #expect(session.phase == .connected)
+  }
+
+  @MainActor
+  private func waitFor(
+    timeout: Duration = .seconds(15),
+    _ condition: @escaping @MainActor () -> Bool
+  ) async throws {
+    let clock = ContinuousClock()
+    let deadline = clock.now.advanced(by: timeout)
+    while clock.now < deadline {
+      if condition() { return }
+      try await Task.sleep(for: .milliseconds(25))
+    }
+    #expect(condition())
   }
 
   private func statusDocument() throws -> TailscaleStatusDocument {
@@ -489,4 +591,10 @@ private struct StaticTailscaleRunner: TailscaleCommandRunning {
 private struct NoopRemoteInput: RemoteInputForwarding {
   func keyEvent(down: Bool, keysym: UInt32) {}
   func pointerEvent(buttonMask: UInt8, x: UInt16, y: UInt16) {}
+}
+
+private struct LoopbackPeerAuthorizer: TailnetPeerAuthorizing {
+  func authorize(remoteAddress: String) async -> Bool {
+    remoteAddress == "127.0.0.1"
+  }
 }

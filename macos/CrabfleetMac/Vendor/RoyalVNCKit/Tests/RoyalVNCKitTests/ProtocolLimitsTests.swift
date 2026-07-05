@@ -228,13 +228,24 @@ struct ProtocolLimitsTests {
   }
 
   @Test
-  func rejectsUnadvertisedExtendedClipboardMessages() async {
-    let negativeLength = UInt32(bitPattern: Int32(-8))
-    let connection = BufferConnection(serverCutTextHeader(length: negativeLength))
+  func dropsMalformedExtendedClipboardBodiesWithoutDesynchronizing() async throws {
+    // Two action bits at once is invalid; the fully-read body must be dropped
+    // without tearing down the connection.
+    let malformedFlags: UInt32 =
+      VNCExtendedClipboard.requestAction | VNCExtendedClipboard.notifyAction
+    var payload = serverCutTextHeader(length: UInt32(bitPattern: Int32(-4)))
+    var bigEndianFlags = malformedFlags.bigEndian
+    withUnsafeBytes(of: &bigEndianFlags) { payload.append(contentsOf: $0) }
+    let connection = BufferConnection(payload)
 
-    await #expect(throws: (any Error).self) {
-      try await VNCProtocol.ServerCutText.receive(connection: connection, logger: VNCPrintLogger())
-    }
+    let message = try await VNCProtocol.ServerCutText.receive(
+      connection: connection,
+      logger: VNCPrintLogger()
+    )
+
+    #expect(message.extended == nil)
+    #expect(message.isExtended)
+    #expect(message.text.isEmpty)
   }
 
   @Test

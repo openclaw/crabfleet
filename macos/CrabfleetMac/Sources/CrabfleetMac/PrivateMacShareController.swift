@@ -1,6 +1,7 @@
 import AppKit
 import CoreGraphics
 import Foundation
+import ServiceManagement
 
 enum PrivateMacSharePermissionPolicy {
   static func canStart(
@@ -58,6 +59,9 @@ final class PrivateMacShareController: ObservableObject {
   }
 
   static let port: UInt16 = 5_901
+  nonisolated static let selectedDisplayDefaultsKey = "org.openclaw.crabfleet.share.display"
+  nonisolated static let clipboardSyncDefaultsKey = "org.openclaw.crabfleet.share.clipboard"
+  nonisolated static let autoShareDefaultsKey = "org.openclaw.crabfleet.share.auto-share"
 
   @Published private(set) var identity: TailnetIdentity?
   @Published private(set) var phase: Phase = .idle
@@ -68,21 +72,44 @@ final class PrivateMacShareController: ObservableObject {
   @Published private(set) var notice: String?
   @Published private(set) var isRefreshing = false
   @Published private(set) var registryPhase: RegistryPhase
+  @Published private(set) var availableDisplays: [ShareableDisplayOption] = []
+  @Published private(set) var launchAtLoginEnabled = false
+
+  @Published var selectedDisplayID: CGDirectDisplayID {
+    didSet {
+      defaults.set(Int(selectedDisplayID), forKey: Self.selectedDisplayDefaultsKey)
+    }
+  }
+
+  @Published var clipboardSyncEnabled: Bool {
+    didSet {
+      defaults.set(clipboardSyncEnabled, forKey: Self.clipboardSyncDefaultsKey)
+    }
+  }
 
   private let runner: (any TailscaleCommandRunning)?
   private let desktopRegistration: (any DesktopHostRegistering)?
   private let runnerInitializationError: Error?
+  private let defaults: UserDefaults
   private var capture: MacScreenCapture?
   private var server: TailnetRFBServer?
+  private var clipboardBridge: HostClipboardBridge?
   private var serverGeneration: UUID?
   private var registrationTask: Task<Void, Never>?
 
   init(
     runner: (any TailscaleCommandRunning)? = nil,
-    desktopRegistration: (any DesktopHostRegistering)? = CrabfleetDesktopRegistration()
+    desktopRegistration: (any DesktopHostRegistering)? = CrabfleetDesktopRegistration(),
+    defaults: UserDefaults = .standard
   ) {
     self.desktopRegistration = desktopRegistration
+    self.defaults = defaults
     registryPhase = desktopRegistration == nil ? .notConfigured : .registering
+    let savedDisplayID = defaults.object(forKey: Self.selectedDisplayDefaultsKey) as? Int
+    selectedDisplayID = savedDisplayID.map(CGDirectDisplayID.init) ?? CGMainDisplayID()
+    clipboardSyncEnabled =
+      defaults.object(forKey: Self.clipboardSyncDefaultsKey) as? Bool ?? true
+    launchAtLoginEnabled = SMAppService.mainApp.status == .enabled
     if let runner {
       self.runner = runner
       runnerInitializationError = nil
@@ -115,7 +142,40 @@ final class PrivateMacShareController: ObservableObject {
     notice = nil
     await loadIdentity()
     refreshPermissions()
+    await refreshDisplays()
+    launchAtLoginEnabled = SMAppService.mainApp.status == .enabled
     isRefreshing = false
+  }
+
+  /// Registers or removes the login item and remembers to auto-start the
+  /// share on launch, so this Mac stays reachable without manual setup.
+  func setLaunchAtLogin(_ enabled: Bool) {
+    do {
+      if enabled {
+        try SMAppService.mainApp.register()
+      } else {
+        try SMAppService.mainApp.unregister()
+      }
+      defaults.set(enabled, forKey: Self.autoShareDefaultsKey)
+      launchAtLoginEnabled = SMAppService.mainApp.status == .enabled
+    } catch {
+      launchAtLoginEnabled = SMAppService.mainApp.status == .enabled
+      notice =
+        "Could not update the login item: \(error.localizedDescription) "
+        + "(requires the bundled app, not a bare executable)"
+    }
+  }
+
+  nonisolated static func isAutoShareRequested(defaults: UserDefaults = .standard) -> Bool {
+    guard defaults.bool(forKey: autoShareDefaultsKey) else { return false }
+    guard SMAppService.mainApp.status == .enabled else {
+      // The login item was disabled outside the app (for example in System
+      // Settings); drop the stale request so a manual launch does not start
+      // sharing unexpectedly.
+      defaults.set(false, forKey: autoShareDefaultsKey)
+      return false
+    }
+    return true
   }
 
   func requestScreenRecordingPermission() async {
@@ -165,8 +225,9 @@ final class PrivateMacShareController: ObservableObject {
 
     let capture = MacScreenCapture()
     do {
-      let descriptor = try await capture.start()
+      let descriptor = try await capture.start(displayID: selectedDisplayID)
       let input = MacRemoteInputController(descriptor: descriptor)
+      let bridge = clipboardSyncEnabled ? HostClipboardBridge() : nil
       let generation = UUID()
       serverGeneration = generation
       let server = TailnetRFBServer(
@@ -175,6 +236,7 @@ final class PrivateMacShareController: ObservableObject {
         capture: capture,
         descriptor: descriptor,
         input: input,
+        clipboard: bridge,
         port: Self.port,
         eventHandler: { [weak self] event in
           Task { @MainActor in self?.handle(event, generation: generation) }
@@ -183,6 +245,7 @@ final class PrivateMacShareController: ObservableObject {
       try server.start()
       self.capture = capture
       self.server = server
+      self.clipboardBridge = bridge
     } catch {
       serverGeneration = nil
       await capture.stop()
@@ -200,6 +263,8 @@ final class PrivateMacShareController: ObservableObject {
     serverGeneration = nil
     server?.stop()
     server = nil
+    clipboardBridge?.detach()
+    clipboardBridge = nil
     let capture = capture
     self.capture = nil
     await capture?.stop()
@@ -253,6 +318,19 @@ final class PrivateMacShareController: ObservableObject {
     accessibilityGranted = MacRemoteInputController.isAccessibilityGranted
   }
 
+  private func refreshDisplays() async {
+    guard screenRecordingGranted else {
+      availableDisplays = []
+      return
+    }
+    let displays = await MacScreenCapture.availableDisplays()
+    availableDisplays = displays
+    if !displays.isEmpty, !displays.contains(where: { $0.id == selectedDisplayID }) {
+      selectedDisplayID =
+        displays.first(where: { $0.id == CGMainDisplayID() })?.id ?? displays[0].id
+    }
+  }
+
   private func handle(_ event: TailnetRFBServerEvent, generation: UUID) {
     guard serverGeneration == generation else { return }
     switch event {
@@ -281,6 +359,8 @@ final class PrivateMacShareController: ObservableObject {
       serverGeneration = nil
       server?.stop()
       server = nil
+      clipboardBridge?.detach()
+      clipboardBridge = nil
       let failedCapture = capture
       capture = nil
       Task { await failedCapture?.stop() }

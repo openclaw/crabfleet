@@ -1,4 +1,5 @@
 import Foundation
+import RoyalVNCKit
 
 enum RFBVersion: Comparable, Sendable {
   case v3Point3
@@ -100,7 +101,12 @@ struct RFBPixelFormat: Equatable, Sendable {
 
 enum RFBWire {
   static let tightEncoding: Int32 = 7
+  static let extendedDesktopSizeEncoding: Int32 = -308
+  static let extendedClipboardEncoding = Int32(bitPattern: 0xc0a1_e5ce)
   static let maximumClipboardBytes = 1 * 1_024 * 1_024
+
+  /// Flags word plus the codec's bounded compressed payload.
+  static let maximumExtendedClipboardBodyBytes = 4 + VNCExtendedClipboard.maximumBodyBytes
 
   static func serverInit(width: Int, height: Int, name: String) throws -> Data {
     guard
@@ -145,6 +151,59 @@ enum RFBWire {
     data.append(0x90)  // Tight JPEG subencoding
     data.append(tightCompactLength(frame.jpegData.count))
     data.append(frame.jpegData)
+    return data
+  }
+
+  /// FramebufferUpdate carrying a single ExtendedDesktopSize pseudo-rectangle.
+  /// `reason` and `status` use the RFB screen-layout codes; the single screen
+  /// uses a stable non-zero id so clients register a screen-layout change.
+  static func extendedDesktopSizeUpdate(
+    reason: UInt16,
+    status: UInt16,
+    width: Int,
+    height: Int
+  ) throws -> Data {
+    guard
+      (1...Int(UInt16.max)).contains(width),
+      (1...Int(UInt16.max)).contains(height)
+    else {
+      throw PrivateMacShareError.protocolError("invalid desktop size")
+    }
+
+    var data = Data(capacity: 36)
+    data.append(0)  // FramebufferUpdate
+    data.append(0)  // padding
+    data.appendBigEndian(UInt16(1))
+    data.appendBigEndian(reason)
+    data.appendBigEndian(status)
+    data.appendBigEndian(UInt16(width))
+    data.appendBigEndian(UInt16(height))
+    data.appendBigEndian(extendedDesktopSizeEncoding)
+    data.append(1)  // number of screens
+    data.append(contentsOf: [0, 0, 0])
+    data.appendBigEndian(UInt32(1))  // screen id
+    data.appendBigEndian(UInt16(0))
+    data.appendBigEndian(UInt16(0))
+    data.appendBigEndian(UInt16(width))
+    data.appendBigEndian(UInt16(height))
+    data.appendBigEndian(UInt32(0))  // flags
+    return data
+  }
+
+  /// Legacy Latin-1 ServerCutText. Returns nil when the text cannot be
+  /// represented losslessly or exceeds the clipboard limit.
+  static func legacyServerCutText(text: String) -> Data? {
+    guard let encoded = text.data(using: .isoLatin1),
+      encoded.count <= maximumClipboardBytes
+    else {
+      return nil
+    }
+
+    var data = Data(capacity: 8 + encoded.count)
+    data.append(3)  // ServerCutText
+    data.append(contentsOf: [0, 0, 0])
+    data.appendBigEndian(UInt32(encoded.count))
+    data.append(encoded)
     return data
   }
 
