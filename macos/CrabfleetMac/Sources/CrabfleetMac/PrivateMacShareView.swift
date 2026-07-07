@@ -87,6 +87,12 @@ struct PrivateMacShareSheet: View {
         .help("Text copied on either Mac is available on the other while connected.")
 
         Toggle(
+          "View only (ignore remote input)",
+          isOn: $controller.viewOnlyEnabled
+        )
+        .help("Applies immediately and keeps remote keyboard and pointer events from reaching this Mac.")
+
+        Toggle(
           "Start sharing when I log in",
           isOn: Binding(
             get: { controller.launchAtLoginEnabled },
@@ -184,6 +190,17 @@ struct PrivateMacShareSheet: View {
   }
 
   private var phaseDetail: String {
+    if let stats = controller.streamStats, controller.phase == .connected {
+      let hardware = stats.codec == "H.264"
+        ? stats.hardwareAccelerated ? " (hardware)" : " (software)"
+        : ""
+      return String(
+        format: "%@%@ · %.0f fps · %.1f Mbit/s",
+        stats.codec,
+        hardware,
+        stats.framesPerSecond,
+        stats.megabitsPerSecond)
+    }
     if let peer = controller.connectedPeer {
       return "\(controller.phase.title) · \(peer)"
     }

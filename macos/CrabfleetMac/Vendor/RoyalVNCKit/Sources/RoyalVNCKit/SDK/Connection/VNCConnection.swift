@@ -171,7 +171,7 @@ public final class VNCConnection: NSObjectOrAnyObject, @unchecked Sendable {
 		let jpegQualityLevelEncodingType = VNCPseudoEncodingType.jpegQualityLevel6.rawValue
 		let jpegQualityLevelEncoding = VNCProtocol.JPEGQualityLevelEncoding(encodingType: jpegQualityLevelEncodingType)
 
-		let encs: Encodings = [
+		var encs: Encodings = [
 			// Frame Encodings
 			VNCFrameEncodingType.copyRect.rawValue: VNCProtocol.CopyRectEncoding(),
             VNCFrameEncodingType.tight.rawValue: VNCProtocol.TightEncoding(),
@@ -192,6 +192,9 @@ public final class VNCConnection: NSObjectOrAnyObject, @unchecked Sendable {
 			compressionLevelEncodingType: compressionLevelEncoding,
 			jpegQualityLevelEncodingType: jpegQualityLevelEncoding
 		]
+#if canImport(VideoToolbox)
+		encs[VNCFrameEncodingType.openH264.rawValue] = VNCProtocol.OpenH264Encoding()
+#endif
 		let requestedFrameEncodings = Set(settings.frameEncodings.map(\.rawValue))
 		let mandatoryFrameEncodings: Set<VNCEncodingType> = [
 			VNCFrameEncodingType.raw.rawValue,
@@ -237,6 +240,16 @@ public final class VNCConnection: NSObjectOrAnyObject, @unchecked Sendable {
 		   !VNCProtocol.TightEncoding.supportsPixelFormat(pixelFormat) {
 			customizedFrameEncodings.removeAll(where: { $0 == VNCFrameEncodingType.tight.rawValue })
 		}
+
+#if canImport(VideoToolbox)
+		if let pixelFormat = state.pixelFormat,
+		   customizedFrameEncodings.contains(VNCFrameEncodingType.openH264.rawValue),
+		   !VNCProtocol.OpenH264Encoding.supportsPixelFormat(pixelFormat) {
+			customizedFrameEncodings.removeAll(where: { $0 == VNCFrameEncodingType.openH264.rawValue })
+		}
+#else
+		customizedFrameEncodings.removeAll(where: { $0 == VNCFrameEncodingType.openH264.rawValue })
+#endif
 
 		let usesTightEncoding = customizedFrameEncodings.contains(VNCFrameEncodingType.tight.rawValue)
 

@@ -23,7 +23,9 @@ let package = Package(
         .swiftLanguageMode(.v5)
       ],
       linkerSettings: [
-        .linkedFramework("Security")
+        .linkedFramework("Security"),
+        .linkedFramework("VideoToolbox"),
+        .linkedFramework("CoreMedia"),
       ]
     ),
     .testTarget(

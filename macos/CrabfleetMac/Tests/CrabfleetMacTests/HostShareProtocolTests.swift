@@ -83,6 +83,17 @@ struct HostShareWireTests {
     )
     #expect(floored.width == 320)
     #expect(floored.height == 200)
+
+    let h264 = MacScreenCapture.resizedDimensions(
+      requestedWidth: 4_096,
+      requestedHeight: 2_304,
+      sourcePixelWidth: 5_120,
+      sourcePixelHeight: 2_880,
+      maximumWidth: 4_096,
+      maximumHeight: 2_304
+    )
+    #expect(h264.width == 4_096)
+    #expect(h264.height == 2_304)
   }
 }
 

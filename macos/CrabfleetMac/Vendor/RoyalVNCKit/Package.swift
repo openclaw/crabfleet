@@ -24,7 +24,11 @@ let package = Package(
       name: "RoyalVNCKit",
       dependencies: ["d3des", "Z", "CryptoSwift"],
       exclude: ["SDK/CSDK"],
-      swiftSettings: [.swiftLanguageMode(.v5)]
+      swiftSettings: [.swiftLanguageMode(.v5)],
+      linkerSettings: [
+        .linkedFramework("VideoToolbox", .when(platforms: [.macOS])),
+        .linkedFramework("CoreMedia", .when(platforms: [.macOS])),
+      ]
     ),
     .testTarget(
       name: "RoyalVNCKitTests",

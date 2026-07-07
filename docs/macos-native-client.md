@@ -27,8 +27,9 @@ app-owned private desktop host for Mac-to-Mac access.
 - RFB 3.3, 3.7, and 3.8 framing is supported, including server-selected RFB
   3.3 None and VNC-password authentication.
 - Client-side fit scaling and rendering use RoyalVNCKit's IOSurface/Metal path.
-- Share This Mac captures the primary display with ScreenCaptureKit and serves
-  RFB 3.8 Tight/JPEG frames without enabling Apple's Screen Sharing daemon.
+- Share This Mac captures a selected display with ScreenCaptureKit and serves
+  RFB 3.8 Open H.264 or Tight/JPEG frames without enabling Apple's Screen
+  Sharing daemon.
 - The host binds port 5901 only to a verified Tailscale `100.64.0.0/10` address,
   requires a valid identity on the active tailnet, and admits only a
   Tailscale-authorized peer owned by that same user.
@@ -62,11 +63,12 @@ relay, Cloudflare, or the Crabfleet Worker.
 1. Tailscale status must report `BackendState=Running`, a valid active tailnet,
    an online signed-in user, and a CGNAT address in `100.64.0.0/10`.
 2. The app captures the selected display (default: main) at a bounded even
-   resolution no larger than 1600×1000 and encodes at most 15 Tight/JPEG frames
-   per second. When the connected viewer requests a desktop size, the host
+   resolution no larger than 2560×1600. Open H.264 viewers receive up to 60
+   frames per second; other viewers receive at most 15 Tight/JPEG frames per
+   second. When the connected viewer requests a desktop size, the host
    re-targets the capture to aspect-fit that request up to the display's native
-   pixel resolution (bounded at 2560×1600), so the remote desktop follows the
-   viewer window.
+   pixel resolution and the active codec's cap, so the remote desktop follows
+   the viewer window.
 3. An RFB listener binds port 5901. Binding the Tailscale address directly is
    not viable on current macOS — accepted Network-framework child connections
    re-bind a required local endpoint and fail with `EADDRINUSE` — so instead
@@ -90,6 +92,20 @@ relay, Cloudflare, or the Crabfleet Worker.
    reboot without manual setup (the equivalent of `--share-this-mac` for
    unattended hosts).
 
+### Video pipeline
+
+The viewer prefers the community RFB Open H.264 encoding (type 50). The host
+uses VideoToolbox's low-latency rate control with the constrained baseline
+profile the encoding prescribes, prepends SPS/PPS to IDR frames, and sends
+Annex-B video with explicit decoder resets on session start and resize. The
+viewer decodes every access unit in a rectangle (third-party servers may glue
+several frames together) and displays the last. Initial capture is capped at 2560×1600 at 60 fps; H.264 resize may
+reach 4096×2304 within the selected display's native pixel size. An AIMD
+controller adapts from 8 Mbit/s within a 1.5–30 Mbit/s range based on network
+send time. If H.264 setup or encoding fails, the session automatically returns
+to the negotiated 15 fps Tight/JPEG path. The share sheet reports codec,
+hardware acceleration, frame rate, and throughput while connected.
+
 After the first Screen Recording grant, restart the bundled app before starting
 the share. Ad-hoc development signatures do not provide a stable TCC identity,
 so a rebuilt prototype may need permission again. Sign every iterative build
@@ -97,7 +113,8 @@ with the same Apple Development or Developer ID identity to preserve the app's
 code requirement and permission identity.
 
 Accessibility is not required to start the listener. Without it, Crabfleet
-serves a view-only desktop and discards remote keyboard and pointer events.
+serves a view-only desktop. The persisted View only toggle can also discard
+remote keyboard and pointer events live even when Accessibility is available.
 
 Tailscale supplies the encrypted, ACL-controlled transport and peer identity;
 RFB None authentication is accepted only inside that already-authenticated
@@ -148,9 +165,9 @@ from the build, or obtain written provenance approval.
   disabled until their parsers and cryptography are replaced or fully tested.
 - Password authentication uses a process-global DES key schedule. The fork
   serializes that path; replace it before concurrent password-auth sessions.
-- App-owned hosting shares one selected display at a time to a single client,
-  as lossy Tight/JPEG at most 15 fps, capped at 1600×1000 until the viewer
-  requests a size (then up to native pixels, bounded at 2560×1600).
+- App-owned hosting shares one selected display at a time to a single client.
+  Open H.264 reaches 60 fps at an initial 2560×1600 cap and resizes up to
+  4096×2304; Tight/JPEG fallback remains capped at 15 fps and 2560×1600.
 - Audio is not implemented.
 - A connecting peer must be another device owned by the same Tailscale user.
   Team-wide or named-user sharing is intentionally unsupported.

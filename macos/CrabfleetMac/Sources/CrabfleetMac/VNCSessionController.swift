@@ -20,7 +20,7 @@ struct VNCViewportSize: Equatable {
     )
     guard pixelSize.width >= 320, pixelSize.height >= 240 else { return nil }
 
-    let maximum = CGSize(width: 2_560, height: 1_600)
+    let maximum = CGSize(width: 4_096, height: 2_304)
     let fitScale = min(1, maximum.width / pixelSize.width, maximum.height / pixelSize.height)
     let width = max(320, Int((pixelSize.width * fitScale).rounded(.down)) & ~1)
     let height = max(240, Int((pixelSize.height * fitScale).rounded(.down)) & ~1)
@@ -119,7 +119,7 @@ final class VNCSessionController: NSObject, ObservableObject {
       inputMode: .forwardKeyboardShortcutsIfNotInUseLocally,
       clipboardMode: clipboardEnabled ? .externallyManaged : .disabled,
       colorDepth: .depth24Bit,
-      frameEncodings: [.tight, .hextile]
+      frameEncodings: [.openH264, .tight, .hextile]
     )
     let connection = VNCConnection(settings: settings)
     connection.delegate = self

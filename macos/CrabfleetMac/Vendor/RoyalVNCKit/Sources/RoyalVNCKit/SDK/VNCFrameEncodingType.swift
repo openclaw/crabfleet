@@ -17,6 +17,7 @@ public enum _ObjC_VNCFrameEncodingType: Int64 {
 	case zlib = 6
 	case tight = 7
 	case zrle = 16
+	case openH264 = 50
 }
 
 public enum VNCFrameEncodingType: VNCEncodingType {
@@ -28,6 +29,7 @@ public enum VNCFrameEncodingType: VNCEncodingType {
 	case zlib = 6
 	case tight = 7
 	case zrle = 16
+	case openH264 = 50
 }
 
 extension VNCFrameEncodingType: CustomStringConvertible {
@@ -49,6 +51,8 @@ extension VNCFrameEncodingType: CustomStringConvertible {
 				"Tight"
 			case .zrle:
 				"ZRLE"
+			case .openH264:
+				"Open H.264"
 		}
 	}
 }
@@ -134,6 +138,8 @@ extension VNCFrameEncodingType {
 				.tight
 			case .zrle:
 				.zrle
+			case .openH264:
+				.openH264
 		}
 	}
 }

@@ -329,8 +329,8 @@ struct PrivateMacShareTests {
   @Test
   func scalesCaptureWithinBoundedEvenDimensions() {
     let retina = MacScreenCapture.captureDimensions(sourceWidth: 5_120, sourceHeight: 2_880)
-    #expect(retina.width == 1_600)
-    #expect(retina.height == 900)
+    #expect(retina.width == 2_560)
+    #expect(retina.height == 1_440)
     #expect(retina.width.isMultiple(of: 2))
     #expect(retina.height.isMultiple(of: 2))
 
@@ -489,8 +489,13 @@ struct PrivateMacShareTests {
 
     // The stream must keep flowing after the resize exchange (this test
     // fixture has no live capture stream, so the server answers the resize
-    // with an out-of-resources status and continues serving frames).
+    // with an out-of-resources status and continues serving frames). An
+    // unchanged frame is deduplicated into rectangle-free heartbeats, so new
+    // content must arrive as a fresh framebuffer update.
     let updates = session.framebufferUpdateCount
+    await capture.frameStore.update(
+      .init(jpegData: jpeg, sequence: 2, width: 64, height: 64)
+    )
     try await waitFor { session.framebufferUpdateCount > updates }
     #expect(session.phase == .connected)
   }

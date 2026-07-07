@@ -17,6 +17,10 @@ framing; prefers supported Apple Remote Desktop authentication when macOS
 Screen Sharing advertises it; validates palette ranges; and materializes bounded framebuffer
 previews.
 
+The fork also negotiates and decodes the community Open H.264 RFB frame
+encoding (type 50) through VideoToolbox on supported Apple platforms, with
+Annex-B parsing, decoder-context resets, and IDR recovery kept in one encoding.
+
 The fork completes the upstream Extended Clipboard stub (pseudo-encoding
 `0xc0a1e5ce`): the client advertises the extension when clipboard sync is
 enabled, answers server caps, exchanges UTF-8 text through bounded

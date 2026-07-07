@@ -14,6 +14,7 @@ Crabfleet gives OpenClaw maintainers a fleet dashboard where every Codex crabbox
 - **Issue/PR lookup.** Type `#123` in search to preview matching GitHub issues or PRs across enabled OpenClaw repos and create a card from the match.
 - **Codex run control.** Start durable run attempts, track heartbeats, watch the Ghostty WASM session grid, and take over only when the selected runtime advertises that capability.
 - **Interactive Crabboxes.** Start a standalone Codex CLI workspace for manual cloud work and attach it in the same fullscreen Ghostty grid or WebVNC.
+- **Share This Mac.** Stream a selected Mac display privately over Tailscale with hardware H.264 at up to 60 fps, adaptive bitrate, automatic Tight/JPEG fallback, and a live view-only mode.
 - **Steerable GitHub Actions.** Register an Actions job as a durable `github_actions` session, stream its PTY outbound into Ghostty, steer it from the browser, and report work state and Codex thread/turn IDs.
 - **Worker-owned sandbox credentials.** Built-in Cloudflare Sandbox sessions get placeholder env credentials; Worker-controlled outbound routing injects model and GitHub credentials only for approved upstream requests.
 - **Diff previews.** Card tiles show changed files and totals; the run drawer shows a compact Codiff-style patch view.
