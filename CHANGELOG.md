@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Add a VideoToolbox-backed Open H.264 RFB pipeline for Share This Mac with up to 60 fps capture, adaptive 1.5–30 Mbit/s rate control, automatic Tight/JPEG fallback, live stream stats, larger resize limits, and a persisted host-enforced view-only mode.
 - Exchange full UTF-8 clipboard text between the native Mac viewer, Share This Mac hosts, and any Extended Clipboard-capable VNC server by completing the RoyalVNCKit fork's extension stub, keeping Latin-1 cut text as the fallback and dropping malformed extension bodies without tearing down the connection.
 - Add persisted send-only and receive-only clipboard directions to the native viewer's focus toolbar; automatic sync respects the direction while the explicit Send and Get actions keep working.
 - Sync the host Mac's clipboard with the connected peer in both directions during Share This Mac sessions, with a pre-share opt-out, echo suppression, and the shared 1 MiB text bound; previously client cut text was discarded and the host never sent its clipboard.

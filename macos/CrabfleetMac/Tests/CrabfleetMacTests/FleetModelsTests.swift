@@ -24,7 +24,7 @@ struct FleetModelsTests {
     )
     #expect(
       VNCViewportSize.fitting(CGSize(width: 5_120, height: 3_200))
-        == .init(width: 2_560, height: 1_600)
+        == .init(width: 3_686, height: 2_304)
     )
     #expect(
       VNCViewportSize.fitting(CGSize(width: 1_200, height: 700), backingScale: 2)

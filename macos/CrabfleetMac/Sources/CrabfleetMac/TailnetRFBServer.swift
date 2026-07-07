@@ -1,3 +1,4 @@
+import CoreMedia
 import Foundation
 import Network
 import RoyalVNCKit
@@ -6,9 +7,17 @@ enum TailnetRFBServerEvent: Equatable, Sendable {
   case listening
   case authorizing(String)
   case connected(String)
+  case streaming(TailnetStreamStats)
   case disconnected
   case listenerFailed(String)
   case sessionFailed(String)
+}
+
+struct TailnetStreamStats: Equatable, Sendable {
+  let codec: String
+  let hardwareAccelerated: Bool
+  let framesPerSecond: Double
+  let megabitsPerSecond: Double
 }
 
 final class TailnetRFBServer: @unchecked Sendable {
@@ -27,6 +36,7 @@ final class TailnetRFBServer: @unchecked Sendable {
   private let eventHandler: EventHandler
   private var listener: NWListener?
   private var session: RFBHostSession?
+  private var viewOnly = false
 
   init(
     identity: TailnetIdentity,
@@ -94,6 +104,14 @@ final class TailnetRFBServer: @unchecked Sendable {
     capture.setConsumerActive(false)
   }
 
+  func setViewOnly(_ enabled: Bool) {
+    let activeSession = withLock { () -> RFBHostSession? in
+      viewOnly = enabled
+      return session
+    }
+    activeSession?.setViewOnly(enabled)
+  }
+
   private func accept(_ connection: NWConnection) {
     let hasActiveSession = withLock { self.session != nil }
     guard !hasActiveSession else {
@@ -116,13 +134,17 @@ final class TailnetRFBServer: @unchecked Sendable {
       clipboard: clipboard,
       requiredLocalAddress: identity.ipv4Address,
       desktopName: "Crabfleet — \(identity.hostName)",
+      viewOnly: false,
       didAuthorize: { [weak capture] in capture?.setConsumerActive(true) },
       eventHandler: eventHandler,
       didFinish: { [weak self] finishedSession in
         self?.clear(finishedSession)
       }
     )
-    withLock { self.session = newSession }
+    withLock {
+      self.session = newSession
+      newSession.setViewOnly(viewOnly)
+    }
     newSession.start()
   }
 
@@ -163,6 +185,7 @@ private final class RFBHostSession: @unchecked Sendable {
 
   // Negotiated per-connection state; only the protocol task mutates it.
   private var supportsTightEncoding = false
+  private var supportsOpenH264 = false
   private var supportsExtendedDesktopSize = false
   private var supportsExtendedClipboard = false
   private var sentServerClipboardCaps = false
@@ -170,6 +193,16 @@ private final class RFBHostSession: @unchecked Sendable {
   private var clientClipboardCaps: VNCExtendedClipboardCaps?
   private var currentWidth: Int
   private var currentHeight: Int
+  private var viewOnly: Bool
+  private var videoEncoder: MacVideoEncoder?
+  private var videoFrameMailbox: VideoMailbox<EncodedVideoFrame>?
+  private var videoPixelMailbox: VideoMailbox<VideoPixelSource>?
+  private var videoFrameConsumer: Task<Void, Never>?
+  private var videoPathBroken = false
+  private var needsContextReset = false
+  private var forceNextKeyframe = false
+  private var rateController = VideoRateController()
+  private var lastStatsTimestamp = ProcessInfo.processInfo.systemUptime
 
   init(
     connection: NWConnection,
@@ -180,6 +213,7 @@ private final class RFBHostSession: @unchecked Sendable {
     clipboard: (any HostClipboardSyncing)?,
     requiredLocalAddress: String,
     desktopName: String,
+    viewOnly: Bool,
     didAuthorize: @escaping @Sendable () -> Void,
     eventHandler: @escaping TailnetRFBServer.EventHandler,
     didFinish: @escaping @Sendable (RFBHostSession) -> Void
@@ -192,6 +226,7 @@ private final class RFBHostSession: @unchecked Sendable {
     self.clipboard = clipboard
     self.requiredLocalAddress = requiredLocalAddress
     self.desktopName = desktopName
+    self.viewOnly = viewOnly
     self.didAuthorize = didAuthorize
     self.eventHandler = eventHandler
     self.didFinish = didFinish
@@ -220,6 +255,14 @@ private final class RFBHostSession: @unchecked Sendable {
     task?.cancel()
     connection.cancel()
     finish(event: .disconnected)
+  }
+
+  func setViewOnly(_ enabled: Bool) {
+    let shouldReleaseInput = withLock { () -> Bool in
+      defer { viewOnly = enabled }
+      return enabled && !viewOnly
+    }
+    if shouldReleaseInput { input.releaseAllInput() }
   }
 
   private func beginProtocolIfNeeded() {
@@ -271,6 +314,8 @@ private final class RFBHostSession: @unchecked Sendable {
     withLock { pushIO = io }
     attachClipboard()
     eventHandler(.connected(remoteAddress))
+    rateController = VideoRateController()
+    lastStatsTimestamp = ProcessInfo.processInfo.systemUptime
     try await messageLoop(io: io)
   }
 
@@ -307,7 +352,8 @@ private final class RFBHostSession: @unchecked Sendable {
   }
 
   private func messageLoop(io: RFBConnectionIO) async throws {
-    var hasSentFrame = false
+    var hasSentJPEGFrame = false
+    var lastSentJPEGSequence: UInt64 = 0
 
     while !Task.isCancelled {
       let messageType = try await io.readUInt8()
@@ -328,6 +374,7 @@ private final class RFBHostSession: @unchecked Sendable {
         let encodingData = try await io.readExactly(count * 4)
         let encodings = (0..<count).map { encodingData.readInt32(at: $0 * 4) }
         supportsTightEncoding = encodings.contains(RFBWire.tightEncoding)
+        supportsOpenH264 = encodings.contains(RFBWire.openH264Encoding)
         if encodings.contains(RFBWire.extendedDesktopSizeEncoding),
           !supportsExtendedDesktopSize
         {
@@ -337,12 +384,17 @@ private final class RFBHostSession: @unchecked Sendable {
         withLock {
           supportsExtendedClipboard = encodings.contains(RFBWire.extendedClipboardEncoding)
         }
+        if !supportsOpenH264 {
+          if activeVideoEncoder != nil { await stopVideoPath(markBroken: false) }
+          if supportsTightEncoding { try await prepareTightFallback(io: io) }
+        }
         try await sendServerClipboardCapsIfNeeded(io: io)
 
       case 3:  // FramebufferUpdateRequest
-        _ = try await io.readExactly(9)
-        guard supportsTightEncoding else {
-          throw PrivateMacShareError.protocolError("the client did not offer Tight encoding")
+        let payload = try await io.readExactly(9)
+        let incremental = payload[0] != 0
+        guard selectedFrameEncoding != nil else {
+          throw PrivateMacShareError.protocolError("the client did not offer a supported encoding")
         }
         if needsDesktopSizeAnnounce {
           needsDesktopSizeAnnounce = false
@@ -354,24 +406,93 @@ private final class RFBHostSession: @unchecked Sendable {
               height: currentHeight
             ))
         }
-        if hasSentFrame {
-          try await Task.sleep(for: .milliseconds(66))
+        if selectedFrameEncoding == .openH264 {
+          if activeVideoEncoder == nil {
+            do {
+              try await startVideoPath()
+            } catch {
+              await stopVideoPath(markBroken: true)
+              if supportsTightEncoding {
+                try await prepareTightFallback(io: io)
+              }
+            }
+          }
+          if let encoder = activeVideoEncoder {
+            if !incremental { requestKeyframe() }
+            switch await nextVideoUpdate(encoder: encoder) {
+            case .frame(let frame):
+              let flags: UInt32 = needsContextReset ? 0x2 : 0
+              let update = try RFBWire.openH264Update(
+                width: currentWidth,
+                height: currentHeight,
+                payload: frame.data,
+                flags: flags)
+              let sendSeconds = try await timedSend(update, io: io)
+              needsContextReset = false
+              recordFrameStats(
+                byteCount: frame.data.count,
+                sendSeconds: sendSeconds,
+                codec: "H.264",
+                hardwareAccelerated: encoder.isHardwareAccelerated,
+                encoder: encoder)
+              continue
+            case .idle:
+              // Nothing changed on screen; answer the request anyway so the
+              // client's request loop and input keep flowing.
+              try await io.send(RFBWire.emptyUpdate())
+              emitStatsIfDue(codec: "H.264", hardwareAccelerated: encoder.isHardwareAccelerated)
+              continue
+            case .failed:
+              await stopVideoPath(markBroken: true)
+              if supportsTightEncoding {
+                try await prepareTightFallback(io: io)
+              }
+            }
+          }
         }
+
+        guard selectedFrameEncoding == .tight else {
+          throw PrivateMacShareError.protocolError("the Open H.264 encoder failed and Tight was not offered")
+        }
+        if hasSentJPEGFrame { try await Task.sleep(for: .milliseconds(66)) }
         let frame = try await waitForMatchingFrame()
-        try await io.send(try RFBWire.tightJPEGUpdate(frame: frame))
-        hasSentFrame = true
+        // Deduplicate only incremental requests: a non-incremental request is
+        // an explicit ask for the full framebuffer contents.
+        if incremental, frame.sequence == lastSentJPEGSequence {
+          try await io.send(RFBWire.emptyUpdate())
+          emitStatsIfDue(codec: "JPEG", hardwareAccelerated: false)
+          continue
+        }
+        let update = try RFBWire.tightJPEGUpdate(frame: frame)
+        let sendSeconds = try await timedSend(update, io: io)
+        recordFrameStats(
+          byteCount: frame.jpegData.count,
+          sendSeconds: sendSeconds,
+          codec: "JPEG",
+          hardwareAccelerated: false,
+          encoder: nil)
+        lastSentJPEGSequence = frame.sequence
+        hasSentJPEGFrame = true
 
       case 4:  // KeyEvent
         let payload = try await io.readExactly(7)
-        input.keyEvent(down: payload[0] != 0, keysym: payload.readUInt32(at: 3))
+        withLock {
+          if !viewOnly {
+            input.keyEvent(down: payload[0] != 0, keysym: payload.readUInt32(at: 3))
+          }
+        }
 
       case 5:  // PointerEvent
         let payload = try await io.readExactly(5)
-        input.pointerEvent(
-          buttonMask: payload[0],
-          x: payload.readUInt16(at: 1),
-          y: payload.readUInt16(at: 3)
-        )
+        withLock {
+          if !viewOnly {
+            input.pointerEvent(
+              buttonMask: payload[0],
+              x: payload.readUInt16(at: 1),
+              y: payload.readUInt16(at: 3)
+            )
+          }
+        }
 
       case 6:  // ClientCutText
         try await receiveClientCutText(io: io)
@@ -510,11 +631,15 @@ private final class RFBHostSession: @unchecked Sendable {
       throw PrivateMacShareError.protocolError("resize requested without ExtendedDesktopSize")
     }
 
+    let videoWasActive = activeVideoEncoder != nil
+    let isUsingH264 = selectedFrameEncoding == .openH264
     let target = MacScreenCapture.resizedDimensions(
       requestedWidth: requestedWidth,
       requestedHeight: requestedHeight,
       sourcePixelWidth: descriptor.sourcePixelWidth,
-      sourcePixelHeight: descriptor.sourcePixelHeight
+      sourcePixelHeight: descriptor.sourcePixelHeight,
+      maximumWidth: isUsingH264 ? 4_096 : 2_560,
+      maximumHeight: isUsingH264 ? 2_304 : 1_600
     )
 
     if target.width == currentWidth, target.height == currentHeight {
@@ -545,24 +670,321 @@ private final class RFBHostSession: @unchecked Sendable {
     currentWidth = target.width
     currentHeight = target.height
     input.updateFrameSize(width: target.width, height: target.height)
+    if videoWasActive {
+      do {
+        try await restartVideoPath()
+      } catch {
+        await stopVideoPath(markBroken: true)
+        guard supportsTightEncoding else {
+          throw PrivateMacShareError.protocolError(
+            "the Open H.264 encoder failed after resize and Tight was not offered")
+        }
+        let tightTarget = MacScreenCapture.resizedDimensions(
+          requestedWidth: requestedWidth,
+          requestedHeight: requestedHeight,
+          sourcePixelWidth: descriptor.sourcePixelWidth,
+          sourcePixelHeight: descriptor.sourcePixelHeight)
+        if tightTarget.width != currentWidth || tightTarget.height != currentHeight {
+          try await capture.updateOutputSize(width: tightTarget.width, height: tightTarget.height)
+          currentWidth = tightTarget.width
+          currentHeight = tightTarget.height
+          input.updateFrameSize(width: currentWidth, height: currentHeight)
+        }
+      }
+    }
     try await io.send(
       try RFBWire.extendedDesktopSizeUpdate(
         reason: 1,
         status: 0,
-        width: target.width,
-        height: target.height
+        width: currentWidth,
+        height: currentHeight
       ))
   }
 
+  // MARK: - Video
+
+  /// Captured pixel buffers flow into a latest-wins mailbox and are encoded
+  /// one at a time as the connection drains: every encoded frame is sent, so
+  /// the H.264 reference chain stays intact and stale frames are dropped
+  /// before they cost encoder time.
+  private func startVideoPath() async throws {
+    let encoder = try MacVideoEncoder(width: currentWidth, height: currentHeight)
+    let pixelMailbox = VideoMailbox<VideoPixelSource>()
+    _ = replaceVideoEncoder(with: encoder)
+    withLock { videoPixelMailbox = pixelMailbox }
+    startVideoFrameConsumer(for: encoder)
+    rateController = VideoRateController()
+    lastStatsTimestamp = ProcessInfo.processInfo.systemUptime
+    needsContextReset = true
+    requestKeyframe()
+    capture.setVideoFrameHandler { pixelBuffer, presentationTime in
+      pixelMailbox.offer(
+        VideoPixelSource(pixelBuffer: pixelBuffer, presentationTime: presentationTime))
+    }
+    do {
+      try await capture.updateFrameInterval(framesPerSecond: 60)
+    } catch {
+      capture.setVideoFrameHandler(nil)
+      stopVideoFrameConsumer()
+      finishPixelMailbox()
+      encoder.invalidate()
+      _ = replaceVideoEncoder(with: nil)
+      throw error
+    }
+  }
+
+  private func restartVideoPath() async throws {
+    capture.setVideoFrameHandler(nil)
+    stopVideoFrameConsumer()
+    finishPixelMailbox()
+    replaceVideoEncoder(with: nil)?.invalidate()
+    try await startVideoPath()
+  }
+
+  private func stopVideoPath(markBroken: Bool) async {
+    if markBroken { videoPathBroken = true }
+    capture.setVideoFrameHandler(nil)
+    stopVideoFrameConsumer()
+    finishPixelMailbox()
+    replaceVideoEncoder(with: nil)?.invalidate()
+    needsContextReset = false
+    withLock { forceNextKeyframe = false }
+    rateController = VideoRateController()
+    lastStatsTimestamp = ProcessInfo.processInfo.systemUptime
+    try? await capture.updateFrameInterval(framesPerSecond: 15)
+  }
+
+  private func finishPixelMailbox() {
+    let mailbox = withLock { () -> VideoMailbox<VideoPixelSource>? in
+      defer { videoPixelMailbox = nil }
+      return videoPixelMailbox
+    }
+    mailbox?.finish()
+  }
+
+  private func prepareTightFallback(io: RFBConnectionIO) async throws {
+    guard currentWidth > 2_560 || currentHeight > 1_600 else { return }
+    let target = MacScreenCapture.resizedDimensions(
+      requestedWidth: currentWidth,
+      requestedHeight: currentHeight,
+      sourcePixelWidth: descriptor.sourcePixelWidth,
+      sourcePixelHeight: descriptor.sourcePixelHeight)
+    guard target.width != currentWidth || target.height != currentHeight else { return }
+    try await capture.updateOutputSize(width: target.width, height: target.height)
+    currentWidth = target.width
+    currentHeight = target.height
+    input.updateFrameSize(width: currentWidth, height: currentHeight)
+    if supportsExtendedDesktopSize {
+      try await io.send(
+        try RFBWire.extendedDesktopSizeUpdate(
+          reason: 0,
+          status: 0,
+          width: currentWidth,
+          height: currentHeight))
+    }
+  }
+
+  private var selectedFrameEncoding: RFBWire.FrameEncodingSelection? {
+    var encodings: [Int32] = []
+    if supportsOpenH264 { encodings.append(RFBWire.openH264Encoding) }
+    if supportsTightEncoding { encodings.append(RFBWire.tightEncoding) }
+    return RFBWire.preferredFrameEncoding(
+      from: encodings, videoPathBroken: videoPathBroken)
+  }
+
+  private var activeVideoEncoder: MacVideoEncoder? {
+    withLock { videoEncoder }
+  }
+
+  @discardableResult
+  private func replaceVideoEncoder(with encoder: MacVideoEncoder?) -> MacVideoEncoder? {
+    withLock {
+      defer { videoEncoder = encoder }
+      return videoEncoder
+    }
+  }
+
+  private func requestKeyframe() {
+    withLock { forceNextKeyframe = true }
+  }
+
+  private func startVideoFrameConsumer(for encoder: MacVideoEncoder) {
+    let mailbox = VideoMailbox<EncodedVideoFrame>()
+    let consumer = Task { [weak self] in
+      for await frame in encoder.frames {
+        // With one frame in flight a drop cannot happen; if it ever does the
+        // client missed pixels, so resync with a keyframe.
+        mailbox.offer(frame, onDrop: { self?.requestKeyframe() })
+      }
+      mailbox.finish()
+    }
+    let previous = withLock { () -> (Task<Void, Never>?, VideoMailbox<EncodedVideoFrame>?) in
+      defer {
+        videoFrameConsumer = consumer
+        videoFrameMailbox = mailbox
+      }
+      return (videoFrameConsumer, videoFrameMailbox)
+    }
+    previous.0?.cancel()
+    previous.1?.finish()
+  }
+
+  private func stopVideoFrameConsumer() {
+    let previous = withLock { () -> (Task<Void, Never>?, VideoMailbox<EncodedVideoFrame>?) in
+      defer {
+        videoFrameConsumer = nil
+        videoFrameMailbox = nil
+      }
+      return (videoFrameConsumer, videoFrameMailbox)
+    }
+    previous.0?.cancel()
+    previous.1?.finish()
+  }
+
+  private func consumeForceNextKeyframe() -> Bool {
+    withLock {
+      defer { forceNextKeyframe = false }
+      return forceNextKeyframe
+    }
+  }
+
+  private func pendingKeyframeRequested() -> Bool {
+    withLock { forceNextKeyframe }
+  }
+
+  private enum VideoUpdateOutcome {
+    case frame(EncodedVideoFrame)
+    case idle
+    case failed
+  }
+
+  /// Encodes at most one captured frame for this update request. `.idle`
+  /// means the screen has not changed (and no keyframe is owed), `.failed`
+  /// means the encoder produced no output for a submitted frame.
+  private func nextVideoUpdate(encoder: MacVideoEncoder) async -> VideoUpdateOutcome {
+    let mailboxes = withLock { (videoPixelMailbox, videoFrameMailbox) }
+    guard let pixelMailbox = mailboxes.0, let encodedMailbox = mailboxes.1,
+      !encodedMailbox.isFinished
+    else {
+      return .failed
+    }
+
+    var source = await pixelMailbox.next(timeout: .milliseconds(100))
+    if let candidate = source, !matchesCurrentSize(candidate.pixelBuffer) {
+      source = nil  // stale capture output from before a resize
+    }
+    if source == nil, needsContextReset || pendingKeyframeRequested() {
+      source = await keyframeSource()
+    }
+    guard let source else { return .idle }
+
+    let forceKeyframe = consumeForceNextKeyframe() || needsContextReset
+    guard
+      encoder.encode(
+        source.pixelBuffer,
+        presentationTime: source.presentationTime,
+        forceKeyframe: forceKeyframe)
+    else {
+      // Rejected input (for example a timestamp raced behind a synthetic
+      // keyframe stamp) produces no output; try again on the next request.
+      if forceKeyframe { requestKeyframe() }
+      return .idle
+    }
+
+    while let frame = await encodedMailbox.next(timeout: .seconds(1)) {
+      guard frame.width >= currentWidth, frame.height >= currentHeight,
+        frame.width <= currentWidth + 15, frame.height <= currentHeight + 15
+      else { continue }
+      return .frame(frame)
+    }
+    return .failed
+  }
+
+  /// A source for keyframes owed while the screen is idle: the last streamed
+  /// buffer if it still matches, otherwise a one-shot screenshot. Re-encoded
+  /// buffers get a fresh host-clock stamp to stay monotonic.
+  private func keyframeSource() async -> VideoPixelSource? {
+    if let cached = capture.latestVideoFrame(), matchesCurrentSize(cached.pixelBuffer) {
+      return VideoPixelSource(
+        pixelBuffer: cached.pixelBuffer,
+        presentationTime: CMClockGetTime(CMClockGetHostTimeClock()))
+    }
+    guard let snapshot = await capture.snapshotVideoFrame(),
+      matchesCurrentSize(snapshot.pixelBuffer)
+    else {
+      return nil
+    }
+    return VideoPixelSource(
+      pixelBuffer: snapshot.pixelBuffer,
+      presentationTime: CMClockGetTime(CMClockGetHostTimeClock()))
+  }
+
+  private func matchesCurrentSize(_ pixelBuffer: CVPixelBuffer) -> Bool {
+    CVPixelBufferGetWidth(pixelBuffer) == currentWidth
+      && CVPixelBufferGetHeight(pixelBuffer) == currentHeight
+  }
+
+  private func timedSend(_ data: Data, io: RFBConnectionIO) async throws -> Double {
+    let clock = ContinuousClock()
+    let start = clock.now
+    try await io.send(data)
+    let duration = start.duration(to: clock.now)
+    let components = duration.components
+    return Double(components.seconds) + Double(components.attoseconds) / 1e18
+  }
+
+  private func recordFrameStats(
+    byteCount: Int,
+    sendSeconds: Double,
+    codec: String,
+    hardwareAccelerated: Bool,
+    encoder: MacVideoEncoder?
+  ) {
+    let now = ProcessInfo.processInfo.systemUptime
+    if let bitrate = rateController.recordFrame(
+      byteCount: byteCount,
+      sendSeconds: sendSeconds,
+      timestamp: now)
+    {
+      encoder?.setAverageBitrate(bitrate)
+    }
+    emitStatsIfDue(codec: codec, hardwareAccelerated: hardwareAccelerated, now: now)
+  }
+
+  private func emitStatsIfDue(
+    codec: String,
+    hardwareAccelerated: Bool,
+    now: Double = ProcessInfo.processInfo.systemUptime
+  ) {
+    guard now - lastStatsTimestamp >= 2 else { return }
+    lastStatsTimestamp = now
+    let snapshot = rateController.statsSnapshot(now: now)
+    eventHandler(
+      .streaming(
+        TailnetStreamStats(
+          codec: codec,
+          hardwareAccelerated: hardwareAccelerated,
+          framesPerSecond: snapshot.fps,
+          megabitsPerSecond: snapshot.megabitsPerSecond)))
+  }
+
   /// Waits for a frame matching the announced framebuffer size, discarding
-  /// stale frames captured before a resize took effect.
+  /// stale frames captured before a resize took effect. The store can be
+  /// stale after an H.264 fallback on a static screen, so one snapshot
+  /// refresh is attempted before giving up.
   private func waitForMatchingFrame() async throws -> CapturedDesktopFrame {
-    for _ in 0..<150 {
+    var didRequestSnapshot = false
+    for iteration in 0..<150 {
       if let frame = await capture.frameStore.latest(),
         frame.width == currentWidth,
         frame.height == currentHeight
       {
         return frame
+      }
+      if iteration >= 25, !didRequestSnapshot {
+        didRequestSnapshot = true
+        _ = await capture.refreshJPEGFrame()
+        continue
       }
       try await Task.sleep(for: .milliseconds(20))
     }
@@ -578,8 +1000,24 @@ private final class RFBHostSession: @unchecked Sendable {
     finished = true
     pushIO = nil
     lock.unlock()
+    capture.setVideoFrameHandler(nil)
+    stopVideoFrameConsumer()
+    finishPixelMailbox()
+    let encoder = replaceVideoEncoder(with: nil)
+    encoder?.invalidate()
     clipboard?.detach()
     connection.cancel()
+    guard encoder != nil else {
+      completeFinish(event: event)
+      return
+    }
+    Task { [self] in
+      try? await capture.updateFrameInterval(framesPerSecond: 15)
+      completeFinish(event: event)
+    }
+  }
+
+  private func completeFinish(event: TailnetRFBServerEvent) {
     eventHandler(event)
     didFinish(self)
   }

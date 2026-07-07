@@ -101,9 +101,15 @@ struct RFBPixelFormat: Equatable, Sendable {
 
 enum RFBWire {
   static let tightEncoding: Int32 = 7
+  static let openH264Encoding: Int32 = 50
   static let extendedDesktopSizeEncoding: Int32 = -308
   static let extendedClipboardEncoding = Int32(bitPattern: 0xc0a1_e5ce)
   static let maximumClipboardBytes = 1 * 1_024 * 1_024
+
+  enum FrameEncodingSelection: Equatable, Sendable {
+    case openH264
+    case tight
+  }
 
   /// Flags word plus the codec's bounded compressed payload.
   static let maximumExtendedClipboardBodyBytes = 4 + VNCExtendedClipboard.maximumBodyBytes
@@ -129,6 +135,15 @@ enum RFBWire {
     return data
   }
 
+  static func preferredFrameEncoding(
+    from encodings: [Int32],
+    videoPathBroken: Bool = false
+  ) -> FrameEncodingSelection? {
+    if !videoPathBroken, encodings.contains(openH264Encoding) { return .openH264 }
+    if encodings.contains(tightEncoding) { return .tight }
+    return nil
+  }
+
   static func tightJPEGUpdate(frame: CapturedDesktopFrame) throws -> Data {
     guard
       (1...Int(UInt16.max)).contains(frame.width),
@@ -151,6 +166,43 @@ enum RFBWire {
     data.append(0x90)  // Tight JPEG subencoding
     data.append(tightCompactLength(frame.jpegData.count))
     data.append(frame.jpegData)
+    return data
+  }
+
+  /// FramebufferUpdate with zero rectangles: a legal no-op that answers an
+  /// outstanding update request when the screen has not changed, so idle
+  /// sessions stay responsive without resending pixels.
+  static func emptyUpdate() -> Data {
+    Data([0, 0, 0, 0])
+  }
+
+  static func openH264Update(
+    width: Int,
+    height: Int,
+    payload: Data,
+    flags: UInt32
+  ) throws -> Data {
+    guard
+      (1...Int(UInt16.max)).contains(width),
+      (1...Int(UInt16.max)).contains(height),
+      !payload.isEmpty,
+      payload.count < 16 * 1_024 * 1_024
+    else {
+      throw PrivateMacShareError.protocolError("invalid Open H.264 frame")
+    }
+
+    var data = Data(capacity: payload.count + 24)
+    data.append(0)
+    data.append(0)
+    data.appendBigEndian(UInt16(1))
+    data.appendBigEndian(UInt16(0))
+    data.appendBigEndian(UInt16(0))
+    data.appendBigEndian(UInt16(width))
+    data.appendBigEndian(UInt16(height))
+    data.appendBigEndian(openH264Encoding)
+    data.appendBigEndian(UInt32(payload.count))
+    data.appendBigEndian(flags)
+    data.append(payload)
     return data
   }
 

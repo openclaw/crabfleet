@@ -29,6 +29,33 @@ actor CapturedDesktopFrameStore {
   }
 }
 
+private actor CaptureConfigurationGate {
+  private var tail = Task<Void, Never> {}
+
+  func run<T: Sendable>(
+    _ operation: @escaping @Sendable () async throws -> T
+  ) async throws -> T {
+    let predecessor = tail
+    let result = Task<Result<T, Error>, Never> {
+      await predecessor.value
+      do {
+        return .success(try await operation())
+      } catch {
+        return .failure(error)
+      }
+    }
+    tail = Task { _ = await result.value }
+    return try await result.value.get()
+  }
+}
+
+/// A captured frame handed from the ScreenCaptureKit callback to the encode
+/// path. CVPixelBuffer is thread-safe to retain and read across queues.
+struct VideoPixelSource: @unchecked Sendable {
+  let pixelBuffer: CVPixelBuffer
+  let presentationTime: CMTime
+}
+
 struct CapturedDisplayDescriptor: Equatable, Sendable {
   let displayID: CGDirectDisplayID
   let displayBounds: CGRect
@@ -60,10 +87,14 @@ final class MacScreenCapture: NSObject, @unchecked Sendable {
     .cacheIntermediates: false
   ])
   private let frameLock = NSLock()
+  private let configurationGate = CaptureConfigurationGate()
   private var sequence: UInt64 = 0
   private var consumerActive = false
+  private var videoFrameHandler: (@Sendable (CVPixelBuffer, CMTime) -> Void)?
+  private var latestVideoSource: (pixelBuffer: CVPixelBuffer, presentationTime: CMTime)?
   private var stream: SCStream?
   private var configuration: SCStreamConfiguration?
+  private var contentFilter: SCContentFilter?
 
   static func availableDisplays() async -> [ShareableDisplayOption] {
     guard let shareableContent = try? await SCShareableContent.current else { return [] }
@@ -115,8 +146,11 @@ final class MacScreenCapture: NSObject, @unchecked Sendable {
     let stream = SCStream(filter: filter, configuration: configuration, delegate: self)
     try stream.addStreamOutput(self, type: .screen, sampleHandlerQueue: captureQueue)
     try await stream.startCapture()
-    self.stream = stream
-    self.configuration = configuration
+    try await configurationGate.run { [self] in
+      self.stream = stream
+      self.configuration = configuration
+      self.contentFilter = filter
+    }
 
     return CapturedDisplayDescriptor(
       displayID: displayID,
@@ -130,19 +164,38 @@ final class MacScreenCapture: NSObject, @unchecked Sendable {
 
   /// Re-targets the running stream to a new output size for remote-resize.
   func updateOutputSize(width: Int, height: Int) async throws {
-    guard let stream, let configuration else {
-      throw PrivateMacShareError.captureUnavailable
+    try await configurationGate.run { [self] in
+      guard let stream, let configuration else {
+        throw PrivateMacShareError.captureUnavailable
+      }
+      configuration.width = width
+      configuration.height = height
+      try await stream.updateConfiguration(configuration)
     }
-    configuration.width = width
-    configuration.height = height
-    try await stream.updateConfiguration(configuration)
+  }
+
+  func updateFrameInterval(framesPerSecond: Int) async throws {
+    try await configurationGate.run { [self] in
+      guard framesPerSecond > 0, let stream, let configuration else {
+        throw PrivateMacShareError.captureUnavailable
+      }
+      configuration.minimumFrameInterval = CMTime(
+        value: 1, timescale: CMTimeScale(framesPerSecond))
+      try await stream.updateConfiguration(configuration)
+    }
   }
 
   func stop() async {
-    guard let stream else { return }
-    self.stream = nil
-    self.configuration = nil
-    try? await stream.stopCapture()
+    let stopped = try? await configurationGate.run { [self] in
+      guard let stream else { return false }
+      self.stream = nil
+      self.configuration = nil
+      self.contentFilter = nil
+      try? await stream.stopCapture()
+      return true
+    }
+    guard stopped == true else { return }
+    clearLatestVideoSource()
     await frameStore.clear()
   }
 
@@ -152,12 +205,69 @@ final class MacScreenCapture: NSObject, @unchecked Sendable {
     frameLock.unlock()
   }
 
+  func setVideoFrameHandler(
+    _ handler: (@Sendable (CVPixelBuffer, CMTime) -> Void)?
+  ) {
+    frameLock.lock()
+    videoFrameHandler = handler
+    frameLock.unlock()
+  }
+
+  func latestVideoFrame() -> (pixelBuffer: CVPixelBuffer, presentationTime: CMTime)? {
+    frameLock.lock()
+    defer { frameLock.unlock() }
+    return latestVideoSource
+  }
+
+  /// Renders a one-shot screenshot into the JPEG frame store. The store goes
+  /// stale while a video handler consumes capture output, so the Tight path
+  /// needs this after an H.264 fallback on a static screen.
+  func refreshJPEGFrame() async -> Bool {
+    guard let source = await snapshotVideoFrame(),
+      let jpegData = encodeJPEG(source.pixelBuffer),
+      jpegData.count <= 4 * 1_024 * 1_024
+    else {
+      return false
+    }
+    let frame = CapturedDesktopFrame(
+      jpegData: jpegData,
+      sequence: nextSequence(),
+      width: CVPixelBufferGetWidth(source.pixelBuffer),
+      height: CVPixelBufferGetHeight(source.pixelBuffer)
+    )
+    await frameStore.update(frame)
+    return true
+  }
+
+  /// One-shot capture for when a frame is needed but the stream has nothing
+  /// cached — a fresh session or resize on a static screen delivers no stream
+  /// output until content changes.
+  func snapshotVideoFrame() async -> (pixelBuffer: CVPixelBuffer, presentationTime: CMTime)? {
+    let source = try? await configurationGate.run { [self] in
+      guard let contentFilter, let configuration else {
+        throw PrivateMacShareError.captureUnavailable
+      }
+      let sampleBuffer = try await SCScreenshotManager.captureSampleBuffer(
+        contentFilter: contentFilter,
+        configuration: configuration)
+      guard let pixelBuffer = sampleBuffer.imageBuffer else {
+        throw PrivateMacShareError.captureUnavailable
+      }
+      return VideoPixelSource(
+        pixelBuffer: pixelBuffer,
+        presentationTime: sampleBuffer.presentationTimeStamp)
+    }
+    guard let source else { return nil }
+    retainVideoSource(source.pixelBuffer, presentationTime: source.presentationTime)
+    return (source.pixelBuffer, source.presentationTime)
+  }
+
   static func captureDimensions(sourceWidth: Int, sourceHeight: Int) -> (
     width: Int,
     height: Int
   ) {
-    let maximumWidth = 1_600.0
-    let maximumHeight = 1_000.0
+    let maximumWidth = 2_560.0
+    let maximumHeight = 1_600.0
     let width = max(Double(sourceWidth), 1)
     let height = max(Double(sourceHeight), 1)
     let scale = min(1, maximumWidth / width, maximumHeight / height)
@@ -172,10 +282,10 @@ final class MacScreenCapture: NSObject, @unchecked Sendable {
     requestedWidth: Int,
     requestedHeight: Int,
     sourcePixelWidth: Int,
-    sourcePixelHeight: Int
+    sourcePixelHeight: Int,
+    maximumWidth: Double = 2_560,
+    maximumHeight: Double = 1_600
   ) -> (width: Int, height: Int) {
-    let maximumWidth = 2_560.0
-    let maximumHeight = 1_600.0
     let requestWidth = min(max(Double(requestedWidth), 320), maximumWidth)
     let requestHeight = min(max(Double(requestedHeight), 240), maximumHeight)
     let sourceWidth = max(Double(sourcePixelWidth), 1)
@@ -221,6 +331,24 @@ final class MacScreenCapture: NSObject, @unchecked Sendable {
     frameLock.lock()
     defer { frameLock.unlock() }
     return consumerActive
+  }
+
+  private func currentVideoFrameHandler() -> (@Sendable (CVPixelBuffer, CMTime) -> Void)? {
+    frameLock.lock()
+    defer { frameLock.unlock() }
+    return videoFrameHandler
+  }
+
+  private func retainVideoSource(_ pixelBuffer: CVPixelBuffer, presentationTime: CMTime) {
+    frameLock.lock()
+    latestVideoSource = (pixelBuffer, presentationTime)
+    frameLock.unlock()
+  }
+
+  private func clearLatestVideoSource() {
+    frameLock.lock()
+    latestVideoSource = nil
+    frameLock.unlock()
   }
 
   private func encodeJPEG(_ pixelBuffer: CVPixelBuffer) -> Data? {
@@ -274,7 +402,19 @@ extension MacScreenCapture: SCStreamOutput, SCStreamDelegate {
       let attachments = attachmentsArray.first,
       let statusRawValue = attachments[.status] as? Int,
       SCFrameStatus(rawValue: statusRawValue) == .complete,
-      let pixelBuffer = sampleBuffer.imageBuffer,
+      let pixelBuffer = sampleBuffer.imageBuffer
+    else {
+      return
+    }
+
+    retainVideoSource(pixelBuffer, presentationTime: sampleBuffer.presentationTimeStamp)
+
+    if let handler = currentVideoFrameHandler() {
+      handler(pixelBuffer, sampleBuffer.presentationTimeStamp)
+      return
+    }
+
+    guard
       let jpegData = encodeJPEG(pixelBuffer),
       jpegData.count <= 4 * 1_024 * 1_024
     else {

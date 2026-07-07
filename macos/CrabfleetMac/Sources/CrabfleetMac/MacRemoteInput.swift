@@ -6,10 +6,12 @@ protocol RemoteInputForwarding: Sendable {
   func keyEvent(down: Bool, keysym: UInt32)
   func pointerEvent(buttonMask: UInt8, x: UInt16, y: UInt16)
   func updateFrameSize(width: Int, height: Int)
+  func releaseAllInput()
 }
 
 extension RemoteInputForwarding {
   func updateFrameSize(width: Int, height: Int) {}
+  func releaseAllInput() {}
 }
 
 final class MacRemoteInputController: RemoteInputForwarding, @unchecked Sendable {
@@ -22,11 +24,14 @@ final class MacRemoteInputController: RemoteInputForwarding, @unchecked Sendable
   private var frameWidth: Int
   private var frameHeight: Int
   private var previousButtonMask: UInt8 = 0
+  private var previousPointerLocation: CGPoint
+  private var pressedKeysyms: Set<UInt32> = []
 
   init(descriptor: CapturedDisplayDescriptor) {
     self.descriptor = descriptor
     frameWidth = descriptor.frameWidth
     frameHeight = descriptor.frameHeight
+    previousPointerLocation = descriptor.displayBounds.origin
   }
 
   /// Keeps pointer scaling aligned with the announced framebuffer size after
@@ -54,21 +59,12 @@ final class MacRemoteInputController: RemoteInputForwarding, @unchecked Sendable
   func keyEvent(down: Bool, keysym: UInt32) {
     eventQueue.async { [self] in
       guard Self.isAccessibilityGranted else { return }
-      let event: CGEvent?
-      if let keyCode = Self.keyCode(for: keysym) {
-        event = CGEvent(keyboardEventSource: eventSource(), virtualKey: keyCode, keyDown: down)
-      } else if let scalar = UnicodeScalar(keysym) {
-        let candidate = CGEvent(keyboardEventSource: eventSource(), virtualKey: 0, keyDown: down)
-        var codeUnits = Array(String(scalar).utf16)
-        candidate?.keyboardSetUnicodeString(
-          stringLength: codeUnits.count,
-          unicodeString: &codeUnits
-        )
-        event = candidate
+      postKeyEvent(down: down, keysym: keysym)
+      if down {
+        pressedKeysyms.insert(keysym)
       } else {
-        event = nil
+        pressedKeysyms.remove(keysym)
       }
-      event?.post(tap: .cghidEventTap)
     }
   }
 
@@ -76,6 +72,7 @@ final class MacRemoteInputController: RemoteInputForwarding, @unchecked Sendable
     eventQueue.async { [self] in
       guard Self.isAccessibilityGranted else { return }
       let location = mappedLocation(x: x, y: y)
+      previousPointerLocation = location
       let changedButtons = previousButtonMask ^ buttonMask
       var postedButtonChange = false
 
@@ -117,6 +114,44 @@ final class MacRemoteInputController: RemoteInputForwarding, @unchecked Sendable
       if newWheelBits & 0x40 != 0 { postScroll(vertical: 0, horizontal: -1) }
       previousButtonMask = buttonMask
     }
+  }
+
+  func releaseAllInput() {
+    eventQueue.async { [self] in
+      guard Self.isAccessibilityGranted else { return }
+      for keysym in pressedKeysyms {
+        postKeyEvent(down: false, keysym: keysym)
+      }
+      pressedKeysyms.removeAll()
+
+      for button in Self.mouseButtons where previousButtonMask & button.mask != 0 {
+        CGEvent(
+          mouseEventSource: eventSource(),
+          mouseType: button.upType,
+          mouseCursorPosition: previousPointerLocation,
+          mouseButton: button.button
+        )?.post(tap: .cghidEventTap)
+      }
+      previousButtonMask = 0
+    }
+  }
+
+  private func postKeyEvent(down: Bool, keysym: UInt32) {
+    let event: CGEvent?
+    if let keyCode = Self.keyCode(for: keysym) {
+      event = CGEvent(keyboardEventSource: eventSource(), virtualKey: keyCode, keyDown: down)
+    } else if let scalar = UnicodeScalar(keysym) {
+      let candidate = CGEvent(keyboardEventSource: eventSource(), virtualKey: 0, keyDown: down)
+      var codeUnits = Array(String(scalar).utf16)
+      candidate?.keyboardSetUnicodeString(
+        stringLength: codeUnits.count,
+        unicodeString: &codeUnits
+      )
+      event = candidate
+    } else {
+      event = nil
+    }
+    event?.post(tap: .cghidEventTap)
   }
 
   private func eventSource() -> CGEventSource? {
