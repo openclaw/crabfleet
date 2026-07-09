@@ -114,7 +114,7 @@ Owners can evaluate `CRABBOX.md` for enabled repos. Valid workflow config sets r
 - Kysely
 - GitHub OAuth/API
 - Ghostty WebAssembly
-- `tsgo`, `oxlint`, `oxfmt`
+- `tsc`, `oxlint`, `oxfmt`
 
 ## Status
 

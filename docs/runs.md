@@ -184,7 +184,7 @@ Returns all attempts for the card, newest first.
 
 ## Test Stack
 
-- `pnpm run check`: asset generation, `tsgo --noEmit`, `oxlint`, `oxfmt --check`.
+- `pnpm run check`: asset generation, `tsc --noEmit`, `oxlint`, `oxfmt --check`.
 - SQLite migration smoke with migrations applied in order.
 - Structured autoreview per non-trivial change until no accepted/actionable findings remain.
 - Browser/live smoke after deploy for `/app`, `/docs/`, auth surface, and docs subdomain.

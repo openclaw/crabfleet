@@ -287,7 +287,7 @@ pnpm format
 
 ### Test Stack
 
-- `tsgo --noEmit` through `pnpm build`
+- `tsc --noEmit` through `pnpm build`
 - `oxlint` for linting
 - `oxfmt --check` for formatting
 - SQLite migration smoke checks for D1 schema compatibility
