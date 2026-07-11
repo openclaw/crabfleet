@@ -5,26 +5,26 @@
   "scripts": {
     "build": "node scripts/generate-assets.mjs && tsc --noEmit",
     "build:static": "node scripts/generate-assets.mjs --static",
-    "deploy": "pnpm build && pnpm deploy:product:worker && wrangler d1 migrations apply DB --remote && wrangler deploy && pnpm deploy:domains",
-    "deploy:product": "pnpm deploy:product:worker && pnpm deploy:domains:product",
-    "deploy:product:worker": "wrangler deploy --config wrangler.product.jsonc",
-    "deploy:domains": "node scripts/ensure-cloudflare-domains.mjs",
-    "deploy:domains:product": "node scripts/ensure-cloudflare-domains.mjs --product-only",
-    "test": "node --test --experimental-strip-types tests/*.test.ts",
-    "lint": "oxlint --ignore-pattern node_modules --ignore-pattern src/generated.ts .",
-    "format": "oxfmt --check .",
     "check": "node scripts/generate-assets.mjs && tsc --noEmit && oxlint --ignore-pattern node_modules --ignore-pattern src/generated.ts . && oxfmt --check .",
     "check:changed": "pnpm run check",
-    "test:changed": "pnpm run test",
-    "macos:build": "swift build --package-path macos/CrabfleetMac",
-    "macos:bundle": "sh macos/CrabfleetMac/scripts/build-app.sh",
-    "macos:test": "pnpm macos:test:vendor && swift test --package-path macos/CrabfleetMac",
-    "macos:test:vendor": "swift test --package-path macos/CrabfleetMac/Vendor/RoyalVNCKit",
-    "macos:run": "swift run --package-path macos/CrabfleetMac CrabfleetMac",
     "crabbox:hydrate": "crabbox actions hydrate",
     "crabbox:run": "crabbox run",
     "crabbox:stop": "crabbox stop",
-    "crabbox:warmup": "crabbox warmup"
+    "crabbox:warmup": "crabbox warmup",
+    "deploy": "pnpm build && pnpm deploy:product:worker && wrangler d1 migrations apply DB --remote && wrangler deploy && pnpm deploy:domains",
+    "deploy:domains": "node scripts/ensure-cloudflare-domains.mjs",
+    "deploy:domains:product": "node scripts/ensure-cloudflare-domains.mjs --product-only",
+    "deploy:product": "pnpm deploy:product:worker && pnpm deploy:domains:product",
+    "deploy:product:worker": "wrangler deploy --config wrangler.product.jsonc",
+    "format": "oxfmt --check .",
+    "lint": "oxlint --ignore-pattern node_modules --ignore-pattern src/generated.ts .",
+    "macos:build": "swift build --package-path macos/CrabfleetMac",
+    "macos:bundle": "sh macos/CrabfleetMac/scripts/build-app.sh",
+    "macos:run": "swift run --package-path macos/CrabfleetMac CrabfleetMac",
+    "macos:test": "pnpm macos:test:vendor && swift test --package-path macos/CrabfleetMac",
+    "macos:test:vendor": "swift test --package-path macos/CrabfleetMac/Vendor/RoyalVNCKit",
+    "test": "node --test --experimental-strip-types tests/*.test.ts",
+    "test:changed": "pnpm run test"
   },
   "dependencies": {
     "@cloudflare/sandbox": "0.12.2",
@@ -42,8 +42,8 @@
     "vite": "^8.1.4",
     "wrangler": "^4.107.1"
   },
-  "packageManager": "pnpm@10.23.0",
   "engines": {
     "node": ">=24"
-  }
+  },
+  "packageManager": "pnpm@10.23.0"
 }
