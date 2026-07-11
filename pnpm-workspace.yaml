@@ -5,6 +5,7 @@ preferWorkspacePackages: true
 preferOffline: true
 pmOnFail: ignore
 verifyDepsBeforeRun: false
+minimumReleaseAge: 2880
 minimumReleaseAgeExclude:
   - "@openclaw/libterminal@0.1.0"
   - "@typescript/native-preview-darwin-arm64@7.0.0-dev.20260609.1"
