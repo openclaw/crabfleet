@@ -52,11 +52,9 @@ export async function archiveInteractiveSessionLogs(
   const summaryKey = attemptedArchive.summary_key;
   if (env.SESSION_LOGS) {
     await Promise.all([
-      env.SESSION_LOGS.put(
-        eventsKey,
-        events.map((row) => JSON.stringify(interactiveSessionEvent(row))).join("\n") + "\n",
-        { httpMetadata: { contentType: "application/x-ndjson; charset=utf-8" } },
-      ),
+      env.SESSION_LOGS.put(eventsKey, sessionLogEventsNdjson(events), {
+        httpMetadata: { contentType: "application/x-ndjson; charset=utf-8" },
+      }),
       env.SESSION_LOGS.put(transcriptKey, sessionLogTranscript(sessionRow, events), {
         httpMetadata: { contentType: "text/markdown; charset=utf-8" },
       }),
@@ -160,6 +158,10 @@ export async function cleanupSessionLogArchiveObjects(
 
 export function sessionLogArchiveBase(id: string): string {
   return `orgs/openclaw/interactive-sessions/${id.replace(/[^A-Za-z0-9_.-]/g, "_")}`;
+}
+
+export function sessionLogEventsNdjson(events: InteractiveSessionEventRow[]): string {
+  return events.map((row) => JSON.stringify(interactiveSessionEvent(row))).join("\n") + "\n";
 }
 
 export function sessionLogTranscript(

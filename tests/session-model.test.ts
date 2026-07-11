@@ -77,10 +77,20 @@ test("event and archive rows map to public session records", () => {
       id: 1,
       session_id: "IS-42",
       actor: "owner",
+      event_key: "run:42",
+      event_type: "clawsweeper.action",
       message: "ready",
+      payload_json: '{"details":{"count":2},"version":1}',
       created_at: 10,
     }),
-    { actor: "owner", message: "ready", createdAt: 10 },
+    {
+      actor: "owner",
+      eventKey: "run:42",
+      type: "clawsweeper.action",
+      message: "ready",
+      payload: { details: { count: 2 }, version: 1 },
+      createdAt: 10,
+    },
   );
 
   const row: InteractiveSessionLogArchiveTable = {

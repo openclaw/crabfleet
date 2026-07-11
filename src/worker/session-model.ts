@@ -122,8 +122,23 @@ export type InteractiveSessionLogArchive = {
 
 export type InteractiveSessionEvent = {
   actor: string;
+  eventKey: string | null;
+  type: string;
   message: string;
+  payload: InteractiveSessionEventPayload | null;
   createdAt: number;
+};
+
+export type InteractiveSessionEventPayloadValue =
+  | null
+  | boolean
+  | number
+  | string
+  | InteractiveSessionEventPayloadValue[]
+  | { [key: string]: InteractiveSessionEventPayloadValue };
+
+export type InteractiveSessionEventPayload = {
+  [key: string]: InteractiveSessionEventPayloadValue;
 };
 
 export type InteractiveSessionEventRow = {
@@ -131,6 +146,9 @@ export type InteractiveSessionEventRow = {
   session_id: string;
   actor: string;
   message: string;
+  event_key: string | null;
+  event_type: string;
+  payload_json: string | null;
   created_at: number;
 };
 
@@ -201,7 +219,10 @@ export function interactiveSession(
 export function interactiveSessionEvent(row: InteractiveSessionEventRow): InteractiveSessionEvent {
   return {
     actor: row.actor,
+    eventKey: row.event_key,
+    type: row.event_type || "message",
     message: row.message,
+    payload: parseEventPayload(row.payload_json),
     createdAt: row.created_at,
   };
 }
@@ -249,4 +270,12 @@ function parseJson<T>(value: string, fallback: T): T {
   } catch {
     return fallback;
   }
+}
+
+function parseEventPayload(value: string | null): InteractiveSessionEventPayload | null {
+  if (!value) return null;
+  const parsed = parseJson<unknown>(value, null);
+  return parsed && typeof parsed === "object" && !Array.isArray(parsed)
+    ? (parsed as InteractiveSessionEventPayload)
+    : null;
 }
