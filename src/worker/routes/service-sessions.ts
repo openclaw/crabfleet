@@ -13,6 +13,7 @@ export type ServiceSessionRouteDependencies = {
   createSshSession(request: Request): Promise<unknown>;
   createAgentSession(request: Request): Promise<unknown>;
   updateAgentWorkState(request: Request, sessionId: string): Promise<unknown>;
+  appendAgentEvent(request: Request, sessionId: string): Promise<unknown>;
   openAgentRunnerPty(request: Request, sessionId: string): Promise<Response>;
   requireSshViewer(request: Request): Promise<User>;
   requireAgentUser(request: Request): Promise<User>;
@@ -62,6 +63,9 @@ export async function handleServiceSessionRoute(
 
   if (principal === "agent" && request.method === "POST" && resource === "work-state") {
     return json(await dependencies.updateAgentWorkState(request, sessionId));
+  }
+  if (principal === "agent" && request.method === "POST" && resource === "events") {
+    return json(await dependencies.appendAgentEvent(request, sessionId));
   }
   if (principal === "agent" && request.method === "GET" && resource === "runner-pty") {
     return dependencies.openAgentRunnerPty(request, sessionId);

@@ -25,7 +25,10 @@ import {
   type AgentSessionAuthenticationOptions,
   type AgentSessionAuthenticationStore,
 } from "./session-agent-auth.ts";
-import { appendInteractiveSessionEventRecord } from "./session-events.ts";
+import {
+  appendInteractiveSessionEventRecord,
+  appendStructuredInteractiveSessionEventRecord,
+} from "./session-events.ts";
 import { InteractiveSessionGrantRepository } from "./session-grant-repository.ts";
 import { nextInteractiveSessionId } from "./session-id-repository.ts";
 import type { InteractiveSession } from "./session-model.ts";
@@ -82,7 +85,7 @@ export class GitHubActionsApplication {
       updateSession: (id, values) => repository.updateSession(id, values),
       isConstraintError,
       disconnectRunner: (id) => this.disconnectRunner(id),
-      appendEvent: (id, message, now) => this.appendEvent(id, user, message, now),
+      appendEvent: (id, message, now) => this.appendMessageEvent(id, user, message, now),
       audit: (message, now) => this.dependencies.audit(user, message, now),
       readSession: (id) => readInteractiveSessionRecord(this.env, id),
     };
@@ -100,7 +103,8 @@ export class GitHubActionsApplication {
       now: () => Date.now(),
       readRow: (sessionId) => repository.readById(sessionId),
       persist: (sessionId, values) => repository.updateSession(sessionId, values),
-      appendEvent: (sessionId, message, now) => this.appendEvent(sessionId, user, message, now),
+      appendEvent: (sessionId, message, now) =>
+        this.appendMessageEvent(sessionId, user, message, now),
       disconnectRunner: (sessionId) => this.disconnectRunner(sessionId),
       readSession: (sessionId) => readInteractiveSessionRecord(this.env, sessionId),
     };
@@ -108,6 +112,29 @@ export class GitHubActionsApplication {
       session: await new GitHubActionsWorkStateService(store).update(session, body),
       user,
     };
+  }
+
+  async appendStructuredEvent(request: Request, id: string) {
+    const { user } = await this.authenticate(request, id);
+    const input = await readJson<unknown>(request);
+    if (!input || typeof input !== "object" || Array.isArray(input)) {
+      throw badRequest("event body must be a JSON object");
+    }
+    const body = input as {
+      eventKey?: unknown;
+      type?: unknown;
+      message?: unknown;
+      payload?: unknown;
+    };
+    return appendStructuredInteractiveSessionEventRecord(this.env, {
+      sessionId: id,
+      actor: actor(user),
+      eventKey: body.eventKey,
+      type: body.type,
+      message: body.message,
+      payload: body.payload,
+      now: Date.now(),
+    });
   }
 
   async openRunnerPty(request: Request, id: string): Promise<Response> {
@@ -123,7 +150,8 @@ export class GitHubActionsApplication {
     const store: GitHubActionsRunnerConnectionStore = {
       now: () => Date.now(),
       persist: (sessionId, values) => repository.updateSession(sessionId, values),
-      appendEvent: (sessionId, message, now) => this.appendEvent(sessionId, user, message, now),
+      appendEvent: (sessionId, message, now) =>
+        this.appendMessageEvent(sessionId, user, message, now),
     };
     await new GitHubActionsRunnerConnectionService(store).connect(session);
     return stub.fetch("https://crabfleet.internal/api/session-control/github-actions/runner", {
@@ -160,7 +188,7 @@ export class GitHubActionsApplication {
     return this.registry.get(services.repository, () => new GitHubActionsRepository(this.env));
   }
 
-  private appendEvent(id: string, user: User, message: string, now: number): Promise<void> {
+  private appendMessageEvent(id: string, user: User, message: string, now: number): Promise<void> {
     return appendInteractiveSessionEventRecord(this.env, {
       sessionId: id,
       actor: actor(user),

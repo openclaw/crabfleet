@@ -56,6 +56,10 @@ function dependencies(calls: string[]): ServiceSessionRouteDependencies {
       calls.push(`work-state:${sessionId}`);
       return { handler: "work-state" };
     },
+    async appendAgentEvent(_request: Request, sessionId: string) {
+      calls.push(`event:${sessionId}`);
+      return { handler: "event" };
+    },
     async openAgentRunnerPty(_request: Request, sessionId: string) {
       calls.push(`runner-pty:${sessionId}`);
       return response("runner-pty");
@@ -130,6 +134,16 @@ test("service-session routes dispatch collection and agent-specialized endpoints
       request("POST", "/api/agent/interactive-sessions/IS%2F2/work-state", {}),
       200,
       ["work-state:IS/2"],
+    ],
+    [
+      request("POST", "/api/agent/interactive-sessions/IS%2F2/events", {
+        eventKey: "run:1",
+        type: "clawsweeper.action",
+        message: "updated pull request",
+        payload: { version: 1 },
+      }),
+      200,
+      ["event:IS/2"],
     ],
   ];
 
@@ -235,6 +249,18 @@ test("service-session routes keep actions and checkpoints SSH-only", async () =>
   assert.equal(
     await dispatch(
       request("POST", "/api/agent/interactive-sessions/IS-2/actions", { action: "stop" }),
+      calls,
+    ),
+    null,
+  );
+  assert.equal(
+    await dispatch(
+      request("POST", "/api/ssh/interactive-sessions/IS-2/events", {
+        eventKey: "run:1",
+        type: "clawsweeper.action",
+        message: "updated pull request",
+        payload: { version: 1 },
+      }),
       calls,
     ),
     null,

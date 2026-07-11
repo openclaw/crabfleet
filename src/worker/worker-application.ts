@@ -275,6 +275,8 @@ export class WorkerApplication {
           session: this.sessions.present(result.session, result.user),
         };
       },
+      appendAgentEvent: (request, sessionId) =>
+        this.githubActions.appendStructuredEvent(request, sessionId),
       openAgentRunnerPty: (request, sessionId) =>
         this.githubActions.openRunnerPty(request, sessionId),
       requireSshViewer: async (request) => {
