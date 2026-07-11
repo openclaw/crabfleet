@@ -96,8 +96,9 @@ test("structured session events canonicalize additive payloads and replay idempo
   const invalidations: string[] = [];
   const archives: string[] = [];
   const store: InteractiveSessionEventLedgerStore = {
-    async persist(event) {
+    async persistAndInvalidate(event) {
       persistedPayloads.push(event.payloadJson);
+      invalidations.push(event.sessionId);
       if (!row) {
         row = {
           id: 1,
@@ -112,9 +113,6 @@ test("structured session events canonicalize additive payloads and replay idempo
         return { row, inserted: true };
       }
       return { row, inserted: false };
-    },
-    async invalidateTerminalFinalization(sessionId) {
-      invalidations.push(sessionId);
     },
     async archive(sessionId) {
       archives.push(sessionId);
@@ -181,14 +179,10 @@ test("structured session event key conflicts reject changed content before side 
     payload_json: '{"version":1}',
     created_at: 123,
   };
-  let invalidated = false;
   let archived = false;
   const service = new InteractiveSessionEventLedgerService({
-    async persist() {
+    async persistAndInvalidate() {
       return { row: existing, inserted: false };
-    },
-    async invalidateTerminalFinalization() {
-      invalidated = true;
     },
     async archive() {
       archived = true;
@@ -213,18 +207,16 @@ test("structured session event key conflicts reject changed content before side 
       return true;
     },
   );
-  assert.equal(invalidated, false);
   assert.equal(archived, false);
 });
 
 test("structured session events require bounded identifiers and a versioned object payload", async () => {
   let persisted = false;
   const service = new InteractiveSessionEventLedgerService({
-    async persist() {
+    async persistAndInvalidate() {
       persisted = true;
       throw new Error("unexpected persistence");
     },
-    async invalidateTerminalFinalization() {},
     async archive() {},
   });
   const cases = [
@@ -259,11 +251,10 @@ test("structured session events require bounded identifiers and a versioned obje
 test("structured session event payload budgets fail with controlled client errors", async () => {
   let persisted = false;
   const service = new InteractiveSessionEventLedgerService({
-    async persist() {
+    async persistAndInvalidate() {
       persisted = true;
       throw new Error("unexpected persistence");
     },
-    async invalidateTerminalFinalization() {},
     async archive() {},
   });
   let nested: Record<string, unknown> = {};

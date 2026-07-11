@@ -1,6 +1,9 @@
+import { sql } from "kysely";
+
 import { database, executeBatch } from "./database.ts";
 import type { RuntimeEnv } from "./env.ts";
 import { badRequest, conflict, payloadTooLarge } from "./http.ts";
+import { deadInteractiveSessionStatuses } from "./models.ts";
 import { archiveInteractiveSessionLogs } from "./session-log-archive.ts";
 import {
   interactiveSessionEvent,
@@ -48,10 +51,9 @@ type PersistedStructuredInteractiveSessionEvent = {
 };
 
 export type InteractiveSessionEventLedgerStore = {
-  persist(
+  persistAndInvalidate(
     event: PersistedStructuredInteractiveSessionEvent,
   ): Promise<{ row: InteractiveSessionEventRow; inserted: boolean }>;
-  invalidateTerminalFinalization(sessionId: string): Promise<void>;
   archive(sessionId: string, now: number): Promise<void>;
 };
 
@@ -71,11 +73,10 @@ export class InteractiveSessionEventLedgerService {
     input: AppendStructuredInteractiveSessionEventInput,
   ): Promise<AppendStructuredInteractiveSessionEventResult> {
     const event = normalizeStructuredEvent(input);
-    const persisted = await this.store.persist(event);
+    const persisted = await this.store.persistAndInvalidate(event);
     if (!sameStructuredEvent(persisted.row, event)) {
       throw conflict("event key already belongs to a different session event");
     }
-    await this.store.invalidateTerminalFinalization(event.sessionId);
     await this.store.archive(event.sessionId, event.now).catch(() => undefined);
     return {
       event: interactiveSessionEvent(persisted.row),
@@ -111,8 +112,8 @@ export async function appendStructuredInteractiveSessionEventRecord(
 ): Promise<AppendStructuredInteractiveSessionEventResult> {
   const db = database(env);
   return new InteractiveSessionEventLedgerService({
-    async persist(event) {
-      const inserted = await db
+    async persistAndInvalidate(event) {
+      const insert = db
         .insertInto("interactive_session_events")
         .values({
           session_id: event.sessionId,
@@ -124,8 +125,30 @@ export async function appendStructuredInteractiveSessionEventRecord(
           created_at: event.now,
         })
         .onConflict((constraint) => constraint.doNothing())
-        .returningAll()
-        .executeTakeFirst();
+        .returningAll();
+      const invalidate = db
+        .updateTable("interactive_sessions")
+        .set({ terminal_finalize_pending: 1 })
+        .where("id", "=", event.sessionId)
+        .where("status", "in", deadInteractiveSessionStatuses)
+        .where(
+          sql<boolean>`EXISTS (
+            SELECT 1
+            FROM interactive_session_events
+            WHERE session_id = ${event.sessionId}
+              AND event_key = ${event.eventKey}
+              AND event_type = ${event.type}
+              AND message = ${event.message}
+              AND payload_json = ${event.payloadJson}
+          )`,
+        );
+      const results = await env.DB.batch<InteractiveSessionEventRow>(
+        [insert, invalidate].map((query) => {
+          const compiled = query.compile();
+          return env.DB.prepare(compiled.sql).bind(...compiled.parameters);
+        }),
+      );
+      const inserted = results[0]?.results?.[0];
       const row =
         inserted ??
         (await db
@@ -136,9 +159,6 @@ export async function appendStructuredInteractiveSessionEventRecord(
           .executeTakeFirst());
       if (!row) throw new Error("structured session event was not persisted");
       return { row, inserted: Boolean(inserted) };
-    },
-    async invalidateTerminalFinalization(sessionId) {
-      await executeBatch(env, [terminalFinalizationPendingQuery(db, sessionId)]);
     },
     archive,
   }).append(input);
