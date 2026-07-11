@@ -621,6 +621,36 @@ Agent-authenticated heartbeat and state update. Use `Authorization: Bearer <agen
 
 Every call updates `lastHeartbeatAt`. Active states are `registered` and `running`; `phase` keeps active steps distinguishable. Terminal states are `completed`, `blocked`, `failed`, and `canceled`.
 
+### POST /api/agent/interactive-sessions/:id/events
+
+Agent-authenticated structured event append. Use `Authorization: Bearer <agentToken>`.
+
+```json
+{
+  "eventKey": "clawsweeper:run:123:pull:42:update",
+  "type": "clawsweeper.action",
+  "message": "updated pull request 42",
+  "payload": {
+    "version": 1,
+    "action": "pull_request_updated",
+    "repository": "openclaw/crabfleet",
+    "number": 42
+  }
+}
+```
+
+`eventKey` is required, nonempty, and unique within the session. `type` and
+`message` are required. `payload` must be a JSON object with a positive integer
+`version`; additional fields and future positive versions are retained without
+schema filtering.
+
+The first append returns the stored public event with `duplicate: false`.
+Replaying the same key, type, trimmed message, and semantic JSON payload returns
+the original event with `duplicate: true`, including when object keys arrive in
+a different order. Reusing the key with different content returns `409`.
+Structured events do not change work state, `lastEvent`, or the existing
+message-event behavior.
+
 ### POST /api/interactive-sessions
 
 Maintainer+. Creates a standalone Codex CLI workspace request.
@@ -680,7 +710,7 @@ Authenticated viewer. Returns one current decorated session after a bounded life
 
 ### GET /api/interactive-sessions/:id/logs
 
-Visible-session viewer. Returns up to 5,000 recent D1 events, the total event count, truncation state, and current R2 archive snapshot metadata when available. It does not read or return the archived R2 objects.
+Visible-session viewer. Returns up to 5,000 recent D1 events, the total event count, truncation state, and current R2 archive snapshot metadata when available. Event records expose `actor`, `eventKey`, `type`, `message`, `payload`, and `createdAt`. Legacy message events use `eventKey: null`, `type: "message"`, and `payload: null`. This endpoint does not read or return the archived R2 objects.
 
 ### GET /api/interactive-sessions/:id/transcript
 

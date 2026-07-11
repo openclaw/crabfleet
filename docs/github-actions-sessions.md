@@ -212,6 +212,41 @@ ClawSweeper include:
 Crabfleet records the state transition as a session event and exposes the
 latest state in Fleet, Sessions, API, CLI, and logs.
 
+## Structured Action Events
+
+The Action runner can append durable machine-readable events without changing
+the work-state heartbeat:
+
+```http
+POST /api/agent/interactive-sessions/:id/events
+Authorization: Bearer <agentToken>
+Content-Type: application/json
+```
+
+```json
+{
+  "eventKey": "clawsweeper:run:123:pull:42:update",
+  "type": "clawsweeper.action",
+  "message": "updated pull request 42",
+  "payload": {
+    "version": 1,
+    "action": "pull_request_updated",
+    "number": 42,
+    "headSha": "0123456789abcdef"
+  }
+}
+```
+
+The payload must be a JSON object with a positive integer `version`. Crabfleet
+keeps all additional fields so ClawSweeper can extend action metadata without a
+coordinated schema migration.
+
+`eventKey` is unique within the session. An exact semantic replay succeeds and
+returns the original event with `duplicate: true`; changed content under the
+same key returns `409`. This lets retried workflow steps publish once without a
+separate read-before-write race. The endpoint only appends the event ledger: it
+does not update `workState`, `workPhase`, `lastHeartbeatAt`, or `lastEvent`.
+
 ## Runner PTY
 
 The Action connects outbound to the returned `runnerPtyUrl`:
@@ -458,11 +493,14 @@ Viewer terminal attaches are also recorded.
 
 When `SESSION_LOGS` is configured, session events periodically refresh:
 
-- NDJSON event archive;
+- NDJSON event archive with `eventKey`, `type`, and structured `payload`;
 - Markdown transcript;
 - JSON summary.
 
-D1 keeps the compact event list and archive pointers used by the app and API. Terminal completion forces a current snapshot before finalization clears.
+D1 keeps the compact event list and archive pointers used by the app and API.
+Legacy message events remain in the same stream with a null key and payload and
+the `message` type. Terminal completion forces a current snapshot before
+finalization clears.
 
 ## Operational Checks
 
