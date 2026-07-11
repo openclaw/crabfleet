@@ -5,6 +5,10 @@ import type { RuntimeEnv } from "../src/worker/env.ts";
 import {
   appendInteractiveSessionEventRecord,
   InteractiveSessionEventLedgerService,
+  structuredEventPayloadMaxBytes,
+  structuredEventPayloadMaxDepth,
+  structuredEventPayloadMaxMembers,
+  structuredEventPayloadMaxStringBytes,
   type InteractiveSessionEventLedgerStore,
 } from "../src/worker/session-events.ts";
 import type { InteractiveSessionEventRow } from "../src/worker/session-model.ts";
@@ -244,6 +248,72 @@ test("structured session events require bounded identifiers and a versioned obje
         assert.equal(
           typeof error === "object" && error && "status" in error ? error.status : undefined,
           400,
+        );
+        return true;
+      },
+    );
+  }
+  assert.equal(persisted, false);
+});
+
+test("structured session event payload budgets fail with controlled client errors", async () => {
+  let persisted = false;
+  const service = new InteractiveSessionEventLedgerService({
+    async persist() {
+      persisted = true;
+      throw new Error("unexpected persistence");
+    },
+    async invalidateTerminalFinalization() {},
+    async archive() {},
+  });
+  let nested: Record<string, unknown> = {};
+  const deepPayload: Record<string, unknown> = { version: 1, nested };
+  for (let depth = 0; depth < structuredEventPayloadMaxDepth + 1; depth += 1) {
+    const child: Record<string, unknown> = {};
+    nested.child = child;
+    nested = child;
+  }
+  const cases: Array<{ payload: Record<string, unknown>; status: number }> = [
+    { payload: deepPayload, status: 400 },
+    {
+      payload: {
+        version: 1,
+        values: Array.from({ length: structuredEventPayloadMaxMembers }, () => null),
+      },
+      status: 400,
+    },
+    {
+      payload: {
+        version: 1,
+        value: "x".repeat(structuredEventPayloadMaxStringBytes + 1),
+      },
+      status: 400,
+    },
+    {
+      payload: {
+        version: 1,
+        values: Array.from({ length: 5 }, () =>
+          "x".repeat(Math.floor(structuredEventPayloadMaxBytes / 4)),
+        ),
+      },
+      status: 413,
+    },
+  ];
+  for (const { payload, status } of cases) {
+    await assert.rejects(
+      service.append({
+        sessionId: "IS-1",
+        actor: "operator",
+        eventKey: "run:1",
+        type: "clawsweeper.action",
+        message: "updated pull request",
+        payload,
+        now: 123,
+      }),
+      (error) => {
+        assert.equal(
+          typeof error === "object" && error && "status" in error ? error.status : undefined,
+          status,
         );
         return true;
       },

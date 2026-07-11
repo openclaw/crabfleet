@@ -1,6 +1,6 @@
 import { database, executeBatch } from "./database.ts";
 import type { RuntimeEnv } from "./env.ts";
-import { badRequest, conflict } from "./http.ts";
+import { badRequest, conflict, payloadTooLarge } from "./http.ts";
 import { archiveInteractiveSessionLogs } from "./session-log-archive.ts";
 import {
   interactiveSessionEvent,
@@ -10,6 +10,13 @@ import {
   type InteractiveSessionEventRow,
 } from "./session-model.ts";
 import { terminalFinalizationPendingQuery } from "./session-terminal-finalization.ts";
+
+const encoder = new TextEncoder();
+
+export const structuredEventPayloadMaxBytes = 64 * 1024;
+export const structuredEventPayloadMaxDepth = 16;
+export const structuredEventPayloadMaxMembers = 1024;
+export const structuredEventPayloadMaxStringBytes = 16 * 1024;
 
 export type AppendInteractiveSessionEventInput = {
   sessionId: string;
@@ -143,14 +150,14 @@ function normalizeStructuredEvent(
   const eventKey = requiredString(input.eventKey, "eventKey", 240);
   const type = requiredString(input.type, "type", 120);
   const message = requiredString(input.message, "message", 1000);
-  const payload = structuredPayload(input.payload);
+  const payloadJson = structuredPayloadJson(input.payload);
   return {
     sessionId: input.sessionId,
     actor: input.actor,
     eventKey,
     type,
     message,
-    payloadJson: JSON.stringify(payload),
+    payloadJson,
     now: input.now,
   };
 }
@@ -168,7 +175,7 @@ function sameStructuredEvent(
   );
 }
 
-function structuredPayload(value: unknown): InteractiveSessionEventPayload {
+function structuredPayloadJson(value: unknown): string {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
     throw badRequest("payload must be a JSON object");
   }
@@ -182,14 +189,30 @@ function structuredPayload(value: unknown): InteractiveSessionEventPayload {
   ) {
     throw badRequest("payload.version must be a positive integer");
   }
-  return canonicalJsonValue(record, new Set()) as InteractiveSessionEventPayload;
+  const payload = canonicalJsonValue(record, new Set(), 0, { members: 0 });
+  const payloadJson = JSON.stringify(payload);
+  if (encoder.encode(payloadJson).byteLength > structuredEventPayloadMaxBytes) {
+    throw payloadTooLarge(
+      `payload must be at most ${structuredEventPayloadMaxBytes} serialized bytes`,
+    );
+  }
+  return payloadJson;
 }
 
 function canonicalJsonValue(
   value: unknown,
   parents: Set<object>,
+  depth: number,
+  budget: { members: number },
 ): InteractiveSessionEventPayloadValue {
-  if (value === null || typeof value === "string" || typeof value === "boolean") return value;
+  if (depth > structuredEventPayloadMaxDepth) {
+    throw badRequest(`payload depth must be at most ${structuredEventPayloadMaxDepth}`);
+  }
+  if (value === null || typeof value === "boolean") return value;
+  if (typeof value === "string") {
+    assertPayloadStringSize(value);
+    return value;
+  }
   if (typeof value === "number") {
     if (!Number.isFinite(value)) throw badRequest("payload must contain valid JSON values");
     return value;
@@ -201,15 +224,35 @@ function canonicalJsonValue(
   parents.add(value);
   try {
     if (Array.isArray(value)) {
-      return value.map((item) => canonicalJsonValue(item, parents));
+      consumePayloadMembers(budget, value.length);
+      return value.map((item) => canonicalJsonValue(item, parents, depth + 1, budget));
     }
+    const keys = Object.keys(value).sort();
+    consumePayloadMembers(budget, keys.length);
+    for (const key of keys) assertPayloadStringSize(key);
     return Object.fromEntries(
-      Object.keys(value)
-        .sort()
-        .map((key) => [key, canonicalJsonValue((value as Record<string, unknown>)[key], parents)]),
+      keys.map((key) => [
+        key,
+        canonicalJsonValue((value as Record<string, unknown>)[key], parents, depth + 1, budget),
+      ]),
     ) as InteractiveSessionEventPayload;
   } finally {
     parents.delete(value);
+  }
+}
+
+function consumePayloadMembers(budget: { members: number }, count: number): void {
+  budget.members += count;
+  if (budget.members > structuredEventPayloadMaxMembers) {
+    throw badRequest(`payload must contain at most ${structuredEventPayloadMaxMembers} members`);
+  }
+}
+
+function assertPayloadStringSize(value: string): void {
+  if (encoder.encode(value).byteLength > structuredEventPayloadMaxStringBytes) {
+    throw badRequest(
+      `payload strings must be at most ${structuredEventPayloadMaxStringBytes} UTF-8 bytes`,
+    );
   }
 }
 

@@ -642,7 +642,10 @@ Agent-authenticated structured event append. Use `Authorization: Bearer <agentTo
 `eventKey` is required, nonempty, and unique within the session. `type` and
 `message` are required. `payload` must be a JSON object with a positive integer
 `version`; additional fields and future positive versions are retained without
-schema filtering.
+schema filtering. The serialized payload is limited to 64 KiB, 16 levels,
+1,024 aggregate array/object members, and 16 KiB per UTF-8 string or object key.
+Structural-limit violations return `400`; serialized payload overflow returns
+`413`.
 
 The first append returns the stored public event with `duplicate: false`.
 Replaying the same key, type, trimmed message, and semantic JSON payload returns

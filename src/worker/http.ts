@@ -106,6 +106,10 @@ export function badRequest(message: string): HttpError {
   return httpError(400, message);
 }
 
+export function payloadTooLarge(message: string): HttpError {
+  return httpError(413, message);
+}
+
 export function tooManyRequests(message: string): HttpError {
   return httpError(429, message);
 }

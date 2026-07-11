@@ -239,7 +239,8 @@ Content-Type: application/json
 
 The payload must be a JSON object with a positive integer `version`. Crabfleet
 keeps all additional fields so ClawSweeper can extend action metadata without a
-coordinated schema migration.
+coordinated schema migration. Payloads are bounded to 64 KiB serialized, 16
+levels, 1,024 aggregate members, and 16 KiB per UTF-8 string or object key.
 
 `eventKey` is unique within the session. An exact semantic replay succeeds and
 returns the original event with `duplicate: true`; changed content under the
