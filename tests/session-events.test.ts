@@ -2,7 +2,12 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import type { RuntimeEnv } from "../src/worker/env.ts";
-import { appendInteractiveSessionEventRecord } from "../src/worker/session-events.ts";
+import {
+  appendInteractiveSessionEventRecord,
+  InteractiveSessionEventLedgerService,
+  type InteractiveSessionEventLedgerStore,
+} from "../src/worker/session-events.ts";
+import type { InteractiveSessionEventRow } from "../src/worker/session-model.ts";
 
 type PreparedStatement = {
   sql: string;
@@ -79,4 +84,170 @@ test("session event archive refresh remains best effort after durable persistenc
   );
 
   assert.equal(persisted, true);
+});
+
+test("structured session events canonicalize additive payloads and replay idempotently", async () => {
+  let row: InteractiveSessionEventRow | undefined;
+  const persistedPayloads: string[] = [];
+  const invalidations: string[] = [];
+  const archives: string[] = [];
+  const store: InteractiveSessionEventLedgerStore = {
+    async persist(event) {
+      persistedPayloads.push(event.payloadJson);
+      if (!row) {
+        row = {
+          id: 1,
+          session_id: event.sessionId,
+          actor: event.actor,
+          event_key: event.eventKey,
+          event_type: event.type,
+          message: event.message,
+          payload_json: event.payloadJson,
+          created_at: event.now,
+        };
+        return { row, inserted: true };
+      }
+      return { row, inserted: false };
+    },
+    async invalidateTerminalFinalization(sessionId) {
+      invalidations.push(sessionId);
+    },
+    async archive(sessionId) {
+      archives.push(sessionId);
+    },
+  };
+  const service = new InteractiveSessionEventLedgerService(store);
+  const first = await service.append({
+    sessionId: "IS-1",
+    actor: "operator",
+    eventKey: " run:1 ",
+    type: " clawsweeper.action ",
+    message: " updated pull request ",
+    payload: {
+      version: 2,
+      target: { z: true, a: 1 },
+      additiveField: ["kept"],
+    },
+    now: 123,
+  });
+  const replay = await service.append({
+    sessionId: "IS-1",
+    actor: "operator",
+    eventKey: "run:1",
+    type: "clawsweeper.action",
+    message: "updated pull request",
+    payload: {
+      additiveField: ["kept"],
+      target: { a: 1, z: true },
+      version: 2,
+    },
+    now: 456,
+  });
+
+  assert.equal(first.duplicate, false);
+  assert.equal(replay.duplicate, true);
+  assert.deepEqual(replay.event, {
+    actor: "operator",
+    eventKey: "run:1",
+    type: "clawsweeper.action",
+    message: "updated pull request",
+    payload: {
+      additiveField: ["kept"],
+      target: { a: 1, z: true },
+      version: 2,
+    },
+    createdAt: 123,
+  });
+  assert.deepEqual(persistedPayloads, [
+    '{"additiveField":["kept"],"target":{"a":1,"z":true},"version":2}',
+    '{"additiveField":["kept"],"target":{"a":1,"z":true},"version":2}',
+  ]);
+  assert.deepEqual(invalidations, ["IS-1", "IS-1"]);
+  assert.deepEqual(archives, ["IS-1", "IS-1"]);
+});
+
+test("structured session event key conflicts reject changed content before side effects", async () => {
+  const existing: InteractiveSessionEventRow = {
+    id: 1,
+    session_id: "IS-1",
+    actor: "operator",
+    event_key: "run:1",
+    event_type: "clawsweeper.action",
+    message: "original",
+    payload_json: '{"version":1}',
+    created_at: 123,
+  };
+  let invalidated = false;
+  let archived = false;
+  const service = new InteractiveSessionEventLedgerService({
+    async persist() {
+      return { row: existing, inserted: false };
+    },
+    async invalidateTerminalFinalization() {
+      invalidated = true;
+    },
+    async archive() {
+      archived = true;
+    },
+  });
+
+  await assert.rejects(
+    service.append({
+      sessionId: "IS-1",
+      actor: "operator",
+      eventKey: "run:1",
+      type: "clawsweeper.action",
+      message: "changed",
+      payload: { version: 1 },
+      now: 456,
+    }),
+    (error) => {
+      assert.equal(
+        typeof error === "object" && error && "status" in error ? error.status : undefined,
+        409,
+      );
+      return true;
+    },
+  );
+  assert.equal(invalidated, false);
+  assert.equal(archived, false);
+});
+
+test("structured session events require bounded identifiers and a versioned object payload", async () => {
+  let persisted = false;
+  const service = new InteractiveSessionEventLedgerService({
+    async persist() {
+      persisted = true;
+      throw new Error("unexpected persistence");
+    },
+    async invalidateTerminalFinalization() {},
+    async archive() {},
+  });
+  const cases = [
+    { eventKey: "", type: "action", message: "message", payload: { version: 1 } },
+    { eventKey: "key", type: "", message: "message", payload: { version: 1 } },
+    { eventKey: "key", type: "action", message: "", payload: { version: 1 } },
+    { eventKey: "key", type: "action", message: "message", payload: null },
+    { eventKey: "key", type: "action", message: "message", payload: [] },
+    { eventKey: "key", type: "action", message: "message", payload: {} },
+    { eventKey: "key", type: "action", message: "message", payload: { version: 0 } },
+  ];
+  for (const input of cases) {
+    await assert.rejects(
+      service.append({
+        sessionId: "IS-1",
+        actor: "operator",
+        ...input,
+        now: 123,
+      }),
+      (error) => {
+        assert.equal(
+          typeof error === "object" && error && "status" in error ? error.status : undefined,
+          400,
+        );
+        return true;
+      },
+    );
+  }
+  assert.equal(persisted, false);
 });

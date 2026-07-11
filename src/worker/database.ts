@@ -266,6 +266,9 @@ export type InteractiveSessionEventTable = {
   session_id: string;
   actor: string;
   message: string;
+  event_key: Generated<string | null>;
+  event_type: Generated<string>;
+  payload_json: Generated<string | null>;
   created_at: number;
 };
 
