@@ -34,7 +34,7 @@ import { nextInteractiveSessionId } from "./session-id-repository.ts";
 import type { InteractiveSession } from "./session-model.ts";
 import { readAgentSessionCredential, readInteractiveSessionRecord } from "./session-repository.ts";
 import { newAgentToken } from "./session-reservation-context.ts";
-import { githubActionsRelayStub } from "./session-control-do.ts";
+import { githubActionsRelayStub } from "./github-actions-relay.ts";
 import { ServiceRegistry } from "./service-registry.ts";
 
 const services = {

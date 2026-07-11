@@ -249,15 +249,6 @@ export function sandboxControlStub(env: RuntimeEnv): DurableObjectStub<SessionCo
   return env.SESSION_CONTROL.get(id);
 }
 
-export function githubActionsRelayStub(
-  env: RuntimeEnv,
-  sessionId: string,
-): DurableObjectStub<SessionControlDO> | null {
-  if (!env.SESSION_CONTROL) return null;
-  const id = env.SESSION_CONTROL.idFromName(`github-actions:${sessionId}`);
-  return env.SESSION_CONTROL.get(id);
-}
-
 export async function readSandboxFleetPolicies(env: RuntimeEnv): Promise<{
   available: boolean;
   policies: FleetSandboxPolicySummary[];
