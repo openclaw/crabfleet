@@ -38,7 +38,7 @@ import {
   delegatedInteractiveSessionControlAvailable,
 } from "./session-access.ts";
 import { InteractiveSessionGrantRepository } from "./session-grant-repository.ts";
-import { githubActionsRelayStub } from "./session-control-do.ts";
+import { githubActionsRelayStub } from "./github-actions-relay.ts";
 import { appendInteractiveSessionEventRecord } from "./session-events.ts";
 import type { InteractiveSession } from "./session-model.ts";
 import { readAuthorizedFreshSession } from "./session-authorized-refresh.ts";
