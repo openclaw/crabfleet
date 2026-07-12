@@ -9,7 +9,9 @@ private struct PixelFormatTransitionMessage: VNCSendableMessage {
 	let pixelFormatMessage: VNCProtocol.SetPixelFormat
 	let willSend: () -> Void
 	let didSend: () -> Void
+	let willSendFence: () -> Void
 	let didSendFence: () -> Void
+	let didFailFence: () -> Void
 
 	var messageType: UInt8 { fenceMessage?.messageType ?? pixelFormatMessage.messageType }
 	var data: Data {
@@ -19,8 +21,17 @@ private struct PixelFormatTransitionMessage: VNCSendableMessage {
 	func send(connection: NetworkConnectionWriting) async throws {
 		if fenceMessage == nil {
 			willSend()
+		} else {
+			willSendFence()
 		}
-		try await connection.write(data: data)
+		do {
+			try await connection.write(data: data)
+		} catch {
+			if fenceMessage != nil {
+				didFailFence()
+			}
+			throw error
+		}
 		if fenceMessage == nil {
 			didSend()
 		} else {
@@ -199,25 +210,51 @@ extension VNCConnection {
 			didSend: { [weak self] in
 				self?.completePixelFormatTransition()
 			},
+			willSendFence: { [weak self] in
+				guard let payload = transition.fencePayload else { return }
+				self?.beginPixelFormatTransitionFenceWrite(payload: payload)
+			},
 			didSendFence: { [weak self] in
 				guard let payload = transition.fencePayload else { return }
 				self?.schedulePixelFormatTransitionDeadline(payload: payload)
+			},
+			didFailFence: { [weak self] in
+				guard let payload = transition.fencePayload else { return }
+				self?.cancelPixelFormatTransitionFenceWrite(payload: payload)
 			}
 		)
 
 		enqueueClientToServerMessage(message)
 	}
 
-	private func schedulePixelFormatTransitionDeadline(payload: Data) {
+	private func beginPixelFormatTransitionFenceWrite(payload: Data) {
 		framebufferRequestLock.lock()
 		defer { framebufferRequestLock.unlock() }
 		guard isPixelFormatTransitionInFlight,
 			  pixelFormatTransitionFencePayload == payload else {
 			return
 		}
-
 		pixelFormatTransitionFenceWasSent = true
+	}
+
+	private func schedulePixelFormatTransitionDeadline(payload: Data) {
+		framebufferRequestLock.lock()
+		defer { framebufferRequestLock.unlock() }
+		guard isPixelFormatTransitionInFlight,
+			  pixelFormatTransitionFencePayload == payload,
+			  pixelFormatTransitionFenceWasSent else {
+			return
+		}
+
 		schedulePixelFormatTransitionDeadlineIfReadyLocked(payload: payload)
+	}
+
+	private func cancelPixelFormatTransitionFenceWrite(payload: Data) {
+		framebufferRequestLock.lock()
+		defer { framebufferRequestLock.unlock() }
+		guard pixelFormatTransitionFencePayload == payload else { return }
+		pixelFormatTransitionFenceWasSent = false
+		cancelPixelFormatTransitionDeadlineLocked()
 	}
 
 	private func schedulePixelFormatTransitionDeadlineIfReadyLocked(payload: Data) {

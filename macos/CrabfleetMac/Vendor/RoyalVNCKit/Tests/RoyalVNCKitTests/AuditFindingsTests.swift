@@ -417,6 +417,53 @@ struct AuditFindingsTests {
   }
 
   @Test
+  func acceptsPixelFormatFenceResponseWhileWriteCompletes() async throws {
+    let connection = try await makeFenceCapableConnection()
+
+    connection.updateColorDepth(.depth8Bit)
+    let queued = try #require(connection.clientToServerMessageQueue.dequeue())
+    let payload = try #require(connection.pixelFormatTransitionFencePayload)
+    connection.completeFramebufferUpdateRequest()
+    var responseError: Error?
+    let writer = AuditWritingConnection {
+      do {
+        try connection.handleServerFence(
+          VNCProtocol.ServerFence(
+            messageType: VNCProtocol.ServerFence.messageType,
+            flags: [.blockBefore, .syncNext],
+            payload: payload
+          )
+        )
+      } catch {
+        responseError = error
+      }
+    }
+
+    try await queued.message.send(connection: writer)
+
+    #expect(responseError == nil)
+    #expect(connection.state.pixelFormat?.depth == 8)
+    #expect(!connection.pixelFormatTransitionFenceWasSent)
+  }
+
+  @Test
+  func rollsBackPixelFormatFenceWhenWriteFails() async throws {
+    let connection = try await makeFenceCapableConnection()
+
+    connection.updateColorDepth(.depth8Bit)
+    let queued = try #require(connection.clientToServerMessageQueue.dequeue())
+
+    await #expect(throws: AuditWriteError.self) {
+      try await queued.message.send(connection: AuditFailingWritingConnection())
+    }
+
+    #expect(connection.isPixelFormatTransitionInFlight)
+    #expect(!connection.pixelFormatTransitionFenceWasSent)
+    #expect(connection.pixelFormatTransitionDeadlineTask == nil)
+    connection.cancelFramebufferUpdateScheduling()
+  }
+
+  @Test
   func waitsForSlowFramebufferBoundaryBeforeArmingTransitionDeadline() async throws {
     let connection = try await makeFenceCapableConnection()
 
@@ -806,6 +853,14 @@ private final class AuditWritingConnection: NetworkConnectionWriting {
     }
     onWrite()
     self.data.append(data)
+  }
+}
+
+private struct AuditWriteError: Error {}
+
+private final class AuditFailingWritingConnection: NetworkConnectionWriting {
+  func write(data: Data) async throws {
+    throw AuditWriteError()
   }
 }
 
