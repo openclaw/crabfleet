@@ -28,6 +28,7 @@ const terminalFrameLimits = { maxFrameBytes: 16 * 1024 * 1024 };
 const terminalInputAcknowledgementTimeoutMs = 5_000;
 
 type PendingTerminalInputAcknowledgement = {
+  promise: Promise<GitHubActionsRelayInputAcknowledgement>;
   resolve(result: GitHubActionsRelayInputAcknowledgement): void;
   timeout: ReturnType<typeof setTimeout>;
 };
@@ -49,7 +50,7 @@ export type TerminalHubSubscription = {
   cols: number;
   rows: number;
   inputAcknowledgements: boolean;
-  pendingInputAcknowledgement: PendingTerminalInputAcknowledgement | null;
+  pendingInputAcknowledgements: PendingTerminalInputAcknowledgement[];
   outputAcknowledgements: boolean;
   outputAcknowledgementBytes: number;
 };
@@ -239,6 +240,7 @@ export class TerminalHub {
               return;
             }
             const inputs = await this.dependencies.inputPayloads(subscription, user, frame.payload);
+            const acknowledgements: PendingTerminalInputAcknowledgement[] = [];
             for (const [index, input] of inputs.entries()) {
               if (index > 0) await sleep(index === inputs.length - 1 ? 80 : 2);
               if (
@@ -253,23 +255,34 @@ export class TerminalHub {
               const acknowledgement = subscription.inputAcknowledgements
                 ? beginTerminalInputAcknowledgement(subscription)
                 : null;
+              if (acknowledgement) acknowledgements.push(acknowledgement);
               try {
                 subscription.upstream.send(input);
               } catch {
-                cancelTerminalInputAcknowledgement(subscription);
-                sendTerminalJson(server, TerminalMessageType.Error, frame.sessionId, {
-                  error: "terminal upstream send failed",
-                });
-                return;
-              }
-              if (acknowledgement) {
-                const result = await acknowledgement;
-                if (!result.accepted) {
+                if (acknowledgement) {
+                  completeTerminalInputAcknowledgement(subscription, acknowledgement, {
+                    accepted: false,
+                    error: "terminal upstream send failed",
+                  });
+                  break;
+                } else {
                   sendTerminalJson(server, TerminalMessageType.Error, frame.sessionId, {
-                    error: result.error ?? "terminal input was not accepted",
+                    error: "terminal upstream send failed",
                   });
                   return;
                 }
+              }
+            }
+            if (acknowledgements.length > 0) {
+              const results = await Promise.all(
+                acknowledgements.map((acknowledgement) => acknowledgement.promise),
+              );
+              const rejection = results.find((result) => !result.accepted);
+              if (rejection) {
+                sendTerminalJson(server, TerminalMessageType.Error, frame.sessionId, {
+                  error: rejection.error ?? "terminal input was not accepted",
+                });
+                return;
               }
             }
             sendTerminalJson(server, TerminalMessageType.Event, frame.sessionId, {
@@ -448,7 +461,7 @@ export class TerminalHub {
         cols,
         rows,
         inputAcknowledgements: session.runtime === githubActionsRuntime,
-        pendingInputAcknowledgement: null,
+        pendingInputAcknowledgements: [],
         outputAcknowledgements: outputAcknowledgements && upstreamConnection.outputAcknowledgements,
         outputAcknowledgementBytes: 0,
       };
@@ -494,7 +507,7 @@ export class TerminalHub {
             if (typeof data === "string") {
               const inputAcknowledgement = parseGitHubActionsRelayInputAcknowledgement(data);
               if (inputAcknowledgement) {
-                completeTerminalInputAcknowledgement(activeSubscription, inputAcknowledgement);
+                completeNextTerminalInputAcknowledgement(activeSubscription, inputAcknowledgement);
                 return;
               }
               const parsed = parseTerminalControlMessage(data);
@@ -521,7 +534,7 @@ export class TerminalHub {
           });
       });
       upstream.addEventListener("close", (event) => {
-        completeTerminalInputAcknowledgement(activeSubscription, {
+        completeAllTerminalInputAcknowledgements(activeSubscription, {
           accepted: false,
           error: "terminal upstream closed before accepting input",
         });
@@ -549,7 +562,7 @@ export class TerminalHub {
         }
       });
       upstream.addEventListener("error", () => {
-        completeTerminalInputAcknowledgement(activeSubscription, {
+        completeAllTerminalInputAcknowledgements(activeSubscription, {
           accepted: false,
           error: "terminal upstream failed before accepting input",
         });
@@ -583,46 +596,63 @@ export class TerminalHub {
 
 function beginTerminalInputAcknowledgement(
   subscription: TerminalHubSubscription,
-): Promise<GitHubActionsRelayInputAcknowledgement> {
-  cancelTerminalInputAcknowledgement(subscription);
-  return new Promise((resolve) => {
-    const pending: PendingTerminalInputAcknowledgement = {
-      resolve,
-      timeout: setTimeout(() => {
-        if (
-          !completeTerminalInputAcknowledgement(subscription, {
-            accepted: false,
-            error: "terminal input delivery was not acknowledged",
-          })
-        ) {
-          return;
-        }
-        if (subscription.upstream.readyState === WebSocket.OPEN) {
-          subscription.upstream.close(1011, "input acknowledgement timed out");
-        }
-      }, terminalInputAcknowledgementTimeoutMs),
-    };
-    subscription.pendingInputAcknowledgement = pending;
+): PendingTerminalInputAcknowledgement {
+  let resolve!: (result: GitHubActionsRelayInputAcknowledgement) => void;
+  const promise = new Promise<GitHubActionsRelayInputAcknowledgement>((complete) => {
+    resolve = complete;
   });
+  const pending: PendingTerminalInputAcknowledgement = {
+    promise,
+    resolve,
+    timeout: setTimeout(() => {
+      if (
+        completeAllTerminalInputAcknowledgements(subscription, {
+          accepted: false,
+          error: "terminal input delivery was not acknowledged",
+        }) === 0
+      ) {
+        return;
+      }
+      if (subscription.upstream.readyState === WebSocket.OPEN) {
+        subscription.upstream.close(1011, "input acknowledgement timed out");
+      }
+    }, terminalInputAcknowledgementTimeoutMs),
+  };
+  subscription.pendingInputAcknowledgements.push(pending);
+  return pending;
 }
 
 function completeTerminalInputAcknowledgement(
   subscription: TerminalHubSubscription,
+  pending: PendingTerminalInputAcknowledgement,
   result: GitHubActionsRelayInputAcknowledgement,
 ): boolean {
-  const pending = subscription.pendingInputAcknowledgement;
-  if (!pending) return false;
-  subscription.pendingInputAcknowledgement = null;
+  const index = subscription.pendingInputAcknowledgements.indexOf(pending);
+  if (index < 0) return false;
+  subscription.pendingInputAcknowledgements.splice(index, 1);
   clearTimeout(pending.timeout);
   pending.resolve(result);
   return true;
 }
 
-function cancelTerminalInputAcknowledgement(subscription: TerminalHubSubscription): void {
-  const pending = subscription.pendingInputAcknowledgement;
-  if (!pending) return;
-  subscription.pendingInputAcknowledgement = null;
-  clearTimeout(pending.timeout);
+function completeNextTerminalInputAcknowledgement(
+  subscription: TerminalHubSubscription,
+  result: GitHubActionsRelayInputAcknowledgement,
+): boolean {
+  const pending = subscription.pendingInputAcknowledgements[0];
+  return pending ? completeTerminalInputAcknowledgement(subscription, pending, result) : false;
+}
+
+function completeAllTerminalInputAcknowledgements(
+  subscription: TerminalHubSubscription,
+  result: GitHubActionsRelayInputAcknowledgement,
+): number {
+  const pending = subscription.pendingInputAcknowledgements.splice(0);
+  for (const acknowledgement of pending) {
+    clearTimeout(acknowledgement.timeout);
+    acknowledgement.resolve(result);
+  }
+  return pending.length;
 }
 
 function updateTerminalInputCapability(

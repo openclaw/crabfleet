@@ -66,6 +66,10 @@ async function flushQueues(): Promise<void> {
   await new Promise<void>((resolve) => setImmediate(resolve));
 }
 
+async function waitForInputPayloads(): Promise<void> {
+  await new Promise<void>((resolve) => setTimeout(resolve, 100));
+}
+
 const user: User = {
   subject: "github:42",
   login: "operator",
@@ -609,6 +613,214 @@ test("GitHub Actions relay rejection becomes a terminal input error", async () =
   assert.deepEqual(decodeJsonPayload(rejected.payload), {
     error: "GitHub Actions runner did not accept terminal input",
   });
+  server.emit("close");
+});
+
+test("GitHub Actions input acknowledgements resolve overlapping payloads in FIFO order", async () => {
+  const client = socket();
+  const server = socket();
+  const upstream = socket();
+  const hub = new TerminalHub(
+    dependencies(client, server, upstream, {
+      async readSession() {
+        return githubActionsSession;
+      },
+      async inputPayloads() {
+        return [new TextEncoder().encode("first"), new TextEncoder().encode("second")];
+      },
+    }),
+  );
+  await hub.open(
+    new Request("https://fleet.example/api/terminal/ws", {
+      headers: { upgrade: "websocket" },
+    }),
+    user,
+  );
+  server.emit("message", {
+    data: encodeTerminalFrame({
+      type: TerminalMessageType.Subscribe,
+      sessionId: githubActionsSession.id,
+      payload: encodeSubscribePayload({ flags: 0, columns: 120, rows: 34 }),
+    }),
+  });
+  await flushQueues();
+  await flushQueues();
+  server.emit("message", {
+    data: encodeTerminalFrame({
+      type: TerminalMessageType.Input,
+      sessionId: githubActionsSession.id,
+      payload: new TextEncoder().encode("input"),
+    }),
+  });
+  await waitForInputPayloads();
+
+  assert.deepEqual(
+    upstream.sent.map((payload) => new TextDecoder().decode(payload as Uint8Array)),
+    ["first", "second"],
+  );
+  sendGitHubActionsRelayInputAcknowledgement(
+    {
+      readyState: WebSocket.OPEN,
+      send(message) {
+        upstream.emit("message", { data: message });
+      },
+      close() {},
+    },
+    true,
+  );
+  await flushQueues();
+  assert.notDeepEqual(decodeJsonPayload(frame(server.sent.at(-1)!).payload), {
+    type: "input-accepted",
+  });
+
+  sendGitHubActionsRelayInputAcknowledgement(
+    {
+      readyState: WebSocket.OPEN,
+      send(message) {
+        upstream.emit("message", { data: message });
+      },
+      close() {},
+    },
+    true,
+  );
+  await flushQueues();
+  await flushQueues();
+
+  assert.deepEqual(decodeJsonPayload(frame(server.sent.at(-1)!).payload), {
+    type: "input-accepted",
+  });
+  server.emit("close");
+});
+
+test("GitHub Actions send failure removes only its own acknowledgement waiter", async () => {
+  const client = socket();
+  const server = socket();
+  const upstream = socket();
+  const send = upstream.send.bind(upstream);
+  let sendCount = 0;
+  upstream.send = (payload) => {
+    sendCount += 1;
+    if (sendCount === 2) throw new Error("runner disconnected");
+    send(payload);
+  };
+  const hub = new TerminalHub(
+    dependencies(client, server, upstream, {
+      async readSession() {
+        return githubActionsSession;
+      },
+      async inputPayloads() {
+        return [new TextEncoder().encode("delivered"), new TextEncoder().encode("failed")];
+      },
+    }),
+  );
+  await hub.open(
+    new Request("https://fleet.example/api/terminal/ws", {
+      headers: { upgrade: "websocket" },
+    }),
+    user,
+  );
+  server.emit("message", {
+    data: encodeTerminalFrame({
+      type: TerminalMessageType.Subscribe,
+      sessionId: githubActionsSession.id,
+      payload: encodeSubscribePayload({ flags: 0, columns: 120, rows: 34 }),
+    }),
+  });
+  await flushQueues();
+  await flushQueues();
+  server.emit("message", {
+    data: encodeTerminalFrame({
+      type: TerminalMessageType.Input,
+      sessionId: githubActionsSession.id,
+      payload: new TextEncoder().encode("input"),
+    }),
+  });
+  await waitForInputPayloads();
+  assert.deepEqual(
+    upstream.sent.map((payload) => new TextDecoder().decode(payload as Uint8Array)),
+    ["delivered"],
+  );
+
+  sendGitHubActionsRelayInputAcknowledgement(
+    {
+      readyState: WebSocket.OPEN,
+      send(message) {
+        upstream.emit("message", { data: message });
+      },
+      close() {},
+    },
+    true,
+  );
+  await flushQueues();
+  await flushQueues();
+
+  const rejected = frame(server.sent.at(-1)!);
+  assert.equal(rejected.type, TerminalMessageType.Error);
+  assert.deepEqual(decodeJsonPayload(rejected.payload), {
+    error: "terminal upstream send failed",
+  });
+  server.emit("close");
+});
+
+test("GitHub Actions close rejects every pending input acknowledgement", async () => {
+  const client = socket();
+  const server = socket();
+  const upstream = socket();
+  const hub = new TerminalHub(
+    dependencies(client, server, upstream, {
+      async readSession() {
+        return githubActionsSession;
+      },
+      async inputPayloads() {
+        return [new TextEncoder().encode("first"), new TextEncoder().encode("second")];
+      },
+    }),
+  );
+  await hub.open(
+    new Request("https://fleet.example/api/terminal/ws", {
+      headers: { upgrade: "websocket" },
+    }),
+    user,
+  );
+  server.emit("message", {
+    data: encodeTerminalFrame({
+      type: TerminalMessageType.Subscribe,
+      sessionId: githubActionsSession.id,
+      payload: encodeSubscribePayload({ flags: 0, columns: 120, rows: 34 }),
+    }),
+  });
+  await flushQueues();
+  await flushQueues();
+  server.emit("message", {
+    data: encodeTerminalFrame({
+      type: TerminalMessageType.Input,
+      sessionId: githubActionsSession.id,
+      payload: new TextEncoder().encode("input"),
+    }),
+  });
+  await waitForInputPayloads();
+  upstream.emit("close", { code: 1011, reason: "runner disconnected" });
+  await flushQueues();
+  await flushQueues();
+
+  const messages = server.sent.map((payload) => frame(payload));
+  assert.equal(
+    messages.some(
+      (message) =>
+        message.type === TerminalMessageType.Event &&
+        (decodeJsonPayload(message.payload) as { type?: string }).type === "input-accepted",
+    ),
+    false,
+  );
+  assert.equal(
+    messages.some(
+      (message) =>
+        message.type === TerminalMessageType.Error &&
+        (decodeJsonPayload(message.payload) as { error?: string }).error ===
+          "terminal upstream closed before accepting input",
+    ),
+    true,
+  );
   server.emit("close");
 });
 
