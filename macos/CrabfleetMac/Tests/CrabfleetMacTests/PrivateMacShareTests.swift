@@ -25,7 +25,7 @@ struct PrivateMacShareTests {
       from: [
         "HOME": "/Users/tester",
         "PATH": "/tmp/untrusted",
-        "SECRET_TOKEN": "do-not-forward",
+        "SECRET_TOKEN": "test-token-placeholder",
         "TS_DEBUG": "unsafe",
         "TAILSCALE_SOCKET": "/tmp/unsafe.sock",
       ]
