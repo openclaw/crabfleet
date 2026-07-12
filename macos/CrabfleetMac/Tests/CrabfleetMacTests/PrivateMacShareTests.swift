@@ -501,18 +501,19 @@ struct PrivateMacShareTests {
   }
 
   @Test @MainActor
-  func ambiguousLegacyDesktopPublicationAttemptsGuardedCleanup() async throws {
-    let identity = desktopIdentity(name: "ambiguous-legacy", address: "100.64.12.62")
-    let registration = AmbiguousLegacyDesktopRegistration()
+  func negativeRecoveryDoesNotDeleteANewerTokenlessPublisher() async throws {
+    let identity = desktopIdentity(name: "negative-recovery", address: "100.64.12.62")
+    let registration = NegativeRecoveryDesktopRegistration()
     let lifecycle = DesktopHostRegistrationLifecycle(registration: registration)
 
     await #expect(throws: DesktopHostRegistrationResultUncertainError.self) {
       try await lifecycle.publish(identity: identity, port: 5_901)
     }
+    await registration.publishNewerEndpoint()
     try await lifecycle.removePublishedIdentities()
 
-    #expect(!(await registration.isPublished))
-    #expect(await registration.events == [.register, .recover, .unregister])
+    #expect(await registration.activeEndpoint == "newer-publisher")
+    #expect(await registration.events == [.register, .recover])
   }
 
   @Test @MainActor
@@ -2694,14 +2695,14 @@ private actor AmbiguousDesktopRegistration: DesktopHostRegistering {
   }
 }
 
-private actor AmbiguousLegacyDesktopRegistration: DesktopHostRegistering {
+private actor NegativeRecoveryDesktopRegistration: DesktopHostRegistering {
   enum Event: Equatable {
     case register
     case recover
     case unregister
   }
 
-  private(set) var isPublished = false
+  private(set) var activeEndpoint: String?
   private(set) var events: [Event] = []
 
   func register(
@@ -2710,8 +2711,7 @@ private actor AmbiguousLegacyDesktopRegistration: DesktopHostRegistering {
     publicationID: String
   ) async throws -> String? {
     events.append(.register)
-    isPublished = true
-    throw DesktopHostRegistrationResultUncertainError(message: "legacy response lost")
+    throw DesktopHostRegistrationResultUncertainError(message: "response lost")
   }
 
   func recover(identity: TailnetIdentity, publicationID: String) async throws -> String? {
@@ -2722,7 +2722,11 @@ private actor AmbiguousLegacyDesktopRegistration: DesktopHostRegistering {
   func unregister(identity: TailnetIdentity, ownershipToken: String?) async throws {
     #expect(ownershipToken == nil)
     events.append(.unregister)
-    isPublished = false
+    activeEndpoint = nil
+  }
+
+  func publishNewerEndpoint() {
+    activeEndpoint = "newer-publisher"
   }
 }
 
