@@ -621,6 +621,11 @@ Properties:
   `input-rejected`, because that write may still complete. Legacy input reports
   acceptance after relay delivery. The unknown-delivery JSON control event
   carries `{"type":"input-delivery-unknown","error":"terminal input delivery outcome is unknown; the runner may still complete it"}`.
+- Runner replacement also marks unresolved old-generation input as
+  `input-delivery-unknown`; a write that already entered the old PTY cannot be
+  proven absent. A runner-side PTY write that exceeds the bounded write deadline
+  retires that runner socket, so queued frames cannot execute behind a wedged
+  write.
 - Framed viewer lifecycle events remain typed binary frames while no runner is
   connected. Legacy viewers receive the JSON fallback.
 - When runner and viewer modes differ, the relay wraps or unwraps terminal

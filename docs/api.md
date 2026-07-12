@@ -1164,7 +1164,9 @@ Removes one registered desktop owned by the signed-in viewer. The route cannot
 remove another user's record with the same ID. Fenced registrations require the
 exact `X-Crabfleet-Ownership-Token` returned by `PUT`. Legacy clients may omit
 the header only to remove a registration whose stored ownership token is empty;
-omission never removes a tokenized registration.
+omission never removes a tokenized registration. Legacy writes or deletes that
+target a tokenized registration fail explicitly instead of reporting success
+without changing the row.
 
 ## Static Routes
 

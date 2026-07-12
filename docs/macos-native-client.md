@@ -161,8 +161,10 @@ from the build, or obtain written provenance approval.
   bound to loopback behind an authenticated SSH tunnel; Share This Mac is the
   identity-gated tailnet exception.
 - The hardened prototype negotiates standard VNC password or no-auth security
-  only. ARD Diffie-Hellman, UltraVNC MS Logon II, Tight security, and TLS remain
-  disabled until their parsers and cryptography are replaced or fully tested.
+  only. The bundled ARD Diffie-Hellman path now requires a full-width
+  probabilistic safe-prime group and nonzero public/shared results, but ARD,
+  UltraVNC MS Logon II, Tight security, and TLS remain disabled in the app until
+  their complete interoperability surfaces are enabled and tested.
 - Password authentication uses a process-global DES key schedule. The fork
   serializes that path; replace it before concurrent password-auth sessions.
 - App-owned hosting shares one selected display at a time to a single client.
