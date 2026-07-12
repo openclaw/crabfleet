@@ -89,6 +89,7 @@ struct SystemTailscaleCommandRunner: TailscaleCommandRunning {
 
 private final class TailscaleCommandExecution: @unchecked Sendable {
   private static let processDrainTimeout: DispatchTimeInterval = .milliseconds(250)
+  private static let terminationGracePeriod: TimeInterval = 0.5
 
   private enum StopReason {
     case cancelled
@@ -97,12 +98,15 @@ private final class TailscaleCommandExecution: @unchecked Sendable {
   }
 
   private let lock = NSLock()
-  private let process = Process()
   private let outputPipe = Pipe()
   private let errorPipe = Pipe()
   private let readGroup = DispatchGroup()
+  private let executableURL: URL
+  private let arguments: [String]
+  private let environment: [String: String]
   private let timeout: TimeInterval
   private let maximumOutputBytes: Int
+  private var processID: pid_t?
   private var stopReason: StopReason?
   private var captureShouldStop = false
   private var standardOutput = Data()
@@ -115,14 +119,11 @@ private final class TailscaleCommandExecution: @unchecked Sendable {
     timeout: TimeInterval,
     maximumOutputBytes: Int
   ) {
+    self.executableURL = executableURL
+    self.arguments = arguments
+    self.environment = environment
     self.timeout = max(0.1, timeout)
     self.maximumOutputBytes = maximumOutputBytes
-    process.executableURL = executableURL
-    process.arguments = arguments
-    process.environment = environment
-    process.standardOutput = outputPipe
-    process.standardError = errorPipe
-    process.qualityOfService = .userInitiated
   }
 
   func run() throws -> TailscaleCommandResult {
@@ -130,8 +131,9 @@ private final class TailscaleCommandExecution: @unchecked Sendable {
     startCapture(pipe: outputPipe, isStandardOutput: true)
     startCapture(pipe: errorPipe, isStandardOutput: false)
 
+    let pid: pid_t
     do {
-      try process.run()
+      pid = try spawn()
     } catch {
       outputPipe.fileHandleForWriting.closeFile()
       errorPipe.fileHandleForWriting.closeFile()
@@ -139,18 +141,40 @@ private final class TailscaleCommandExecution: @unchecked Sendable {
       throw error
     }
 
-    if currentStopReason() != nil { terminate() }
+    setProcessID(pid)
+    outputPipe.fileHandleForWriting.closeFile()
+    errorPipe.fileHandleForWriting.closeFile()
+    if currentStopReason() != nil { signalProcessGroup(pid, signal: SIGTERM) }
+
     let clock = ContinuousClock()
     let deadline = clock.now.advanced(by: .seconds(timeout))
-    while process.isRunning {
+    var terminationDeadline: ContinuousClock.Instant?
+    var waitStatus: Int32 = 0
+    while true {
+      let waitResult = Darwin.waitpid(pid, &waitStatus, WNOHANG)
+      if waitResult == pid { break }
+      if waitResult == -1 {
+        if errno == EINTR { continue }
+        throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .ECHILD)
+      }
+
       if currentStopReason() != nil {
-        terminate()
+        if terminationDeadline == nil {
+          signalProcessGroup(pid, signal: SIGTERM)
+          terminationDeadline = clock.now.advanced(by: .seconds(Self.terminationGracePeriod))
+        } else if clock.now >= terminationDeadline! {
+          signalProcessGroup(pid, signal: SIGKILL)
+        }
       } else if clock.now >= deadline {
         stop(.timedOut)
       }
       Thread.sleep(forTimeInterval: 0.01)
     }
-    process.waitUntilExit()
+
+    if currentStopReason() != nil {
+      signalProcessGroup(pid, signal: SIGKILL)
+    }
+    clearProcessID(pid)
     finishCapture()
 
     switch currentStopReason() {
@@ -165,10 +189,11 @@ private final class TailscaleCommandExecution: @unchecked Sendable {
     }
 
     let result = values()
-    guard process.terminationStatus == 0 else {
+    let terminationStatus = Self.terminationStatus(from: waitStatus)
+    guard terminationStatus == 0 else {
       let message = result.standardError.trimmingCharacters(in: .whitespacesAndNewlines)
       throw PrivateMacShareError.commandFailed(
-        status: process.terminationStatus,
+        status: terminationStatus,
         message: String(message.prefix(500))
       )
     }
@@ -253,18 +278,95 @@ private final class TailscaleCommandExecution: @unchecked Sendable {
   private func stop(_ reason: StopReason) {
     lock.lock()
     if stopReason == nil { stopReason = reason }
+    let pid = processID
     lock.unlock()
-    terminate()
+    if let pid {
+      signalProcessGroup(pid, signal: SIGTERM)
+    }
   }
 
-  private func terminate() {
-    guard process.isRunning else { return }
-    process.terminate()
-    let pid = process.processIdentifier
-    DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 0.5) { [process] in
-      guard process.isRunning else { return }
-      _ = Darwin.kill(pid, SIGKILL)
+  private func spawn() throws -> pid_t {
+    var fileActions: posix_spawn_file_actions_t?
+    var attributes: posix_spawnattr_t?
+    guard posix_spawn_file_actions_init(&fileActions) == 0 else {
+      throw POSIXError(.ENOMEM)
     }
+    defer { posix_spawn_file_actions_destroy(&fileActions) }
+    guard posix_spawnattr_init(&attributes) == 0 else {
+      throw POSIXError(.ENOMEM)
+    }
+    defer { posix_spawnattr_destroy(&attributes) }
+
+    let outputRead = outputPipe.fileHandleForReading.fileDescriptor
+    let outputWrite = outputPipe.fileHandleForWriting.fileDescriptor
+    let errorRead = errorPipe.fileHandleForReading.fileDescriptor
+    let errorWrite = errorPipe.fileHandleForWriting.fileDescriptor
+    posix_spawn_file_actions_addclose(&fileActions, outputRead)
+    posix_spawn_file_actions_addclose(&fileActions, errorRead)
+    posix_spawn_file_actions_adddup2(&fileActions, outputWrite, STDOUT_FILENO)
+    posix_spawn_file_actions_adddup2(&fileActions, errorWrite, STDERR_FILENO)
+    posix_spawn_file_actions_addclose(&fileActions, outputWrite)
+    posix_spawn_file_actions_addclose(&fileActions, errorWrite)
+
+    let flags = Int16(POSIX_SPAWN_SETPGROUP)
+    posix_spawnattr_setflags(&attributes, flags)
+    posix_spawnattr_setpgroup(&attributes, 0)
+
+    let argv = [executableURL.path] + arguments
+    let env = environment.map { "\($0.key)=\($0.value)" }
+    return try withCStringArray(argv) { argumentPointers in
+      try withCStringArray(env) { environmentPointers in
+        var pid: pid_t = 0
+        let result = posix_spawn(
+          &pid,
+          executableURL.path,
+          &fileActions,
+          &attributes,
+          argumentPointers,
+          environmentPointers
+        )
+        guard result == 0 else {
+          throw POSIXError(POSIXErrorCode(rawValue: result) ?? .EINVAL)
+        }
+        return pid
+      }
+    }
+  }
+
+  private func withCStringArray<Result>(
+    _ strings: [String],
+    body: ([UnsafeMutablePointer<CChar>?]) throws -> Result
+  ) rethrows -> Result {
+    let pointers = strings.map { strdup($0) }
+    defer { pointers.forEach { free($0) } }
+    return try body(pointers + [nil])
+  }
+
+  private func setProcessID(_ pid: pid_t) {
+    lock.lock()
+    processID = pid
+    lock.unlock()
+  }
+
+  private func clearProcessID(_ pid: pid_t) {
+    lock.lock()
+    if processID == pid { processID = nil }
+    lock.unlock()
+  }
+
+  private func signalProcessGroup(_ pid: pid_t, signal: Int32) {
+    guard pid > 0 else { return }
+    if Darwin.kill(-pid, signal) != 0, errno != ESRCH {
+      return
+    }
+  }
+
+  private static func terminationStatus(from waitStatus: Int32) -> Int32 {
+    let signal = waitStatus & 0x7f
+    if signal == 0 {
+      return (waitStatus >> 8) & 0xff
+    }
+    return 128 + signal
   }
 
   private func finishCapture() {
