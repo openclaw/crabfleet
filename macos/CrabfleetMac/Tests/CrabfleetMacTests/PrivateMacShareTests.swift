@@ -403,6 +403,30 @@ struct PrivateMacShareTests {
   }
 
   @Test @MainActor
+  func completedStopDoesNotCoalesceWithTheNextOperation() async {
+    let coordinator = PrivateMacShareStopCoordinator()
+    let operation = SuspendedAsyncOperation()
+
+    let first = Task {
+      await coordinator.perform {
+        await operation.run()
+      }
+    }
+    #expect(await waitUntilAsync { await operation.invocationCount == 1 })
+    await operation.finish()
+    await first.value
+
+    let second = Task {
+      await coordinator.perform {
+        await operation.run()
+      }
+    }
+    #expect(await waitUntilAsync { await operation.invocationCount == 2 })
+    await operation.finish()
+    await second.value
+  }
+
+  @Test @MainActor
   func failedDesktopPublicationIsNotUnregistered() async throws {
     let identity = desktopIdentity(name: "failed-publish", address: "100.64.12.40")
     let registration = RecordingDesktopRegistration(registerFailures: [identity.dnsName: 1])

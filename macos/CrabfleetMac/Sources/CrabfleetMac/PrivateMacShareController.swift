@@ -14,20 +14,25 @@ enum PrivateMacSharePermissionPolicy {
 
 @MainActor
 final class PrivateMacShareStopCoordinator {
-  private var operation: Task<Void, Never>?
+  private var isPerforming = false
+  private var waiters: [CheckedContinuation<Void, Never>] = []
 
   func perform(_ body: @escaping @MainActor () async -> Void) async {
-    if let operation {
-      await operation.value
+    if isPerforming {
+      await withCheckedContinuation { continuation in
+        self.waiters.append(continuation)
+      }
       return
     }
 
-    let operation = Task { @MainActor in
-      await body()
+    isPerforming = true
+    await body()
+    isPerforming = false
+    let waiters = waiters
+    self.waiters.removeAll()
+    for waiter in waiters {
+      waiter.resume()
     }
-    self.operation = operation
-    await operation.value
-    self.operation = nil
   }
 }
 
