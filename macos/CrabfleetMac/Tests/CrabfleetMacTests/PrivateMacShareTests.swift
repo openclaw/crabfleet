@@ -162,6 +162,37 @@ struct PrivateMacShareTests {
     #expect(await runner.callCount == 2)
   }
 
+  @Test @MainActor
+  func stopInvalidatesAStartWaitingForRefreshCompletion() async throws {
+    let runner = SequencedTailscaleRunner()
+    let defaults = try #require(
+      UserDefaults(suiteName: "CrabfleetMacTests.\(UUID().uuidString)")
+    )
+    let controller = PrivateMacShareController(
+      runner: runner,
+      desktopRegistration: nil,
+      defaults: defaults
+    )
+
+    let refreshTask = Task { await controller.refresh() }
+    #expect(await waitUntilAsync { await runner.callCount == 1 })
+
+    let startTask = Task { await controller.start() }
+    #expect(await waitUntilAsync { controller.phase == .starting })
+
+    await controller.stop()
+    #expect(controller.phase == .idle)
+
+    await runner.resumeNext(
+      .success(.init(standardOutput: statusJSON(), standardError: ""))
+    )
+    await refreshTask.value
+    await startTask.value
+
+    #expect(await runner.callCount == 1)
+    #expect(controller.phase == .idle)
+  }
+
   @Test
   func desktopRemovalWaitsForACommittedRegistrationAfterCancellation() async throws {
     let registration = SuspendedDesktopRegistration()
@@ -169,13 +200,13 @@ struct PrivateMacShareTests {
     let identity = try TailnetIdentityPolicy.identity(from: statusDocument())
 
     let publish = Task {
-      try await coordinator.register(identity: identity, port: 5_901)
+      _ = try await coordinator.register(identity: identity, port: 5_901)
     }
     #expect(await waitUntilAsync { await registration.hasStartedRegistration })
     publish.cancel()
 
     let remove = Task {
-      try await coordinator.unregister(identity: identity)
+      try await coordinator.unregister(identity: identity, ownershipToken: "registration-token")
     }
     try await Task.sleep(for: .milliseconds(20))
     #expect(await registration.events == [.registerStarted])
@@ -188,6 +219,44 @@ struct PrivateMacShareTests {
       await registration.events
         == [.registerStarted, .registerFinished, .unregisterStarted]
     )
+  }
+
+  @Test @MainActor
+  func stopReturnsBeforeSlowDesktopRegistryCleanup() async throws {
+    let registration = SuspendedDesktopCleanupRegistration()
+    let lifecycle = DesktopHostRegistrationLifecycle(registration: registration)
+    let identity = desktopIdentity(name: "slow-cleanup", address: "100.64.12.43")
+    try await lifecycle.publish(identity: identity, port: 5_901)
+
+    let runner = SuspendedTailscaleRunner()
+    let defaults = try #require(
+      UserDefaults(suiteName: "CrabfleetMacTests.\(UUID().uuidString)")
+    )
+    let controller = PrivateMacShareController(
+      runner: runner,
+      desktopRegistration: registration,
+      registrationLifecycle: lifecycle,
+      defaults: defaults
+    )
+    let startTask = Task { await controller.start() }
+    #expect(await waitUntilAsync { await runner.hasStarted })
+
+    let stopState = AsyncInvocationState()
+    let stopTask = Task {
+      await controller.stop()
+      await stopState.markFinished()
+    }
+    #expect(await waitUntilAsync { await stopState.finished })
+    #expect(controller.phase == .idle)
+    #expect(await waitUntilAsync { await registration.hasStartedUnregistration })
+
+    await runner.resume(
+      .success(.init(standardOutput: statusJSON(), standardError: ""))
+    )
+    await startTask.value
+    await registration.finishUnregistration()
+    await stopTask.value
+    #expect(await waitUntilAsync { controller.registryPhase == .notPublished })
   }
 
   @Test @MainActor
@@ -228,11 +297,11 @@ struct PrivateMacShareTests {
       await registration.events
         == [
           .register(first.dnsName),
-          .unregister(first.dnsName),
+          .unregister(first.dnsName, "token:\(first.dnsName)"),
           .register(second.dnsName),
-          .unregister(first.dnsName),
-          .unregister(second.dnsName),
-          .unregister(first.dnsName),
+          .unregister(first.dnsName, "token:\(first.dnsName)"),
+          .unregister(second.dnsName, "token:\(second.dnsName)"),
+          .unregister(first.dnsName, "token:\(first.dnsName)"),
         ]
     )
   }
@@ -399,11 +468,49 @@ struct PrivateMacShareTests {
     #expect(json["address"] as? String == "100.64.12.34")
     #expect(json["port"] as? Int == 5901)
 
-    let removal = registration.removalRequest(identity: identity)
+    let removal = try registration.removalRequest(
+      identity: identity,
+      ownershipToken: "desktop-ownership-token"
+    )
     #expect(removal.url == request.url)
     #expect(removal.httpMethod == "DELETE")
     #expect(removal.value(forHTTPHeaderField: "Cookie") == "crabbox_session=secret")
+    #expect(
+      removal.value(forHTTPHeaderField: "X-Crabfleet-Ownership-Token")
+        == "desktop-ownership-token"
+    )
     #expect(removal.httpBody == nil)
+  }
+
+  @Test
+  func desktopRegistrationReturnsTheServerOwnershipToken() async throws {
+    let transport = DesktopRegistrationTransport { request in
+      let responseURL = try #require(request.url)
+      return (
+        Data(#"{"ownershipToken":"server-ownership-token"}"#.utf8),
+        try #require(
+          HTTPURLResponse(
+            url: responseURL,
+            statusCode: 200,
+            httpVersion: nil,
+            headerFields: nil
+          ))
+      )
+    }
+    let registration = try #require(
+      CrabfleetDesktopRegistration(
+        environment: [
+          "CRABFLEET_API_URL": "https://fleet.example/api/fleet",
+          "CRABFLEET_SESSION_COOKIE": "crabbox_session=secret",
+        ],
+        transport: transport
+      ))
+    let identity = try TailnetIdentityPolicy.identity(from: statusDocument())
+
+    #expect(
+      try await registration.register(identity: identity, port: 5_901)
+        == "server-ownership-token"
+    )
   }
 
   @Test
@@ -987,15 +1094,17 @@ private actor SuspendedDesktopRegistration: DesktopHostRegistering {
     registrationContinuation != nil
   }
 
-  func register(identity: TailnetIdentity, port: UInt16) async throws {
+  func register(identity: TailnetIdentity, port: UInt16) async throws -> String {
     events.append(.registerStarted)
     await withCheckedContinuation { continuation in
       registrationContinuation = continuation
     }
     events.append(.registerFinished)
+    return "registration-token"
   }
 
-  func unregister(identity: TailnetIdentity) async throws {
+  func unregister(identity: TailnetIdentity, ownershipToken: String) async throws {
+    #expect(ownershipToken == "registration-token")
     events.append(.unregisterStarted)
   }
 
@@ -1012,7 +1121,7 @@ private enum DesktopRegistrationTestError: Error {
 private actor RecordingDesktopRegistration: DesktopHostRegistering {
   enum Event: Equatable {
     case register(String)
-    case unregister(String)
+    case unregister(String, String)
   }
 
   private var registerFailures: [String: Int]
@@ -1027,15 +1136,16 @@ private actor RecordingDesktopRegistration: DesktopHostRegistering {
     self.unregisterFailures = unregisterFailures
   }
 
-  func register(identity: TailnetIdentity, port: UInt16) async throws {
+  func register(identity: TailnetIdentity, port: UInt16) async throws -> String {
     events.append(.register(identity.dnsName))
     if consumeFailure(for: identity.dnsName, from: &registerFailures) {
       throw DesktopRegistrationTestError.failed
     }
+    return "token:\(identity.dnsName)"
   }
 
-  func unregister(identity: TailnetIdentity) async throws {
-    events.append(.unregister(identity.dnsName))
+  func unregister(identity: TailnetIdentity, ownershipToken: String) async throws {
+    events.append(.unregister(identity.dnsName, ownershipToken))
     if consumeFailure(for: identity.dnsName, from: &unregisterFailures) {
       throw DesktopRegistrationTestError.failed
     }
@@ -1048,6 +1158,30 @@ private actor RecordingDesktopRegistration: DesktopHostRegistering {
     guard let remaining = failures[identity], remaining > 0 else { return false }
     failures[identity] = remaining - 1
     return true
+  }
+}
+
+private actor SuspendedDesktopCleanupRegistration: DesktopHostRegistering {
+  private var unregistrationContinuation: CheckedContinuation<Void, Never>?
+
+  var hasStartedUnregistration: Bool {
+    unregistrationContinuation != nil
+  }
+
+  func register(identity: TailnetIdentity, port: UInt16) async throws -> String {
+    "slow-cleanup-token"
+  }
+
+  func unregister(identity: TailnetIdentity, ownershipToken: String) async throws {
+    #expect(ownershipToken == "slow-cleanup-token")
+    await withCheckedContinuation { continuation in
+      unregistrationContinuation = continuation
+    }
+  }
+
+  func finishUnregistration() {
+    unregistrationContinuation?.resume()
+    unregistrationContinuation = nil
   }
 }
 

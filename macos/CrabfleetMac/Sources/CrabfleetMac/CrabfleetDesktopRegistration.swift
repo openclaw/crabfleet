@@ -1,8 +1,8 @@
 import Foundation
 
 protocol DesktopHostRegistering: Sendable {
-  func register(identity: TailnetIdentity, port: UInt16) async throws
-  func unregister(identity: TailnetIdentity) async throws
+  func register(identity: TailnetIdentity, port: UInt16) async throws -> String
+  func unregister(identity: TailnetIdentity, ownershipToken: String) async throws
 }
 
 actor DesktopHostRegistrationCoordinator {
@@ -13,29 +13,29 @@ actor DesktopHostRegistrationCoordinator {
     self.registration = registration
   }
 
-  func register(identity: TailnetIdentity, port: UInt16) async throws {
+  func register(identity: TailnetIdentity, port: UInt16) async throws -> String {
     let registration = self.registration
     let operation = enqueue {
       try await registration.register(identity: identity, port: port)
     }
-    try await operation.value
+    return try await operation.value
   }
 
-  func unregister(identity: TailnetIdentity) async throws {
+  func unregister(identity: TailnetIdentity, ownershipToken: String) async throws {
     let registration = self.registration
     let operation = enqueue {
-      try await registration.unregister(identity: identity)
+      try await registration.unregister(identity: identity, ownershipToken: ownershipToken)
     }
     try await operation.value
   }
 
-  private func enqueue(
-    _ operation: @escaping @Sendable () async throws -> Void
-  ) -> Task<Void, Error> {
+  private func enqueue<Value: Sendable>(
+    _ operation: @escaping @Sendable () async throws -> Value
+  ) -> Task<Value, Error> {
     let previous = pendingOperation
     let task = Task {
       await previous?.value
-      try await operation()
+      return try await operation()
     }
     pendingOperation = Task {
       _ = try? await task.value
@@ -45,6 +45,10 @@ actor DesktopHostRegistrationCoordinator {
 }
 
 struct CrabfleetDesktopRegistration: DesktopHostRegistering, @unchecked Sendable {
+  private struct RegistrationResponse: Decodable {
+    let ownershipToken: String
+  }
+
   private struct RegistrationBody: Encodable {
     let name: String
     let address: String
@@ -80,14 +84,21 @@ struct CrabfleetDesktopRegistration: DesktopHostRegistering, @unchecked Sendable
     self.transport = transport
   }
 
-  func register(identity: TailnetIdentity, port: UInt16) async throws {
+  func register(identity: TailnetIdentity, port: UInt16) async throws -> String {
     let request = try registrationRequest(identity: identity, port: port)
-    let (_, http) = try await transport.data(for: request)
+    let (data, http) = try await transport.data(for: request)
     try validate(response: http, for: request, acceptingNotFound: false)
+    guard
+      let response = try? JSONDecoder().decode(RegistrationResponse.self, from: data),
+      Self.isValidOwnershipToken(response.ownershipToken)
+    else {
+      throw DesktopHostRegistrationError.invalidResponse
+    }
+    return response.ownershipToken
   }
 
-  func unregister(identity: TailnetIdentity) async throws {
-    let request = removalRequest(identity: identity)
+  func unregister(identity: TailnetIdentity, ownershipToken: String) async throws {
+    let request = try removalRequest(identity: identity, ownershipToken: ownershipToken)
     let (_, http) = try await transport.data(for: request)
     try validate(response: http, for: request, acceptingNotFound: true)
   }
@@ -129,7 +140,10 @@ struct CrabfleetDesktopRegistration: DesktopHostRegistering, @unchecked Sendable
     return request
   }
 
-  func removalRequest(identity: TailnetIdentity) -> URLRequest {
+  func removalRequest(identity: TailnetIdentity, ownershipToken: String) throws -> URLRequest {
+    guard Self.isValidOwnershipToken(ownershipToken) else {
+      throw DesktopHostRegistrationError.invalidResponse
+    }
     let url =
       baseURL
       .appending(path: "api")
@@ -140,6 +154,7 @@ struct CrabfleetDesktopRegistration: DesktopHostRegistering, @unchecked Sendable
     request.timeoutInterval = 15
     request.setValue("application/json", forHTTPHeaderField: "Accept")
     request.setValue(sessionCookie, forHTTPHeaderField: "Cookie")
+    request.setValue(ownershipToken, forHTTPHeaderField: "X-Crabfleet-Ownership-Token")
     return request
   }
 
@@ -164,6 +179,14 @@ struct CrabfleetDesktopRegistration: DesktopHostRegistering, @unchecked Sendable
     else { return false }
     if scheme == "https" { return true }
     return scheme == "http" && (host == "127.0.0.1" || host == "::1")
+  }
+
+  private static func isValidOwnershipToken(_ value: String) -> Bool {
+    !value.isEmpty && value.utf8.count <= 200
+      && !value.unicodeScalars.contains {
+        CharacterSet.whitespacesAndNewlines.contains($0)
+          || CharacterSet.controlCharacters.contains($0)
+      }
   }
 }
 
