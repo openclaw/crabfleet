@@ -19,7 +19,10 @@ extension VNCProtocol.ARDAuthentication {
 			  generator: Data,
 			  peerKey: Data,
 			  keyLength: Int) {
-			guard keyLength > 0 else {
+			guard Self.validParameters(prime: prime,
+									   generator: generator,
+									   peerKey: peerKey,
+									   keyLength: keyLength) else {
 				return nil
 			}
 
@@ -50,6 +53,26 @@ private extension VNCProtocol.ARDAuthentication.DiffieHellmanKeyAgreement {
 	struct KeyPair {
 		let publicKey: Data
 		let privateKey: Data
+	}
+
+	static func validParameters(prime: Data,
+								generator: Data,
+								peerKey: Data,
+								keyLength: Int) -> Bool {
+		guard keyLength >= 128,
+			  keyLength <= 512,
+			  prime.count == keyLength,
+			  peerKey.count == keyLength,
+			  let bigPrime = BigNum(data: prime),
+			  bigPrime.bitsCount >= 1_024,
+			  let bigGenerator = BigNum(data: generator),
+			  bigGenerator.isValidDiffieHellmanElement(modulus: bigPrime),
+			  let bigPeerKey = BigNum(data: peerKey),
+			  bigPeerKey.isValidDiffieHellmanElement(modulus: bigPrime) else {
+			return false
+		}
+
+		return true
 	}
 
 	static func generateKeyPair(generator: Data,

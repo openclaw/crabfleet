@@ -9,16 +9,73 @@ struct SecurityAndInputTests {
     VNCProtocol.UltraVNCMSLogonIIAuthentication.DiffieHellmanKeyAgreement.UltraVNCBigNum
 
   @Test
-  func rejectsZeroAndOneAppleRemoteDesktopModuli() {
-    for prime in [Data([0]), Data([1]), Data([0, 1])] {
+  func rejectsWeakAppleRemoteDesktopModuli() {
+    for prime in [
+      Data(repeating: 0, count: 128),
+      Data(repeating: 1, count: 128),
+      Data([0]) + Data(repeating: 0xFF, count: 127),
+    ] {
       let agreement = ARDKeyAgreement(
         prime: prime,
         generator: Data([2]),
-        peerKey: Data([2]),
-        keyLength: prime.count
+        peerKey: paddedARDValue(2),
+        keyLength: 128
       )
 
       #expect(agreement.map { _ in true } == nil)
+    }
+  }
+
+  @Test
+  func rejectsAppleRemoteDesktopElementsOutsideTheSafeRange() {
+    let prime = Data(repeating: 0xFF, count: 128)
+    let primeMinusOne = Data(repeating: 0xFF, count: 127) + Data([0xFE])
+
+    for generator in [
+      Data([0]),
+      Data([1]),
+      primeMinusOne,
+      prime,
+    ] {
+      #expect(
+        ARDKeyAgreement(
+          prime: prime,
+          generator: generator,
+          peerKey: paddedARDValue(2),
+          keyLength: 128
+        ) == nil
+      )
+    }
+
+    for peerKey in [
+      paddedARDValue(0),
+      paddedARDValue(1),
+      primeMinusOne,
+      prime,
+    ] {
+      #expect(
+        ARDKeyAgreement(
+          prime: prime,
+          generator: Data([2]),
+          peerKey: peerKey,
+          keyLength: 128
+        ) == nil
+      )
+    }
+  }
+
+  @Test
+  func acceptsAppleRemoteDesktopKeyMaterialAtAndAboveTheMinimum() {
+    for keyLength in [128, 256] {
+      let agreement = ARDKeyAgreement(
+        prime: Data(repeating: 0xFF, count: keyLength),
+        generator: Data([2]),
+        peerKey: Data(repeating: 0, count: keyLength - 1) + Data([2]),
+        keyLength: keyLength
+      )
+
+      #expect(agreement?.publicKey.count == keyLength)
+      #expect(agreement?.secretKey.count == keyLength)
     }
   }
 
@@ -91,5 +148,9 @@ struct SecurityAndInputTests {
     #if canImport(ObjectiveC)
     #expect(_ObjC_VNCKeyCode.ansiKeypadDecimal == X11KeySymbols.XK_KP_Decimal)
     #endif
+  }
+
+  private func paddedARDValue(_ value: UInt8) -> Data {
+    Data(repeating: 0, count: 127) + Data([value])
   }
 }

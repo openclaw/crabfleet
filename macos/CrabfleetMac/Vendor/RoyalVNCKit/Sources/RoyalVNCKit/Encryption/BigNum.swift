@@ -24,6 +24,11 @@ extension BigNum {
         self.bigInt > 1
     }
 
+    func isValidDiffieHellmanElement(modulus: BigNum) -> Bool {
+        guard modulus.bigInt > 2 else { return false }
+        return self.bigInt > 1 && self.bigInt < modulus.bigInt - 1
+    }
+
     var isZero: Bool {
         let isIt = self.bigInt == 0
 
