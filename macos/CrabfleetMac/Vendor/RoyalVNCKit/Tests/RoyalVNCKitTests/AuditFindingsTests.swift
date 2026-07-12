@@ -183,6 +183,60 @@ struct AuditFindingsTests {
   }
 
   @Test
+  func publishesFenceNegotiationBeforeExposingSupport() async throws {
+    let logger = AuditCallbackLogger()
+    let connection = VNCConnection(
+      settings: makeSettings(),
+      logger: logger,
+      framebufferAllocator: VNCFramebufferMallocAllocator(),
+      context: nil
+    )
+    let framebuffer = try makeFramebuffer(width: 2, height: 2, depth: 24)
+    connection.framebuffer = framebuffer
+    connection.state.pixelFormat = framebuffer.sourcePixelFormat
+    connection.state.areContinuousUpdatesEnabled = true
+    connection.connectionState = .connected
+    connection._framebufferUpdatePolicy = .paused
+    logger.onDebug = { message in
+      guard message == "Fence supported (server sent ServerFence)" else { return }
+      connection.updateColorDepth(.depth8Bit)
+    }
+
+    try connection.handleServerFence(
+      VNCProtocol.ServerFence(
+        messageType: VNCProtocol.ServerFence.messageType,
+        flags: [.request, .blockBefore, .syncNext],
+        payload: Data("support".utf8)
+      )
+    )
+
+    #expect(connection.state.areFencesSupported)
+    #expect(connection.pixelFormatFenceCapabilityProbePayload != nil)
+    #expect(connection.pendingPixelFormatTransition?.depth == 8)
+    #expect(connection.state.pixelFormat?.depth == 24)
+
+    _ = try #require(connection.clientToServerMessageQueue.dequeue())
+    let capabilityProbe = try #require(connection.clientToServerMessageQueue.dequeue())
+    let capabilityWriter = AuditWritingConnection()
+    try await capabilityProbe.message.send(connection: capabilityWriter)
+    let capabilityLength = Int(capabilityWriter.data[8])
+    let capabilityPayload = Data(capabilityWriter.data[9..<(9 + capabilityLength)])
+
+    try connection.handleServerFence(
+      VNCProtocol.ServerFence(
+        messageType: VNCProtocol.ServerFence.messageType,
+        flags: [.blockBefore, .syncNext],
+        payload: capabilityPayload
+      )
+    )
+
+    #expect(connection.pendingPixelFormatTransition == nil)
+    #expect(connection.clientToServerMessageQueue.dequeue() != nil)
+    logger.onDebug = nil
+    connection.cancelFramebufferUpdateScheduling()
+  }
+
+  @Test
   func startsFenceCapabilityTimeoutAfterDelayedProbeSend() async throws {
     let connection = VNCConnection(
       settings: makeSettings(),
@@ -854,6 +908,19 @@ private final class AuditWritingConnection: NetworkConnectionWriting {
     onWrite()
     self.data.append(data)
   }
+}
+
+private final class AuditCallbackLogger: VNCLogger {
+  var isDebugLoggingEnabled = false
+  var onDebug: ((String) -> Void)?
+
+  func logDebug(_ message: @autoclosure () -> String) {
+    onDebug?(message())
+  }
+
+  func logInfo(_ message: String) {}
+  func logWarning(_ message: String) {}
+  func logError(_ message: String) {}
 }
 
 private struct AuditWriteError: Error {}

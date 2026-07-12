@@ -207,8 +207,7 @@ private extension VNCConnection {
 
 extension VNCConnection {
 	func handleServerFence(_ fence: VNCProtocol.ServerFence) throws {
-		let first = !state.areFencesSupported
-		state.areFencesSupported = true
+		let first = publishPixelFormatFenceSupport()
 
 		if fence.flags.contains(.request) {
 			let responseFlags = fence.flags.intersection(.blockBefore)
@@ -221,7 +220,7 @@ extension VNCConnection {
 
 		if first {
 			logger.logDebug("Fence supported (server sent ServerFence)")
-			probePixelFormatFenceSupport()
+			enqueuePixelFormatFenceSupportProbe()
 		}
 	}
 

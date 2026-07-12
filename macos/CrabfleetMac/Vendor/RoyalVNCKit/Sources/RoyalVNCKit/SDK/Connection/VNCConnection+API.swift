@@ -293,16 +293,27 @@ extension VNCConnection {
 		handleBreakingError(VNCError.protocol(.pixelFormatTransitionTimedOut))
 	}
 
-	func probePixelFormatFenceSupport() {
+	func publishPixelFormatFenceSupport() -> Bool {
 		framebufferRequestLock.lock()
+		defer { framebufferRequestLock.unlock() }
+		guard !state.areFencesSupported else { return false }
+
 		cancelPixelFormatFenceNegotiationTimeoutLocked()
-		guard pixelFormatFenceCapabilityProbePayload == nil,
+		if pixelFormatFenceCapabilityProbePayload == nil,
+		   state.pixelFormat != nil {
+			pixelFormatFenceCapabilityProbePayload = Data("royalvnc-pixel-format".utf8)
+		}
+		state.areFencesSupported = true
+		return true
+	}
+
+	func enqueuePixelFormatFenceSupportProbe() {
+		framebufferRequestLock.lock()
+		guard let payload = pixelFormatFenceCapabilityProbePayload,
 			  let pixelFormat = state.pixelFormat else {
 			framebufferRequestLock.unlock()
 			return
 		}
-		let payload = Data("royalvnc-pixel-format".utf8)
-		pixelFormatFenceCapabilityProbePayload = payload
 		framebufferRequestLock.unlock()
 
 		enqueueClientToServerMessage(
