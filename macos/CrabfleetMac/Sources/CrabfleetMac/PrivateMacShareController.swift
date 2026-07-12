@@ -13,6 +13,25 @@ enum PrivateMacSharePermissionPolicy {
 }
 
 @MainActor
+final class PrivateMacShareStopCoordinator {
+  private var operation: Task<Void, Never>?
+
+  func perform(_ body: @escaping @MainActor () async -> Void) async {
+    if let operation {
+      await operation.value
+      return
+    }
+
+    let operation = Task { @MainActor in
+      await body()
+    }
+    self.operation = operation
+    await operation.value
+    self.operation = nil
+  }
+}
+
+@MainActor
 final class DesktopHostRegistrationLifecycle {
   private struct PublishedRegistration: Equatable {
     let identity: TailnetIdentity
@@ -167,6 +186,7 @@ final class PrivateMacShareController: ObservableObject {
   private var registryOperationGeneration: UInt64 = 0
   private var publishingServerGeneration: UInt64?
   private var refreshWaiters: [CheckedContinuation<Void, Never>] = []
+  private let stopCoordinator = PrivateMacShareStopCoordinator()
 
   init(
     runner: (any TailscaleCommandRunning)? = nil,
@@ -363,6 +383,12 @@ final class PrivateMacShareController: ObservableObject {
   }
 
   func stop() async {
+    await stopCoordinator.perform { [weak self] in
+      await self?.performStop()
+    }
+  }
+
+  private func performStop() async {
     guard phase.isRunning || phase == .failed else { return }
     let generation = beginLifecycleTransition()
     phase = .stopping

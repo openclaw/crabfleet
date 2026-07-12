@@ -339,6 +339,41 @@ struct PrivateMacShareTests {
   }
 
   @Test @MainActor
+  func concurrentStopsAwaitTheSameInFlightOperation() async throws {
+    let coordinator = PrivateMacShareStopCoordinator()
+    let operation = SuspendedAsyncOperation()
+    let firstState = AsyncInvocationState()
+    let secondState = AsyncInvocationState()
+
+    let first = Task {
+      await coordinator.perform {
+        await operation.run()
+      }
+      await firstState.markFinished()
+    }
+    #expect(await waitUntilAsync { await operation.invocationCount == 1 })
+
+    let second = Task {
+      await coordinator.perform {
+        await operation.run()
+      }
+      await secondState.markFinished()
+    }
+    try await Task.sleep(for: .milliseconds(20))
+
+    #expect(await operation.invocationCount == 1)
+    #expect(!(await firstState.finished))
+    #expect(!(await secondState.finished))
+
+    await operation.finish()
+    await first.value
+    await second.value
+
+    #expect(await firstState.finished)
+    #expect(await secondState.finished)
+  }
+
+  @Test @MainActor
   func failedDesktopPublicationIsNotUnregistered() async throws {
     let identity = desktopIdentity(name: "failed-publish", address: "100.64.12.40")
     let registration = RecordingDesktopRegistration(registerFailures: [identity.dnsName: 1])
@@ -1243,6 +1278,23 @@ private actor AsyncInvocationState {
 
   func markFinished() {
     finished = true
+  }
+}
+
+private actor SuspendedAsyncOperation {
+  private var continuation: CheckedContinuation<Void, Never>?
+  private(set) var invocationCount = 0
+
+  func run() async {
+    invocationCount += 1
+    await withCheckedContinuation { continuation in
+      self.continuation = continuation
+    }
+  }
+
+  func finish() {
+    continuation?.resume()
+    continuation = nil
   }
 }
 
