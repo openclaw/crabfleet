@@ -16,6 +16,7 @@ public extension VNCError {
 		case framebufferUpdateReceivedWithoutFramebuffer
 		case framebufferFailedToCreateIOSurface
 		case setColourMapEntriesReceivedWithoutFramebuffer
+		case pixelFormatTransitionTimedOut
 		case frameDecode(encodingType: VNCEncodingType, underlyingError: Error?)
 		case zlibDecompress(underlyingError: Error?)
 		case zrleInvalidSubencoding(subencoding: UInt8)
@@ -50,6 +51,8 @@ public extension VNCError {
 					return "Failed to create IOSurface for Framebuffer."
 				case .setColourMapEntriesReceivedWithoutFramebuffer:
 					return "A Set Colour Map Entries request has been retrieved but no Framebuffer has been created yet."
+				case .pixelFormatTransitionTimedOut:
+					return "The server did not acknowledge the pixel format transition."
 				case .frameDecode(let encodingType, let underlyingError):
 					return VNCError.combinedErrorDescription("An error occurred while decoding a Framebuffer Update Message (Encoding Type: \(encodingType)).",
 															 underlyingError: underlyingError)

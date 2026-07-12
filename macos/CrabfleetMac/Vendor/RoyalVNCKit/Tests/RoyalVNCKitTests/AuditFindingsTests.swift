@@ -310,6 +310,7 @@ struct AuditFindingsTests {
     }
     try await queued.message.send(connection: writer)
 
+    #expect(connection.pixelFormatTransitionDeadlineTask != nil)
     #expect(writer.data.count == 37)
     #expect(writer.data[0] == VNCProtocol.ClientFence.messageType)
     #expect(writer.data[4..<8] == Data([0x80, 0, 0, 5]))
@@ -328,6 +329,45 @@ struct AuditFindingsTests {
 
     #expect(connection.state.pixelFormat?.depth == 8)
     #expect(connection.state.pixelFormat?.depth == connection.framebuffer?.sourcePixelFormat.depth)
+    #expect(connection.pixelFormatTransitionDeadlineTask == nil)
+    #expect(connection.connectionState.status == .connected)
+  }
+
+  @Test
+  func disconnectsWhenPixelFormatTransitionFenceIsMissing() async throws {
+    let connection = try await makeFenceCapableConnection()
+
+    connection.updateColorDepth(.depth8Bit)
+    let queued = try #require(connection.clientToServerMessageQueue.dequeue())
+    try await queued.message.send(connection: AuditWritingConnection())
+    let payload = try #require(connection.pixelFormatTransitionFencePayload)
+
+    #expect(connection.pixelFormatTransitionDeadlineTask != nil)
+    #expect(connection.isPixelFormatTransitionInFlight)
+
+    connection.expirePixelFormatTransitionDeadline(payload: payload)
+
+    #expect(connection.connectionState.status == .disconnected)
+    #expect(connection.pixelFormatTransitionDeadlineTask == nil)
+    #expect(!connection.isPixelFormatTransitionInFlight)
+  }
+
+  @Test
+  func cancellingFramebufferSchedulingInvalidatesPixelFormatTransitionDeadline() async throws {
+    let connection = try await makeFenceCapableConnection()
+
+    connection.updateColorDepth(.depth8Bit)
+    let queued = try #require(connection.clientToServerMessageQueue.dequeue())
+    try await queued.message.send(connection: AuditWritingConnection())
+    let payload = try #require(connection.pixelFormatTransitionFencePayload)
+
+    #expect(connection.pixelFormatTransitionDeadlineTask != nil)
+
+    connection.cancelFramebufferUpdateScheduling()
+    connection.expirePixelFormatTransitionDeadline(payload: payload)
+
+    #expect(connection.pixelFormatTransitionDeadlineTask == nil)
+    #expect(connection.connectionState.status == .connected)
   }
 
   @Test
@@ -374,6 +414,7 @@ struct AuditFindingsTests {
       #expect(connection.state.pixelFormat?.depth == 8)
     }
     try await transition.message.send(connection: transitionWriter)
+    #expect(connection.pixelFormatTransitionDeadlineTask == nil)
     #expect(transitionWriter.data.count == 20)
     #expect(
       transitionWriter.data[0]
@@ -513,6 +554,41 @@ struct AuditFindingsTests {
       colorDepth: .depth24Bit,
       frameEncodings: [.raw]
     )
+  }
+
+  private func makeFenceCapableConnection() async throws -> VNCConnection {
+    let connection = VNCConnection(
+      settings: makeSettings(),
+      framebufferAllocator: VNCFramebufferMallocAllocator()
+    )
+    let framebuffer = try makeFramebuffer(width: 2, height: 2, depth: 24)
+    connection.framebuffer = framebuffer
+    connection.state.pixelFormat = framebuffer.sourcePixelFormat
+    connection.connectionState = .connected
+    connection._framebufferUpdatePolicy = .paused
+    connection.framebufferUpdateRequestOutstanding = true
+
+    try connection.handleServerFence(
+      VNCProtocol.ServerFence(
+        messageType: VNCProtocol.ServerFence.messageType,
+        flags: [.request, .blockBefore, .syncNext],
+        payload: Data("support".utf8)
+      )
+    )
+    _ = try #require(connection.clientToServerMessageQueue.dequeue())
+    let capabilityProbe = try #require(connection.clientToServerMessageQueue.dequeue())
+    let capabilityWriter = AuditWritingConnection()
+    try await capabilityProbe.message.send(connection: capabilityWriter)
+    let capabilityLength = Int(capabilityWriter.data[8])
+    let capabilityPayload = Data(capabilityWriter.data[9..<(9 + capabilityLength)])
+    try connection.handleServerFence(
+      VNCProtocol.ServerFence(
+        messageType: VNCProtocol.ServerFence.messageType,
+        flags: [.blockBefore, .syncNext],
+        payload: capabilityPayload
+      )
+    )
+    return connection
   }
 }
 

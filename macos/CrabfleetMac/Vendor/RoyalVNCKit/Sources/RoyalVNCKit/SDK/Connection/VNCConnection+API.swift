@@ -9,6 +9,7 @@ private struct PixelFormatTransitionMessage: VNCSendableMessage {
 	let pixelFormatMessage: VNCProtocol.SetPixelFormat
 	let willSend: () -> Void
 	let didSend: () -> Void
+	let didSendFence: () -> Void
 
 	var messageType: UInt8 { fenceMessage?.messageType ?? pixelFormatMessage.messageType }
 	var data: Data {
@@ -22,6 +23,8 @@ private struct PixelFormatTransitionMessage: VNCSendableMessage {
 		try await connection.write(data: data)
 		if fenceMessage == nil {
 			didSend()
+		} else {
+			didSendFence()
 		}
 	}
 }
@@ -190,12 +193,54 @@ extension VNCConnection {
 			pixelFormatMessage: VNCProtocol.SetPixelFormat(pixelFormat: transition.pixelFormat),
 			willSend: { [weak self] in
 				self?.beginPixelFormatTransition(transition.pixelFormat)
+			},
+			didSend: { [weak self] in
+				self?.completePixelFormatTransition()
+			},
+			didSendFence: { [weak self] in
+				guard let payload = transition.fencePayload else { return }
+				self?.schedulePixelFormatTransitionDeadline(payload: payload)
 			}
-		) { [weak self] in
-			self?.completePixelFormatTransition()
-		}
+		)
 
 		enqueueClientToServerMessage(message)
+	}
+
+	private func schedulePixelFormatTransitionDeadline(payload: Data) {
+		framebufferRequestLock.lock()
+		defer { framebufferRequestLock.unlock() }
+		guard isPixelFormatTransitionInFlight,
+			  pixelFormatTransitionFencePayload == payload else {
+			return
+		}
+
+		cancelPixelFormatTransitionDeadlineLocked()
+		pixelFormatTransitionDeadlineTask = Task { [weak self] in
+			do {
+				try await Task.sleep(nanoseconds: 5_000_000_000)
+			} catch {
+				return
+			}
+			self?.expirePixelFormatTransitionDeadline(payload: payload)
+		}
+	}
+
+	private func cancelPixelFormatTransitionDeadlineLocked() {
+		pixelFormatTransitionDeadlineTask?.cancel()
+		pixelFormatTransitionDeadlineTask = nil
+	}
+
+	func expirePixelFormatTransitionDeadline(payload: Data) {
+		framebufferRequestLock.lock()
+		guard isPixelFormatTransitionInFlight,
+			  pixelFormatTransitionFencePayload == payload else {
+			framebufferRequestLock.unlock()
+			return
+		}
+		pixelFormatTransitionDeadlineTask = nil
+		framebufferRequestLock.unlock()
+
+		handleBreakingError(VNCError.protocol(.pixelFormatTransitionTimedOut))
 	}
 
 	func probePixelFormatFenceSupport() {
@@ -315,6 +360,7 @@ extension VNCConnection {
 			framebufferRequestLock.unlock()
 			throw VNCError.protocol(.invalidData)
 		}
+		cancelPixelFormatTransitionDeadlineLocked()
 		pixelFormatTransitionFencePayload = nil
 		pixelFormatTransitionRequiredFenceFlags = []
 		framebufferRequestLock.unlock()
@@ -595,6 +641,7 @@ extension VNCConnection {
 		pixelFormatTransitionInFlight = nil
 		pixelFormatTransitionFencePayload = nil
 		pixelFormatTransitionRequiredFenceFlags = []
+		cancelPixelFormatTransitionDeadlineLocked()
 		pixelFormatFenceCapabilityProbePayload = nil
 		cancelPixelFormatFenceNegotiationTimeoutLocked()
 		framebufferRequestLock.unlock()

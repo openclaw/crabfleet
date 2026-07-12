@@ -116,6 +116,7 @@ public final class VNCConnection: NSObjectOrAnyObject, @unchecked Sendable {
 	var pixelFormatTransitionFenceSequence: UInt64 = 0
 	var pixelFormatTransitionFencePayload: Data?
 	var pixelFormatTransitionRequiredFenceFlags: VNCProtocol.FenceFlags = []
+	var pixelFormatTransitionDeadlineTask: Task<Void, Never>?
 	var pixelFormatFenceCapabilityProbePayload: Data?
 	var pixelFormatFenceNegotiationTask: Task<Void, Never>?
 	private let queue = DispatchQueue(label: "com.royalapps.royalvnc.connectionqueue",
