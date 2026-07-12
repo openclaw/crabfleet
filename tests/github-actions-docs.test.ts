@@ -11,6 +11,8 @@ test("the documented Node runner rejects split UTF-8 input frames", async () => 
   for (const documentation of [readme, guide]) {
     assert.match(documentation, /new TextDecoder\("utf-8", \{ fatal: true \}\)/);
     assert.match(documentation, /inputDecoder\.decode\(input\.payload\)/);
+    assert.match(documentation, /pty\.onExit\(\(\) => \{/);
+    assert.match(documentation, /terminal\.close\(1000, "pty exited"\)/);
   }
 
   const decoder = new TextDecoder("utf-8", { fatal: true });

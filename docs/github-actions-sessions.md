@@ -308,6 +308,10 @@ pty.onData((output) => {
   terminal.send(encodeOutput(output));
 });
 
+pty.onExit(() => {
+  if (terminal.readyState < WebSocket.CLOSING) terminal.close(1000, "pty exited");
+});
+
 terminal.addEventListener("message", (event) => {
   acceptInput(event.data);
 });

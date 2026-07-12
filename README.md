@@ -104,6 +104,9 @@ terminal.binaryType = "arraybuffer";
 const inputDecoder = new TextDecoder("utf-8", { fatal: true });
 
 pty.onData((output) => terminal.send(encodeCfr1Output(output)));
+pty.onExit(() => {
+  if (terminal.readyState < WebSocket.CLOSING) terminal.close(1000, "pty exited");
+});
 terminal.onmessage = ({ data }) => {
   const input = decodeCfr1Input(data);
   if (!input) return;
