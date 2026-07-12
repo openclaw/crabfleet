@@ -1,10 +1,17 @@
 import type { RuntimeAdapterWorkspaceStopResult } from "../session-runtime-adapter-stop.ts";
 
+export type RuntimeAdapterWorkspaceRegistration = {
+  profile: string;
+  controlPlane: string;
+};
+
 export type RuntimeAdapterReleaseServiceDependencies = {
   clearCreatePending(sessionId: string, adapterWorkspaceId: string): Promise<void>;
   stopWorkspace(
     sessionId: string,
     adapterWorkspaceId: string,
+    registration: RuntimeAdapterWorkspaceRegistration | null,
+    createPending: boolean,
   ): Promise<RuntimeAdapterWorkspaceStopResult>;
   confirmRelease(
     sessionId: string,
@@ -32,15 +39,21 @@ export class RuntimeAdapterReleaseService {
   async stopSuperseded(input: {
     sessionId: string;
     adapterWorkspaceId: string;
+    registration: RuntimeAdapterWorkspaceRegistration | null;
     createPending: boolean;
     now: number;
   }): Promise<void> {
-    const { sessionId, adapterWorkspaceId, createPending, now } = input;
+    const { sessionId, adapterWorkspaceId, registration, createPending, now } = input;
     if (!createPending) {
       await this.dependencies.clearCreatePending(sessionId, adapterWorkspaceId);
     }
     try {
-      const release = await this.dependencies.stopWorkspace(sessionId, adapterWorkspaceId);
+      const release = await this.dependencies.stopWorkspace(
+        sessionId,
+        adapterWorkspaceId,
+        registration,
+        createPending,
+      );
       if (release.status === "stopped") {
         await this.dependencies.confirmRelease(sessionId, adapterWorkspaceId, now, release.message);
         return;

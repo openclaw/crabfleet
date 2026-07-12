@@ -333,14 +333,18 @@ test("lost reconciliation ownership finalizes terminal rereads or releases super
           [],
         );
       },
-      async stopSuperseded(sessionId, workspaceId, createPending, now) {
-        released.push(`${sessionId}:${workspaceId}:${createPending}:${now}`);
+      async stopSuperseded(sessionId, workspaceId, registration, createPending, now) {
+        released.push(
+          `${sessionId}:${workspaceId}:${registration?.profile}:${registration?.controlPlane}:${createPending}:${now}`,
+        );
       },
     }),
     "runtime-adapter",
   );
   await supersededService.reconcile(row, 150);
-  assert.deepEqual(released, [`${row.id}:workspace-1:false:200`]);
+  assert.deepEqual(released, [
+    `${row.id}:workspace-1:cloudflare-sandbox:https://adapter.example:false:200`,
+  ]);
 });
 
 test("reconciliation failures retain the claimed lifecycle fence", async () => {

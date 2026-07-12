@@ -26,6 +26,7 @@ import {
   type RuntimeAdapterCreateAttemptFence,
   type RuntimeAdapterWorkspaceConflictInput,
 } from "./provisioning/runtime-adapter.ts";
+import type { RuntimeAdapterWorkspaceRegistration } from "./provisioning/runtime-adapter-release-service.ts";
 import { safeProviderError } from "./provisioning/result.ts";
 import type { InteractiveProvisionResult } from "./provisioning/types.ts";
 import {
@@ -186,14 +187,22 @@ export class RuntimeAdapterWorkspaceLifecycle {
   async stopForSession(
     sessionId: string,
     adapterWorkspaceId: string,
+    retainedRegistration?: RuntimeAdapterWorkspaceRegistration | null,
+    retainedCreatePending?: boolean,
   ): Promise<RuntimeAdapterWorkspaceStopResult> {
-    const registration = await database(this.env)
-      .selectFrom("interactive_sessions")
-      .select(["adapter_control_plane", "adapter_create_pending", "profile"])
-      .where("id", "=", sessionId)
-      .where("adapter", "=", runtimeAdapterName)
-      .where("adapter_workspace_id", "=", adapterWorkspaceId)
-      .executeTakeFirst();
+    const registration = retainedRegistration
+      ? {
+          adapter_control_plane: retainedRegistration.controlPlane,
+          adapter_create_pending: retainedCreatePending ? 1 : 0,
+          profile: retainedRegistration.profile,
+        }
+      : await database(this.env)
+          .selectFrom("interactive_sessions")
+          .select(["adapter_control_plane", "adapter_create_pending", "profile"])
+          .where("id", "=", sessionId)
+          .where("adapter", "=", runtimeAdapterName)
+          .where("adapter_workspace_id", "=", adapterWorkspaceId)
+          .executeTakeFirst();
     const controlPlane = requireRegisteredRuntimeAdapterControlPlane(
       this.env,
       registration?.profile ?? "",

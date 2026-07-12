@@ -504,10 +504,11 @@ export class InteractiveSessionApplication {
       finalizeTerminal: (sessionId, status, now) =>
         finalizeTerminalInteractiveSession(this.env, sessionId, status, now),
       readSession: (sessionId) => readInteractiveSessionRecord(this.env, sessionId),
-      stopSupersededAdapter: (sessionId, adapterWorkspaceId, createPending, now) =>
+      stopSupersededAdapter: (sessionId, adapterWorkspaceId, registration, createPending, now) =>
         this.runtime.release().stopSuperseded({
           sessionId,
           adapterWorkspaceId,
+          registration,
           createPending,
           now,
         }),

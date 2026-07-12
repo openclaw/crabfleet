@@ -10,7 +10,13 @@ import {
 import {
   RuntimeAdapterReleaseService,
   type RuntimeAdapterReleaseServiceDependencies,
+  type RuntimeAdapterWorkspaceRegistration,
 } from "../src/worker/provisioning/runtime-adapter-release-service.ts";
+
+const registration: RuntimeAdapterWorkspaceRegistration = {
+  profile: "default",
+  controlPlane: "https://adapter.example.test/",
+};
 
 type PreparedStatement = {
   sql: string;
@@ -75,8 +81,10 @@ test("superseded release clears the create marker before stopping and confirming
       async clearCreatePending(sessionId, adapterWorkspaceId) {
         calls.push(`clear:${sessionId}:${adapterWorkspaceId}`);
       },
-      async stopWorkspace(sessionId, adapterWorkspaceId) {
-        calls.push(`stop:${sessionId}:${adapterWorkspaceId}`);
+      async stopWorkspace(sessionId, adapterWorkspaceId, retained, createPending) {
+        calls.push(
+          `stop:${sessionId}:${adapterWorkspaceId}:${retained?.profile}:${retained?.controlPlane}:${createPending}`,
+        );
         return { status: "stopped", message: "runtime workspace released" };
       },
       async confirmRelease(sessionId, adapterWorkspaceId, now, message) {
@@ -89,13 +97,14 @@ test("superseded release clears the create marker before stopping and confirming
   await service.stopSuperseded({
     sessionId: "IS-101",
     adapterWorkspaceId: "fleet-a-is-101",
+    registration,
     createPending: false,
     now: 200,
   });
 
   assert.deepEqual(calls, [
     "clear:IS-101:fleet-a-is-101",
-    "stop:IS-101:fleet-a-is-101",
+    "stop:IS-101:fleet-a-is-101:default:https://adapter.example.test/:false",
     "confirm:IS-101:fleet-a-is-101:200:runtime workspace released",
   ]);
 });
@@ -116,6 +125,7 @@ test("superseded release preserves pending stop evidence", async () => {
   await service.stopSuperseded({
     sessionId: "IS-101",
     adapterWorkspaceId: "fleet-a-is-101",
+    registration,
     createPending: true,
     now: 200,
   });
@@ -144,6 +154,7 @@ test("superseded release records redacted provider failures for retry", async ()
   await service.stopSuperseded({
     sessionId: "IS-101",
     adapterWorkspaceId: "fleet-a-is-101",
+    registration,
     createPending: true,
     now: 200,
   });
@@ -280,7 +291,7 @@ test("confirmed stopped release persists provider evidence before finalization",
   assert.ok(statements[0].parameters.includes("runtime workspace released"));
 });
 
-test("create-pending clearing is fenced to the registered stopping workspace", async () => {
+test("create-pending clearing fences the prior marker and advances its revision", async () => {
   const executions: Array<{ sql: string; parameters: unknown[] }> = [];
   const env = runtimeEnv((sql, parameters, kind) => {
     assert.equal(kind, "run");
@@ -296,9 +307,12 @@ test("create-pending clearing is fenced to the registered stopping workspace", a
   assert.match(executions[0].sql, /"adapter" = \?/i);
   assert.match(executions[0].sql, /"adapter_workspace_id" = \?/i);
   assert.match(executions[0].sql, /"status" = \?/i);
+  assert.match(executions[0].sql, /max\(updated_at \+ 1, \?\)/i);
+  assert.match(executions[0].sql, /where[\s\S]*"adapter_create_pending" = \?/i);
   assert.ok(executions[0].parameters.includes("IS-101"));
   assert.ok(executions[0].parameters.includes("fleet-a-is-101"));
   assert.ok(executions[0].parameters.includes("stopping"));
+  assert.ok(executions[0].parameters.includes(1));
 });
 
 function releaseEffects(calls: string[]): RuntimeAdapterReleaseEffects {

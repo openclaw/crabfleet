@@ -229,8 +229,8 @@ test("session creation owns normalization through decorated durable result", asy
     "insert",
     "supervise:IS-root:IS-2:100",
     "prepare",
-    "activate:IS-2:100:workspace-2",
     "request:IS-2:100",
+    "activate:IS-2:100:workspace-2",
     "provision:agent-token:unowned",
     "persist",
     "event",
@@ -355,7 +355,7 @@ test("session creation returns a durable replay after a request reservation race
   assert.equal(provisioned, false);
 });
 
-test("session creation orders supervision, preparation, activation, evidence, and provisioning", async () => {
+test("session creation records request evidence before activation and provisioning", async () => {
   const calls: string[] = [];
   const service = new InteractiveSessionCreationService(
     creationStore({
@@ -387,8 +387,8 @@ test("session creation orders supervision, preparation, activation, evidence, an
   assert.deepEqual(calls, [
     "supervise:IS-1:IS-2:100",
     "prepare",
-    "activate:IS-2:100:workspace-2",
     "record:IS-2:100",
+    "activate:IS-2:100:workspace-2",
     "provision",
   ]);
 });
@@ -428,6 +428,65 @@ test("session creation rolls back failed preparation before returning the error"
     failure,
   );
   assert.deepEqual(calls, ["supervise", "prepare", "rollback:IS-2:100"]);
+});
+
+test("session creation rolls back when request recording fails", async () => {
+  const calls: string[] = [];
+  const failure = new Error("request event write failed");
+  const service = new InteractiveSessionCreationService(
+    creationStore({
+      enforceSupervision: async () => {
+        calls.push("supervise");
+      },
+      recordRequest: async () => {
+        calls.push("record");
+        throw failure;
+      },
+      rollbackReservation: async (sessionId, insertedAt) => {
+        calls.push(`rollback:${sessionId}:${insertedAt}`);
+      },
+      activateReservation: async () => {
+        calls.push("activate");
+      },
+    }),
+    creationConfiguration,
+  );
+
+  await assert.rejects(
+    service.provision(
+      reservation,
+      async () => {
+        calls.push("prepare");
+      },
+      async () => {
+        calls.push("provision");
+      },
+    ),
+    failure,
+  );
+  assert.deepEqual(calls, ["supervise", "prepare", "record", "rollback:IS-2:100"]);
+});
+
+test("session creation keeps ordinary reservations rollbackable through request recording", async () => {
+  const current = session({ id: "IS-2", status: "ready" });
+  let preparationReservation: boolean | null = null;
+  let activated = false;
+  const service = new InteractiveSessionCreationService(
+    creationStore({
+      insertReservation: async (input) => {
+        preparationReservation = input.preparationReservation;
+      },
+      activateReservation: async () => {
+        activated = true;
+      },
+      readSession: async () => current,
+    }),
+    creationConfiguration,
+  );
+
+  assert.equal(await service.create({ repo: "openclaw/crabfleet" }), current);
+  assert.equal(preparationReservation, true);
+  assert.equal(activated, true);
 });
 
 test("session creation skips optional supervision, preparation, and activation", async () => {
@@ -623,6 +682,10 @@ test("session creation preserves the currently owned adapter provision", async (
       {
         sessionId: "IS-2",
         adapterName: "runtime-v1",
+        adapterRegistration: {
+          profile: "default",
+          controlPlane: "https://controller.example",
+        },
         sandboxLeasePrefix: "sandbox:",
         now: 150,
       },
@@ -652,8 +715,10 @@ test("session creation stops superseded adapter workspaces", async () => {
   const service = new InteractiveSessionCreationService(
     creationStore({
       readSession: async () => current,
-      stopSupersededAdapter: async (sessionId, workspaceId, createPending, now) => {
-        calls.push(`stop:${sessionId}:${workspaceId}:${createPending}:${now}`);
+      stopSupersededAdapter: async (sessionId, workspaceId, registration, createPending, now) => {
+        calls.push(
+          `stop:${sessionId}:${workspaceId}:${registration?.profile}:${registration?.controlPlane}:${createPending}:${now}`,
+        );
       },
     }),
     creationConfiguration,
@@ -664,6 +729,10 @@ test("session creation stops superseded adapter workspaces", async () => {
       {
         sessionId: "IS-2",
         adapterName: "runtime-v1",
+        adapterRegistration: {
+          profile: "default",
+          controlPlane: "https://controller.example",
+        },
         sandboxLeasePrefix: "sandbox:",
         now: 150,
       },
@@ -680,7 +749,45 @@ test("session creation stops superseded adapter workspaces", async () => {
     ),
     current,
   );
-  assert.deepEqual(calls, ["stop:IS-2:workspace-late:true:150"]);
+  assert.deepEqual(calls, ["stop:IS-2:workspace-late:default:https://controller.example:true:150"]);
+});
+
+test("session creation retains adapter registration when late provisioning loses ownership", async () => {
+  const current = session({
+    id: "IS-2",
+    status: "ready",
+    adapter: "runtime-v1",
+    adapter_workspace_id: "workspace-current",
+  });
+  const releases: unknown[][] = [];
+  const service = new InteractiveSessionCreationService(
+    creationStore({
+      persistProvisionResult: async () => ({
+        updated: false,
+        terminalStatus: null,
+        terminalAt: 101,
+      }),
+      readSession: async () => current,
+      stopSupersededAdapter: async (...args) => {
+        releases.push(args);
+      },
+    }),
+    creationConfiguration,
+  );
+
+  assert.equal(await service.create({ repo: "openclaw/crabfleet" }), current);
+  assert.deepEqual(releases, [
+    [
+      "IS-2",
+      "workspace-2",
+      {
+        profile: "default",
+        controlPlane: "https://controller.example",
+      },
+      false,
+      100,
+    ],
+  ]);
 });
 
 test("session creation cleans superseded sandbox ownership and rereads durability", async () => {
@@ -706,6 +813,7 @@ test("session creation cleans superseded sandbox ownership and rereads durabilit
       {
         sessionId: "IS-2",
         adapterName: "runtime-v1",
+        adapterRegistration: null,
         sandboxLeasePrefix: "sandbox:",
         now: 150,
       },
@@ -730,6 +838,7 @@ test("session creation fails explicitly when durable ownership disappears", asyn
       {
         sessionId: "IS-2",
         adapterName: "runtime-v1",
+        adapterRegistration: null,
         sandboxLeasePrefix: "sandbox:",
         now: 150,
       },

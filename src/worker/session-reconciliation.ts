@@ -5,6 +5,7 @@ import { database, type CompilableQuery, type InteractiveSessionRow } from "./da
 import type { RuntimeEnv } from "./env.ts";
 import type { InteractiveSessionStatus } from "./models.ts";
 import type { InteractiveProvisionResult } from "./provisioning/types.ts";
+import type { RuntimeAdapterWorkspaceRegistration } from "./provisioning/runtime-adapter-release-service.ts";
 import type { InteractiveSession } from "./session-model.ts";
 
 export type RuntimeAdapterReconciliationTransition = {
@@ -37,6 +38,7 @@ export type InteractiveSessionReconciliationStore = {
   stopSuperseded(
     sessionId: string,
     adapterWorkspaceId: string,
+    registration: RuntimeAdapterWorkspaceRegistration | null,
     createPending: boolean,
     now: number,
   ): Promise<void>;
@@ -120,6 +122,12 @@ export class InteractiveSessionReconciliationService {
       await this.store.stopSuperseded(
         row.id,
         inspection.adapterWorkspaceId,
+        row.adapter_control_plane
+          ? {
+              profile: row.profile,
+              controlPlane: row.adapter_control_plane,
+            }
+          : null,
         inspection.createPending === true,
         this.store.now(),
       );

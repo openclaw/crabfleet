@@ -362,13 +362,18 @@ export async function clearRuntimeAdapterCreatePending(
   sessionId: string,
   adapterWorkspaceId: string,
 ): Promise<void> {
+  const now = Date.now();
   await database(env)
     .updateTable("interactive_sessions")
-    .set({ adapter_create_pending: 0 })
+    .set({
+      adapter_create_pending: 0,
+      updated_at: sql<number>`MAX(updated_at + 1, ${now})`,
+    })
     .where("id", "=", sessionId)
     .where("adapter", "=", runtimeAdapterName)
     .where("adapter_workspace_id", "=", adapterWorkspaceId)
     .where("status", "=", "stopping")
+    .where("adapter_create_pending", "=", 1)
     .execute();
 }
 

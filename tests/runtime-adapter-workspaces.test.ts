@@ -362,6 +362,45 @@ test("session-bound stop parses DELETE evidence and preserves the registered pat
   });
 });
 
+test("superseded stop uses retained registration after the session row moves on", async () => {
+  let databaseReads = 0;
+  const requests: Array<{ url: string; method: string | undefined }> = [];
+  const service = new RuntimeAdapterWorkspaceLifecycle(
+    runtimeEnv(() => {
+      databaseReads += 1;
+      return [];
+    }),
+    dependencies({
+      async fetch(input, init) {
+        requests.push({ url: input, method: init.method });
+        return new Response(null, { status: 204 });
+      },
+    }),
+  );
+
+  const result = await service.stopForSession(
+    "IS-42",
+    "workspace-superseded",
+    {
+      profile: "default",
+      controlPlane: "https://adapter.example.test/",
+    },
+    false,
+  );
+
+  assert.equal(databaseReads, 0);
+  assert.deepEqual(requests, [
+    {
+      url: "https://adapter.example.test/v1/workspaces/workspace-superseded",
+      method: "DELETE",
+    },
+  ]);
+  assert.deepEqual(result, {
+    status: "stopped",
+    message: "runtime adapter workspace released",
+  });
+});
+
 test("session-bound stop redacts provider credentials from failures", async () => {
   const env = runtimeEnv(() => [
     {

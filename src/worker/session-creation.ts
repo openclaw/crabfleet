@@ -16,6 +16,7 @@ import type {
   InteractiveProvisionResult,
   SandboxProvisionOwnership,
 } from "./provisioning/types.ts";
+import type { RuntimeAdapterWorkspaceRegistration } from "./provisioning/runtime-adapter-release-service.ts";
 
 export type InteractiveSessionCreateOptions = {
   createdBy?: string;
@@ -45,6 +46,7 @@ export type InteractiveSessionCreationReservation = {
 export type InteractiveSessionProvisionRecoveryInput = {
   sessionId: string;
   adapterName: string;
+  adapterRegistration: RuntimeAdapterWorkspaceRegistration | null;
   sandboxLeasePrefix: string;
   now: number;
 };
@@ -123,6 +125,7 @@ export type InteractiveSessionCreationStore = {
   stopSupersededAdapter(
     sessionId: string,
     adapterWorkspaceId: string,
+    registration: RuntimeAdapterWorkspaceRegistration | null,
     createPending: boolean,
     now: number,
   ): Promise<void>;
@@ -166,7 +169,8 @@ export class InteractiveSessionCreationService {
       request.createdBy,
       lineage,
     );
-    const preparationReservation = Boolean(options.afterReserve || supervisedRootSessionId);
+    // Keep the insert removable until request evidence is durable.
+    const preparationReservation = true;
     const now = this.store.now();
 
     for (let attempt = 0; attempt < this.configuration.maximumAttempts; attempt += 1) {
@@ -240,6 +244,12 @@ export class InteractiveSessionCreationService {
             {
               sessionId: id,
               adapterName: this.configuration.adapterName,
+              adapterRegistration: context.adapterControlPlane
+                ? {
+                    profile: request.profile,
+                    controlPlane: context.adapterControlPlane,
+                  }
+                : null,
               sandboxLeasePrefix: this.configuration.sandboxLeasePrefix,
               now: this.store.now(),
             },
@@ -279,6 +289,7 @@ export class InteractiveSessionCreationService {
     }
     try {
       await prepare?.();
+      await this.store.recordRequest(reservation.id, reservation.insertedAt);
     } catch (error) {
       await this.store.rollbackReservation(reservation.id, reservation.insertedAt);
       throw error;
@@ -290,7 +301,6 @@ export class InteractiveSessionCreationService {
         reservation.adapterWorkspaceId,
       );
     }
-    await this.store.recordRequest(reservation.id, reservation.insertedAt);
     return provision();
   }
 
@@ -372,6 +382,7 @@ export class InteractiveSessionCreationService {
       await this.store.stopSupersededAdapter(
         input.sessionId,
         result.adapterWorkspaceId,
+        input.adapterRegistration,
         result.createPending === true,
         input.now,
       );

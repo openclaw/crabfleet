@@ -188,8 +188,13 @@ export class RuntimeApplication {
         new RuntimeAdapterReleaseService({
           clearCreatePending: (sessionId, adapterWorkspaceId) =>
             clearRuntimeAdapterCreatePending(this.env, sessionId, adapterWorkspaceId),
-          stopWorkspace: (sessionId, adapterWorkspaceId) =>
-            this.workspaceLifecycle().stopForSession(sessionId, adapterWorkspaceId),
+          stopWorkspace: (sessionId, adapterWorkspaceId, registration, createPending) =>
+            this.workspaceLifecycle().stopForSession(
+              sessionId,
+              adapterWorkspaceId,
+              registration,
+              createPending,
+            ),
           confirmRelease: (sessionId, adapterWorkspaceId, now, message) =>
             confirmRuntimeAdapterRelease(this.env, sessionId, adapterWorkspaceId, now, message),
           persistStopEvidence: (sessionId, adapterWorkspaceId, message, now, reconcileError) =>
@@ -263,10 +268,11 @@ export class RuntimeApplication {
                 runtimeAdapterName,
               ),
             readSession: (sessionId) => readInteractiveSessionRecord(this.env, sessionId),
-            stopSuperseded: (sessionId, adapterWorkspaceId, createPending, now) =>
+            stopSuperseded: (sessionId, adapterWorkspaceId, registration, createPending, now) =>
               this.release().stopSuperseded({
                 sessionId,
                 adapterWorkspaceId,
+                registration,
                 createPending,
                 now,
               }),
