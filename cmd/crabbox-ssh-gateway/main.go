@@ -98,6 +98,22 @@ type sessionPTY struct {
 	resizes chan fleetapi.TerminalSize
 }
 
+type sshConnectionSettings struct {
+	handshakeTimeout time.Duration
+	connectionIdle   time.Duration
+	sessionIdle      time.Duration
+	sessionChannels  int
+}
+
+func currentSSHConnectionSettings() sshConnectionSettings {
+	return sshConnectionSettings{
+		handshakeTimeout: sshHandshakeTimeout,
+		connectionIdle:   sshConnectionIdle,
+		sessionIdle:      sshSessionIdleTimer,
+		sessionChannels:  sshSessionChannels,
+	}
+}
+
 func main() {
 	var addr string
 	var apiURL string
@@ -176,6 +192,7 @@ func main() {
 }
 
 func acceptConn(raw net.Conn, config *ssh.ServerConfig, client *apiClient) {
+	settings := currentSSHConnectionSettings()
 	if !sshConnectionSlots.acquire() {
 		log.Printf("connection limit reached for %s", raw.RemoteAddr())
 		raw.Close()
@@ -187,17 +204,25 @@ func acceptConn(raw net.Conn, config *ssh.ServerConfig, client *apiClient) {
 		raw.Close()
 		return
 	}
-	go handleConnWithRelease(raw, config, client, sshHandshakeSlots.release, sshConnectionSlots.release)
+	go handleConnWithRelease(
+		raw,
+		config,
+		client,
+		settings,
+		sshHandshakeSlots.release,
+		sshConnectionSlots.release,
+	)
 }
 
 func handleConn(raw net.Conn, config *ssh.ServerConfig, client *apiClient) {
-	handleConnWithRelease(raw, config, client, nil, nil)
+	handleConnWithRelease(raw, config, client, currentSSHConnectionSettings(), nil, nil)
 }
 
 func handleConnWithRelease(
 	raw net.Conn,
 	config *ssh.ServerConfig,
 	client *apiClient,
+	settings sshConnectionSettings,
 	releaseHandshake func(),
 	releaseConnection func(),
 ) {
@@ -212,7 +237,7 @@ func handleConnWithRelease(
 		}
 	}()
 	defer raw.Close()
-	if err := raw.SetDeadline(time.Now().Add(sshHandshakeTimeout)); err != nil {
+	if err := raw.SetDeadline(time.Now().Add(settings.handshakeTimeout)); err != nil {
 		log.Printf("handshake deadline %s: %v", raw.RemoteAddr(), err)
 	}
 	conn, chans, reqs, err := ssh.NewServerConn(raw, config)
@@ -234,12 +259,12 @@ func handleConnWithRelease(
 	if permissions == nil {
 		permissions = &ssh.Permissions{Extensions: map[string]string{}}
 	}
-	sessionSlots := newConnectionLimiter(sshSessionChannels)
+	sessionSlots := newConnectionLimiter(settings.sessionChannels)
 	sessionDone := make(chan struct{})
 	connectionClosed := make(chan struct{})
 	defer close(connectionClosed)
 	activeSessions := 0
-	connectionIdleTimer, connectionIdle := newConnectionIdleTimer()
+	connectionIdleTimer, connectionIdle := newIdleTimer(settings.connectionIdle)
 	defer stopTimer(connectionIdleTimer)
 	for {
 		select {
@@ -251,7 +276,7 @@ func handleConnWithRelease(
 			}
 			if activeSessions == 0 {
 				stopTimer(connectionIdleTimer)
-				connectionIdleTimer, connectionIdle = newConnectionIdleTimer()
+				connectionIdleTimer, connectionIdle = newIdleTimer(settings.connectionIdle)
 			}
 		case ch, ok := <-chans:
 			if !ok {
@@ -277,12 +302,12 @@ func handleConnWithRelease(
 					activeSessions--
 				}
 				if activeSessions == 0 {
-					connectionIdleTimer, connectionIdle = newConnectionIdleTimer()
+					connectionIdleTimer, connectionIdle = newIdleTimer(settings.connectionIdle)
 				}
 				log.Printf("channel accept: %v", err)
 				continue
 			}
-			go handleSession(channel, requests, permissions, client, func() {
+			go handleSession(channel, requests, permissions, client, settings.sessionIdle, func() {
 				sessionSlots.release()
 				select {
 				case sessionDone <- struct{}{}:
@@ -298,6 +323,7 @@ func handleSession(
 	requests <-chan *ssh.Request,
 	perms *ssh.Permissions,
 	client *apiClient,
+	idleTimeout time.Duration,
 	release func(),
 ) {
 	if release != nil {
@@ -306,7 +332,7 @@ func handleSession(
 	defer channel.Close()
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	idleTimer, idle := newSessionIdleTimer()
+	idleTimer, idle := newIdleTimer(idleTimeout)
 	defer stopTimer(idleTimer)
 	pty := sessionPTY{
 		cols:    120,
@@ -398,19 +424,11 @@ func handleSession(
 	}
 }
 
-func newSessionIdleTimer() (*time.Timer, <-chan time.Time) {
-	if sshSessionIdleTimer <= 0 {
+func newIdleTimer(timeout time.Duration) (*time.Timer, <-chan time.Time) {
+	if timeout <= 0 {
 		return nil, nil
 	}
-	timer := time.NewTimer(sshSessionIdleTimer)
-	return timer, timer.C
-}
-
-func newConnectionIdleTimer() (*time.Timer, <-chan time.Time) {
-	if sshConnectionIdle <= 0 {
-		return nil, nil
-	}
-	timer := time.NewTimer(sshConnectionIdle)
+	timer := time.NewTimer(timeout)
 	return timer, timer.C
 }
 
