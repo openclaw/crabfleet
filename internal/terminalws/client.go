@@ -87,7 +87,7 @@ type Client struct {
 	stateMu                      sync.Mutex
 	inputWaiter                  chan error
 	attachment                   *terminalAttachment
-	pendingAttachmentFrames      []frame
+	attachmentReady              chan struct{}
 	readerDone                   chan struct{}
 	readerErr                    error
 }
@@ -296,6 +296,7 @@ func (c *Client) SendInputConfirmed(ctx context.Context, payload []byte) error {
 		return c.readerError()
 	case <-ctx.Done():
 		c.clearInputWaiter(waiter)
+		_ = c.Close()
 		return ctx.Err()
 	}
 }
@@ -342,7 +343,7 @@ func (c *Client) Attach(ctx context.Context, terminal io.ReadWriter, resizes <-c
 		for {
 			count, err := terminal.Read(buffer)
 			if count > 0 && c.canInput.Load() {
-				if writeErr := c.SendInput(ctx, buffer[:count]); writeErr != nil {
+				if writeErr := c.SendInputConfirmed(ctx, buffer[:count]); writeErr != nil {
 					errCh <- writeErr
 					return
 				}
@@ -452,7 +453,10 @@ func (c *Client) write(ctx context.Context, current frame) error {
 func (c *Client) startReader() {
 	ctx, cancel := context.WithCancel(context.Background())
 	c.readCancel = cancel
+	c.stateMu.Lock()
 	c.readerDone = make(chan struct{})
+	c.attachmentReady = make(chan struct{})
+	c.stateMu.Unlock()
 	go c.readLoop(ctx)
 }
 
@@ -549,22 +553,20 @@ func (c *Client) registerAttachment() (*terminalAttachment, error) {
 	if c.attachment != nil {
 		return nil, errors.New("terminal client is already attached")
 	}
-	if len(c.pendingAttachmentFrames) == 0 {
-		select {
-		case <-c.readerDone:
-			return nil, readerUnavailableError(c.readerErr)
-		default:
-		}
+	select {
+	case <-c.readerDone:
+		return nil, readerUnavailableError(c.readerErr)
+	default:
 	}
 	attachment := &terminalAttachment{
-		frames: make(chan frame, len(c.pendingAttachmentFrames)+16),
+		frames: make(chan frame, 16),
 		done:   make(chan struct{}),
 	}
-	for _, current := range c.pendingAttachmentFrames {
-		attachment.frames <- current
-	}
-	c.pendingAttachmentFrames = nil
 	c.attachment = attachment
+	if c.attachmentReady != nil {
+		close(c.attachmentReady)
+		c.attachmentReady = nil
+	}
 	return attachment, nil
 }
 
@@ -573,24 +575,39 @@ func (c *Client) clearAttachment(attachment *terminalAttachment) {
 	if c.attachment == attachment {
 		c.attachment = nil
 		close(attachment.done)
+		select {
+		case <-c.readerDone:
+		default:
+			c.attachmentReady = make(chan struct{})
+		}
 	}
 	c.stateMu.Unlock()
 }
 
 func (c *Client) deliverOrQueueOutput(ctx context.Context, current frame) {
-	c.stateMu.Lock()
-	attachment := c.attachment
-	if attachment == nil {
-		c.pendingAttachmentFrames = append(c.pendingAttachmentFrames, current)
+	for {
+		c.stateMu.Lock()
+		attachment := c.attachment
+		ready := c.attachmentReady
 		c.stateMu.Unlock()
-		return
-	}
-	c.stateMu.Unlock()
-	select {
-	case attachment.frames <- current:
-	case <-attachment.done:
-		c.deliverOrQueueOutput(ctx, current)
-	case <-ctx.Done():
+		if attachment == nil {
+			if ready == nil {
+				return
+			}
+			select {
+			case <-ready:
+				continue
+			case <-ctx.Done():
+				return
+			}
+		}
+		select {
+		case attachment.frames <- current:
+			return
+		case <-attachment.done:
+		case <-ctx.Done():
+			return
+		}
 	}
 }
 
