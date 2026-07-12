@@ -99,7 +99,7 @@ test("structured session events canonicalize additive payloads and replay idempo
   const invalidations: string[] = [];
   const archives: string[] = [];
   const store: InteractiveSessionEventLedgerStore = {
-    async persistAndInvalidate(event) {
+    async persist(event) {
       persistedPayloads.push(event.payloadJson);
       invalidations.push(event.sessionId);
       if (!row) {
@@ -113,25 +113,70 @@ test("structured session events canonicalize additive payloads and replay idempo
           payload_json: event.payloadJson,
           created_at: event.now,
         };
-        return { row, inserted: true };
+        return { row, inserted: true, refreshArchive: true };
       }
-      return { row, inserted: false };
+      return { row, inserted: false, refreshArchive: true };
     },
     async archive(sessionId) {
       archives.push(sessionId);
     },
   };
   const service = new InteractiveSessionEventLedgerService(store);
+  const githubCredentialOne = `ghp_${"x".repeat(24)}`;
+  const githubCredentialTwo = `ghp_${"y".repeat(24)}`;
+  const providerCredentialOne = `sk-${"x".repeat(24)}`;
+  const providerCredentialTwo = `sk-${"y".repeat(24)}`;
+  const cloudCredentialOne = `AKIA${"X".repeat(16)}`;
+  const cloudCredentialTwo = `ASIA${"Y".repeat(16)}`;
+  const gitLabCredentialOne = `glpat-${"x".repeat(24)}`;
+  const gitLabCredentialTwo = `glpat-${"y".repeat(24)}`;
+  const privateKeyOne = [
+    "-----BEGIN PRIVATE",
+    "KEY-----\nZmFrZS1rZXktb25l\n-----END PRIVATE",
+    "KEY-----",
+  ].join(" ");
+  const privateKeyTwo = [
+    "-----BEGIN PRIVATE",
+    "KEY-----\nZmFrZS1rZXktdHdv\n-----END PRIVATE",
+    "KEY-----",
+  ].join(" ");
   const first = await service.append({
     sessionId: "IS-1",
     actor: "operator",
     eventKey: " run:1 ",
     type: " clawsweeper.action ",
-    message: " updated pull request ",
+    message: ` updated pull request: authorization: Bearer credential-one\ncredentials=dummy\nSharedAccessKey=dummy\nhttps://alice:s3cr3t@example.com/repo\n${githubCredentialOne} `,
     payload: {
       version: 2,
       target: { z: true, a: 1 },
       additiveField: ["kept"],
+      secretKey: "dummy",
+      secretAccessKey: "dummy",
+      accessKeyId: "dummy",
+      accountKey: "dummy",
+      connectionString: "dummy",
+      sharedAccessKey: "dummy",
+      credentials: {
+        authorization: "Bearer credential-one",
+        githubToken: "dummy",
+      },
+      note: "request failed: authorization: Bearer credential-one",
+      remote: "https://alice:s3cr3t@example.com/repo",
+      pemAssignment: `private_key=${privateKeyOne}`,
+      storageKey: "dummy",
+      tokenSamples: [
+        githubCredentialOne,
+        gitLabCredentialOne,
+        providerCredentialOne,
+        cloudCredentialOne,
+        privateKeyOne,
+      ],
+      urlSamples: [
+        "https://:secret@example.com/repo",
+        "https://token:@example.com/repo",
+        "https://alice:p@ss@example.com/repo",
+        "https://alice@example.com:pass@host.example/repo",
+      ],
     },
     now: 123,
   });
@@ -140,9 +185,36 @@ test("structured session events canonicalize additive payloads and replay idempo
     actor: "operator",
     eventKey: "run:1",
     type: "clawsweeper.action",
-    message: "updated pull request",
+    message: `updated pull request: authorization: Bearer credential-two\ncredentials=fake\nSharedAccessKey=fake\nhttps://bob:p%40ssword@example.com/repo\n${githubCredentialTwo}`,
     payload: {
       additiveField: ["kept"],
+      secretKey: "fake",
+      secretAccessKey: "fake",
+      accessKeyId: "fake",
+      accountKey: "fake",
+      connectionString: "fake",
+      sharedAccessKey: "fake",
+      credentials: {
+        authorization: "Bearer credential-two",
+        githubToken: "fake",
+      },
+      note: "request failed: authorization: Bearer credential-two",
+      remote: "https://bob:p%40ssword@example.com/repo",
+      pemAssignment: `private_key=${privateKeyTwo}`,
+      storageKey: "fake",
+      tokenSamples: [
+        githubCredentialTwo,
+        gitLabCredentialTwo,
+        providerCredentialTwo,
+        cloudCredentialTwo,
+        privateKeyTwo,
+      ],
+      urlSamples: [
+        "https://:changed@example.com/repo",
+        "https://changed:@example.com/repo",
+        "https://bob:n@ew@example.com/repo",
+        "https://bob@example.com:changed@host.example/repo",
+      ],
       target: { a: 1, z: true },
       version: 2,
     },
@@ -155,20 +227,100 @@ test("structured session events canonicalize additive payloads and replay idempo
     actor: "operator",
     eventKey: "run:1",
     type: "clawsweeper.action",
-    message: "updated pull request",
+    message:
+      "updated pull request: [credential]\n[credential]\n[credential]\nhttps://[credential]@example.com/repo\n[credential]",
     payload: {
+      accessKeyId: "[redacted]",
+      accountKey: "[redacted]",
       additiveField: ["kept"],
+      credentials: "[redacted]",
+      connectionString: "[redacted]",
+      note: "request failed: [credential]",
+      pemAssignment: "private_key=[credential]",
+      remote: "https://[credential]@example.com/repo",
+      secretAccessKey: "[redacted]",
+      secretKey: "[redacted]",
+      sharedAccessKey: "[redacted]",
+      storageKey: "[redacted]",
       target: { a: 1, z: true },
+      tokenSamples: [
+        "[credential]",
+        "[credential]",
+        "[credential]",
+        "[credential]",
+        "[credential]",
+      ],
+      urlSamples: [
+        "https://[credential]@example.com/repo",
+        "https://[credential]@example.com/repo",
+        "https://[credential]@example.com/repo",
+        "https://[credential]@host.example/repo",
+      ],
       version: 2,
     },
     createdAt: 123,
   });
   assert.deepEqual(persistedPayloads, [
-    '{"additiveField":["kept"],"target":{"a":1,"z":true},"version":2}',
-    '{"additiveField":["kept"],"target":{"a":1,"z":true},"version":2}',
+    '{"accessKeyId":"[redacted]","accountKey":"[redacted]","additiveField":["kept"],"connectionString":"[redacted]","credentials":"[redacted]","note":"request failed: [credential]","pemAssignment":"private_key=[credential]","remote":"https://[credential]@example.com/repo","secretAccessKey":"[redacted]","secretKey":"[redacted]","sharedAccessKey":"[redacted]","storageKey":"[redacted]","target":{"a":1,"z":true},"tokenSamples":["[credential]","[credential]","[credential]","[credential]","[credential]"],"urlSamples":["https://[credential]@example.com/repo","https://[credential]@example.com/repo","https://[credential]@example.com/repo","https://[credential]@host.example/repo"],"version":2}',
+    '{"accessKeyId":"[redacted]","accountKey":"[redacted]","additiveField":["kept"],"connectionString":"[redacted]","credentials":"[redacted]","note":"request failed: [credential]","pemAssignment":"private_key=[credential]","remote":"https://[credential]@example.com/repo","secretAccessKey":"[redacted]","secretKey":"[redacted]","sharedAccessKey":"[redacted]","storageKey":"[redacted]","target":{"a":1,"z":true},"tokenSamples":["[credential]","[credential]","[credential]","[credential]","[credential]"],"urlSamples":["https://[credential]@example.com/repo","https://[credential]@example.com/repo","https://[credential]@example.com/repo","https://[credential]@host.example/repo"],"version":2}',
   ]);
   assert.deepEqual(invalidations, ["IS-1", "IS-1"]);
   assert.deepEqual(archives, ["IS-1", "IS-1"]);
+});
+
+test("structured event redaction spans private-key arrays and underscore secret tokens", async () => {
+  let persistedMessage = "";
+  let persistedPayload = "";
+  const service = new InteractiveSessionEventLedgerService({
+    async persist(event) {
+      persistedMessage = event.message;
+      persistedPayload = event.payloadJson;
+      return {
+        row: {
+          id: 1,
+          session_id: event.sessionId,
+          actor: event.actor,
+          event_key: event.eventKey,
+          event_type: event.type,
+          message: event.message,
+          payload_json: event.payloadJson,
+          created_at: event.now,
+        },
+        inserted: true,
+        refreshArchive: false,
+      };
+    },
+    async archive() {},
+  });
+  const secret = ["sk", "live", "x".repeat(24)].join("_");
+  const privateKeyBegin = ["-----BEGIN PRIVATE", "KEY-----"].join(" ");
+  const privateKeyEnd = ["-----END PRIVATE", "KEY-----"].join(" ");
+
+  const result = await service.append({
+    sessionId: "IS-1",
+    actor: "operator",
+    eventKey: "run:private-key",
+    type: "clawsweeper.action",
+    message: secret,
+    payload: {
+      version: 1,
+      output: [privateKeyBegin, "ZmFrZS1rZXktbWF0ZXJpYWw=", privateKeyEnd],
+      commandOutput: `failed with ${secret}`,
+    },
+    now: 123,
+  });
+
+  assert.equal(persistedMessage, "[credential]");
+  assert.deepEqual(JSON.parse(persistedPayload), {
+    commandOutput: "failed with [credential]",
+    output: ["[credential]", "[credential]", "[credential]"],
+    version: 1,
+  });
+  assert.deepEqual(result.event.payload, {
+    commandOutput: "failed with [credential]",
+    output: ["[credential]", "[credential]", "[credential]"],
+    version: 1,
+  });
 });
 
 test("structured session event key conflicts reject changed content before side effects", async () => {
@@ -184,8 +336,8 @@ test("structured session event key conflicts reject changed content before side 
   };
   let archived = false;
   const service = new InteractiveSessionEventLedgerService({
-    async persistAndInvalidate() {
-      return { row: existing, inserted: false };
+    async persist() {
+      return { row: existing, inserted: false, refreshArchive: true };
     },
     async archive() {
       archived = true;
@@ -216,7 +368,7 @@ test("structured session event key conflicts reject changed content before side 
 test("structured session events require bounded identifiers and a versioned object payload", async () => {
   let persisted = false;
   const service = new InteractiveSessionEventLedgerService({
-    async persistAndInvalidate() {
+    async persist() {
       persisted = true;
       throw new Error("unexpected persistence");
     },
@@ -254,7 +406,7 @@ test("structured session events require bounded identifiers and a versioned obje
 test("structured session event payload budgets fail with controlled client errors", async () => {
   let persisted = false;
   const service = new InteractiveSessionEventLedgerService({
-    async persistAndInvalidate() {
+    async persist() {
       persisted = true;
       throw new Error("unexpected persistence");
     },

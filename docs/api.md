@@ -653,9 +653,16 @@ The first append returns the stored public event with `duplicate: false`.
 Replaying the same key, type, trimmed message, and semantic JSON payload returns
 the original event with `duplicate: true`, including when object keys arrive in
 a different order. Reusing the key with different content returns `409`.
-Structured events do not change work state, `lastEvent`, or the existing
-message-event behavior. A terminal session token remains valid for structured
-event append and replay for five minutes after `stoppedAt`, then returns `403`.
+Credential-shaped payload fields are recursively replaced with `[redacted]`,
+and embedded credential text is scrubbed from payload strings and `message`
+before persistence. For five minutes after a session becomes terminal, only an
+exact replay of an already-persisted event is accepted without refreshing
+finalized archives; new terminal history is rejected. The terminal credential
+returns `403` after that window. Structured events do not change work state,
+`lastEvent`, or the existing message-event behavior.
+An exact replay of a pre-hardening row atomically redacts its stored credentials,
+marks terminal archive finalization pending for durable retry, and refreshes its
+archive with cadence bypass before returning the sanitized event.
 
 ### POST /api/interactive-sessions
 

@@ -2,7 +2,7 @@ import { sql } from "kysely";
 
 import { database, executeBatch } from "./database.ts";
 import type { RuntimeEnv } from "./env.ts";
-import { badRequest, conflict, payloadTooLarge } from "./http.ts";
+import { badRequest, conflict, forbidden, payloadTooLarge } from "./http.ts";
 import { deadInteractiveSessionStatuses } from "./models.ts";
 import { archiveInteractiveSessionLogs } from "./session-log-archive.ts";
 import {
@@ -32,7 +32,11 @@ export type AppendInteractiveSessionEventInput = {
   now: number;
 };
 
-export type InteractiveSessionEventArchive = (sessionId: string, now: number) => Promise<void>;
+export type InteractiveSessionEventArchive = (
+  sessionId: string,
+  now: number,
+  options?: { force?: boolean },
+) => Promise<void>;
 
 export type AppendStructuredInteractiveSessionEventInput = {
   sessionId: string;
@@ -55,10 +59,13 @@ type PersistedStructuredInteractiveSessionEvent = {
 };
 
 export type InteractiveSessionEventLedgerStore = {
-  persistAndInvalidate(
-    event: PersistedStructuredInteractiveSessionEvent,
-  ): Promise<{ row: InteractiveSessionEventRow; inserted: boolean }>;
-  archive(sessionId: string, now: number): Promise<void>;
+  persist(event: PersistedStructuredInteractiveSessionEvent): Promise<{
+    row: InteractiveSessionEventRow;
+    inserted: boolean;
+    refreshArchive: boolean;
+    forceArchive?: boolean;
+  }>;
+  archive(sessionId: string, now: number, options?: { force?: boolean }): Promise<void>;
 };
 
 export type AppendStructuredInteractiveSessionEventResult = {
@@ -77,13 +84,18 @@ export class InteractiveSessionEventLedgerService {
     input: AppendStructuredInteractiveSessionEventInput,
   ): Promise<AppendStructuredInteractiveSessionEventResult> {
     const event = normalizeStructuredEvent(input);
-    const persisted = await this.store.persistAndInvalidate(event);
-    if (!sameStructuredEvent(persisted.row, event)) {
+    const persisted = await this.store.persist(event);
+    const row = redactedStructuredEventRow(persisted.row);
+    if (!sameStructuredEvent(row, event)) {
       throw conflict("event key already belongs to a different session event");
     }
-    await this.store.archive(event.sessionId, event.now).catch(() => undefined);
+    if (persisted.refreshArchive) {
+      await this.store
+        .archive(event.sessionId, event.now, persisted.forceArchive ? { force: true } : undefined)
+        .catch(() => undefined);
+    }
     return {
-      event: interactiveSessionEvent(persisted.row),
+      event: interactiveSessionEvent(row),
       duplicate: !persisted.inserted,
     };
   }
@@ -111,50 +123,54 @@ export async function appendInteractiveSessionEventRecord(
 export async function appendStructuredInteractiveSessionEventRecord(
   env: RuntimeEnv,
   input: AppendStructuredInteractiveSessionEventInput,
-  archive: InteractiveSessionEventArchive = (sessionId, now) =>
-    archiveInteractiveSessionLogs(env, sessionId, now),
+  archive: InteractiveSessionEventArchive = (sessionId, now, options) =>
+    archiveInteractiveSessionLogs(env, sessionId, now, options),
 ): Promise<AppendStructuredInteractiveSessionEventResult> {
   const db = database(env);
   try {
     return await new InteractiveSessionEventLedgerService({
-      async persistAndInvalidate(event) {
-        const insert = db
-          .insertInto("interactive_session_events")
-          .values({
-            session_id: event.sessionId,
-            actor: event.actor,
-            event_key: event.eventKey,
-            event_type: event.type,
-            message: event.message,
-            payload_json: event.payloadJson,
-            created_at: event.now,
-          })
-          .onConflict((constraint) => constraint.doNothing())
-          .returningAll();
-        const invalidate = db
-          .updateTable("interactive_sessions")
-          .set({ terminal_finalize_pending: 1 })
-          .where("id", "=", event.sessionId)
-          .where("status", "in", deadInteractiveSessionStatuses)
-          .where(
-            sql<boolean>`EXISTS (
-              SELECT 1
-              FROM interactive_session_events
-              WHERE session_id = ${event.sessionId}
-                AND event_key = ${event.eventKey}
-                AND event_type = ${event.type}
-                AND message = ${event.message}
-                AND payload_json = ${event.payloadJson}
-            )`,
-          );
-        const results = await env.DB.batch<InteractiveSessionEventRow>(
-          [insert, invalidate].map((query) => {
-            const compiled = query.compile();
-            return env.DB.prepare(compiled.sql).bind(...compiled.parameters);
-          }),
-        );
+      async persist(event) {
+        // Terminal ledgers are immutable. Missing-key gating keeps retries
+        // idempotent without firing INSERT side effects for existing rows.
+        const insert = sql<InteractiveSessionEventRow>`
+          INSERT INTO interactive_session_events (
+            session_id,
+            actor,
+            event_key,
+            event_type,
+            message,
+            payload_json,
+            created_at
+          )
+          SELECT
+            ${event.sessionId},
+            ${event.actor},
+            ${event.eventKey},
+            ${event.type},
+            ${event.message},
+            ${event.payloadJson},
+            ${event.now}
+          WHERE EXISTS (
+            SELECT 1
+            FROM interactive_sessions
+            WHERE id = ${event.sessionId}
+              AND status NOT IN ('stopping', 'stopped', 'expired', 'failed')
+          )
+          AND NOT EXISTS (
+            SELECT 1
+            FROM interactive_session_events
+            WHERE session_id = ${event.sessionId}
+              AND event_key = ${event.eventKey}
+          )
+          ON CONFLICT DO NOTHING
+          RETURNING *
+        `;
+        const compiledInsert = insert.compile(db);
+        const results = await env.DB.batch<InteractiveSessionEventRow>([
+          env.DB.prepare(compiledInsert.sql).bind(...compiledInsert.parameters),
+        ]);
         const inserted = results[0]?.results?.[0];
-        const row =
+        let row =
           inserted ??
           (await db
             .selectFrom("interactive_session_events")
@@ -162,8 +178,65 @@ export async function appendStructuredInteractiveSessionEventRecord(
             .where("session_id", "=", event.sessionId)
             .where("event_key", "=", event.eventKey)
             .executeTakeFirst());
-        if (!row) throw new Error("structured session event was not persisted");
-        return { row, inserted: Boolean(inserted) };
+        const session = !inserted
+          ? await db
+              .selectFrom("interactive_sessions")
+              .select("status")
+              .where("id", "=", event.sessionId)
+              .executeTakeFirst()
+          : undefined;
+        if (!row) {
+          if (
+            session &&
+            (session.status === "stopping" ||
+              deadInteractiveSessionStatuses.includes(session.status))
+          ) {
+            throw forbidden("terminal sessions accept only exact event replays");
+          }
+          throw new Error("structured session event was not persisted");
+        }
+        const redactedRow = redactedStructuredEventRow(row);
+        const repairsLegacyCredentials =
+          !inserted &&
+          sameStructuredEvent(redactedRow, event) &&
+          (row.message !== redactedRow.message || row.payload_json !== redactedRow.payload_json);
+        if (repairsLegacyCredentials) {
+          const repair = db
+            .updateTable("interactive_session_events")
+            .set({
+              message: redactedRow.message,
+              payload_json: redactedRow.payload_json,
+            })
+            .where("id", "=", row.id)
+            .where("message", "=", row.message)
+            .where("payload_json", "=", row.payload_json)
+            .returningAll();
+          const compiledRepair = repair.compile();
+          const pending = terminalFinalizationPendingQuery(db, event.sessionId).compile(db);
+          const repairResults = await env.DB.batch<InteractiveSessionEventRow>([
+            env.DB.prepare(compiledRepair.sql).bind(...compiledRepair.parameters),
+            env.DB.prepare(pending.sql).bind(...pending.parameters),
+          ]);
+          const repaired = repairResults[0]?.results?.[0];
+          row =
+            repaired ??
+            (await db
+              .selectFrom("interactive_session_events")
+              .selectAll()
+              .where("id", "=", row.id)
+              .executeTakeFirstOrThrow());
+        }
+        const terminal = Boolean(
+          session &&
+          (session.status === "stopping" ||
+            deadInteractiveSessionStatuses.includes(session.status)),
+        );
+        return {
+          row,
+          inserted: Boolean(inserted),
+          refreshArchive: !terminal || repairsLegacyCredentials,
+          forceArchive: repairsLegacyCredentials,
+        };
       },
       archive,
     }).append(input);
@@ -182,7 +255,7 @@ function normalizeStructuredEvent(
 ): PersistedStructuredInteractiveSessionEvent {
   const eventKey = requiredString(input.eventKey, "eventKey", 240);
   const type = requiredString(input.type, "type", 120);
-  const message = requiredString(input.message, "message", 1000);
+  const message = redactedStructuredEventText(requiredString(input.message, "message", 1000));
   const payloadJson = structuredPayloadJson(input.payload);
   return {
     sessionId: input.sessionId,
@@ -208,6 +281,23 @@ function sameStructuredEvent(
   );
 }
 
+function redactedStructuredEventRow(row: InteractiveSessionEventRow): InteractiveSessionEventRow {
+  return {
+    ...row,
+    message: redactedStructuredEventText(row.message),
+    payload_json: redactedStoredStructuredPayloadJson(row.payload_json),
+  };
+}
+
+function redactedStoredStructuredPayloadJson(value: string | null): string | null {
+  if (value === null) return null;
+  try {
+    return structuredPayloadJson(JSON.parse(value));
+  } catch {
+    return value;
+  }
+}
+
 function structuredPayloadJson(value: unknown): string {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
     throw badRequest("payload must be a JSON object");
@@ -222,7 +312,9 @@ function structuredPayloadJson(value: unknown): string {
   ) {
     throw badRequest("payload.version must be a positive integer");
   }
-  const payload = canonicalJsonValue(record, new Set(), 0, { members: 0 });
+  const payload = redactStructuredPayload(
+    canonicalJsonValue(record, new Set(), 0, { members: 0 }) as InteractiveSessionEventPayload,
+  );
   const payloadJson = JSON.stringify(payload);
   if (encoder.encode(payloadJson).byteLength > structuredEventPayloadMaxBytes) {
     throw payloadTooLarge(
@@ -230,6 +322,98 @@ function structuredPayloadJson(value: unknown): string {
     );
   }
   return payloadJson;
+}
+
+const sensitivePayloadField =
+  /^(?:access_?key_?id|account_?key|api_?key|apikey|auth|authorization|client_?secret|connection_?string|cookie|credential|credentials|id_?token|password|passwd|private_?key|proxy_?authorization|refresh_?token|sas_?token|secret|secret_?access_?key|secret_?key|session_?token|set_?cookie|shared_?access_?key|shared_?access_?signature|sig|signature|signed_?url|storage_?key|ticket|token|x_?api_?key|.+(?:_access_?key_?id|_account_?key|_api_?key|_connection_?string|_credential|_credentials|_password|_private_?key|_secret|_secret_?access_?key|_secret_?key|_shared_?access_?key|_signature|_storage_?key|_ticket|_token))$/i;
+
+function redactStructuredPayload(
+  value: InteractiveSessionEventPayload,
+): InteractiveSessionEventPayload {
+  return Object.fromEntries(
+    Object.entries(value).map(([key, nested]) => [
+      key,
+      sensitivePayloadField.test(normalizedPayloadField(key))
+        ? "[redacted]"
+        : redactStructuredPayloadValue(nested),
+    ]),
+  );
+}
+
+function redactStructuredPayloadValue(
+  value: InteractiveSessionEventPayloadValue,
+): InteractiveSessionEventPayloadValue {
+  if (Array.isArray(value)) return redactStructuredPayloadArray(value);
+  if (typeof value === "string") return redactedStructuredEventText(value);
+  if (!value || typeof value !== "object") return value;
+  return redactStructuredPayload(value);
+}
+
+const privateKeyBegin =
+  /-----BEGIN (?:RSA |DSA |EC |OPENSSH |PGP |ENCRYPTED )?PRIVATE KEY(?: BLOCK)?-----/iu;
+const privateKeyEnd =
+  /-----END (?:RSA |DSA |EC |OPENSSH |PGP |ENCRYPTED )?PRIVATE KEY(?: BLOCK)?-----/iu;
+
+function redactStructuredPayloadArray(
+  value: InteractiveSessionEventPayloadValue[],
+): InteractiveSessionEventPayloadValue[] {
+  let insidePrivateKey = false;
+  return value.map((nested) => {
+    if (typeof nested !== "string") return redactStructuredPayloadValue(nested);
+    const beginsPrivateKey = privateKeyBegin.test(nested);
+    if (!insidePrivateKey && !beginsPrivateKey) return redactedStructuredEventText(nested);
+    insidePrivateKey = !privateKeyEnd.test(nested);
+    return "[credential]";
+  });
+}
+
+function redactedStructuredEventText(value: string): string {
+  const sensitiveName =
+    "access[_-]?key[_-]?id|access[_-]?token|account[_-]?key|api[_-]?key|apikey|auth|authorization|client[_-]?secret|connection[_-]?string|cookie|credential|credentials|id[_-]?token|password|passwd|private[_-]?key|proxy[_-]?authorization|refresh[_-]?token|sas[_-]?token|secret|secret[_-]?access[_-]?key|secret[_-]?key|session[_-]?token|set[_-]?cookie|shared[_-]?access[_-]?key|shared[_-]?access[_-]?signature|sig|signature|storage[_-]?key|ticket|token|x[_-]?api[_-]?key";
+  return value
+    .replace(
+      /\b([a-z][a-z0-9+.-]*:\/\/)[^\s/?#]*:[^\s/?#]*@(?=[^\s/?#]+(?:[/?#]|\s|$))/giu,
+      "$1[credential]@",
+    )
+    .replace(
+      /-----BEGIN (?:RSA |DSA |EC |OPENSSH |PGP |ENCRYPTED )?PRIVATE KEY(?: BLOCK)?-----[\s\S]*?-----END (?:RSA |DSA |EC |OPENSSH |PGP |ENCRYPTED )?PRIVATE KEY(?: BLOCK)?-----/giu,
+      "[credential]",
+    )
+    .replace(
+      /-----BEGIN (?:RSA |DSA |EC |OPENSSH |PGP |ENCRYPTED )?PRIVATE KEY(?: BLOCK)?-----[\s\S]*/giu,
+      "[credential]",
+    )
+    .replace(
+      /\b(?:authorization|proxy-authorization|x-api-key|api-key)\s*:\s*[^\r\n]+/giu,
+      "[credential]",
+    )
+    .replace(/\b(?:bearer|basic)\s+[^\s,;}\x5d]+/giu, "[credential]")
+    .replace(/\b(?:cookie|set-cookie)\s*:\s*[^\r\n]+/giu, "[credential]")
+    .replace(
+      new RegExp(
+        `(?:\\\\?["']?)(?:${sensitiveName})(?:\\\\?["']?)\\s*[:=]\\s*(?!\\[credential\\])(?:\\\\?["'](?:\\\\.|[^"'\\\\])*\\\\?["']|[^\\s,;}&}\\x5d]+)`,
+        "giu",
+      ),
+      "[credential]",
+    )
+    .replace(/\b(?:github_pat_|gh[pousr]_)[A-Za-z0-9_]{20,}\b/gu, "[credential]")
+    .replace(/\bglpat-[A-Za-z0-9_-]{20,}\b/gu, "[credential]")
+    .replace(/\b(?:sk|rk|pk|org|proj)-[A-Za-z0-9_-]{20,}\b/gu, "[credential]")
+    .replace(/\b(?:sk|rk)_(?:live|test)_[A-Za-z0-9]{16,}\b/gu, "[credential]")
+    .replace(/\bxox[baprs]-[A-Za-z0-9-]{20,}\b/gu, "[credential]")
+    .replace(/\bnpm_[A-Za-z0-9]{20,}\b/gu, "[credential]")
+    .replace(/\b(?:AKIA|ASIA)[A-Z0-9]{16}\b/gu, "[credential]")
+    .replace(/\bAIza[0-9A-Za-z_-]{35}\b/gu, "[credential]")
+    .replace(/\bya29\.[0-9A-Za-z_-]{20,}\b/gu, "[credential]")
+    .replace(/\beyJ[A-Za-z0-9_-]{7,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b/gu, "[credential]");
+}
+
+function normalizedPayloadField(value: string): string {
+  return value
+    .replace(/([a-z0-9])([A-Z])/g, "$1_$2")
+    .replace(/[^A-Za-z0-9]+/g, "_")
+    .replace(/^_+|_+$/g, "")
+    .toLowerCase();
 }
 
 function canonicalJsonValue(

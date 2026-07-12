@@ -105,8 +105,8 @@ test("transcripts accept domain sessions and summaries keep event anchors", () =
   assert.equal(summary.workState, "completed");
   assert.equal(summary.eventCount, 2);
   assert.equal(summary.firstEventAt, 10);
-  assert.equal(summary.lastEventAt, 20);
-  assert.equal(summary.lastEvent, "last");
+  assert.equal(summary.lastEventAt, 10);
+  assert.equal(summary.lastEvent, "first");
   assert.equal(summary.updatedAt, 120);
 });
 

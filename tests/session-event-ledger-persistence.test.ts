@@ -4,6 +4,7 @@ import test from "node:test";
 
 import { appendStructuredInteractiveSessionEventRecord } from "../src/worker/session-events.ts";
 import type { RuntimeEnv } from "../src/worker/env.ts";
+import { shouldArchiveInteractiveSessionLogs } from "../src/worker/session-log-archive.ts";
 
 type SqliteStatement = {
   all(...parameters: unknown[]): Record<string, unknown>[];
@@ -39,7 +40,7 @@ function eventDatabase(): DatabaseSync {
     CREATE UNIQUE INDEX idx_interactive_session_events_session_event_key
       ON interactive_session_events(session_id, event_key)
       WHERE event_key IS NOT NULL AND event_key <> '';
-    INSERT INTO interactive_sessions (id, status) VALUES ('IS-1', 'stopped');
+    INSERT INTO interactive_sessions (id, status) VALUES ('IS-1', 'ready');
   `);
   return database;
 }
@@ -146,39 +147,53 @@ test("structured event batch interruption rolls back insert and terminal invalid
   assert.equal(archived, false);
 });
 
-test("structured event races deduplicate and invalidate only exact replays", async () => {
+test("structured event races deduplicate and keep terminal replays side-effect free", async () => {
   const database = eventDatabase();
   const env = runtimeEnv(database);
+  let archiveCalls = 0;
   const append = (input: ReturnType<typeof eventInput>) =>
-    appendStructuredInteractiveSessionEventRecord(env, input, async () => undefined);
+    appendStructuredInteractiveSessionEventRecord(env, input, async () => {
+      archiveCalls += 1;
+    });
   const results = await Promise.all([
     append(eventInput("updated pull request", 100)),
     append(eventInput("updated pull request", 200)),
   ]);
 
   assert.deepEqual(results.map((result) => result.duplicate).sort(), [false, true]);
+  assert.equal(archiveCalls, 2);
   assert.equal(
     database.prepare("SELECT count(*) AS count FROM interactive_session_events").get()?.count,
     1,
   );
+  const sequenceBeforeReplay = database
+    .prepare("SELECT seq FROM sqlite_sequence WHERE name = 'interactive_session_events'")
+    .get()?.seq;
+  assert.equal(sequenceBeforeReplay, 1);
   assert.equal(
     database
       .prepare("SELECT terminal_finalize_pending FROM interactive_sessions WHERE id = 'IS-1'")
       .get()?.terminal_finalize_pending,
-    1,
+    0,
   );
 
-  database.exec("UPDATE interactive_sessions SET terminal_finalize_pending = 0 WHERE id = 'IS-1'");
+  database.exec("UPDATE interactive_sessions SET status = 'stopped' WHERE id = 'IS-1'");
   const replay = await append(eventInput("updated pull request", 300));
   assert.equal(replay.duplicate, true);
+  assert.equal(archiveCalls, 2);
+  assert.equal(
+    database
+      .prepare("SELECT seq FROM sqlite_sequence WHERE name = 'interactive_session_events'")
+      .get()?.seq,
+    sequenceBeforeReplay,
+  );
   assert.equal(
     database
       .prepare("SELECT terminal_finalize_pending FROM interactive_sessions WHERE id = 'IS-1'")
       .get()?.terminal_finalize_pending,
-    1,
+    0,
   );
 
-  database.exec("UPDATE interactive_sessions SET terminal_finalize_pending = 0 WHERE id = 'IS-1'");
   await assert.rejects(append(eventInput("changed content", 400)), (error) => {
     assert.equal(
       typeof error === "object" && error && "status" in error ? error.status : undefined,
@@ -186,6 +201,135 @@ test("structured event races deduplicate and invalidate only exact replays", asy
     );
     return true;
   });
+  assert.equal(
+    database
+      .prepare("SELECT terminal_finalize_pending FROM interactive_sessions WHERE id = 'IS-1'")
+      .get()?.terminal_finalize_pending,
+    0,
+  );
+
+  await assert.rejects(
+    append({ ...eventInput("new content", 500), eventKey: "run:2" }),
+    (error) => {
+      assert.equal(
+        typeof error === "object" && error && "status" in error ? error.status : undefined,
+        403,
+      );
+      return true;
+    },
+  );
+  assert.equal(
+    database.prepare("SELECT count(*) AS count FROM interactive_session_events").get()?.count,
+    1,
+  );
+});
+
+test("legacy credential-bearing replays repair D1 and refresh terminal archives", async () => {
+  const database = eventDatabase();
+  const rawMessage = "authorization: Bearer legacy-secret-value";
+  const rawPayload = JSON.stringify({ version: 1, output: rawMessage });
+  database
+    .prepare(`
+      INSERT INTO interactive_session_events
+        (session_id, actor, event_key, event_type, message, payload_json, created_at)
+      VALUES ('IS-1', 'operator', 'run:legacy', 'clawsweeper.action', ?, ?, 100)
+    `)
+    .run(rawMessage, rawPayload);
+  database.exec("UPDATE interactive_sessions SET status = 'stopped' WHERE id = 'IS-1'");
+  let archiveCalls = 0;
+  let forceArchive = false;
+
+  const replay = await appendStructuredInteractiveSessionEventRecord(
+    runtimeEnv(database),
+    {
+      sessionId: "IS-1",
+      actor: "operator",
+      eventKey: "run:legacy",
+      type: "clawsweeper.action",
+      message: rawMessage,
+      payload: { version: 1, output: rawMessage },
+      now: 200,
+    },
+    async (_sessionId, _now, options) => {
+      archiveCalls += 1;
+      forceArchive = options?.force === true;
+      throw new Error("simulated archive outage");
+    },
+  );
+
+  assert.equal(replay.duplicate, true);
+  assert.equal(replay.event.message, "[credential]");
+  assert.deepEqual(replay.event.payload, { output: "[credential]", version: 1 });
+  assert.equal(archiveCalls, 1);
+  assert.equal(forceArchive, true);
+  assert.equal(
+    database
+      .prepare("SELECT terminal_finalize_pending FROM interactive_sessions WHERE id = 'IS-1'")
+      .get()?.terminal_finalize_pending,
+    1,
+  );
+  assert.deepEqual(
+    {
+      ...database
+        .prepare(`
+          SELECT message, payload_json
+          FROM interactive_session_events
+          WHERE session_id = 'IS-1' AND event_key = 'run:legacy'
+        `)
+        .get(),
+    },
+    {
+      message: "[credential]",
+      payload_json: '{"output":"[credential]","version":1}',
+    },
+  );
+});
+
+test("active legacy repairs bypass fresh same-count archive cadence", async () => {
+  const database = eventDatabase();
+  const rawMessage = "authorization: Bearer legacy-active-value";
+  database
+    .prepare(`
+      INSERT INTO interactive_session_events
+        (session_id, actor, event_key, event_type, message, payload_json, created_at)
+      VALUES ('IS-1', 'operator', 'run:active-legacy', 'clawsweeper.action', ?,
+        '{"version":1}', 100)
+    `)
+    .run(rawMessage);
+  let archiveReplaced = false;
+
+  const replay = await appendStructuredInteractiveSessionEventRecord(
+    runtimeEnv(database),
+    {
+      sessionId: "IS-1",
+      actor: "operator",
+      eventKey: "run:active-legacy",
+      type: "clawsweeper.action",
+      message: rawMessage,
+      payload: { version: 1 },
+      now: 200,
+    },
+    async (_sessionId, now, options) => {
+      archiveReplaced = shouldArchiveInteractiveSessionLogs(
+        {
+          session_id: "IS-1",
+          event_count: 1,
+          session_updated_at: 100,
+          events_key: "events",
+          transcript_key: "transcript",
+          summary_key: "summary",
+          archived_at: 190,
+          updated_at: 190,
+        },
+        1,
+        now,
+        options?.force,
+      );
+    },
+  );
+
+  assert.equal(replay.duplicate, true);
+  assert.equal(archiveReplaced, true);
   assert.equal(
     database
       .prepare("SELECT terminal_finalize_pending FROM interactive_sessions WHERE id = 'IS-1'")
