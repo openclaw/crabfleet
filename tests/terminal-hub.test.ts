@@ -1511,7 +1511,7 @@ test("GitHub Actions runner disconnect rejects pending input without closing the
   server.emit("close");
 });
 
-test("GitHub Actions runner replacement rejects old input and accepts new input", async () => {
+test("GitHub Actions runner replacement reports old input as unknown and accepts new input", async () => {
   const client = socket();
   const server = socket();
   const upstream = socket();
@@ -1559,9 +1559,9 @@ test("GitHub Actions runner replacement rejects old input and accepts new input"
   assert.equal(
     replacementEvents.some(
       (event) =>
-        (event as { type?: string }).type === "input-rejected" &&
+        (event as { type?: string }).type === "input-delivery-unknown" &&
         (event as { error?: string }).error ===
-          "GitHub Actions runner was replaced before accepting input",
+          "terminal input delivery outcome is unknown; the runner may still complete it",
     ),
     true,
     JSON.stringify(replacementEvents),
@@ -1587,16 +1587,18 @@ test("GitHub Actions runner replacement rejects old input and accepts new input"
     .map((payload) => frame(payload))
     .filter((message) => message.type === TerminalMessageType.Event)
     .map((message) => decodeJsonPayload(message.payload) as { type?: string })
-    .filter((message) => message.type === "input-accepted" || message.type === "input-rejected");
+    .filter(
+      (message) => message.type === "input-accepted" || message.type === "input-delivery-unknown",
+    );
   assert.deepEqual(
     completions.map((message) => message.type),
-    ["input-rejected", "input-accepted"],
+    ["input-delivery-unknown", "input-accepted"],
   );
   assert.deepEqual(upstream.closed, []);
   server.emit("close");
 });
 
-test("queued runner replacement rejects only acknowledgements sent to the old generation", async () => {
+test("queued runner replacement marks only old-generation acknowledgements unknown", async () => {
   const client = socket();
   const server = socket();
   const upstream = socket();
@@ -1672,11 +1674,11 @@ test("queued runner replacement rejects only acknowledgements sent to the old ge
     .map((payload) => frame(payload))
     .filter((message) => message.type === TerminalMessageType.Event)
     .map((message) => decodeJsonPayload(message.payload) as { type?: string; error?: string })
-    .filter((message) => message.type === "input-accepted" || message.type === "input-rejected");
+    .filter((message) => message.type === "input-delivery-unknown");
   assert.deepEqual(completions, [
     {
-      type: "input-rejected",
-      error: "GitHub Actions runner was replaced before accepting input",
+      type: "input-delivery-unknown",
+      error: "terminal input delivery outcome is unknown; the runner may still complete it",
     },
   ]);
   assert.deepEqual(upstream.closed, []);
@@ -1773,11 +1775,11 @@ test("relay generations bind interleaved replacement input before lifecycle proc
     .map((payload) => frame(payload))
     .filter((message) => message.type === TerminalMessageType.Event)
     .map((message) => decodeJsonPayload(message.payload) as { type?: string; error?: string })
-    .filter((message) => message.type === "input-accepted" || message.type === "input-rejected");
+    .filter((message) => message.type === "input-delivery-unknown");
   assert.deepEqual(completions, [
     {
-      type: "input-rejected",
-      error: "GitHub Actions runner was replaced before accepting input",
+      type: "input-delivery-unknown",
+      error: "terminal input delivery outcome is unknown; the runner may still complete it",
     },
   ]);
   assert.deepEqual(upstream.closed, []);

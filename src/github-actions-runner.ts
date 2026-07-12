@@ -8,9 +8,11 @@ import {
 const runnerInputQueueMaxBytes = 16 * 1024 * 1024;
 const runnerInputQueueMaxFrames = 32;
 const runnerInputQueueMaxAgeMs = 5_000;
+const runnerInputWriteTimeoutMs = 5_000;
 const runnerInputBacklogError = "GitHub Actions runner input backlog exceeded";
 const runnerInputExpiredError = "GitHub Actions runner input expired";
 const runnerInputGenerationError = "GitHub Actions runner generation changed";
+const runnerInputWriteTimeoutError = "GitHub Actions runner input write timed out";
 
 type RunnerInputQueue = {
   bytes: number;
@@ -34,6 +36,7 @@ export function acceptGitHubActionsRunnerInput(
   message: string | ArrayBuffer,
   writeToPty: (payload: ArrayBuffer) => void | Promise<void>,
   now: () => number = Date.now,
+  writeTimeoutMs: number = runnerInputWriteTimeoutMs,
 ): Promise<boolean> {
   const input = parseGitHubActionsRelayInput(message);
   if (!input) return Promise.resolve(false);
@@ -97,12 +100,20 @@ export function acceptGitHubActionsRunnerInput(
         );
         return;
       }
-      try {
-        await writeToPty(input.payload);
+      const writeResult = await writeRunnerInputWithTimeout(
+        () => writeToPty(input.payload),
+        writeTimeoutMs,
+      );
+      if (writeResult === "timed-out") {
+        queue.retired = true;
+        closeRunnerInputSocket(socket, runnerInputWriteTimeoutError);
+        return;
+      }
+      if (writeResult === "accepted") {
         if (isActiveRunnerInputQueue(socket, queue)) {
           sendRunnerInputAcknowledgement(socket, input.inputId, input.generation, true);
         }
-      } catch {
+      } else {
         if (isActiveRunnerInputQueue(socket, queue)) {
           sendRunnerInputAcknowledgement(socket, input.inputId, input.generation, false);
         }
@@ -114,6 +125,33 @@ export function acceptGitHubActionsRunnerInput(
     });
   queue.tail = queued;
   return queued.then(() => true);
+}
+
+function writeRunnerInputWithTimeout(
+  write: () => void | Promise<void>,
+  timeoutMs: number,
+): Promise<"accepted" | "rejected" | "timed-out"> {
+  return new Promise((resolve) => {
+    let settled = false;
+    const finish = (result: "accepted" | "rejected" | "timed-out") => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeout);
+      resolve(result);
+    };
+    const timeout = setTimeout(() => finish("timed-out"), timeoutMs);
+    let result: void | Promise<void>;
+    try {
+      result = write();
+    } catch {
+      finish("rejected");
+      return;
+    }
+    Promise.resolve(result).then(
+      () => finish("accepted"),
+      () => finish("rejected"),
+    );
+  });
 }
 
 function sendRunnerInputAcknowledgement(

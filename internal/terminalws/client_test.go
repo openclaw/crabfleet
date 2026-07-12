@@ -1460,6 +1460,34 @@ func TestSendInputConfirmedReturnsImmediatelyForEmptyInput(t *testing.T) {
 	}
 }
 
+func TestWaitForInputConfirmationPrefersDetachedAcceptanceOverTimeout(t *testing.T) {
+	client := &Client{readerDone: make(chan struct{})}
+	waiter := make(chan error, 1)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	time.AfterFunc(time.Millisecond, func() {
+		waiter <- nil
+	})
+
+	if err := client.waitForInputConfirmation(ctx, waiter); err != nil {
+		t.Fatalf("confirmation = %v", err)
+	}
+}
+
+func TestWaitForInputConfirmationPrefersDetachedAcceptanceOverReaderShutdown(t *testing.T) {
+	readerDone := make(chan struct{})
+	close(readerDone)
+	client := &Client{readerDone: readerDone}
+	waiter := make(chan error, 1)
+	time.AfterFunc(time.Millisecond, func() {
+		waiter <- nil
+	})
+
+	if err := client.waitForInputConfirmation(context.Background(), waiter); err != nil {
+		t.Fatalf("confirmation = %v", err)
+	}
+}
+
 func TestSendInputConfirmedClosesAfterConfirmationTimeout(t *testing.T) {
 	inputReceived := make(chan struct{})
 	releaseServer := make(chan struct{})

@@ -357,10 +357,19 @@ func (c *Client) waitForInputConfirmation(ctx context.Context, waiter chan error
 			return err
 		default:
 		}
-		c.clearInputWaiter(waiter)
+		if !c.clearInputWaiter(waiter) {
+			return <-waiter
+		}
 		return readerUnavailableError(c.readerError())
 	case <-ctx.Done():
-		c.clearInputWaiter(waiter)
+		select {
+		case err := <-waiter:
+			return err
+		default:
+		}
+		if !c.clearInputWaiter(waiter) {
+			return <-waiter
+		}
 		c.closeNow()
 		return ctx.Err()
 	}
@@ -682,12 +691,14 @@ func (c *Client) registerInputWaiter(waiter chan error) error {
 	return nil
 }
 
-func (c *Client) clearInputWaiter(waiter chan error) {
+func (c *Client) clearInputWaiter(waiter chan error) bool {
 	c.stateMu.Lock()
 	defer c.stateMu.Unlock()
 	if c.inputWaiter == waiter {
 		c.inputWaiter = nil
+		return true
 	}
+	return false
 }
 
 func (c *Client) completeInput(err error) {

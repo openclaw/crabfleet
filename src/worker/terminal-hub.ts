@@ -679,7 +679,9 @@ export class TerminalHub {
                       (pending) => pending.runnerGeneration !== relayEvent.generation,
                       {
                         accepted: false,
-                        error: "GitHub Actions runner was replaced before accepting input",
+                        deliveryUnknown: true,
+                        error:
+                          "terminal input delivery outcome is unknown; the runner may still complete it",
                       },
                     );
                   } else {
@@ -691,7 +693,9 @@ export class TerminalHub {
                       runnerGenerationAtReceipt as number,
                       {
                         accepted: false,
-                        error: "GitHub Actions runner was replaced before accepting input",
+                        deliveryUnknown: true,
+                        error:
+                          "terminal input delivery outcome is unknown; the runner may still complete it",
                       },
                     );
                   }

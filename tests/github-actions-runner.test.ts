@@ -240,6 +240,57 @@ test("runner bounds queued bytes while a PTY write is stalled", async () => {
   );
 });
 
+test("runner times out a stalled PTY write and retires its socket queue", async () => {
+  const socket = relaySocket();
+  let completeWrite!: () => void;
+  const blockedWrite = new Promise<void>((resolve) => {
+    completeWrite = resolve;
+  });
+  const writes: string[] = [];
+  const first = acceptGitHubActionsRunnerInput(
+    socket,
+    encodeGitHubActionsRelayInput("input-first", "first"),
+    async (payload) => {
+      writes.push(new TextDecoder().decode(payload));
+      await blockedWrite;
+    },
+    Date.now,
+    10,
+  );
+  const queued = acceptGitHubActionsRunnerInput(
+    socket,
+    encodeGitHubActionsRelayInput("input-queued", "queued"),
+    async (payload) => {
+      writes.push(new TextDecoder().decode(payload));
+    },
+    Date.now,
+    10,
+  );
+
+  assert.deepEqual(await Promise.all([first, queued]), [true, true]);
+  assert.deepEqual(writes, ["first"]);
+  assert.deepEqual(socket.sent, []);
+  assert.deepEqual(socket.closes, [
+    { code: 1012, reason: "GitHub Actions runner input write timed out" },
+  ]);
+
+  assert.equal(
+    await acceptGitHubActionsRunnerInput(
+      socket,
+      encodeGitHubActionsRelayInput("input-late", "late"),
+      async () => {
+        assert.fail("retired input must not reach the PTY");
+      },
+      Date.now,
+      10,
+    ),
+    true,
+  );
+  completeWrite();
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.deepEqual(socket.sent, []);
+});
+
 test("runner does not execute queued input after its socket is replaced", async () => {
   const replaced = relaySocket();
   const replacement = relaySocket();
