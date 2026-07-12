@@ -31,11 +31,11 @@ export function credentialPolicyRegistrationAccepted<T extends { sessionId: stri
     return false;
   }
   if (!current) return true;
-  if (
-    current.generation !== incoming.generation ||
-    current.policy.sessionId !== incoming.policy.sessionId
-  ) {
+  if (current.policy.sessionId !== incoming.policy.sessionId) {
     return false;
+  }
+  if (current.generation !== incoming.generation) {
+    return incoming.registrationExpiresAt > current.registrationExpiresAt;
   }
   if (current.registrationClaim === incoming.registrationClaim) {
     return incoming.registrationExpiresAt >= current.registrationExpiresAt;

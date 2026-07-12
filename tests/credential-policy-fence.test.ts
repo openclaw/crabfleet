@@ -67,6 +67,32 @@ test("generation fences isolate new policies from stale cleanup", () => {
   );
 });
 
+test("newer generations rotate policy for the same session only", () => {
+  const current = registration("generation-1", "claim-current", 300);
+
+  assert.equal(
+    credentialPolicyRegistrationAccepted(
+      current,
+      undefined,
+      registration("generation-2", "claim-replacement", 301),
+      100,
+    ),
+    true,
+  );
+  assert.equal(
+    credentialPolicyRegistrationAccepted(
+      current,
+      undefined,
+      {
+        ...registration("generation-2", "claim-replacement", 301),
+        policy: { sessionId: "IS-102", value: "claim-replacement" },
+      },
+      100,
+    ),
+    false,
+  );
+});
+
 test("same-generation registration claims advance monotonically", () => {
   const current = registration("generation-1", "claim-current", 300);
 
