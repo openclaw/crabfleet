@@ -14,18 +14,34 @@ test("the documented Node runner acknowledges only delivered UTF-8 input", async
   assert.match(readme, /ignore the offer leave `WebSocket\.protocol` empty/);
   assert.doesNotMatch(readme, /New runners opt into[\s\S]*cfr1-framed-io-v1/);
   assert.doesNotMatch(readme, /encodeCfr1Output|decodeCfr1Input|encodeCfr1Ack/);
+  assert.match(guide, /new WebSocket\(runnerPtyUrl, "cfr1-framed-io-v2"\)/);
+  assert.match(guide, /terminal\.protocol !== "cfr1-framed-io-v2"/);
+  assert.doesNotMatch(guide, /searchParams\.set\("runnerProtocol"/);
   assert.match(guide, /let pendingInputs = \[\]/);
+  assert.match(guide, /let inputQueue = Promise\.resolve\(\)/);
+  assert.match(
+    guide,
+    /inputQueue = inputQueue\s+\.then\(\(\) => acceptInput\(event\.data\)\)\s+\.catch/,
+  );
   assert.match(guide, /pendingInputs\.push\(input\)/);
-  assert.match(guide, /const text = decodeCompleteUtf8\(payload\)/);
-  assert.match(guide, /if \(text === null\) return/);
-  assert.match(guide, /await deliverSteeringInput\(text\);\s+settlePendingInputs\(true\)/);
+  assert.match(guide, /text = decodeCompleteUtf8\(payload\)/);
+  assert.match(guide, /if \(text === null\) \{\s+armPendingInputTimer\(\);\s+return;/);
+  assert.match(
+    guide,
+    /const inputs = takePendingInputs\(\);\s+try \{\s+await deliverSteeringInput\(text\);\s+settleInputs\(inputs, true\)/,
+  );
+  assert.match(guide, /catch \{\s+settleInputs\(inputs, false\);/);
   assert.match(guide, /const maxPendingInputBytes = 16 \* 1024/);
   assert.match(guide, /const maxPendingInputFrames = 32/);
   assert.match(guide, /const maxPendingInputAgeMs = 1_000/);
-  assert.match(guide, /setTimeout\(\(\) => settlePendingInputs\(false\), maxPendingInputAgeMs\)/);
+  assert.match(guide, /settleInputs\(takePendingInputs\(\), false\)/);
   assert.match(guide, /pendingInputBytes > maxPendingInputBytes/);
   assert.match(guide, /pendingInputs\.length > maxPendingInputFrames/);
   assert.match(guide, /clearTimeout\(pendingInputTimer\)/);
+  assert.match(
+    guide,
+    /const inputs = pendingInputs;\s+pendingInputs = \[\];\s+pendingInputBytes = 0;\s+return inputs;/,
+  );
   assert.match(guide, /new TextDecoder\("utf-8", \{ fatal: true, ignoreBOM: true \}\)/);
   assert.doesNotMatch(guide, /inputDecoder\.decode/);
   assert.match(guide, /subscribeSteeringOutput\(\(outputText\) => \{/);
@@ -40,6 +56,13 @@ test("the documented Node runner acknowledges only delivered UTF-8 input", async
   assert.match(guide, /terminal\.close\(1000, "pty exited"\)/);
   assert.match(guide, /must never forward that input to a\s+shell or subprocess/);
   assert.doesNotMatch(guide, /spawn\(process\.env\.SHELL|env:\s*process\.env|pty\.write/);
+
+  const timerArm = guide.indexOf("armPendingInputTimer();");
+  const batchSnapshot = guide.indexOf("const inputs = takePendingInputs();");
+  const delivery = guide.indexOf("await deliverSteeringInput(text);");
+  assert.ok(timerArm > guide.indexOf("if (text === null)"));
+  assert.ok(batchSnapshot > timerArm);
+  assert.ok(delivery > batchSnapshot);
 
   const decodeCompleteUtf8 = (payload: Uint8Array) => {
     const decoder = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true });

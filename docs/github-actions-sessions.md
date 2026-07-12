@@ -265,14 +265,14 @@ returns only the sanitized event.
 The Action connects outbound to the returned `runnerPtyUrl`. Node's global
 `WebSocket` can open the URL without custom headers.
 
-The returned URL opens a legacy raw-input/raw-output socket. A runner opts into
-collision-free framed I/O by adding the exact
-`runnerProtocol=cfr1-framed-io-v2` query before opening the socket. The relay
-records that mode and a relay-owned runner generation before accepting the
-connection. Viewer input then arrives in a binary `CFR1` frame carrying a
-correlation ID and that generation, and runner output uses a distinct `CFR1`
-output frame. The runner copies the generation into its correlated
-acknowledgement only after its PTY accepts the input write.
+The returned URL opens a legacy raw-input/raw-output socket. A runner offers
+`cfr1-framed-io-v2` as a WebSocket subprotocol and switches to collision-free
+framed I/O only when the upgrade response selects it. The relay records that
+mode and a relay-owned runner generation before accepting the connection.
+Viewer input then arrives in a binary `CFR1` frame carrying a correlation ID
+and that generation, and runner output uses a distinct `CFR1` output frame. The
+runner copies the generation into its correlated acknowledgement only after its
+restricted steering handler accepts the input.
 
 Complete Node framing adapter around a restricted Codex steering handler:
 
@@ -296,15 +296,18 @@ const maxPendingInputAgeMs = 1_000;
 let pendingInputs = [];
 let pendingInputBytes = 0;
 let pendingInputTimer;
-const framedRunnerPtyUrl = new URL(runnerPtyUrl);
-framedRunnerPtyUrl.searchParams.set("runnerProtocol", "cfr1-framed-io-v2");
-const terminal = new WebSocket(framedRunnerPtyUrl);
+let inputQueue = Promise.resolve();
+const terminal = new WebSocket(runnerPtyUrl, "cfr1-framed-io-v2");
 terminal.binaryType = "arraybuffer";
 
 await new Promise((resolve, reject) => {
   terminal.addEventListener("open", resolve, { once: true });
   terminal.addEventListener("error", reject, { once: true });
 });
+if (terminal.protocol !== "cfr1-framed-io-v2") {
+  terminal.close(1002, "framed protocol not negotiated");
+  throw new Error("relay did not negotiate cfr1-framed-io-v2");
+}
 
 subscribeSteeringOutput((outputText) => {
   terminal.send(encodeUtf8Output(outputText));
@@ -315,7 +318,11 @@ subscribeSteeringExit(() => {
 });
 
 terminal.addEventListener("message", (event) => {
-  void acceptInput(event.data);
+  inputQueue = inputQueue
+    .then(() => acceptInput(event.data))
+    .catch(() => {
+      settleInputs(takePendingInputs(), false);
+    });
 });
 
 async function acceptInput(data) {
@@ -323,11 +330,8 @@ async function acceptInput(data) {
   if (!input) return;
   pendingInputs.push(input);
   pendingInputBytes += input.payload.byteLength;
-  if (pendingInputs.length === 1) {
-    pendingInputTimer = setTimeout(() => settlePendingInputs(false), maxPendingInputAgeMs);
-  }
   if (pendingInputBytes > maxPendingInputBytes || pendingInputs.length > maxPendingInputFrames) {
-    settlePendingInputs(false);
+    settleInputs(takePendingInputs(), false);
     return;
   }
 
@@ -338,13 +342,23 @@ async function acceptInput(data) {
     offset += pending.payload.byteLength;
   }
 
+  let text;
   try {
-    const text = decodeCompleteUtf8(payload);
-    if (text === null) return;
-    await deliverSteeringInput(text);
-    settlePendingInputs(true);
+    text = decodeCompleteUtf8(payload);
   } catch {
-    settlePendingInputs(false);
+    settleInputs(takePendingInputs(), false);
+    return;
+  }
+  if (text === null) {
+    armPendingInputTimer();
+    return;
+  }
+  const inputs = takePendingInputs();
+  try {
+    await deliverSteeringInput(text);
+    settleInputs(inputs, true);
+  } catch {
+    settleInputs(inputs, false);
   }
 }
 
@@ -354,14 +368,26 @@ function decodeCompleteUtf8(payload) {
   return encoder.encode(text).byteLength === payload.byteLength ? text : null;
 }
 
-function settlePendingInputs(accepted) {
+function armPendingInputTimer() {
+  if (pendingInputTimer) return;
+  pendingInputTimer = setTimeout(() => {
+    settleInputs(takePendingInputs(), false);
+  }, maxPendingInputAgeMs);
+}
+
+function takePendingInputs() {
   if (pendingInputTimer) clearTimeout(pendingInputTimer);
   pendingInputTimer = undefined;
-  for (const input of pendingInputs) {
-    terminal.send(encodeAck(input.inputId, input.generation, accepted));
-  }
+  const inputs = pendingInputs;
   pendingInputs = [];
   pendingInputBytes = 0;
+  return inputs;
+}
+
+function settleInputs(inputs, accepted) {
+  for (const input of inputs) {
+    terminal.send(encodeAck(input.inputId, input.generation, accepted));
+  }
 }
 
 function decodeInput(data) {
