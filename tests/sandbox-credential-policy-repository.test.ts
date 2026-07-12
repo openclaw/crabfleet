@@ -1104,6 +1104,82 @@ test("write-fence migration conservatively protects existing staged rotations", 
   );
 });
 
+test("write-fence migration recovers a crashed namespace repair", async () => {
+  const sqlite = credentialPolicyDatabase({ applyMigrations: false });
+  for (const migration of [
+    "0034_credential_policy_registration_staging.sql",
+    "0035_credential_policy_registration_rollback.sql",
+    "0036_credential_policy_lookup_repair.sql",
+    "0037_credential_policy_registration_lookup_ids.sql",
+  ]) {
+    sqlite.exec(readFileSync(new URL(`../migrations/${migration}`, import.meta.url), "utf8"));
+  }
+  sqlite
+    .prepare(`
+      UPDATE interactive_session_credential_policies
+      SET lookup_id = 'do-old'
+      WHERE session_id = 'IS-42' AND sandbox_id = 'sandbox-1' AND lookup_id = 'do-1'
+    `)
+    .run();
+  const expiredRegistration = {
+    generation: "generation:interrupted",
+    claim: "registration:interrupted",
+    lookupIds: ["sandbox-1", "do-1"],
+  };
+  sqlite
+    .prepare(`
+      INSERT INTO interactive_session_credential_policy_registrations (
+        session_id,
+        sandbox_id,
+        state,
+        registration_generation,
+        registration_claim,
+        registration_claim_expires_at,
+        lookup_ids_json,
+        repair_generation,
+        created_at,
+        updated_at
+      ) VALUES (?, ?, 'registering', ?, ?, 0, ?, 'generation:existing', 1, 0)
+    `)
+    .run(
+      "IS-42",
+      "sandbox-1",
+      expiredRegistration.generation,
+      expiredRegistration.claim,
+      JSON.stringify(expiredRegistration.lookupIds),
+    );
+  sqlite.exec(
+    readFileSync(
+      new URL("../migrations/0040_credential_policy_registration_write_fence.sql", import.meta.url),
+      "utf8",
+    ),
+  );
+
+  const env = sqliteRuntimeEnv(sqlite);
+  const recovered = await claimSandboxCredentialPolicyRegistrationRecovery(
+    env,
+    "IS-42",
+    "sandbox-1",
+    expiredRegistration,
+    0,
+    ownershipFence,
+  );
+  assert.ok(recovered);
+  assert.deepEqual(
+    await claimObsoleteSandboxCredentialPolicyReferences(
+      env,
+      "IS-42",
+      "sandbox-1",
+      recovered.registration,
+      "generation:existing",
+      ["do-old"],
+      ownershipFence,
+      recovered.registrationExpiresAt,
+    ),
+    ["do-old"],
+  );
+});
+
 test("stale staged cleanup releases legacy deletion but an active cleanup claim stays fenced", async () => {
   const sqlite = credentialPolicyDatabase();
   const env = sqliteRuntimeEnv(sqlite);
