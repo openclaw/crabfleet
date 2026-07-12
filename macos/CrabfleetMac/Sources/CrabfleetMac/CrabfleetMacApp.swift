@@ -48,15 +48,26 @@ enum VNCConnectionLaunchMode {
 @MainActor
 final class CrabfleetApplicationDelegate: NSObject, NSApplicationDelegate {
   let shareController: PrivateMacShareController
+  private let replyToTerminationRequest: @MainActor (Bool) -> Void
   private var autoShareTask: Task<Void, Never>?
+  private var terminationTask: Task<Void, Never>?
 
   override init() {
     shareController = PrivateMacShareController()
+    replyToTerminationRequest = { shouldTerminate in
+      NSApp.reply(toApplicationShouldTerminate: shouldTerminate)
+    }
     super.init()
   }
 
-  init(shareController: PrivateMacShareController) {
+  init(
+    shareController: PrivateMacShareController,
+    replyToTerminationRequest: @escaping @MainActor (Bool) -> Void = {
+      NSApp.reply(toApplicationShouldTerminate: $0)
+    }
+  ) {
     self.shareController = shareController
+    self.replyToTerminationRequest = replyToTerminationRequest
     super.init()
   }
 
@@ -68,6 +79,18 @@ final class CrabfleetApplicationDelegate: NSObject, NSApplicationDelegate {
       try? await Task.sleep(for: .milliseconds(500))
       await self.startPrivateShare(shareController)
     }
+  }
+
+  func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+    autoShareTask?.cancel()
+    guard terminationTask == nil else { return .terminateLater }
+    terminationTask = Task { [weak self] in
+      guard let self else { return }
+      await shareController.stopAndWaitForCleanup()
+      terminationTask = nil
+      replyToTerminationRequest(true)
+    }
+    return .terminateLater
   }
 
   func applicationWillTerminate(_ notification: Notification) {

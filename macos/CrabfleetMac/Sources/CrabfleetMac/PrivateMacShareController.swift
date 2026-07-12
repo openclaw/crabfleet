@@ -384,6 +384,12 @@ final class PrivateMacShareController: ObservableObject {
     phase = .idle
   }
 
+  func stopAndWaitForCleanup() async {
+    await stop()
+    let cleanupTask = registrationTask
+    await cleanupTask?.value
+  }
+
   func openPrivacySettings(_ pane: PrivacyPane) {
     let value: String
     switch pane {

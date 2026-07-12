@@ -360,6 +360,47 @@ struct PrivateMacShareTests {
     #expect(delegate.shareController === controller)
   }
 
+  @Test @MainActor
+  func applicationTerminationWaitsForPrivateShareCleanup() async throws {
+    let registration = SuspendedDesktopCleanupRegistration()
+    let lifecycle = DesktopHostRegistrationLifecycle(registration: registration)
+    let identity = desktopIdentity(name: "termination-cleanup", address: "100.64.12.44")
+    try await lifecycle.publish(identity: identity, port: 5_901)
+
+    let runner = SuspendedTailscaleRunner()
+    let defaults = try #require(
+      UserDefaults(suiteName: "CrabfleetMacTests.\(UUID().uuidString)")
+    )
+    let controller = PrivateMacShareController(
+      runner: runner,
+      desktopRegistration: registration,
+      registrationLifecycle: lifecycle,
+      defaults: defaults
+    )
+    let startTask = Task { await controller.start() }
+    #expect(await waitUntilAsync { await runner.hasStarted })
+
+    var replies: [Bool] = []
+    let delegate = CrabfleetApplicationDelegate(
+      shareController: controller,
+      replyToTerminationRequest: { replies.append($0) }
+    )
+
+    #expect(delegate.applicationShouldTerminate(NSApplication.shared) == .terminateLater)
+    #expect(await waitUntilAsync { await registration.hasStartedUnregistration })
+    #expect(replies.isEmpty)
+
+    await runner.resume(
+      .success(.init(standardOutput: statusJSON(), standardError: ""))
+    )
+    await startTask.value
+    await registration.finishUnregistration()
+
+    #expect(await waitUntilAsync { replies == [true] })
+    #expect(controller.phase == .idle)
+    #expect(controller.registryPhase == .notPublished)
+  }
+
   @Test
   func privateShareCanStartViewOnlyWithoutAccessibility() {
     #expect(

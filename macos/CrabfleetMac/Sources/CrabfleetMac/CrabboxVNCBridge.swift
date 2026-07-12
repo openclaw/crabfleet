@@ -36,6 +36,12 @@ private struct CrabboxVNCHandoff: Decodable {
 }
 
 final class CrabboxVNCBridge: @unchecked Sendable {
+  private static let configEnvironmentKeys = [
+    "CRABBOX_CONFIG",
+    "XDG_CONFIG_HOME",
+    "XDG_STATE_HOME",
+  ]
+
   private static let networkEnvironmentKeys = [
     "ALL_PROXY",
     "HTTP_PROXY",
@@ -263,7 +269,8 @@ final class CrabboxVNCBridge: @unchecked Sendable {
     SubprocessEnvironment.minimal(
       from: source,
       includeSSHAgent: true,
-      additionalInheritedKeys: networkEnvironmentKeys
+      additionalInheritedKeys: networkEnvironmentKeys,
+      additionalInheritedPathKeys: configEnvironmentKeys
     )
   }
 
