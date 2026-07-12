@@ -87,6 +87,7 @@ type Client struct {
 	stateMu                      sync.Mutex
 	inputWaiter                  chan error
 	attachment                   *terminalAttachment
+	pendingAttachmentFrames      []frame
 	readerDone                   chan struct{}
 	readerErr                    error
 }
@@ -475,14 +476,7 @@ func (c *Client) handleFrame(ctx context.Context, current frame) error {
 	}
 	switch current.messageType {
 	case messageOutput:
-		if c.deliverAttachment(ctx, current) {
-			return nil
-		}
-		return c.write(ctx, frame{
-			messageType: messageAck,
-			sessionID:   c.sessionID,
-			payload:     ackPayload(uint32(len(current.payload))),
-		})
+		c.deliverOrQueueOutput(ctx, current)
 	case messageError:
 		err := frameError(current, "terminal connection failed")
 		c.canInput.Store(false)
@@ -550,20 +544,26 @@ func (c *Client) completeInput(err error) {
 }
 
 func (c *Client) registerAttachment() (*terminalAttachment, error) {
-	attachment := &terminalAttachment{
-		frames: make(chan frame, 16),
-		done:   make(chan struct{}),
-	}
 	c.stateMu.Lock()
 	defer c.stateMu.Unlock()
-	select {
-	case <-c.readerDone:
-		return nil, readerUnavailableError(c.readerErr)
-	default:
-	}
 	if c.attachment != nil {
 		return nil, errors.New("terminal client is already attached")
 	}
+	if len(c.pendingAttachmentFrames) == 0 {
+		select {
+		case <-c.readerDone:
+			return nil, readerUnavailableError(c.readerErr)
+		default:
+		}
+	}
+	attachment := &terminalAttachment{
+		frames: make(chan frame, len(c.pendingAttachmentFrames)+16),
+		done:   make(chan struct{}),
+	}
+	for _, current := range c.pendingAttachmentFrames {
+		attachment.frames <- current
+	}
+	c.pendingAttachmentFrames = nil
 	c.attachment = attachment
 	return attachment, nil
 }
@@ -575,6 +575,23 @@ func (c *Client) clearAttachment(attachment *terminalAttachment) {
 		close(attachment.done)
 	}
 	c.stateMu.Unlock()
+}
+
+func (c *Client) deliverOrQueueOutput(ctx context.Context, current frame) {
+	c.stateMu.Lock()
+	attachment := c.attachment
+	if attachment == nil {
+		c.pendingAttachmentFrames = append(c.pendingAttachmentFrames, current)
+		c.stateMu.Unlock()
+		return
+	}
+	c.stateMu.Unlock()
+	select {
+	case attachment.frames <- current:
+	case <-attachment.done:
+		c.deliverOrQueueOutput(ctx, current)
+	case <-ctx.Done():
+	}
 }
 
 func (c *Client) deliverAttachment(ctx context.Context, current frame) bool {
