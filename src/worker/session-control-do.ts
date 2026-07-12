@@ -8,13 +8,16 @@ import {
 import type { FleetSandboxPolicySummary } from "../fleet-state.ts";
 import {
   attachGitHubActionsRunnerProtocol,
+  attachGitHubActionsViewerProtocol,
   githubActionsRelayRole,
   githubActionsRunnerProtocolQuery,
+  githubActionsViewerProtocolQuery,
   notifyGitHubActionsViewers,
   parseGitHubActionsRunnerProtocol,
+  parseGitHubActionsViewerProtocol,
   relayGitHubActionsWebSocketMessage,
   replaceGitHubActionsRunner,
-  type GitHubActionsRunnerProtocol,
+  type GitHubActionsRelayProtocol,
 } from "../github-actions-runtime.ts";
 import type { RuntimeEnv } from "./env.ts";
 import { json } from "./http.ts";
@@ -65,7 +68,10 @@ export class SessionControlDO extends DurableObject<RuntimeEnv> {
         request.method === "GET" &&
         url.pathname === "/api/session-control/github-actions/viewer"
       ) {
-        return this.openGitHubActionsRelay("viewer");
+        return this.openGitHubActionsRelay(
+          "viewer",
+          parseGitHubActionsViewerProtocol(url.searchParams.get(githubActionsViewerProtocolQuery)),
+        );
       }
 
       if (
@@ -232,20 +238,21 @@ export class SessionControlDO extends DurableObject<RuntimeEnv> {
 
   private openGitHubActionsRelay(
     role: "runner" | "viewer",
-    runnerProtocol: GitHubActionsRunnerProtocol | null = null,
+    protocol: GitHubActionsRelayProtocol | null = null,
   ): Response {
     const pair = new WebSocketPair();
     const client = pair[0];
     const server = pair[1];
     if (role === "runner") {
       replaceGitHubActionsRunner(this.ctx.getWebSockets("github-actions-runner"));
-      attachGitHubActionsRunnerProtocol(server, runnerProtocol);
+      attachGitHubActionsRunnerProtocol(server, protocol);
       this.ctx.acceptWebSocket(server, ["github-actions-runner"]);
       notifyGitHubActionsViewers(
         this.ctx.getWebSockets("github-actions-viewer"),
         "runner_connected",
       );
     } else {
+      attachGitHubActionsViewerProtocol(server, protocol);
       this.ctx.acceptWebSocket(server, ["github-actions-viewer"]);
       if (this.ctx.getWebSockets("github-actions-runner").length === 0) {
         notifyGitHubActionsViewers([server], "runner_waiting");

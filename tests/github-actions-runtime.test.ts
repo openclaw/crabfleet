@@ -2,7 +2,9 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
   attachGitHubActionsRunnerProtocol,
+  attachGitHubActionsViewerProtocol,
   buildGitHubActionsRunnerPtyUrl,
+  buildGitHubActionsViewerRelayUrl,
   encodeGitHubActionsRelayInput,
   encodeGitHubActionsRelayInputAcknowledgement,
   encodeGitHubActionsRelayOutput,
@@ -12,7 +14,9 @@ import {
   githubActionsRelayRole,
   githubActionsRunnerProtocolQuery,
   githubActionsRuntimeLabel,
+  githubActionsViewerProtocolQuery,
   gitHubActionsRunnerUsesFramedProtocol,
+  gitHubActionsViewerUsesFramedProtocol,
   isGitHubActionsViewerControlMessage,
   isTerminalGitHubActionsWorkState,
   notifyGitHubActionsViewers,
@@ -21,6 +25,7 @@ import {
   parseGitHubActionsRelayInputAcknowledgement,
   parseGitHubActionsRelayOutput,
   parseGitHubActionsRunnerProtocol,
+  parseGitHubActionsViewerProtocol,
   parseGitHubActionsWorkState,
   relayGitHubActionsWebSocketMessage,
   replaceGitHubActionsRunner,
@@ -54,6 +59,12 @@ function relaySocket(readyState = 1): GitHubActionsRelaySocket & {
   };
 }
 
+function framedViewer() {
+  const viewer = relaySocket();
+  attachGitHubActionsViewerProtocol(viewer, githubActionsFramedRunnerCapability);
+  return viewer;
+}
+
 test("github_actions exposes steerable terminal capabilities and label", () => {
   assert.equal(githubActionsRuntimeLabel("github_actions"), "GitHub Actions");
   assert.equal(githubActionsRuntimeLabel("container"), "");
@@ -79,6 +90,17 @@ test("runner URL works without custom WebSocket headers", () => {
     githubActionsFramedRunnerCapability,
   );
   assert.equal(githubActionsRunnerProtocolQuery, "runnerProtocol");
+  assert.equal(
+    buildGitHubActionsViewerRelayUrl(),
+    "https://crabfleet.internal/api/session-control/github-actions/viewer?viewerProtocol=cfr1-framed-io-v1",
+  );
+  assert.equal(parseGitHubActionsViewerProtocol(null), null);
+  assert.equal(parseGitHubActionsViewerProtocol("cfr1-framed-io-v2"), null);
+  assert.equal(
+    parseGitHubActionsViewerProtocol(githubActionsFramedRunnerCapability),
+    githubActionsFramedRunnerCapability,
+  );
+  assert.equal(githubActionsViewerProtocolQuery, "viewerProtocol");
 });
 
 test("work states preserve running phases and map terminal outcomes", () => {
@@ -95,8 +117,8 @@ test("work states preserve running phases and map terminal outcomes", () => {
 test("relay replaces the current runner and frames legacy raw runner output", () => {
   const oldRunner = relaySocket();
   const runner = relaySocket();
-  const viewerOne = relaySocket();
-  const viewerTwo = relaySocket();
+  const viewerOne = framedViewer();
+  const viewerTwo = framedViewer();
 
   assert.equal(replaceGitHubActionsRunner([oldRunner]), 1);
   assert.deepEqual(oldRunner.closed, [[1012, "runner replaced"]]);
@@ -144,7 +166,7 @@ test("relay replaces the current runner and frames legacy raw runner output", ()
 
 test("legacy runners receive raw input and the relay acknowledges delivery", () => {
   const runner = relaySocket();
-  const viewer = relaySocket();
+  const viewer = framedViewer();
   const input = encodeGitHubActionsRelayInput("input-legacy", "steer");
 
   assert.equal(relayGitHubActionsWebSocketMessage("viewer", viewer, input, [runner], []), 1);
@@ -159,7 +181,7 @@ test("connection-time opt-in frames the first input without a pending handshake"
   const closedRunner = relaySocket(3);
   const openRunner = relaySocket();
   const laterRunner = relaySocket();
-  const viewer = relaySocket();
+  const viewer = framedViewer();
   const input = encodeGitHubActionsRelayInput("input-one", "steer");
 
   attachGitHubActionsRunnerProtocol(openRunner, githubActionsFramedRunnerCapability);
@@ -189,7 +211,7 @@ test("relay rejects framed input only when no runner accepts the frame", () => {
   runner.send = () => {
     throw new Error("runner disconnected");
   };
-  const viewer = relaySocket();
+  const viewer = framedViewer();
   const input = encodeGitHubActionsRelayInput("input-failed", "steer");
 
   assert.equal(relayGitHubActionsWebSocketMessage("viewer", viewer, input, [runner], []), 0);
@@ -199,7 +221,7 @@ test("relay rejects framed input only when no runner accepts the frame", () => {
     error: "GitHub Actions runner did not accept terminal input",
   });
 
-  const waitingViewer = relaySocket();
+  const waitingViewer = framedViewer();
   assert.equal(relayGitHubActionsWebSocketMessage("viewer", waitingViewer, input, [], []), 0);
   assert.deepEqual(parseGitHubActionsRelayInputAcknowledgement(waitingViewer.sent[0]!), {
     inputId: "input-failed",
@@ -210,8 +232,8 @@ test("relay rejects framed input only when no runner accepts the frame", () => {
 
 test("runner acknowledgements retain correlation and fan out to viewers", () => {
   const runner = relaySocket();
-  const viewerOne = relaySocket();
-  const viewerTwo = relaySocket();
+  const viewerOne = framedViewer();
+  const viewerTwo = framedViewer();
   const acknowledgement = encodeGitHubActionsRelayInputAcknowledgement({
     inputId: "input-two",
     accepted: true,
@@ -237,7 +259,7 @@ test("runner acknowledgements retain correlation and fan out to viewers", () => 
 
 test("negotiated runners frame output so control-shaped terminal bytes stay output", () => {
   const runner = relaySocket();
-  const viewer = relaySocket();
+  const viewer = framedViewer();
   const controlShapedOutput = encodeGitHubActionsRelayInputAcknowledgement({
     inputId: "collision",
     accepted: true,
@@ -253,7 +275,7 @@ test("negotiated runners frame output so control-shaped terminal bytes stay outp
 });
 
 test("typed acknowledgements reject malformed ids and preserve collision-shaped terminal text", () => {
-  const viewer = relaySocket();
+  const viewer = framedViewer();
   const runner = relaySocket();
   const collision = '{"type":"github_actions_input_ack","inputId":"input-three","accepted":true}';
 
@@ -280,7 +302,7 @@ test("typed acknowledgements reject malformed ids and preserve collision-shaped 
 
 test("relay consumes viewer resize controls and rejects unframed input", () => {
   const runner = relaySocket();
-  const viewer = relaySocket();
+  const viewer = framedViewer();
   const resize = JSON.stringify({ type: "resize", cols: 120, rows: 40 });
   const typedJson = new TextEncoder().encode(resize).buffer;
 
@@ -294,7 +316,7 @@ test("relay consumes viewer resize controls and rejects unframed input", () => {
 });
 
 test("relay tags and runner lifecycle notifications stay explicit", () => {
-  const viewer = relaySocket();
+  const viewer = framedViewer();
   assert.equal(githubActionsRelayRole(["github-actions-runner"]), "runner");
   assert.equal(githubActionsRelayRole(["github-actions-viewer"]), "viewer");
   assert.equal(githubActionsRelayRole([]), null);
@@ -302,4 +324,56 @@ test("relay tags and runner lifecycle notifications stay explicit", () => {
   assert.deepEqual(parseGitHubActionsRelayEvent(viewer.sent[0]!), {
     type: "runner_waiting",
   });
+});
+
+test("unnegotiated viewers retain raw relay compatibility", () => {
+  const runner = relaySocket();
+  const viewer = relaySocket();
+
+  assert.equal(gitHubActionsViewerUsesFramedProtocol(viewer), false);
+  assert.equal(relayGitHubActionsWebSocketMessage("viewer", viewer, "steer", [runner], []), 1);
+  assert.deepEqual(runner.sent, ["steer"]);
+  assert.deepEqual(JSON.parse(viewer.sent[0] as string), {
+    type: "github_actions_input_ack",
+    accepted: true,
+  });
+
+  assert.equal(
+    relayGitHubActionsWebSocketMessage("runner", runner, "output", [runner], [viewer]),
+    1,
+  );
+  assert.equal(viewer.sent[1], "output");
+  assert.equal(notifyGitHubActionsViewers([viewer], "runner_disconnected"), 1);
+  assert.deepEqual(JSON.parse(viewer.sent[2] as string), {
+    type: "runner_disconnected",
+  });
+});
+
+test("raw viewers bridge through framed runners without receiving CFR1 controls", () => {
+  const runner = relaySocket();
+  const viewer = relaySocket();
+  attachGitHubActionsRunnerProtocol(runner, githubActionsFramedRunnerCapability);
+
+  assert.equal(relayGitHubActionsWebSocketMessage("viewer", viewer, "steer", [runner], []), 1);
+  const input = parseGitHubActionsRelayInput(runner.sent[0]!);
+  assert.ok(input);
+  assert.equal(new TextDecoder().decode(input.payload), "steer");
+  assert.deepEqual(JSON.parse(viewer.sent[0] as string), {
+    type: "github_actions_input_ack",
+    accepted: true,
+  });
+
+  const acknowledgement = encodeGitHubActionsRelayInputAcknowledgement({
+    inputId: input.inputId,
+    accepted: true,
+  });
+  assert.equal(
+    relayGitHubActionsWebSocketMessage("runner", runner, acknowledgement, [runner], [viewer]),
+    0,
+  );
+  assert.equal(viewer.sent.length, 1);
+
+  const output = encodeGitHubActionsRelayOutput("output");
+  assert.equal(relayGitHubActionsWebSocketMessage("runner", runner, output, [runner], [viewer]), 1);
+  assert.equal(new TextDecoder().decode(viewer.sent[1] as ArrayBuffer), "output");
 });

@@ -66,9 +66,25 @@ test("GitHub Actions runner protocol is attached before the relay socket is acce
   ]);
 
   assert.match(application, /stub\.fetch\(gitHubActionsRelayRunnerUrl\(request\)/);
-  const attach = relay.indexOf("attachGitHubActionsRunnerProtocol(server, runnerProtocol)");
+  const attach = relay.indexOf("attachGitHubActionsRunnerProtocol(server, protocol)");
   const accept = relay.indexOf(
     'this.ctx.acceptWebSocket(server, ["github-actions-runner"])',
+    attach,
+  );
+  assert.notEqual(attach, -1);
+  assert.ok(accept > attach);
+});
+
+test("GitHub Actions viewer protocol is requested and attached before relay acceptance", async () => {
+  const [terminal, relay] = await Promise.all([
+    readFile(new URL("../src/worker/interactive-terminal-service.ts", import.meta.url), "utf8"),
+    readFile(new URL("../src/worker/session-control-do.ts", import.meta.url), "utf8"),
+  ]);
+
+  assert.match(terminal, /stub\.fetch\(\s*buildGitHubActionsViewerRelayUrl\(\)/);
+  const attach = relay.indexOf("attachGitHubActionsViewerProtocol(server, protocol)");
+  const accept = relay.indexOf(
+    'this.ctx.acceptWebSocket(server, ["github-actions-viewer"])',
     attach,
   );
   assert.notEqual(attach, -1);

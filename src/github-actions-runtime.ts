@@ -31,7 +31,10 @@ export type GitHubActionsRelayInput = {
 
 export const githubActionsFramedRunnerCapability = "cfr1-framed-io-v1";
 export const githubActionsRunnerProtocolQuery = "runnerProtocol";
-export type GitHubActionsRunnerProtocol = typeof githubActionsFramedRunnerCapability;
+export const githubActionsViewerProtocolQuery = "viewerProtocol";
+export type GitHubActionsRelayProtocol = typeof githubActionsFramedRunnerCapability;
+export type GitHubActionsRunnerProtocol = GitHubActionsRelayProtocol;
+export type GitHubActionsViewerProtocol = GitHubActionsRelayProtocol;
 
 export const githubActionsCapabilities = {
   terminal: true,
@@ -82,8 +85,8 @@ const relayEvents = new Map<number, keyof typeof relayEventCodes>(
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
 
-type GitHubActionsRunnerAttachment = {
-  protocol?: GitHubActionsRunnerProtocol;
+type GitHubActionsRelayAttachment = {
+  protocol?: GitHubActionsRelayProtocol;
 };
 
 export function githubActionsRuntimeLabel(runtime: unknown): string {
@@ -101,6 +104,12 @@ export function buildGitHubActionsRunnerPtyUrl(
   );
   url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
   url.searchParams.set("agentToken", agentToken);
+  return url.toString();
+}
+
+export function buildGitHubActionsViewerRelayUrl(): string {
+  const url = new URL("https://crabfleet.internal/api/session-control/github-actions/viewer");
+  url.searchParams.set(githubActionsViewerProtocolQuery, githubActionsFramedRunnerCapability);
   return url.toString();
 }
 
@@ -179,51 +188,68 @@ export function relayGitHubActionsWebSocketMessage(
 ): number {
   if (sender === "viewer") {
     if (isGitHubActionsViewerControlMessage(message)) return 0;
-    const input = parseGitHubActionsRelayInput(message);
-    if (!input) return 0;
+    const framedViewer = gitHubActionsViewerUsesFramedProtocol(senderSocket);
+    const input = framedViewer ? parseGitHubActionsRelayInput(message) : null;
+    if (framedViewer && !input) return 0;
     const runner = runners.find((socket) => socket.readyState === webSocketOpen);
     if (!runner) {
-      sendGitHubActionsRelayInputAcknowledgement(senderSocket, {
-        inputId: input.inputId,
-        accepted: false,
-      });
+      sendGitHubActionsViewerInputAcknowledgement(senderSocket, input?.inputId ?? null, false);
       return 0;
     }
     const framed = gitHubActionsRunnerUsesFramedProtocol(runner);
     try {
-      runner.send(framed ? message : input.payload);
-      if (!framed) {
-        sendGitHubActionsRelayInputAcknowledgement(senderSocket, {
-          inputId: input.inputId,
-          accepted: true,
-        });
+      if (framed) {
+        runner.send(
+          framedViewer
+            ? message
+            : encodeGitHubActionsRelayInput(createGitHubActionsRelayInputId(), message),
+        );
+      } else {
+        runner.send(framedViewer ? input!.payload : message);
+      }
+      if (!framedViewer || !framed) {
+        sendGitHubActionsViewerInputAcknowledgement(senderSocket, input?.inputId ?? null, true);
       }
       return 1;
     } catch {
-      sendGitHubActionsRelayInputAcknowledgement(senderSocket, {
-        inputId: input.inputId,
-        accepted: false,
-      });
+      sendGitHubActionsViewerInputAcknowledgement(senderSocket, input?.inputId ?? null, false);
       return 0;
     }
   }
 
   if (gitHubActionsRunnerUsesFramedProtocol(senderSocket)) {
-    if (
-      !parseGitHubActionsRelayInputAcknowledgement(message) &&
-      !parseGitHubActionsRelayOutput(message)
-    ) {
-      return 0;
+    const acknowledgement = parseGitHubActionsRelayInputAcknowledgement(message);
+    const output = parseGitHubActionsRelayOutput(message);
+    if (!acknowledgement && !output) return 0;
+    let forwarded = 0;
+    for (const viewer of viewers) {
+      if (viewer.readyState !== webSocketOpen) continue;
+      if (acknowledgement && !gitHubActionsViewerUsesFramedProtocol(viewer)) continue;
+      try {
+        viewer.send(gitHubActionsViewerUsesFramedProtocol(viewer) ? message : output!);
+        forwarded += 1;
+      } catch {
+        // A failed viewer does not prevent delivery to the remaining viewers.
+      }
     }
-    return forwardGitHubActionsRelayMessage(sender, message, runners, viewers);
+    return forwarded;
   }
 
-  return forwardGitHubActionsRelayMessage(
-    sender,
-    encodeGitHubActionsRelayOutput(message),
-    runners,
-    viewers,
-  );
+  let forwarded = 0;
+  for (const viewer of viewers) {
+    if (viewer.readyState !== webSocketOpen) continue;
+    try {
+      viewer.send(
+        gitHubActionsViewerUsesFramedProtocol(viewer)
+          ? encodeGitHubActionsRelayOutput(message)
+          : message,
+      );
+      forwarded += 1;
+    } catch {
+      // A failed viewer does not prevent delivery to the remaining viewers.
+    }
+  }
+  return forwarded;
 }
 
 export function sendGitHubActionsRelayInputAcknowledgement(
@@ -302,12 +328,27 @@ export function parseGitHubActionsRunnerProtocol(
   return value === githubActionsFramedRunnerCapability ? githubActionsFramedRunnerCapability : null;
 }
 
+export function parseGitHubActionsViewerProtocol(
+  value: string | null,
+): GitHubActionsViewerProtocol | null {
+  return value === githubActionsFramedRunnerCapability ? githubActionsFramedRunnerCapability : null;
+}
+
 export function attachGitHubActionsRunnerProtocol(
   socket: GitHubActionsRelaySocket,
   protocol: GitHubActionsRunnerProtocol | null,
 ): void {
   socket.serializeAttachment?.(
-    protocol ? ({ protocol } satisfies GitHubActionsRunnerAttachment) : {},
+    protocol ? ({ protocol } satisfies GitHubActionsRelayAttachment) : {},
+  );
+}
+
+export function attachGitHubActionsViewerProtocol(
+  socket: GitHubActionsRelaySocket,
+  protocol: GitHubActionsViewerProtocol | null,
+): void {
+  socket.serializeAttachment?.(
+    protocol ? ({ protocol } satisfies GitHubActionsRelayAttachment) : {},
   );
 }
 
@@ -354,7 +395,7 @@ export function notifyGitHubActionsViewers(
   viewers: readonly GitHubActionsRelaySocket[],
   type: "runner_connected" | "runner_disconnected" | "runner_waiting",
 ): number {
-  const payload = encodeGitHubActionsRelayFrame(
+  const framedPayload = encodeGitHubActionsRelayFrame(
     relayEventFrameType,
     "",
     new Uint8Array([relayEventCodes[type]]),
@@ -362,7 +403,9 @@ export function notifyGitHubActionsViewers(
   let notified = 0;
   for (const socket of viewers) {
     if (socket.readyState !== webSocketOpen) continue;
-    socket.send(payload);
+    socket.send(
+      gitHubActionsViewerUsesFramedProtocol(socket) ? framedPayload : JSON.stringify({ type }),
+    );
     notified += 1;
   }
   return notified;
@@ -432,9 +475,40 @@ function requireGitHubActionsRelayInputId(inputId: string): void {
 }
 
 export function gitHubActionsRunnerUsesFramedProtocol(socket: GitHubActionsRelaySocket): boolean {
+  return gitHubActionsRelayUsesFramedProtocol(socket);
+}
+
+export function gitHubActionsViewerUsesFramedProtocol(socket: GitHubActionsRelaySocket): boolean {
+  return gitHubActionsRelayUsesFramedProtocol(socket);
+}
+
+function gitHubActionsRelayUsesFramedProtocol(socket: GitHubActionsRelaySocket): boolean {
   const attachment = socket.deserializeAttachment?.();
   if (!attachment || typeof attachment !== "object") return false;
   return (
-    (attachment as GitHubActionsRunnerAttachment).protocol === githubActionsFramedRunnerCapability
+    (attachment as GitHubActionsRelayAttachment).protocol === githubActionsFramedRunnerCapability
   );
+}
+
+function sendGitHubActionsViewerInputAcknowledgement(
+  viewer: GitHubActionsRelaySocket,
+  inputId: string | null,
+  accepted: boolean,
+): boolean {
+  if (inputId) {
+    return sendGitHubActionsRelayInputAcknowledgement(viewer, { inputId, accepted });
+  }
+  if (viewer.readyState !== webSocketOpen) return false;
+  try {
+    viewer.send(
+      JSON.stringify({
+        type: "github_actions_input_ack",
+        accepted,
+        ...(accepted ? {} : { error: relayInputRejectedError }),
+      }),
+    );
+    return true;
+  } catch {
+    return false;
+  }
 }

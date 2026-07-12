@@ -6,7 +6,10 @@ import {
   terminalSubmittedLine,
   type TerminalInputState,
 } from "../terminal-multiplayer.ts";
-import { githubActionsRuntime } from "../github-actions-runtime.ts";
+import {
+  buildGitHubActionsViewerRelayUrl,
+  githubActionsRuntime,
+} from "../github-actions-runtime.ts";
 import { terminalFailureStatusForAdapter } from "../runtime-adapter.ts";
 import { cachedBooleanGrant } from "../terminal-authorization.ts";
 import { actor, requireRole } from "./auth.ts";
@@ -126,10 +129,9 @@ export class InteractiveTerminalService {
     if (session.runtime === githubActionsRuntime) {
       const stub = githubActionsRelayStub(this.env, session.id);
       if (!stub) throw serviceUnavailable("SESSION_CONTROL Durable Object is not configured");
-      const upstreamResponse = await stub.fetch(
-        "https://crabfleet.internal/api/session-control/github-actions/viewer",
-        { headers: { upgrade: "websocket" } },
-      );
+      const upstreamResponse = await stub.fetch(buildGitHubActionsViewerRelayUrl(), {
+        headers: { upgrade: "websocket" },
+      });
       const upstream = upstreamResponse.webSocket;
       if (!upstream || upstreamResponse.status !== 101) {
         throw serviceUnavailable(`GitHub Actions relay HTTP ${upstreamResponse.status}`);
