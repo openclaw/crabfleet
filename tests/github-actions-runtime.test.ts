@@ -4,7 +4,8 @@ import {
   buildGitHubActionsRunnerPtyUrl,
   encodeGitHubActionsRelayInput,
   encodeGitHubActionsRelayInputAcknowledgement,
-  forwardGitHubActionsRelayMessage,
+  encodeGitHubActionsRelayOutput,
+  encodeGitHubActionsRunnerCapabilities,
   gitHubActionsSessionStatus,
   githubActionsCapabilities,
   githubActionsRelayRole,
@@ -15,6 +16,7 @@ import {
   parseGitHubActionsRelayEvent,
   parseGitHubActionsRelayInput,
   parseGitHubActionsRelayInputAcknowledgement,
+  parseGitHubActionsRelayOutput,
   parseGitHubActionsWorkState,
   relayGitHubActionsWebSocketMessage,
   replaceGitHubActionsRunner,
@@ -23,11 +25,13 @@ import {
 } from "../src/github-actions-runtime.ts";
 
 function relaySocket(readyState = 1): GitHubActionsRelaySocket & {
+  attachment: unknown;
   closed: Array<[number | undefined, string | undefined]>;
   sent: Array<string | ArrayBuffer>;
 } {
   return {
     readyState,
+    attachment: null,
     sent: [],
     closed: [],
     send(message) {
@@ -36,6 +40,12 @@ function relaySocket(readyState = 1): GitHubActionsRelaySocket & {
     close(code, reason) {
       this.closed.push([code, reason]);
       this.readyState = 3;
+    },
+    serializeAttachment(attachment) {
+      this.attachment = attachment;
+    },
+    deserializeAttachment() {
+      return this.attachment;
     },
   };
 }
@@ -71,7 +81,7 @@ test("work states preserve running phases and map terminal outcomes", () => {
   assert.equal(gitHubActionsSessionStatus("failed"), "failed");
 });
 
-test("relay replaces the current runner and fans out raw runner output", () => {
+test("relay replaces the current runner and frames legacy raw runner output", () => {
   const oldRunner = relaySocket();
   const runner = relaySocket();
   const viewerOne = relaySocket();
@@ -84,20 +94,56 @@ test("relay replaces the current runner and fans out raw runner output", () => {
   assert.deepEqual(stoppedRunner.closed, [[1000, "runner disconnected"]]);
 
   assert.equal(
-    forwardGitHubActionsRelayMessage("runner", "output", [runner], [viewerOne, viewerTwo]),
+    relayGitHubActionsWebSocketMessage(
+      "runner",
+      runner,
+      "output",
+      [runner],
+      [viewerOne, viewerTwo],
+    ),
     2,
   );
-  assert.deepEqual(viewerOne.sent, ["output"]);
-  assert.deepEqual(viewerTwo.sent, ["output"]);
+  assert.equal(
+    new TextDecoder().decode(parseGitHubActionsRelayOutput(viewerOne.sent[0]!)!),
+    "output",
+  );
+  assert.equal(
+    new TextDecoder().decode(parseGitHubActionsRelayOutput(viewerTwo.sent[0]!)!),
+    "output",
+  );
 });
 
-test("relay sends framed viewer input to the first open runner without acknowledging queueing", () => {
+test("legacy runners receive raw input and the relay acknowledges delivery", () => {
+  const runner = relaySocket();
+  const viewer = relaySocket();
+  const input = encodeGitHubActionsRelayInput("input-legacy", "steer");
+
+  assert.equal(relayGitHubActionsWebSocketMessage("viewer", viewer, input, [runner], []), 1);
+  assert.equal(new TextDecoder().decode(runner.sent[0] as ArrayBuffer), "steer");
+  assert.deepEqual(parseGitHubActionsRelayInputAcknowledgement(viewer.sent[0]!), {
+    inputId: "input-legacy",
+    accepted: true,
+  });
+});
+
+test("negotiated runners receive framed input without an early acknowledgement", () => {
   const closedRunner = relaySocket(3);
   const openRunner = relaySocket();
   const laterRunner = relaySocket();
   const viewer = relaySocket();
   const input = encodeGitHubActionsRelayInput("input-one", "steer");
 
+  assert.equal(
+    relayGitHubActionsWebSocketMessage(
+      "runner",
+      openRunner,
+      encodeGitHubActionsRunnerCapabilities(),
+      [openRunner],
+      [],
+    ),
+    0,
+  );
+  openRunner.sent.length = 0;
   assert.equal(
     relayGitHubActionsWebSocketMessage(
       "viewer",
@@ -150,6 +196,14 @@ test("runner acknowledgements retain correlation and fan out to viewers", () => 
     inputId: "input-two",
     accepted: true,
   });
+  relayGitHubActionsWebSocketMessage(
+    "runner",
+    runner,
+    encodeGitHubActionsRunnerCapabilities(),
+    [runner],
+    [],
+  );
+  runner.sent.length = 0;
 
   assert.equal(
     relayGitHubActionsWebSocketMessage(
@@ -168,6 +222,33 @@ test("runner acknowledgements retain correlation and fan out to viewers", () => 
   assert.deepEqual(viewerTwo.sent, [acknowledgement]);
 });
 
+test("negotiated runners frame output so control-shaped terminal bytes stay output", () => {
+  const runner = relaySocket();
+  const viewer = relaySocket();
+  const controlShapedOutput = encodeGitHubActionsRelayInputAcknowledgement({
+    inputId: "collision",
+    accepted: true,
+  });
+
+  assert.equal(
+    relayGitHubActionsWebSocketMessage(
+      "runner",
+      runner,
+      encodeGitHubActionsRunnerCapabilities(),
+      [runner],
+      [viewer],
+    ),
+    0,
+  );
+  assert.equal(typeof runner.sent[0], "string");
+  const output = encodeGitHubActionsRelayOutput(controlShapedOutput);
+  assert.equal(relayGitHubActionsWebSocketMessage("runner", runner, output, [runner], [viewer]), 1);
+  assert.deepEqual(
+    new Uint8Array(parseGitHubActionsRelayOutput(viewer.sent[0]!)!),
+    new Uint8Array(controlShapedOutput),
+  );
+});
+
 test("typed acknowledgements reject malformed ids and preserve collision-shaped terminal text", () => {
   const viewer = relaySocket();
   const runner = relaySocket();
@@ -178,7 +259,10 @@ test("typed acknowledgements reject malformed ids and preserve collision-shaped 
     relayGitHubActionsWebSocketMessage("runner", runner, collision, [runner], [viewer]),
     1,
   );
-  assert.deepEqual(viewer.sent, [collision]);
+  assert.equal(
+    new TextDecoder().decode(parseGitHubActionsRelayOutput(viewer.sent[0]!)!),
+    collision,
+  );
   assert.throws(() => encodeGitHubActionsRelayInput("bad id", "input"), {
     message: "invalid GitHub Actions relay input id",
   });

@@ -14,6 +14,8 @@ export type GitHubActionsRelaySocket = {
   readyState: number;
   send(message: string | ArrayBuffer): void;
   close(code?: number, reason?: string): void;
+  serializeAttachment?(attachment: unknown): void;
+  deserializeAttachment?(): unknown;
 };
 
 export type GitHubActionsRelayInputAcknowledgement = {
@@ -26,6 +28,8 @@ export type GitHubActionsRelayInput = {
   inputId: string;
   payload: ArrayBuffer;
 };
+
+export const githubActionsFramedRunnerCapability = "cfr1-framed-io-v1";
 
 export const githubActionsCapabilities = {
   terminal: true,
@@ -59,6 +63,7 @@ const relayFrameHeaderBytes = relayFrameMagic.byteLength + 2;
 const relayInputFrameType = 1;
 const relayInputAcknowledgementFrameType = 2;
 const relayEventFrameType = 3;
+const relayOutputFrameType = 4;
 const relayInputIdMaximumBytes = 80;
 const relayInputIdPattern = /^[A-Za-z0-9_-]+$/;
 const relayEventCodes = {
@@ -74,6 +79,11 @@ const relayEvents = new Map<number, keyof typeof relayEventCodes>(
 );
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
+const runnerCapabilitiesMessageType = "crabfleet_runner_capabilities";
+
+type GitHubActionsRunnerAttachment = {
+  protocol?: typeof githubActionsFramedRunnerCapability;
+};
 
 export function githubActionsRuntimeLabel(runtime: unknown): string {
   return runtime === githubActionsRuntime ? "GitHub Actions" : "";
@@ -170,17 +180,65 @@ export function relayGitHubActionsWebSocketMessage(
     if (isGitHubActionsViewerControlMessage(message)) return 0;
     const input = parseGitHubActionsRelayInput(message);
     if (!input) return 0;
-    const forwarded = forwardGitHubActionsRelayMessage(sender, message, runners, viewers);
-    if (forwarded !== 1) {
+    const runner = runners.find((socket) => socket.readyState === webSocketOpen);
+    if (!runner) {
       sendGitHubActionsRelayInputAcknowledgement(senderSocket, {
         inputId: input.inputId,
         accepted: false,
       });
+      return 0;
     }
-    return forwarded;
+    const framed = gitHubActionsRunnerUsesFramedProtocol(runner);
+    try {
+      runner.send(framed ? message : input.payload);
+      if (!framed) {
+        sendGitHubActionsRelayInputAcknowledgement(senderSocket, {
+          inputId: input.inputId,
+          accepted: true,
+        });
+      }
+      return 1;
+    } catch {
+      sendGitHubActionsRelayInputAcknowledgement(senderSocket, {
+        inputId: input.inputId,
+        accepted: false,
+      });
+      return 0;
+    }
   }
 
-  return forwardGitHubActionsRelayMessage(sender, message, runners, viewers);
+  const capabilities = parseGitHubActionsRunnerCapabilities(message);
+  if (capabilities) {
+    if (capabilities.includes(githubActionsFramedRunnerCapability)) {
+      senderSocket.serializeAttachment?.({
+        protocol: githubActionsFramedRunnerCapability,
+      } satisfies GitHubActionsRunnerAttachment);
+      sendGitHubActionsRunnerCapabilitiesAccepted(senderSocket, [
+        githubActionsFramedRunnerCapability,
+      ]);
+    } else {
+      senderSocket.serializeAttachment?.({} satisfies GitHubActionsRunnerAttachment);
+      sendGitHubActionsRunnerCapabilitiesAccepted(senderSocket, []);
+    }
+    return 0;
+  }
+
+  if (gitHubActionsRunnerUsesFramedProtocol(senderSocket)) {
+    if (
+      !parseGitHubActionsRelayInputAcknowledgement(message) &&
+      !parseGitHubActionsRelayOutput(message)
+    ) {
+      return 0;
+    }
+    return forwardGitHubActionsRelayMessage(sender, message, runners, viewers);
+  }
+
+  return forwardGitHubActionsRelayMessage(
+    sender,
+    encodeGitHubActionsRelayOutput(message),
+    runners,
+    viewers,
+  );
 }
 
 export function sendGitHubActionsRelayInputAcknowledgement(
@@ -230,6 +288,18 @@ export function encodeGitHubActionsRelayInput(
   return encodeGitHubActionsRelayFrame(relayInputFrameType, inputId, messageBytes(payload));
 }
 
+export function encodeGitHubActionsRelayOutput(
+  payload: string | ArrayBuffer | ArrayBufferView,
+): ArrayBuffer {
+  return encodeGitHubActionsRelayFrame(relayOutputFrameType, "", messageBytes(payload));
+}
+
+export function parseGitHubActionsRelayOutput(message: string | ArrayBuffer): ArrayBuffer | null {
+  const frame = decodeGitHubActionsRelayFrame(message, relayOutputFrameType);
+  if (!frame || frame.inputId) return null;
+  return Uint8Array.from(frame.payload).buffer;
+}
+
 export function parseGitHubActionsRelayInput(
   message: string | ArrayBuffer,
 ): GitHubActionsRelayInput | null {
@@ -239,6 +309,30 @@ export function parseGitHubActionsRelayInput(
     inputId: frame.inputId,
     payload: Uint8Array.from(frame.payload).buffer,
   };
+}
+
+export function encodeGitHubActionsRunnerCapabilities(): string {
+  return JSON.stringify({
+    type: runnerCapabilitiesMessageType,
+    capabilities: [githubActionsFramedRunnerCapability],
+  });
+}
+
+export function parseGitHubActionsRunnerCapabilities(
+  message: string | ArrayBuffer,
+): string[] | null {
+  if (typeof message !== "string") return null;
+  try {
+    const parsed = JSON.parse(message) as Record<string, unknown>;
+    if (parsed.type !== runnerCapabilitiesMessageType || !Array.isArray(parsed.capabilities)) {
+      return null;
+    }
+    return parsed.capabilities.filter((capability): capability is string => {
+      return typeof capability === "string";
+    });
+  } catch {
+    return null;
+  }
 }
 
 export function encodeGitHubActionsRelayInputAcknowledgement(
@@ -359,4 +453,25 @@ function messageBytes(message: string | ArrayBuffer | ArrayBufferView): Uint8Arr
 
 function requireGitHubActionsRelayInputId(inputId: string): void {
   if (!inputId) throw new Error("invalid GitHub Actions relay input id");
+}
+
+function gitHubActionsRunnerUsesFramedProtocol(socket: GitHubActionsRelaySocket): boolean {
+  const attachment = socket.deserializeAttachment?.();
+  if (!attachment || typeof attachment !== "object") return false;
+  return (
+    (attachment as GitHubActionsRunnerAttachment).protocol === githubActionsFramedRunnerCapability
+  );
+}
+
+function sendGitHubActionsRunnerCapabilitiesAccepted(
+  socket: GitHubActionsRelaySocket,
+  capabilities: string[],
+): void {
+  if (socket.readyState !== webSocketOpen) return;
+  socket.send(
+    JSON.stringify({
+      type: runnerCapabilitiesMessageType,
+      accepted: capabilities,
+    }),
+  );
 }

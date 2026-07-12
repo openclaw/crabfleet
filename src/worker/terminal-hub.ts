@@ -18,6 +18,7 @@ import {
   encodeGitHubActionsRelayInput,
   githubActionsRuntime,
   parseGitHubActionsRelayInputAcknowledgement,
+  parseGitHubActionsRelayOutput,
   parseGitHubActionsRelayEvent,
   type GitHubActionsRelayInputAcknowledgement,
 } from "../github-actions-runtime.ts";
@@ -283,21 +284,11 @@ export class TerminalHub {
                 }
               }
             }
-            if (acknowledgements.length > 0) {
-              const results = await Promise.all(
-                acknowledgements.map((acknowledgement) => acknowledgement.promise),
-              );
-              const rejection = results.find((result) => !result.accepted);
-              if (rejection) {
-                sendTerminalJson(server, TerminalMessageType.Error, frame.sessionId, {
-                  error: rejection.error ?? "terminal input was not accepted",
-                });
-                return;
-              }
-            }
-            sendTerminalJson(server, TerminalMessageType.Event, frame.sessionId, {
-              type: "input-accepted",
-            });
+            reportTerminalInputCompletion(
+              server,
+              frame.sessionId,
+              acknowledgements.map((acknowledgement) => acknowledgement.promise),
+            );
             return;
           }
           if (frame.type === TerminalMessageType.Resize) {
@@ -529,6 +520,16 @@ export class TerminalHub {
                 sendTerminalJson(client, TerminalMessageType.Event, id, relayEvent);
                 return;
               }
+              const relayOutput = parseGitHubActionsRelayOutput(data);
+              if (!relayOutput) return;
+              const output = new Uint8Array(relayOutput);
+              sendTerminalFrame(client, TerminalMessageType.Output, id, output);
+              if (activeSubscription.outputAcknowledgements) {
+                activeSubscription.outputAcknowledgementBytes += output.byteLength;
+              } else if (upstreamConnection.outputAcknowledgements) {
+                sendOutputAcknowledgement(upstream, output.byteLength);
+              }
+              return;
             }
             if (typeof data === "string") {
               if (!activeSubscription.inputAcknowledgements) {
@@ -671,6 +672,32 @@ function completeAllTerminalInputAcknowledgements(
     acknowledgement.resolve({ inputId: acknowledgement.inputId, ...result });
   }
   return pending.length;
+}
+
+function reportTerminalInputCompletion(
+  socket: WebSocket,
+  sessionId: string,
+  acknowledgements: Promise<GitHubActionsRelayInputAcknowledgement>[],
+): void {
+  if (acknowledgements.length === 0) {
+    sendTerminalJson(socket, TerminalMessageType.Event, sessionId, {
+      type: "input-accepted",
+    });
+    return;
+  }
+  void Promise.all(acknowledgements).then((results) => {
+    if (socket.readyState !== WebSocket.OPEN) return;
+    const rejection = results.find((result) => !result.accepted);
+    if (rejection) {
+      sendTerminalJson(socket, TerminalMessageType.Error, sessionId, {
+        error: rejection.error ?? "terminal input was not accepted",
+      });
+      return;
+    }
+    sendTerminalJson(socket, TerminalMessageType.Event, sessionId, {
+      type: "input-accepted",
+    });
+  });
 }
 
 function updateTerminalInputCapability(

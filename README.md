@@ -100,7 +100,15 @@ The response contains `{session, agentToken, runnerPtyUrl, browserUrl}`. New reg
 const terminal = new WebSocket(runnerPtyUrl);
 terminal.binaryType = "arraybuffer";
 
-pty.onData((output) => terminal.send(output)); // Runner output stays raw.
+terminal.onopen = () => {
+  terminal.send(
+    JSON.stringify({
+      type: "crabfleet_runner_capabilities",
+      capabilities: ["cfr1-framed-io-v1"],
+    }),
+  );
+};
+pty.onData((output) => terminal.send(encodeCfr1Output(output)));
 terminal.onmessage = ({ data }) => {
   const input = decodeCfr1Input(data);
   if (!input) return;
@@ -113,11 +121,11 @@ terminal.onmessage = ({ data }) => {
 };
 ```
 
-Crabfleet sends viewer input in correlated binary `CFR1` frames. The runner must
-return the matching binary acknowledgement only after its PTY accepts the
-input. Runner terminal output remains unframed and raw. Legacy clients that
-expect raw viewer input are incompatible; the complete encoder, decoder, and
-Node runner example are in
+Existing runners retain raw input and output. A runner opts into correlated
+binary `CFR1` input, output, and acknowledgement frames by advertising the
+`cfr1-framed-io-v1` capability immediately after connecting. Negotiated runners
+acknowledge only after their PTY accepts the input; the complete encoder,
+decoder, and Node runner example are in
 [`docs/github-actions-sessions.md`](docs/github-actions-sessions.md#runner-pty).
 
 The runner reports heartbeat and durable progress with bearer `agentToken` to `POST /api/agent/interactive-sessions/:id/work-state`. Terminal states are `completed`, `blocked`, `failed`, and `canceled`; active work uses `registered` or `running` plus a specific `phase`.

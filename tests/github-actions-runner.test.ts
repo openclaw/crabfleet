@@ -1,9 +1,15 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { acceptGitHubActionsRunnerInput } from "../src/github-actions-runner.ts";
+import {
+  acceptGitHubActionsRunnerInput,
+  negotiateGitHubActionsRunnerProtocol,
+  sendGitHubActionsRunnerOutput,
+} from "../src/github-actions-runner.ts";
 import {
   encodeGitHubActionsRelayInput,
+  parseGitHubActionsRelayOutput,
+  parseGitHubActionsRunnerCapabilities,
   parseGitHubActionsRelayInputAcknowledgement,
   type GitHubActionsRelaySocket,
 } from "../src/github-actions-runtime.ts";
@@ -64,4 +70,18 @@ test("runner rejects failed writes and ignores unframed terminal data", async ()
   });
   assert.equal(await acceptGitHubActionsRunnerInput(socket, "raw output", async () => {}), false);
   assert.equal(socket.sent.length, 1);
+});
+
+test("runner helpers negotiate framed IO and envelope PTY output", () => {
+  const socket = relaySocket();
+
+  negotiateGitHubActionsRunnerProtocol(socket);
+  assert.deepEqual(parseGitHubActionsRunnerCapabilities(socket.sent[0]!), ["cfr1-framed-io-v1"]);
+
+  const collision = encodeGitHubActionsRelayInput("looks-like-input", "terminal bytes");
+  sendGitHubActionsRunnerOutput(socket, collision);
+  assert.deepEqual(
+    new Uint8Array(parseGitHubActionsRelayOutput(socket.sent[1]!)!),
+    new Uint8Array(collision),
+  );
 });

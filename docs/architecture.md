@@ -95,7 +95,7 @@ D1 is canonical for product metadata:
 ### Durable Objects
 
 - `Sandbox` runs first-party Cloudflare Sandbox workspaces.
-- `SessionControlDO` stores generation-fenced Sandbox credential/checkpoint state and relays one current GitHub Actions runner to multiple viewers. Runner output remains raw; viewer input, runner acknowledgements, and lifecycle events use correlated binary `CFR1` frames so control traffic cannot consume terminal text.
+- `SessionControlDO` stores generation-fenced Sandbox credential/checkpoint state and relays one current GitHub Actions runner to multiple viewers. Existing runners retain raw input/output at the runner boundary; capability-negotiated runners use correlated binary `CFR1` input, output, and acknowledgement frames. Viewer-bound output is always framed so terminal bytes cannot collide with control traffic.
 
 There is no `BoardDO` or `RunDO`. General Board/Fleet state is D1 plus REST polling.
 
@@ -137,7 +137,7 @@ Interactive sessions are the live execution plane. Supported paths:
 
 - **Built-in Sandbox:** Worker provisions a Cloudflare Sandbox, prepares the repo, starts a Codex-capable shell, and proxies PTY traffic.
 - **Versioned runtime adapter:** Worker durably registers a tenant-namespaced workspace ID, creates and reconciles the provider workspace, proxies PTY access, mints transient desktop links, and confirms provider release before terminal state.
-- **GitHub Actions:** OpenClaw automation registers a logical work key; an Actions runner connects outbound to `SessionControlDO`, reports work state, receives correlated `CFR1` browser input, writes it to its PTY, and acknowledges the matching ID before Crabfleet reports input acceptance.
+- **GitHub Actions:** OpenClaw automation registers a logical work key; an Actions runner connects outbound to `SessionControlDO`, reports work state, and either retains legacy raw terminal traffic or negotiates correlated `CFR1` browser input/output. Negotiated runners acknowledge each PTY write before Crabfleet reports input acceptance.
 
 Sessions can carry a stable tenant owner, parent/root lineage, purpose, summary, named grants, public share state, delegated control, multiplayer mode, archive metadata, and runtime-specific capability state.
 

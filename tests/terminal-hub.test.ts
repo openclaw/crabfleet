@@ -12,6 +12,7 @@ import {
 } from "@openclaw/libterminal/protocol";
 import {
   encodeGitHubActionsRelayInputAcknowledgement,
+  encodeGitHubActionsRelayOutput,
   parseGitHubActionsRelayInput,
 } from "../src/github-actions-runtime.ts";
 import type { User } from "../src/worker/models.ts";
@@ -687,7 +688,7 @@ test("GitHub Actions input acknowledgements correlate overlapping payloads out o
   server.emit("close");
 });
 
-test("GitHub Actions collision-shaped terminal text remains raw output", async () => {
+test("GitHub Actions framed output preserves control-shaped terminal bytes", async () => {
   const client = socket();
   const server = socket();
   const upstream = socket();
@@ -714,13 +715,120 @@ test("GitHub Actions collision-shaped terminal text remains raw output", async (
   await flushQueues();
   await flushQueues();
 
-  const collision = '{"type":"runner_waiting","inputId":"stale-input-id","accepted":true}';
-  upstream.emit("message", { data: collision });
+  const collision = encodeGitHubActionsRelayInputAcknowledgement({
+    inputId: "stale-input-id",
+    accepted: true,
+  });
+  upstream.emit("message", { data: encodeGitHubActionsRelayOutput(collision) });
   await flushQueues();
 
   const output = frame(server.sent.at(-1)!);
   assert.equal(output.type, TerminalMessageType.Output);
-  assert.equal(new TextDecoder().decode(output.payload), collision);
+  assert.deepEqual(output.payload, new Uint8Array(collision));
+  server.emit("close");
+});
+
+test("a stalled GitHub Actions acknowledgement does not block other sessions or ping", async () => {
+  const client = socket();
+  const server = socket();
+  const firstUpstream = socket();
+  const secondUpstream = socket();
+  const secondSession = interactiveSession(
+    sessionRow({
+      id: "IS-actions-second",
+      adapter: null,
+      adapter_workspace_id: null,
+      capabilities_json: JSON.stringify(containerCapabilities),
+      runtime: "github_actions",
+      status: "ready",
+    }),
+  );
+  const hub = new TerminalHub(
+    dependencies(client, server, firstUpstream, {
+      async readSession(_request, _user, id) {
+        return id === secondSession.id ? secondSession : githubActionsSession;
+      },
+      async openUpstream(_request, _user, selectedSession) {
+        return {
+          socket: selectedSession.id === secondSession.id ? secondUpstream : firstUpstream,
+          outputAcknowledgements: true,
+          async markConnected() {},
+        };
+      },
+    }),
+  );
+  await hub.open(
+    new Request("https://fleet.example/api/terminal/ws", {
+      headers: { upgrade: "websocket" },
+    }),
+    user,
+  );
+  for (const selectedSession of [githubActionsSession, secondSession]) {
+    server.emit("message", {
+      data: encodeTerminalFrame({
+        type: TerminalMessageType.Subscribe,
+        sessionId: selectedSession.id,
+        payload: encodeSubscribePayload({ flags: 0, columns: 120, rows: 34 }),
+      }),
+    });
+  }
+  await flushQueues();
+  await flushQueues();
+
+  server.emit("message", {
+    data: encodeTerminalFrame({
+      type: TerminalMessageType.Input,
+      sessionId: githubActionsSession.id,
+      payload: new TextEncoder().encode("stalled"),
+    }),
+  });
+  await flushQueues();
+  assert.equal(relayInput(firstUpstream.sent[0]!).text, "stalled");
+
+  server.emit("message", {
+    data: encodeTerminalFrame({
+      type: TerminalMessageType.Ping,
+      sessionId: "",
+      payload: new TextEncoder().encode("still-live"),
+    }),
+  });
+  server.emit("message", {
+    data: encodeTerminalFrame({
+      type: TerminalMessageType.Input,
+      sessionId: secondSession.id,
+      payload: new TextEncoder().encode("independent"),
+    }),
+  });
+  await flushQueues();
+  await flushQueues();
+
+  assert.equal(relayInput(secondUpstream.sent[0]!).text, "independent");
+  assert.equal(
+    server.sent.some((payload) => {
+      const message = frame(payload);
+      return (
+        message.type === TerminalMessageType.Pong &&
+        new TextDecoder().decode(message.payload) === "still-live"
+      );
+    }),
+    true,
+  );
+
+  const secondInput = relayInput(secondUpstream.sent[0]!);
+  emitRelayAcknowledgement(secondUpstream, secondInput.inputId, true);
+  await flushQueues();
+  assert.equal(
+    server.sent.some((payload) => {
+      const message = frame(payload);
+      return (
+        message.type === TerminalMessageType.Event &&
+        message.sessionId === secondSession.id &&
+        (decodeJsonPayload(message.payload) as { type?: string }).type === "input-accepted"
+      );
+    }),
+    true,
+  );
+
   server.emit("close");
 });
 

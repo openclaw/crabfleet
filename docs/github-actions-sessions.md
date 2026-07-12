@@ -263,13 +263,14 @@ returns only the sanitized event.
 ## Runner PTY
 
 The Action connects outbound to the returned `runnerPtyUrl`. Node's global
-`WebSocket` can open the URL without custom headers, but runner input is a
-framed protocol rather than raw WebSocket bytes.
+`WebSocket` can open the URL without custom headers.
 
-Runner output remains unframed and raw. Viewer input arrives in a binary `CFR1`
-frame carrying a correlation ID. The runner returns a binary acknowledgement
-with the same ID only after its PTY accepts the input write. Legacy runners that
-expect raw viewer input are incompatible.
+Runner sockets begin in legacy mode with raw input and output. A runner opts
+into collision-free framed I/O by advertising `cfr1-framed-io-v1` immediately
+after connecting. Negotiated viewer input arrives in a binary `CFR1` frame
+carrying a correlation ID; runner output uses a distinct `CFR1` output frame.
+The runner returns a correlated acknowledgement only after its PTY accepts the
+input write.
 
 Complete Node runner integration:
 
@@ -293,6 +294,12 @@ await new Promise((resolve, reject) => {
   terminal.addEventListener("open", resolve, { once: true });
   terminal.addEventListener("error", reject, { once: true });
 });
+terminal.send(
+  JSON.stringify({
+    type: "crabfleet_runner_capabilities",
+    capabilities: ["cfr1-framed-io-v1"],
+  }),
+);
 
 const pty = spawn(process.env.SHELL || "/bin/bash", [], {
   cwd: process.cwd(),
@@ -300,7 +307,7 @@ const pty = spawn(process.env.SHELL || "/bin/bash", [], {
 });
 
 pty.onData((output) => {
-  terminal.send(output); // Terminal output stays raw and unframed.
+  terminal.send(encodeOutput(output));
 });
 
 terminal.addEventListener("message", (event) => {
@@ -349,6 +356,16 @@ function encodeAck(inputId, accepted) {
   return frame;
 }
 
+function encodeOutput(output) {
+  const payload = encoder.encode(output);
+  const frame = new Uint8Array(6 + payload.byteLength);
+  frame.set(magic);
+  frame[4] = 0x04;
+  frame[5] = 0;
+  frame.set(payload, 6);
+  return frame;
+}
+
 terminal.addEventListener("close", () => {
   pty.kill();
 });
@@ -363,19 +380,23 @@ For a PTY API with an asynchronous write callback or promise, await that
 acceptance signal before sending `encodeAck(..., true)`. Do not acknowledge when
 the WebSocket merely queues the input frame.
 
-Each `CFR1` frame occupies one binary WebSocket message:
+The relay answers the advertisement with
+`{"type":"crabfleet_runner_capabilities","accepted":["cfr1-framed-io-v1"]}`.
+WebSocket ordering applies the negotiated mode before subsequent runner
+messages. Each `CFR1` frame occupies one binary WebSocket message:
 
-| Offset | Size     | Value                                                           |
-| ------ | -------- | --------------------------------------------------------------- |
-| 0      | 4        | ASCII `CFR1`                                                    |
-| 4      | 1        | `0x01` input, `0x02` acknowledgement, or `0x03` lifecycle event |
-| 5      | 1        | input ID byte length                                            |
-| 6      | variable | input ID followed by the type-specific payload                  |
+| Offset | Size     | Value                                                                          |
+| ------ | -------- | ------------------------------------------------------------------------------ |
+| 0      | 4        | ASCII `CFR1`                                                                   |
+| 4      | 1        | `0x01` input, `0x02` acknowledgement, `0x03` lifecycle event, or `0x04` output |
+| 5      | 1        | input ID byte length                                                           |
+| 6      | variable | input ID followed by the type-specific payload                                 |
 
 Input payloads are raw terminal bytes. An acknowledgement payload starts with
 `1` for accepted or `0` for rejected and may include UTF-8 error text after the
 status byte. Lifecycle events use an empty input ID and event code `0x01` for
 runner connected, `0x02` for runner disconnected, or `0x03` for runner waiting.
+Output uses an empty input ID followed by raw terminal bytes.
 The full wire contract is also specified in
 [API](/api/#get-api-agent-interactive-sessions-id-runner-pty).
 
@@ -385,13 +406,15 @@ Properties:
 - Only one runner is current.
 - A new runner connection replaces the previous runner.
 - Multiple browser viewers may remain connected.
-- Unframed runner output is fanned out to viewers unchanged.
-- Writable viewer input is framed and sent to the current runner only.
-- A viewer sees `input-accepted` only after the correlated runner
-  acknowledgement.
+- Legacy runners receive raw viewer input and send raw output.
+- Negotiated runners receive framed input and must wrap every output payload in
+  a `0x04` frame.
+- Negotiated input produces `input-accepted` only after the correlated runner
+  acknowledgement. Legacy input reports acceptance after relay delivery.
 - Runner lifecycle events are typed binary frames even while no runner is
   connected.
-- Unframed viewer input is rejected.
+- The relay frames legacy output internally, so raw bytes beginning with
+  `CFR1` cannot collide with acknowledgements or lifecycle events.
 
 The relay does not interpret Codex JSON-RPC. The runner-side integration decides
 how accepted terminal input maps to model steering.
@@ -430,7 +453,7 @@ instead of inventing a local shell.
 
 ## Steering Semantics
 
-Crabfleet forwards terminal input inside correlated `CFR1` frames. In the
+Crabfleet forwards negotiated terminal input inside correlated `CFR1` frames. In the
 ClawSweeper integration, the runner:
 
 1. Accepts the framed bytes into its input handler and acknowledges that input

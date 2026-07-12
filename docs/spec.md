@@ -178,15 +178,16 @@ Crabfleet owns:
 
 - session identity and metadata;
 - rotating scoped agent token;
-- outbound runner relay through `SessionControlDO`, with raw runner output and correlated binary `CFR1` input, acknowledgement, and lifecycle frames;
+- outbound runner relay through `SessionControlDO`, preserving legacy raw runner traffic while capability-negotiated runners use correlated binary `CFR1` input, output, acknowledgement, and lifecycle frames;
 - browser terminal steering;
 - work-state heartbeats;
 - event and transcript finalization.
 
-The Action remains the execution host and mutation authority. It acknowledges
-viewer input only after its PTY accepts the correlated write; relay queueing is
-not acceptance. Legacy raw-input runners are incompatible. Ending the Crabfleet
-session does not cancel the workflow run.
+The Action remains the execution host and mutation authority. A negotiated
+runner acknowledges viewer input only after its PTY accepts the correlated
+write; relay queueing is not acceptance. Legacy runners keep raw input/output
+and relay-level delivery reporting. Ending the Crabfleet session does not
+cancel the workflow run.
 
 ## Session Lifecycle
 

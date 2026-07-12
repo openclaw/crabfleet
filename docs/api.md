@@ -598,17 +598,19 @@ Response:
 }
 ```
 
-Every new registration and every resume requires `owner`; it must resolve to exactly one active Crabfleet user by login, email, or stable subject. Existing work keys resume only when the supplied owner resolves to the same stable owner subject already stored on the work key. Ownerless resumes fail closed before token rotation, and a work key cannot transfer to a different stable owner. `runnerPtyUrl` can be opened with Node's global `WebSocket` without custom headers, but the runner must implement the framed input and acknowledgement protocol below. The query credential is session-scoped, rotates on registration, is stored only as a hash, and is not exposed through viewer/session APIs.
+Every new registration and every resume requires `owner`; it must resolve to exactly one active Crabfleet user by login, email, or stable subject. Existing work keys resume only when the supplied owner resolves to the same stable owner subject already stored on the work key. Ownerless resumes fail closed before token rotation, and a work key cannot transfer to a different stable owner. `runnerPtyUrl` can be opened with Node's global `WebSocket` without custom headers. Existing runners retain raw input/output; runners advertise `cfr1-framed-io-v1` to negotiate the framed contract below. The query credential is session-scoped, rotates on registration, is stored only as a hash, and is not exposed through viewer/session APIs.
 
 ### GET /api/agent/interactive-sessions/:id/runner-pty
 
 WebSocket endpoint for the outbound GitHub Actions runner. Authentication uses the scoped `agentToken` query parameter embedded in `runnerPtyUrl`. One runner is current; a reconnect replaces the previous runner while browser viewers remain attached.
 
-Runner output remains unframed: text and binary WebSocket messages are fanned
-out as raw terminal output. Viewer input and relay control traffic use binary
-`CFR1` frames so terminal text cannot be mistaken for an acknowledgement.
-Legacy runners that expect raw viewer input are incompatible and their
-unframed input is rejected.
+Runner sockets begin in legacy mode with raw input and output. A runner
+negotiates framed I/O by sending
+`{"type":"crabfleet_runner_capabilities","capabilities":["cfr1-framed-io-v1"]}`.
+The relay responds with the accepted capability. Negotiated input, output,
+acknowledgements, and relay control traffic use binary `CFR1` frames. The relay
+wraps legacy output before forwarding it to viewers, so arbitrary raw PTY bytes
+cannot be consumed as control traffic.
 
 Each `CFR1` frame occupies one binary WebSocket message and starts with:
 
@@ -626,6 +628,7 @@ Input IDs are nonempty ASCII `[A-Za-z0-9_-]` values of at most 80 bytes.
 | `0x01` input           | relay to runner  | raw terminal input bytes                                                      |
 | `0x02` acknowledgement | runner to relay  | one byte: `1` accepted or `0` rejected, followed by optional UTF-8 error text |
 | `0x03` lifecycle event | relay to viewers | empty input ID and one event-code byte                                        |
+| `0x04` output          | runner to relay  | empty input ID followed by raw terminal output bytes                          |
 
 Lifecycle event codes are `0x01` runner connected, `0x02` runner disconnected,
 and `0x03` runner waiting.
@@ -636,6 +639,10 @@ payload. Queueing the frame in `WebSocket.send()` is not acceptance. Crabfleet
 generates a rejected acknowledgement only when no current runner is available
 to receive the input frame or the relay send fails. Stale or mismatched
 acknowledgement IDs do not complete another pending input.
+
+Before negotiation, the relay unwraps viewer input to raw bytes and reports
+acceptance once the runner socket accepts the send. This preserves existing
+runner integrations while negotiated runners provide PTY-level completion.
 
 See [GitHub Actions Sessions](/github-actions-sessions/#runner-pty) for a
 complete Node runner integration.
