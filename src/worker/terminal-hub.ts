@@ -661,13 +661,17 @@ export class TerminalHub {
                       (pending) => pending.runnerGeneration === relayEvent.generation,
                       {
                         accepted: false,
-                        error: "GitHub Actions runner disconnected before accepting input",
+                        deliveryUnknown: true,
+                        error:
+                          "terminal input delivery outcome is unknown; the runner may still complete it",
                       },
                     );
                   } else {
                     completeAllTerminalInputAcknowledgements(activeSubscription, {
                       accepted: false,
-                      error: "GitHub Actions runner disconnected before accepting input",
+                      deliveryUnknown: true,
+                      error:
+                        "terminal input delivery outcome is unknown; the runner may still complete it",
                     });
                   }
                 } else if (relayEvent.type === "runner_connected") {

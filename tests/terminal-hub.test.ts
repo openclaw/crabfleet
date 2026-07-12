@@ -1453,7 +1453,7 @@ test("GitHub Actions close rejects every pending input acknowledgement", async (
   server.emit("close");
 });
 
-test("GitHub Actions runner disconnect rejects pending input without closing the viewer relay", async () => {
+test("GitHub Actions runner disconnect reports pending input as delivery unknown", async () => {
   const client = socket();
   const server = socket();
   const upstream = socket();
@@ -1501,13 +1501,91 @@ test("GitHub Actions runner disconnect rejects pending input without closing the
   assert.equal(
     disconnectEvents.some(
       (event) =>
-        (event as { type?: string }).type === "input-rejected" &&
+        (event as { type?: string }).type === "input-delivery-unknown" &&
         (event as { error?: string }).error ===
-          "GitHub Actions runner disconnected before accepting input",
+          "terminal input delivery outcome is unknown; the runner may still complete it",
     ),
     true,
     JSON.stringify(disconnectEvents),
   );
+  server.emit("close");
+});
+
+test("generation-fenced runner disconnect marks only matching input as delivery unknown", async () => {
+  const client = socket();
+  const server = socket();
+  const upstream = socket();
+  const hub = new TerminalHub(
+    dependencies(client, server, upstream, {
+      async readSession() {
+        return githubActionsSession;
+      },
+      async openUpstream() {
+        return {
+          socket: upstream,
+          inputAcknowledgements: true,
+          inputGenerations: true,
+          initialRunnerGeneration: "generation-current",
+          outputAcknowledgements: false,
+          async markConnected() {},
+        };
+      },
+    }),
+  );
+  await hub.open(
+    new Request("https://fleet.example/api/terminal/ws", {
+      headers: { upgrade: "websocket" },
+    }),
+    user,
+  );
+  server.emit("message", {
+    data: encodeTerminalFrame({
+      type: TerminalMessageType.Subscribe,
+      sessionId: githubActionsSession.id,
+      payload: encodeSubscribePayload({ flags: 0, columns: 120, rows: 34 }),
+    }),
+  });
+  await flushQueues();
+  await flushQueues();
+
+  server.emit("message", {
+    data: encodeTerminalFrame({
+      type: TerminalMessageType.Input,
+      sessionId: githubActionsSession.id,
+      payload: new TextEncoder().encode("possibly delivered"),
+    }),
+  });
+  await flushQueues();
+  assert.equal(relayInput(upstream.sent.at(-1)!).generation, "generation-current");
+
+  emitRelayEvent(upstream, "runner_disconnected", "generation-stale");
+  await flushQueues();
+  await flushQueues();
+  assert.equal(
+    server.sent
+      .map((payload) => frame(payload))
+      .filter((message) => message.type === TerminalMessageType.Event)
+      .map((message) => decodeJsonPayload(message.payload) as { type?: string })
+      .some((message) => message.type?.startsWith("input-")),
+    false,
+  );
+
+  emitRelayEvent(upstream, "runner_disconnected", "generation-current");
+  await flushQueues();
+  await flushQueues();
+
+  const completions = server.sent
+    .map((payload) => frame(payload))
+    .filter((message) => message.type === TerminalMessageType.Event)
+    .map((message) => decodeJsonPayload(message.payload) as { type?: string; error?: string })
+    .filter((message) => message.type?.startsWith("input-"));
+  assert.deepEqual(completions, [
+    {
+      type: "input-delivery-unknown",
+      error: "terminal input delivery outcome is unknown; the runner may still complete it",
+    },
+  ]);
+  assert.deepEqual(upstream.closed, []);
   server.emit("close");
 });
 
