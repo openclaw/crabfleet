@@ -190,6 +190,7 @@ export class RuntimeAdapterWorkspaceLifecycle {
     retainedRegistration?: RuntimeAdapterWorkspaceRegistration | null,
     retainedCreatePending?: boolean,
   ): Promise<RuntimeAdapterWorkspaceStopResult> {
+    const supersededCleanup = retainedRegistration !== undefined;
     const registration = retainedRegistration
       ? {
           adapter_control_plane: retainedRegistration.controlPlane,
@@ -208,13 +209,18 @@ export class RuntimeAdapterWorkspaceLifecycle {
       registration?.profile ?? "",
       registration?.adapter_control_plane,
     );
-    if (registration?.adapter_create_pending !== 0) {
+    if (registration?.adapter_create_pending !== 0 && !supersededCleanup) {
       return {
         status: "stopping",
         message: "runtime adapter stop waiting for create resolution",
       };
     }
-    return this.stopWorkspace(registration?.profile ?? "", controlPlane, adapterWorkspaceId);
+    return this.stopWorkspace(
+      registration?.profile ?? "",
+      controlPlane,
+      adapterWorkspaceId,
+      supersededCleanup && registration?.adapter_create_pending !== 0,
+    );
   }
 
   private async reconcileStopping(
@@ -523,6 +529,7 @@ export class RuntimeAdapterWorkspaceLifecycle {
     profile: string,
     registeredControlPlane: string,
     adapterWorkspaceId: string,
+    retryMissing = false,
   ): Promise<RuntimeAdapterWorkspaceStopResult> {
     const controlPlane = requireRegisteredRuntimeAdapterControlPlane(
       this.env,
@@ -546,6 +553,12 @@ export class RuntimeAdapterWorkspaceLifecycle {
     const message =
       parsed?.message ??
       redactedAdapterResponseMessage(body, fallbackMessage, [adapterWorkspaceId]);
+    if (response.status === 404 && retryMissing) {
+      return {
+        status: "stopping",
+        message: "runtime adapter workspace not yet visible; cleanup retry pending",
+      };
+    }
     if (response.status === 404 || response.status === 204) {
       return { status: "stopped", message };
     }

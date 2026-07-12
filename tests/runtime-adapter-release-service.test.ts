@@ -1,7 +1,16 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import { DatabaseSync } from "node:sqlite";
 import test from "node:test";
 
 import type { RuntimeEnv } from "../src/worker/env.ts";
+import {
+  claimRuntimeAdapterWorkspaceCleanup,
+  claimRuntimeAdapterWorkspaceCleanupBatch,
+  completeRuntimeAdapterWorkspaceCleanup,
+  persistRuntimeAdapterWorkspaceCleanupEvidence,
+  stageRuntimeAdapterWorkspaceCleanup,
+} from "../src/worker/provisioning/runtime-adapter-release-repository.ts";
 import {
   clearRuntimeAdapterCreatePending,
   confirmRuntimeAdapterRelease,
@@ -10,6 +19,7 @@ import {
 import {
   RuntimeAdapterReleaseService,
   type RuntimeAdapterReleaseServiceDependencies,
+  type RuntimeAdapterWorkspaceCleanup,
   type RuntimeAdapterWorkspaceRegistration,
 } from "../src/worker/provisioning/runtime-adapter-release-service.ts";
 
@@ -28,7 +38,25 @@ type PreparedStatement = {
 function releaseDependencies(
   overrides: Partial<RuntimeAdapterReleaseServiceDependencies> = {},
 ): RuntimeAdapterReleaseServiceDependencies {
+  let stagedCleanup: RuntimeAdapterWorkspaceCleanup | null = null;
   return {
+    async stageCleanup(input) {
+      stagedCleanup = {
+        sessionId: input.sessionId,
+        adapterWorkspaceId: input.adapterWorkspaceId,
+        registration: input.registration,
+        createPending: input.createPending,
+        claim: "claim-1",
+      };
+    },
+    async claimCleanup() {
+      return stagedCleanup;
+    },
+    async claimPendingCleanups() {
+      return [];
+    },
+    async persistCleanupEvidence() {},
+    async completeCleanup() {},
     async clearCreatePending() {},
     async stopWorkspace() {
       return { status: "stopped", message: "runtime workspace released" };
@@ -78,6 +106,18 @@ test("superseded release clears the create marker before stopping and confirming
   const calls: string[] = [];
   const service = new RuntimeAdapterReleaseService(
     releaseDependencies({
+      async stageCleanup(input) {
+        calls.push(`stage:${input.sessionId}:${input.adapterWorkspaceId}`);
+      },
+      async claimCleanup(sessionId, adapterWorkspaceId) {
+        return {
+          sessionId,
+          adapterWorkspaceId,
+          registration,
+          createPending: false,
+          claim: "claim-1",
+        };
+      },
       async clearCreatePending(sessionId, adapterWorkspaceId) {
         calls.push(`clear:${sessionId}:${adapterWorkspaceId}`);
       },
@@ -91,6 +131,9 @@ test("superseded release clears the create marker before stopping and confirming
         calls.push(`confirm:${sessionId}:${adapterWorkspaceId}:${now}:${message}`);
         return "stopped";
       },
+      async completeCleanup(cleanup) {
+        calls.push(`complete:${cleanup.sessionId}:${cleanup.adapterWorkspaceId}`);
+      },
     }),
   );
 
@@ -103,9 +146,11 @@ test("superseded release clears the create marker before stopping and confirming
   });
 
   assert.deepEqual(calls, [
+    "stage:IS-101:fleet-a-is-101",
     "clear:IS-101:fleet-a-is-101",
     "stop:IS-101:fleet-a-is-101:default:https://adapter.example.test/:false",
     "confirm:IS-101:fleet-a-is-101:200:runtime workspace released",
+    "complete:IS-101:fleet-a-is-101",
   ]);
 });
 
@@ -168,6 +213,173 @@ test("superseded release records redacted provider failures for retry", async ()
       "provider unavailable",
     ],
   ]);
+});
+
+test("superseded cleanup survives ownership loss and retries only the old workspace", async () => {
+  const replacementWorkspaceId = "fleet-a-is-101-replacement";
+  const cleanupRows = new Map<string, RuntimeAdapterWorkspaceCleanup>();
+  const stopped: string[] = [];
+  const sessionEvidence: string[] = [];
+  let stopAttempts = 0;
+  const service = new RuntimeAdapterReleaseService(
+    releaseDependencies({
+      async stageCleanup(input) {
+        cleanupRows.set(input.adapterWorkspaceId, {
+          sessionId: input.sessionId,
+          adapterWorkspaceId: input.adapterWorkspaceId,
+          registration: input.registration,
+          createPending: input.createPending,
+          claim: "claim-1",
+        });
+      },
+      async claimCleanup(_sessionId, adapterWorkspaceId) {
+        return cleanupRows.get(adapterWorkspaceId) ?? null;
+      },
+      async claimPendingCleanups() {
+        return [...cleanupRows.values()].map((cleanup) => ({
+          ...cleanup,
+          claim: "claim-2",
+        }));
+      },
+      async stopWorkspace(_sessionId, adapterWorkspaceId) {
+        stopped.push(adapterWorkspaceId);
+        stopAttempts += 1;
+        return stopAttempts === 1
+          ? { status: "stopping", message: "provider stop pending" }
+          : { status: "stopped", message: "provider workspace released" };
+      },
+      async persistCleanupEvidence(cleanup, message) {
+        cleanupRows.set(cleanup.adapterWorkspaceId, {
+          ...cleanup,
+          claim: "",
+        });
+        assert.equal(message, "provider stop pending");
+      },
+      async persistStopEvidence(_sessionId, adapterWorkspaceId) {
+        if (adapterWorkspaceId === replacementWorkspaceId) {
+          sessionEvidence.push(adapterWorkspaceId);
+        }
+      },
+      async confirmRelease(_sessionId, adapterWorkspaceId) {
+        assert.notEqual(adapterWorkspaceId, replacementWorkspaceId);
+        return null;
+      },
+      async completeCleanup(cleanup) {
+        cleanupRows.delete(cleanup.adapterWorkspaceId);
+      },
+    }),
+  );
+
+  await service.stopSuperseded({
+    sessionId: "IS-101",
+    adapterWorkspaceId: "fleet-a-is-101-old",
+    registration,
+    createPending: true,
+    now: 200,
+  });
+  assert.equal(cleanupRows.size, 1);
+
+  await service.retryPending(300);
+
+  assert.deepEqual(stopped, ["fleet-a-is-101-old", "fleet-a-is-101-old"]);
+  assert.deepEqual(sessionEvidence, []);
+  assert.equal(cleanupRows.size, 0);
+});
+
+test("superseded provider failures remain independently retryable", async () => {
+  const cleanupRows: RuntimeAdapterWorkspaceCleanup[] = [];
+  let fail = true;
+  const service = new RuntimeAdapterReleaseService(
+    releaseDependencies({
+      async stageCleanup(input) {
+        cleanupRows.push({
+          sessionId: input.sessionId,
+          adapterWorkspaceId: input.adapterWorkspaceId,
+          registration: input.registration,
+          createPending: input.createPending,
+          claim: "claim-1",
+        });
+      },
+      async claimCleanup() {
+        return cleanupRows[0] ?? null;
+      },
+      async claimPendingCleanups() {
+        return cleanupRows;
+      },
+      async stopWorkspace() {
+        if (fail) {
+          fail = false;
+          throw new Error("provider unavailable");
+        }
+        return { status: "stopped", message: "provider workspace released" };
+      },
+      async persistCleanupEvidence(cleanup, message, _now, reconcileError) {
+        assert.equal(cleanup.adapterWorkspaceId, "fleet-a-is-101-old");
+        assert.equal(message, "superseded runtime adapter stop pending: provider unavailable");
+        assert.equal(reconcileError, "provider unavailable");
+      },
+      async completeCleanup() {
+        cleanupRows.length = 0;
+      },
+    }),
+  );
+
+  await service.stopSuperseded({
+    sessionId: "IS-101",
+    adapterWorkspaceId: "fleet-a-is-101-old",
+    registration,
+    createPending: true,
+    now: 200,
+  });
+  assert.equal(cleanupRows.length, 1);
+
+  await service.retryPending(300);
+  assert.equal(cleanupRows.length, 0);
+});
+
+test("runtime adapter cleanup storage is independent and claim fenced", async () => {
+  const sqlite = new DatabaseSync(":memory:");
+  sqlite.exec(
+    readFileSync(
+      new URL("../migrations/0037_runtime_adapter_workspace_cleanup.sql", import.meta.url),
+      "utf8",
+    ),
+  );
+  const env = sqliteRuntimeEnv(sqlite);
+  await stageRuntimeAdapterWorkspaceCleanup(env, {
+    sessionId: "IS-101",
+    adapterWorkspaceId: "fleet-a-is-101-old",
+    registration,
+    createPending: true,
+    now: 200,
+  });
+
+  const claimed = await claimRuntimeAdapterWorkspaceCleanup(
+    env,
+    "IS-101",
+    "fleet-a-is-101-old",
+    200,
+  );
+  assert.ok(claimed);
+  assert.equal(claimed.createPending, true);
+  assert.deepEqual(claimed.registration, registration);
+  assert.equal((await claimRuntimeAdapterWorkspaceCleanupBatch(env, 200, 3)).length, 0);
+
+  await persistRuntimeAdapterWorkspaceCleanupEvidence(
+    env,
+    claimed,
+    "provider stop pending",
+    200,
+    null,
+  );
+  assert.equal((await claimRuntimeAdapterWorkspaceCleanupBatch(env, 15_199, 3)).length, 0);
+  const retry = await claimRuntimeAdapterWorkspaceCleanupBatch(env, 15_200, 3);
+  assert.equal(retry.length, 1);
+  await completeRuntimeAdapterWorkspaceCleanup(env, retry[0]);
+  assert.equal(
+    sqlite.prepare("SELECT COUNT(*) AS count FROM runtime_adapter_workspace_cleanups").get()?.count,
+    0,
+  );
 });
 
 test("confirmed release waits for create resolution behind an exact lifecycle fence", async () => {
@@ -324,4 +536,65 @@ function releaseEffects(calls: string[]): RuntimeAdapterReleaseEffects {
       calls.push(`finalize:${sessionId}:${status}:${now}`);
     },
   };
+}
+
+type BoundStatement = {
+  execute(): {
+    results: Record<string, unknown>[];
+    success: true;
+    meta: { changes: number; last_row_id?: number };
+  };
+};
+
+function sqliteRuntimeEnv(sqlite: DatabaseSync): RuntimeEnv {
+  function execute(sql: string, parameters: unknown[]) {
+    const statement = sqlite.prepare(sql);
+    if (/^\s*(?:select|pragma|with)\b|\breturning\b/i.test(sql)) {
+      const results = statement.all(...parameters).map((row) => ({ ...row }));
+      const changes = Number(sqlite.prepare("SELECT changes() AS changes").get()?.changes ?? 0);
+      return { results, success: true as const, meta: { changes } };
+    }
+    const result = statement.run(...parameters);
+    return {
+      results: [],
+      success: true as const,
+      meta: {
+        changes: Number(result.changes),
+        last_row_id: Number(result.lastInsertRowid),
+      },
+    };
+  }
+  return {
+    DB: {
+      prepare(sql: string) {
+        return {
+          bind(...parameters: unknown[]) {
+            const bound = {
+              execute: () => execute(sql, parameters),
+              async all() {
+                return bound.execute();
+              },
+              async run() {
+                return bound.execute();
+              },
+            };
+            return bound;
+          },
+        };
+      },
+      async batch(statements: D1PreparedStatement[]) {
+        sqlite.exec("BEGIN IMMEDIATE");
+        try {
+          const results = statements.map((statement) =>
+            (statement as unknown as BoundStatement).execute(),
+          );
+          sqlite.exec("COMMIT");
+          return results;
+        } catch (error) {
+          sqlite.exec("ROLLBACK");
+          throw error;
+        }
+      },
+    } as unknown as D1Database,
+  } as RuntimeEnv;
 }

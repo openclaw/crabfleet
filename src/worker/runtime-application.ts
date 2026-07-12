@@ -3,6 +3,13 @@ import { mapWithConcurrency } from "./concurrency.ts";
 import type { InteractiveSessionRow } from "./database.ts";
 import type { RuntimeEnv } from "./env.ts";
 import { readAbandonedInteractiveSessionReservations } from "./openclaw-repository.ts";
+import {
+  claimRuntimeAdapterWorkspaceCleanup,
+  claimRuntimeAdapterWorkspaceCleanupBatch,
+  completeRuntimeAdapterWorkspaceCleanup,
+  persistRuntimeAdapterWorkspaceCleanupEvidence,
+  stageRuntimeAdapterWorkspaceCleanup,
+} from "./provisioning/runtime-adapter-release-repository.ts";
 import { safeProviderError } from "./provisioning/result.ts";
 import { RuntimeAdapterReleaseService } from "./provisioning/runtime-adapter-release-service.ts";
 import {
@@ -186,6 +193,20 @@ export class RuntimeApplication {
       services.release,
       () =>
         new RuntimeAdapterReleaseService({
+          stageCleanup: (input) => stageRuntimeAdapterWorkspaceCleanup(this.env, input),
+          claimCleanup: (sessionId, adapterWorkspaceId, now) =>
+            claimRuntimeAdapterWorkspaceCleanup(this.env, sessionId, adapterWorkspaceId, now),
+          claimPendingCleanups: (now) =>
+            claimRuntimeAdapterWorkspaceCleanupBatch(this.env, now, runtimeAdapterReconcileLimit),
+          persistCleanupEvidence: (cleanup, message, now, reconcileError) =>
+            persistRuntimeAdapterWorkspaceCleanupEvidence(
+              this.env,
+              cleanup,
+              message,
+              now,
+              reconcileError,
+            ),
+          completeCleanup: (cleanup) => completeRuntimeAdapterWorkspaceCleanup(this.env, cleanup),
           clearCreatePending: (sessionId, adapterWorkspaceId) =>
             clearRuntimeAdapterCreatePending(this.env, sessionId, adapterWorkspaceId),
           stopWorkspace: (sessionId, adapterWorkspaceId, registration, createPending) =>
@@ -375,6 +396,7 @@ export class RuntimeApplication {
   }
 
   private async cleanupAbandonedPreparations(now: number): Promise<void> {
+    await this.release().retryPending(now);
     const rows = await readAbandonedInteractiveSessionReservations(
       this.env,
       now - interactiveSessionPreparationStaleMs,

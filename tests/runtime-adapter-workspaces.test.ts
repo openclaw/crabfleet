@@ -401,6 +401,53 @@ test("superseded stop uses retained registration after the session row moves on"
   });
 });
 
+test("superseded pending creates retry DELETE until the old workspace becomes visible", async () => {
+  const requests: Array<{ url: string; method: string | undefined }> = [];
+  let responseStatus = 404;
+  const service = new RuntimeAdapterWorkspaceLifecycle(
+    runtimeEnv(),
+    dependencies({
+      async fetch(input, init) {
+        requests.push({ url: input, method: init.method });
+        return responseStatus === 204
+          ? new Response(null, { status: 204 })
+          : Response.json({ message: "workspace not found" }, { status: responseStatus });
+      },
+    }),
+  );
+  const registration = {
+    profile: "default",
+    controlPlane: "https://adapter.example.test/",
+  };
+
+  assert.deepEqual(
+    await service.stopForSession("IS-42", "workspace-superseded", registration, true),
+    {
+      status: "stopping",
+      message: "runtime adapter workspace not yet visible; cleanup retry pending",
+    },
+  );
+
+  responseStatus = 204;
+  assert.deepEqual(
+    await service.stopForSession("IS-42", "workspace-superseded", registration, true),
+    {
+      status: "stopped",
+      message: "runtime adapter workspace released",
+    },
+  );
+  assert.deepEqual(requests, [
+    {
+      url: "https://adapter.example.test/v1/workspaces/workspace-superseded",
+      method: "DELETE",
+    },
+    {
+      url: "https://adapter.example.test/v1/workspaces/workspace-superseded",
+      method: "DELETE",
+    },
+  ]);
+});
+
 test("session-bound stop redacts provider credentials from failures", async () => {
   const env = runtimeEnv(() => [
     {

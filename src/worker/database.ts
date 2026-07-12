@@ -221,6 +221,25 @@ export type InteractiveSessionTable = {
 
 export type InteractiveSessionRow = Selectable<InteractiveSessionTable>;
 
+export type RuntimeAdapterWorkspaceCleanupTable = {
+  session_id: string;
+  adapter_workspace_id: string;
+  profile: string | null;
+  control_plane: string | null;
+  create_pending: number;
+  message: string;
+  reconcile_error: string | null;
+  attempt_count: Generated<number>;
+  last_attempt_at: number | null;
+  next_attempt_at: number;
+  cleanup_claim: string | null;
+  cleanup_claim_expires_at: number | null;
+  created_at: number;
+  updated_at: number;
+};
+
+export type RuntimeAdapterWorkspaceCleanupRow = Selectable<RuntimeAdapterWorkspaceCleanupTable>;
+
 export type InteractiveSessionGrantTable = {
   session_id: string;
   subject: string;
@@ -395,6 +414,7 @@ export type Database = {
   cards: CardTable;
   run_attempts: RunAttemptTable;
   interactive_sessions: InteractiveSessionTable;
+  runtime_adapter_workspace_cleanups: RuntimeAdapterWorkspaceCleanupTable;
   interactive_session_grants: InteractiveSessionGrantTable;
   openclaw_request_replays: OpenClawRequestReplayTable;
   interactive_session_events: InteractiveSessionEventTable;
