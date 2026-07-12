@@ -18,6 +18,7 @@ import {
   retireObsoleteSandboxCredentialPolicyReference,
   renewSandboxCredentialPolicyRegistration,
   sandboxCredentialPolicyLookupIdsForGeneration,
+  sandboxCredentialPolicyPersistedLookupIds,
   sandboxCredentialPolicyRegistrationQueries,
   sandboxLookupIds,
   stageSandboxCredentialPolicyReferenceRepair,
@@ -28,7 +29,10 @@ import { credentialPolicyRegistrationAccepted } from "../src/credential-policy-f
 import { database } from "../src/worker/database.ts";
 import type { RuntimeEnv } from "../src/worker/env.ts";
 import type { SandboxCredentialPolicyRegistration } from "../src/worker/session-control-policy.ts";
-import { sandboxCredentialPolicyRegistrationLookupIds } from "../src/worker/session-control-policy.ts";
+import {
+  sandboxCredentialPolicyRegistrationLookupIds,
+  sandboxCredentialPolicyRollbackLookupIds,
+} from "../src/worker/session-control-policy.ts";
 import type { StoredSandboxCredentialPolicy } from "../src/worker/session-control-policy.ts";
 
 type PreparedStatement = {
@@ -194,6 +198,7 @@ function credentialPolicyDatabase(options: { applyMigrations?: boolean } = {}): 
 function sqliteRuntimeEnv(
   sqlite: DatabaseSync,
   options: {
+    durableObjectId?: string;
     interruptAfterStatement?: number;
     throwAfterCommit?: boolean;
     failNextReadAfterBatch?: boolean;
@@ -265,7 +270,7 @@ function sqliteRuntimeEnv(
     } as unknown as D1Database,
     SANDBOX: {
       idFromName() {
-        return { toString: () => "do-1" };
+        return { toString: () => options.durableObjectId ?? "do-1" };
       },
     } as unknown as DurableObjectNamespace,
   } as RuntimeEnv;
@@ -346,12 +351,54 @@ test("staged lookup identity decoder requires the stable sandbox lookup", () => 
     ["sandbox-1", "do-current"],
   );
   assert.deepEqual(
+    sandboxCredentialPolicyRegistrationLookupIds(
+      null,
+      "sandbox-1",
+      ["sandbox-1", "do-current"],
+      ["do-persisted", "do-rollback", "do-persisted"],
+    ),
+    ["sandbox-1", "do-current", "do-persisted", "do-rollback"],
+  );
+  assert.deepEqual(
     sandboxCredentialPolicyRegistrationLookupIds(null, "sandbox-1", ["do-current"]),
     ["sandbox-1"],
   );
   assert.deepEqual(
     sandboxCredentialPolicyRegistrationLookupIds("{", "sandbox-1", ["sandbox-1", "do-current"]),
     ["sandbox-1"],
+  );
+});
+
+test("rollback lookup decoder preserves exact valid historical identities", () => {
+  const rollbackJson = JSON.stringify([
+    {
+      generation: "generation:existing",
+      policy: {
+        allowedHosts: [],
+        githubRepo: "openclaw/crabfleet",
+        owner: "operator",
+        sandboxId: "sandbox-1",
+        sessionId: "IS-42",
+      },
+    },
+    {
+      generation: "generation:existing",
+      policy: {
+        allowedHosts: [],
+        githubRepo: "openclaw/crabfleet",
+        owner: "operator",
+        sandboxId: "do-old",
+        sessionId: "IS-42",
+      },
+    },
+  ]);
+  assert.deepEqual(sandboxCredentialPolicyRollbackLookupIds(rollbackJson, "IS-42"), [
+    "sandbox-1",
+    "do-old",
+  ]);
+  assert.throws(
+    () => sandboxCredentialPolicyRollbackLookupIds(rollbackJson, "IS-other"),
+    /rollback snapshot is invalid/,
   );
 });
 
@@ -535,7 +582,7 @@ test("migration leaves live legacy registrations unstaged while old workers rene
   );
 });
 
-test("lookup identity migration preserves compatibility recovery for pre-0037 staging", () => {
+test("pre-0037 recovery preserves current, persisted, and rollback lookup identities", async () => {
   const sqlite = credentialPolicyDatabase({ applyMigrations: false });
   sqlite.exec(
     readFileSync(
@@ -555,14 +602,30 @@ test("lookup identity migration preserves compatibility recovery for pre-0037 st
       "utf8",
     ),
   );
-  sqlite
-    .prepare(`
-      DELETE FROM interactive_session_credential_policies
-      WHERE session_id = 'IS-42'
-        AND sandbox_id = 'sandbox-1'
-        AND lookup_id = 'do-1'
-    `)
-    .run();
+  const rollback = [
+    {
+      generation: "generation:existing",
+      policy: {
+        allowedHosts: [],
+        githubCredentialSource: "none",
+        githubRepo: "openclaw/crabfleet",
+        owner: "operator",
+        sandboxId: "sandbox-1",
+        sessionId: "IS-42",
+      },
+    },
+    {
+      generation: "generation:existing",
+      policy: {
+        allowedHosts: [],
+        githubCredentialSource: "none",
+        githubRepo: "openclaw/crabfleet",
+        owner: "operator",
+        sandboxId: "do-rollback-old",
+        sessionId: "IS-42",
+      },
+    },
+  ];
   sqlite
     .prepare(`
       INSERT INTO interactive_session_credential_policy_registrations (
@@ -583,19 +646,7 @@ test("lookup identity migration preserves compatibility recovery for pre-0037 st
       "generation:staged",
       "registration:staged",
       Number.MAX_SAFE_INTEGER,
-      JSON.stringify([
-        {
-          generation: "generation:existing",
-          policy: {
-            allowedHosts: [],
-            githubCredentialSource: "none",
-            githubRepo: "openclaw/crabfleet",
-            owner: "operator",
-            sandboxId: "do-old",
-            sessionId: "IS-42",
-          },
-        },
-      ]),
+      JSON.stringify(rollback),
     );
   sqlite.exec(
     readFileSync(
@@ -606,20 +657,32 @@ test("lookup identity migration preserves compatibility recovery for pre-0037 st
 
   const row = sqlite
     .prepare(`
-      SELECT lookup_ids_json, repair_generation
+      SELECT lookup_ids_json, repair_generation, rollback_policies_json
       FROM interactive_session_credential_policy_registrations
       WHERE session_id = 'IS-42' AND sandbox_id = 'sandbox-1'
     `)
     .get();
-  const env = sqliteRuntimeEnv(sqlite);
+  const env = sqliteRuntimeEnv(sqlite, { durableObjectId: "do-current" });
+  const persistedLookupIds = await sandboxCredentialPolicyPersistedLookupIds(
+    env,
+    "IS-42",
+    "sandbox-1",
+  );
+  const rollbackLookupIds = sandboxCredentialPolicyRollbackLookupIds(
+    String(row?.rollback_policies_json),
+    "IS-42",
+  );
   assert.equal(row?.lookup_ids_json, null);
+  assert.deepEqual(persistedLookupIds, ["do-1", "sandbox-1"]);
+  assert.deepEqual(rollbackLookupIds, ["sandbox-1", "do-rollback-old"]);
   assert.deepEqual(
     sandboxCredentialPolicyRegistrationLookupIds(
       row?.lookup_ids_json as string | null,
       "sandbox-1",
       sandboxLookupIds(env, "sandbox-1"),
+      [...persistedLookupIds, ...rollbackLookupIds],
     ),
-    ["sandbox-1", "do-1"],
+    ["sandbox-1", "do-current", "do-1", "do-rollback-old"],
   );
   assert.equal(row?.repair_generation, null);
 });

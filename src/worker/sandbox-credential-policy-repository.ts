@@ -156,6 +156,21 @@ export async function sandboxCredentialPolicyLookupIdsForGeneration(
   return rows.map((row) => row.lookup_id);
 }
 
+export async function sandboxCredentialPolicyPersistedLookupIds(
+  env: RuntimeEnv,
+  sessionId: string,
+  sandboxId: string,
+): Promise<string[]> {
+  const rows = await database(env)
+    .selectFrom("interactive_session_credential_policies")
+    .select("lookup_id")
+    .where("session_id", "=", sessionId)
+    .where("sandbox_id", "=", sandboxId)
+    .orderBy("lookup_id")
+    .execute();
+  return rows.map((row) => row.lookup_id);
+}
+
 export async function sandboxCredentialPolicyHasDurableOwner(
   env: RuntimeEnv,
   lookupId: string,

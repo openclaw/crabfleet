@@ -16,6 +16,7 @@ import { safeProviderError } from "./provisioning/result.ts";
 import {
   queueSandboxCredentialPolicyCleanup,
   sandboxCredentialPolicyCleanupAuthorizedCondition,
+  sandboxCredentialPolicyPersistedLookupIds,
   sandboxLookupIds,
 } from "./sandbox-credential-policy-repository.ts";
 import { restoreSandboxCredentialPolicyRollback } from "./sandbox-credential-policy-rollback.ts";
@@ -23,7 +24,10 @@ import { scanCredentialPolicyCleanupPage } from "./sandbox-credential-policy-sca
 import { isCurrentSandboxLease, sandboxLeaseInfo } from "./sandbox-lease.ts";
 import { isSandboxSessionAlreadyGone } from "./sandbox-session-errors.ts";
 import { sandboxControlStub } from "./session-control-do.ts";
-import { sandboxCredentialPolicyRegistrationLookupIds } from "./session-control-policy.ts";
+import {
+  sandboxCredentialPolicyRegistrationLookupIds,
+  sandboxCredentialPolicyRollbackLookupIds,
+} from "./session-control-policy.ts";
 import { finalizeTerminalInteractiveSession } from "./session-terminal-finalization.ts";
 
 const credentialPolicyCleanupLimit = 8;
@@ -130,11 +134,28 @@ async function reconcileStagedCredentialPolicyRegistration(
     .executeTakeFirst();
   if ((claimed.numUpdatedRows ?? 0n) === 0n) return;
   try {
+    const persistedLookupIds = await sandboxCredentialPolicyPersistedLookupIds(
+      env,
+      registration.session_id,
+      registration.sandbox_id,
+    );
+    let rollbackLookupIds: string[] = [];
+    if (registration.rollback_policies_json !== null) {
+      try {
+        rollbackLookupIds = sandboxCredentialPolicyRollbackLookupIds(
+          registration.rollback_policies_json,
+          registration.session_id,
+        );
+      } catch {
+        // Malformed rollback state cannot authorize additional cleanup identities.
+      }
+    }
     await Promise.all(
       sandboxCredentialPolicyRegistrationLookupIds(
         registration.lookup_ids_json,
         registration.sandbox_id,
         sandboxLookupIds(env, registration.sandbox_id),
+        [...persistedLookupIds, ...rollbackLookupIds],
       ).map((lookupId) =>
         unregisterSandboxCredentialPolicyLookup(
           env,

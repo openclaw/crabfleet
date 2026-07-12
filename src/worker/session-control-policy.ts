@@ -1,5 +1,6 @@
 import {
   credentialPolicyCleanupMatches,
+  credentialPolicyRollbackRecord,
   isCurrentCredentialPolicyGeneration,
   type CredentialPolicyGenerationRecord,
   type CredentialPolicyGenerationTombstone,
@@ -33,6 +34,7 @@ export function sandboxCredentialPolicyRegistrationLookupIds(
   value: string | null | undefined,
   sandboxId: string,
   expectedLookupIds: readonly string[],
+  historicalLookupIds: readonly string[] = [],
 ): string[] {
   if (value !== null && value !== undefined) {
     try {
@@ -40,10 +42,7 @@ export function sandboxCredentialPolicyRegistrationLookupIds(
       if (
         Array.isArray(parsed) &&
         parsed.length > 0 &&
-        parsed.every(
-          (lookupId) =>
-            typeof lookupId === "string" && lookupId.length > 0 && lookupId.length <= 200,
-        )
+        parsed.every(validSandboxCredentialPolicyLookupId)
       ) {
         const lookupIds = [...new Set(parsed)];
         if (lookupIds.includes(sandboxId)) return lookupIds;
@@ -53,8 +52,51 @@ export function sandboxCredentialPolicyRegistrationLookupIds(
     }
     return [sandboxId];
   }
-  const fallbackLookupIds = [...new Set(expectedLookupIds)];
-  return fallbackLookupIds.includes(sandboxId) ? fallbackLookupIds : [sandboxId];
+  const currentLookupIds = expectedLookupIds.includes(sandboxId) ? expectedLookupIds : [];
+  return [
+    ...new Set(
+      [sandboxId, ...currentLookupIds, ...historicalLookupIds].filter(
+        validSandboxCredentialPolicyLookupId,
+      ),
+    ),
+  ];
+}
+
+export function sandboxCredentialPolicyRollbackLookupIds(
+  value: string,
+  sessionId: string,
+): string[] {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(value);
+  } catch {
+    throw new Error("sandbox credential policy rollback snapshot is invalid");
+  }
+  if (!Array.isArray(parsed)) {
+    throw new Error("sandbox credential policy rollback snapshot is invalid");
+  }
+  const generations = new Set<string>();
+  const lookupIds = parsed.map((item) => {
+    const record = credentialPolicyRollbackRecord<SandboxCredentialPolicy>(item);
+    const lookupId = record?.policy.sandboxId;
+    if (
+      !record ||
+      record.policy.sessionId !== sessionId ||
+      !validSandboxCredentialPolicyLookupId(lookupId)
+    ) {
+      throw new Error("sandbox credential policy rollback snapshot is invalid");
+    }
+    generations.add(record.generation);
+    return lookupId;
+  });
+  if (new Set(lookupIds).size !== lookupIds.length || generations.size > 1) {
+    throw new Error("sandbox credential policy rollback snapshot is inconsistent");
+  }
+  return lookupIds;
+}
+
+function validSandboxCredentialPolicyLookupId(value: unknown): value is string {
+  return typeof value === "string" && value.length > 0 && value.length <= 200;
 }
 
 export function storedSandboxCredentialPolicy(

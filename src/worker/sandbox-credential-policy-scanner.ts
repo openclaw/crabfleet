@@ -14,12 +14,14 @@ import {
   finishSandboxCredentialPolicyRegistration,
   recordSandboxCredentialPolicyRefs,
   sandboxCredentialPolicyCleanupAuthorizedCondition,
+  sandboxCredentialPolicyPersistedLookupIds,
   sandboxLookupIds,
   type SandboxCredentialPolicyOwnershipFence,
 } from "./sandbox-credential-policy-repository.ts";
 import { sandboxLeaseInfo, sandboxLeasePrefix } from "./sandbox-lease.ts";
 import {
   sandboxCredentialPolicyRegistrationLookupIds,
+  sandboxCredentialPolicyRollbackLookupIds,
   type SandboxCredentialPolicyRegistration,
 } from "./session-control-policy.ts";
 
@@ -339,16 +341,26 @@ async function scanStagedCredentialPolicyRegistrations(
     LIMIT ${credentialPolicyScanLimit}
   `.execute(db);
   for (const row of result.rows) {
-    const registration: SandboxCredentialPolicyRegistration = {
-      generation: row.registration_generation,
-      claim: row.registration_claim,
-      lookupIds: sandboxCredentialPolicyRegistrationLookupIds(
-        row.lookup_ids_json,
-        row.sandbox_id,
-        sandboxLookupIds(env, row.sandbox_id),
-      ),
-    };
     try {
+      const rollbackLookupIds =
+        row.rollback_policies_json === null
+          ? []
+          : sandboxCredentialPolicyRollbackLookupIds(row.rollback_policies_json, row.session_id);
+      const persistedLookupIds = await sandboxCredentialPolicyPersistedLookupIds(
+        env,
+        row.session_id,
+        row.sandbox_id,
+      );
+      const registration: SandboxCredentialPolicyRegistration = {
+        generation: row.registration_generation,
+        claim: row.registration_claim,
+        lookupIds: sandboxCredentialPolicyRegistrationLookupIds(
+          row.lookup_ids_json,
+          row.sandbox_id,
+          sandboxLookupIds(env, row.sandbox_id),
+          [...persistedLookupIds, ...rollbackLookupIds],
+        ),
+      };
       const ownershipFence = credentialPolicyScanOwnershipFence(row, now);
       if (!ownershipFence) {
         await abandonSandboxCredentialPolicyRegistration(
@@ -389,7 +401,10 @@ async function scanStagedCredentialPolicyRegistrations(
       if (row.rollback_policies_json !== null) {
         if (!restoreRollback) throw new Error("sandbox credential policy rollback is unavailable");
         await restoreRollback({
-          registration: recovery.registration,
+          registration: {
+            ...recovery.registration,
+            lookupIds: rollbackLookupIds,
+          },
           registrationExpiresAt: recovery.registrationExpiresAt,
           rollbackJson: row.rollback_policies_json,
           sessionId: row.session_id,

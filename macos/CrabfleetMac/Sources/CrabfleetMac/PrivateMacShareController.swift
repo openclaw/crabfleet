@@ -212,6 +212,12 @@ final class DesktopHostRegistrationLifecycle {
         || !pendingRemovals.isEmpty)
   }
 
+  var canTerminateAfterCleanupFailure: Bool {
+    let hasActiveState =
+      !uncertainRegistrations.isEmpty || publishedRegistration != nil || !pendingRemovals.isEmpty
+    return !hasActiveState || hasDurableRecoveryState
+  }
+
   func publish(identity: TailnetIdentity, port: UInt16) async throws {
     try await loadStateIfNeeded()
     let hostID = CrabfleetDesktopRegistration.hostID(identity: identity)
@@ -743,7 +749,7 @@ final class PrivateMacShareController: ObservableObject {
     } catch {
       registryPhase = .failed(error.localizedDescription)
       notice = error.localizedDescription
-      return desktopRegistrationLifecycle.hasDurableRecoveryState
+      return desktopRegistrationLifecycle.canTerminateAfterCleanupFailure
     }
   }
 

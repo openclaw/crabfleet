@@ -756,6 +756,30 @@ struct PrivateMacShareTests {
   }
 
   @Test @MainActor
+  func idleApplicationTerminationContinuesWhenRecoveryServerIsUnavailable() async throws {
+    try await assertIdleApplicationTerminationContinues { _ in
+      throw URLError(.cannotConnectToHost)
+    }
+  }
+
+  @Test @MainActor
+  func idleApplicationTerminationContinuesWhenRecoverySessionHasExpired() async throws {
+    try await assertIdleApplicationTerminationContinues { request in
+      let responseURL = try #require(request.url)
+      return (
+        Data(),
+        try #require(
+          HTTPURLResponse(
+            url: responseURL,
+            statusCode: 401,
+            httpVersion: nil,
+            headerFields: nil
+          ))
+      )
+    }
+  }
+
+  @Test @MainActor
   func applicationTerminationRetainsAmbiguousPublicationForRelaunchCleanup() async throws {
     let identity = desktopIdentity(name: "durable-cleanup", address: "100.64.12.54")
     let registration = RecoverableAmbiguousDesktopRegistration(recoverFailures: 1)
@@ -848,7 +872,7 @@ struct PrivateMacShareTests {
   }
 
   @Test @MainActor
-  func applicationTerminationIsCancelledWhenRecoveryStateCannotBeSaved() async throws {
+  func applicationTerminationContinuesWhenDurableRecoveryCannotBeUpdated() async throws {
     let identity = desktopIdentity(name: "unsaved-cleanup", address: "100.64.12.55")
     let registration = RecoverableAmbiguousDesktopRegistration()
     let stateStore = ToggleDesktopRegistrationStateStore()
@@ -879,11 +903,44 @@ struct PrivateMacShareTests {
     )
 
     #expect(delegate.applicationShouldTerminate(NSApplication.shared) == .terminateLater)
-    #expect(await waitUntilAsync { replies == [false] })
+    #expect(await waitUntilAsync { replies == [true] })
+    #expect(stateStore.data != nil)
     if case .failed = controller.registryPhase {
-      // Expected: the application remains alive because recovery was not persisted.
+      // Expected: the existing durable retry identity remains available after relaunch.
     } else {
       Issue.record("expected failed registry persistence state")
+    }
+  }
+
+  @Test @MainActor
+  func applicationTerminationIsCancelledForUnpersistedActiveCleanup() async throws {
+    let identity = desktopIdentity(name: "active-cleanup", address: "100.64.12.59")
+    let registration = RecordingDesktopRegistration(
+      unregisterFailures: [identity.dnsName: 2]
+    )
+    let lifecycle = DesktopHostRegistrationLifecycle(registration: registration)
+    try await lifecycle.publish(identity: identity, port: 5_901)
+    let defaults = try #require(
+      UserDefaults(suiteName: "CrabfleetMacTests.\(UUID().uuidString)")
+    )
+    let controller = PrivateMacShareController(
+      runner: StaticTailscaleRunner(output: statusJSON()),
+      desktopRegistration: registration,
+      registrationLifecycle: lifecycle,
+      defaults: defaults
+    )
+    var replies: [Bool] = []
+    let delegate = CrabfleetApplicationDelegate(
+      shareController: controller,
+      replyToTerminationRequest: { replies.append($0) }
+    )
+
+    #expect(delegate.applicationShouldTerminate(NSApplication.shared) == .terminateLater)
+    #expect(await waitUntilAsync { replies == [false] })
+    if case .failed = controller.registryPhase {
+      // Expected: no durable retry state exists for the active registration.
+    } else {
+      Issue.record("expected failed active cleanup state")
     }
   }
 
@@ -2085,6 +2142,42 @@ struct PrivateMacShareTests {
           .unregister("recovered:scoped-publication"),
         ]
     )
+  }
+
+  @MainActor
+  private func assertIdleApplicationTerminationContinues(
+    transportHandler: @escaping (URLRequest) throws -> (Data, HTTPURLResponse)
+  ) async throws {
+    let registration = try #require(
+      CrabfleetDesktopRegistration(
+        environment: [
+          "CRABFLEET_API_URL": "https://fleet.example/api/fleet",
+          "CRABFLEET_SESSION_COOKIE": "crabbox_session=secret",
+        ],
+        transport: DesktopRegistrationTransport(handler: transportHandler)
+      ))
+    let defaults = try #require(
+      UserDefaults(suiteName: "CrabfleetMacTests.\(UUID().uuidString)")
+    )
+    let controller = PrivateMacShareController(
+      runner: StaticTailscaleRunner(output: statusJSON()),
+      desktopRegistration: registration,
+      defaults: defaults
+    )
+    var replies: [Bool] = []
+    let delegate = CrabfleetApplicationDelegate(
+      shareController: controller,
+      replyToTerminationRequest: { replies.append($0) }
+    )
+
+    #expect(delegate.applicationShouldTerminate(NSApplication.shared) == .terminateLater)
+    #expect(await waitUntilAsync { replies == [true] })
+    #expect(controller.phase == .idle)
+    if case .failed = controller.registryPhase {
+      // Recovery remains available for a later launch without blocking this idle quit.
+    } else {
+      Issue.record("expected recovery lookup failure")
+    }
   }
 
   @MainActor
