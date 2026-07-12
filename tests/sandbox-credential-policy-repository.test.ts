@@ -1379,6 +1379,41 @@ test("completed credential-policy rotation atomically promotes every active look
   );
 });
 
+test("expired credential-policy claims cannot promote active authority", async () => {
+  const sqlite = credentialPolicyDatabase();
+  const env = sqliteRuntimeEnv(sqlite);
+  const staged = await beginSandboxCredentialPolicyRegistration(
+    env,
+    "IS-42",
+    "sandbox-1",
+    ownershipFence,
+  );
+  sqlite
+    .prepare(`
+      UPDATE interactive_session_credential_policy_registrations
+      SET registration_claim_expires_at = 0
+      WHERE session_id = 'IS-42' AND sandbox_id = 'sandbox-1'
+    `)
+    .run();
+
+  assert.equal(
+    await finishSandboxCredentialPolicyRegistration(
+      env,
+      "IS-42",
+      "sandbox-1",
+      staged,
+      ownershipFence,
+    ),
+    false,
+  );
+  assert.equal(
+    activeCredentialPolicyRows(sqlite).some(
+      (row) => row.registration_generation === staged.generation && row.state === "active",
+    ),
+    false,
+  );
+});
+
 test("completed credential-policy rotation tolerates an ambiguous committed batch", async () => {
   const sqlite = credentialPolicyDatabase();
   const staged = await beginSandboxCredentialPolicyRegistration(

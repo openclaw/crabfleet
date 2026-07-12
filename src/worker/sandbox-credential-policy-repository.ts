@@ -1024,6 +1024,14 @@ export async function finishSandboxCredentialPolicyRegistration(
   registration: SandboxCredentialPolicyRegistration,
   ownershipFence: SandboxCredentialPolicyOwnershipFence,
 ): Promise<boolean> {
+  const registrationExpiresAt = await renewSandboxCredentialPolicyRegistration(
+    env,
+    sessionId,
+    sandboxId,
+    registration,
+    ownershipFence,
+  );
+  if (!registrationExpiresAt) return false;
   const now = Date.now();
   let batchError: unknown;
   try {
@@ -1034,6 +1042,7 @@ export async function finishSandboxCredentialPolicyRegistration(
         sessionId,
         sandboxId,
         registration,
+        registrationExpiresAt,
         ownershipFence,
         now,
       ),
@@ -1123,6 +1132,7 @@ export function sandboxCredentialPolicyPromotionQueries(
   sessionId: string,
   sandboxId: string,
   registration: SandboxCredentialPolicyRegistration,
+  registrationExpiresAt: number,
   ownershipFence: SandboxCredentialPolicyOwnershipFence,
   now: number,
 ): CompilableQuery[] {
@@ -1135,6 +1145,8 @@ export function sandboxCredentialPolicyPromotionQueries(
         AND state = 'registering'
         AND registration_generation = ${registration.generation}
         AND registration_claim = ${registration.claim}
+        AND registration_claim_expires_at = ${registrationExpiresAt}
+        AND registration_claim_expires_at > ${now}
     )
     AND ${noLivePolicyTableRegistrationCondition(sessionId, sandboxId, now)}
     AND NOT EXISTS (
@@ -1214,6 +1226,8 @@ export function sandboxCredentialPolicyPromotionQueries(
         AND state = 'registering'
         AND registration_generation = ${registration.generation}
         AND registration_claim = ${registration.claim}
+        AND registration_claim_expires_at = ${registrationExpiresAt}
+        AND registration_claim_expires_at > ${now}
         AND ${promotionComplete}
     `,
   ];
