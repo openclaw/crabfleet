@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
 import test from "node:test";
 
 import {
@@ -211,4 +212,18 @@ test("terminal cleanup atomically stages the session and credential-policy refs"
   assert.ok(parameters.includes("generation:test-1"));
   assert.ok(parameters.includes("sandbox-1"));
   assert.ok(parameters.includes(leaseId));
+});
+
+test("staged cleanup uses the persisted lookup set", async () => {
+  const source = await readFile(
+    new URL("../src/worker/sandbox-credential-policy-cleanup-service.ts", import.meta.url),
+    "utf8",
+  );
+  const start = source.indexOf("async function reconcileStagedCredentialPolicyRegistration");
+  const end = source.indexOf("async function normalizeCredentialPolicyCleanupGroups", start);
+  const stagedCleanup = source.slice(start, end);
+
+  assert.match(stagedCleanup, /sandboxCredentialPolicyRegistrationLookupIds/);
+  assert.match(stagedCleanup, /registration\.lookup_ids_json/);
+  assert.doesNotMatch(stagedCleanup, /sandboxLookupIds\(env, registration\.sandbox_id\)/);
 });

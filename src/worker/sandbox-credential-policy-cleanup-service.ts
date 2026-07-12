@@ -23,6 +23,7 @@ import { scanCredentialPolicyCleanupPage } from "./sandbox-credential-policy-sca
 import { isCurrentSandboxLease, sandboxLeaseInfo } from "./sandbox-lease.ts";
 import { isSandboxSessionAlreadyGone } from "./sandbox-session-errors.ts";
 import { sandboxControlStub } from "./session-control-do.ts";
+import { sandboxCredentialPolicyRegistrationLookupIds } from "./session-control-policy.ts";
 import { finalizeTerminalInteractiveSession } from "./session-terminal-finalization.ts";
 
 const credentialPolicyCleanupLimit = 8;
@@ -32,11 +33,12 @@ export async function sandboxCredentialPolicyExists(
   env: RuntimeEnv,
   sandboxId: string,
   generation: string,
+  lookupIds: readonly string[] = sandboxLookupIds(env, sandboxId),
 ): Promise<boolean> {
   const stub = sandboxControlStub(env);
   if (!stub) return false;
   const responses = await Promise.all(
-    sandboxLookupIds(env, sandboxId).map((lookupId) =>
+    lookupIds.map((lookupId) =>
       stub.fetch(
         `https://crabfleet.internal/api/session-control/egress/${encodeURIComponent(lookupId)}`,
       ),
@@ -129,7 +131,10 @@ async function reconcileStagedCredentialPolicyRegistration(
   if ((claimed.numUpdatedRows ?? 0n) === 0n) return;
   try {
     await Promise.all(
-      sandboxLookupIds(env, registration.sandbox_id).map((lookupId) =>
+      sandboxCredentialPolicyRegistrationLookupIds(
+        registration.lookup_ids_json,
+        registration.sandbox_id,
+      ).map((lookupId) =>
         unregisterSandboxCredentialPolicyLookup(
           env,
           lookupId,

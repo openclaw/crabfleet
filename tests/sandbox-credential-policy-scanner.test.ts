@@ -143,6 +143,8 @@ test("staged recovery takes a fresh exclusive claim before promotion or rollback
     stagedRecovery.indexOf("claimSandboxCredentialPolicyRegistrationRecovery(") <
       stagedRecovery.indexOf("restoreRollback({"),
   );
+  assert.match(stagedRecovery, /sandboxCredentialPolicyRegistrationLookupIds/);
+  assert.match(stagedRecovery, /registration\.lookupIds/);
   assert.doesNotMatch(stagedRecovery, /renewSandboxCredentialPolicyRegistration/);
 });
 

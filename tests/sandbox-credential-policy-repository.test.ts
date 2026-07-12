@@ -25,6 +25,7 @@ import { credentialPolicyRegistrationAccepted } from "../src/credential-policy-f
 import { database } from "../src/worker/database.ts";
 import type { RuntimeEnv } from "../src/worker/env.ts";
 import type { SandboxCredentialPolicyRegistration } from "../src/worker/session-control-policy.ts";
+import { sandboxCredentialPolicyRegistrationLookupIds } from "../src/worker/session-control-policy.ts";
 import type { StoredSandboxCredentialPolicy } from "../src/worker/session-control-policy.ts";
 
 type PreparedStatement = {
@@ -174,15 +175,33 @@ function credentialPolicyDatabase(options: { applyMigrations?: boolean } = {}): 
         "utf8",
       ),
     );
+    db.exec(
+      readFileSync(
+        new URL(
+          "../migrations/0037_credential_policy_registration_lookup_ids.sql",
+          import.meta.url,
+        ),
+        "utf8",
+      ),
+    );
   }
   return db;
 }
 
 function sqliteRuntimeEnv(
   sqlite: DatabaseSync,
-  options: { interruptAfterStatement?: number } = {},
+  options: {
+    interruptAfterStatement?: number;
+    throwAfterCommit?: boolean;
+    failNextReadAfterBatch?: boolean;
+  } = {},
 ): RuntimeEnv {
+  let failNextRead = false;
   function execute(sql: string, parameters: unknown[]) {
+    if (failNextRead && /^\s*select\b/i.test(sql)) {
+      failNextRead = false;
+      throw new Error("simulated committed read failure");
+    }
     const statement = sqlite.prepare(sql) as unknown as SqliteStatement;
     if (/^\s*(?:select|pragma|with)\b|\breturning\b/i.test(sql)) {
       const results = statement.all(...parameters).map((row) => ({ ...row }));
@@ -230,9 +249,13 @@ function sqliteRuntimeEnv(
             }
           }
           sqlite.exec("COMMIT");
+          failNextRead = options.failNextReadAfterBatch ?? false;
+          if (options.throwAfterCommit) {
+            throw new Error("simulated ambiguous committed batch");
+          }
           return results;
         } catch (error) {
-          sqlite.exec("ROLLBACK");
+          if (sqlite.isTransaction) sqlite.exec("ROLLBACK");
           throw error;
         }
       },
@@ -291,6 +314,21 @@ test("credential-policy lookup identity includes the Sandbox durable object id e
   assert.deepEqual(sandboxLookupIds(runtimeEnv(undefined, undefined, "sandbox-1"), "sandbox-1"), [
     "sandbox-1",
   ]);
+});
+
+test("staged lookup identity decoder requires the stable sandbox lookup", () => {
+  assert.deepEqual(
+    sandboxCredentialPolicyRegistrationLookupIds('["sandbox-1","do-old"]', "sandbox-1"),
+    ["sandbox-1", "do-old"],
+  );
+  assert.deepEqual(sandboxCredentialPolicyRegistrationLookupIds('["do-old"]', "sandbox-1"), [
+    "sandbox-1",
+  ]);
+  assert.deepEqual(
+    sandboxCredentialPolicyRegistrationLookupIds('["sandbox-1","sandbox-1"]', "sandbox-1"),
+    ["sandbox-1"],
+  );
+  assert.deepEqual(sandboxCredentialPolicyRegistrationLookupIds(null, "sandbox-1"), ["sandbox-1"]);
 });
 
 test("credential-policy generations reuse exactly one current identity", () => {
@@ -370,6 +408,7 @@ test("credential-policy rotation always claims a fresh generation", async () => 
               registration_generation: generation,
               registration_claim: claim,
               registration_claim_expires_at: registrationExpiresAt,
+              lookup_ids_json: '["sandbox-1"]',
             },
           ],
         };
@@ -470,6 +509,78 @@ test("migration leaves live legacy registrations unstaged while old workers rene
       },
     ],
   );
+});
+
+test("lookup identity migration backfills the exact staged legacy lookup set", () => {
+  const sqlite = credentialPolicyDatabase({ applyMigrations: false });
+  sqlite.exec(
+    readFileSync(
+      new URL("../migrations/0034_credential_policy_registration_staging.sql", import.meta.url),
+      "utf8",
+    ),
+  );
+  sqlite.exec(
+    readFileSync(
+      new URL("../migrations/0035_credential_policy_registration_rollback.sql", import.meta.url),
+      "utf8",
+    ),
+  );
+  sqlite.exec(
+    readFileSync(
+      new URL("../migrations/0036_credential_policy_lookup_repair.sql", import.meta.url),
+      "utf8",
+    ),
+  );
+  sqlite
+    .prepare(`
+      INSERT INTO interactive_session_credential_policy_registrations (
+        session_id,
+        sandbox_id,
+        state,
+        registration_generation,
+        registration_claim,
+        registration_claim_expires_at,
+        rollback_policies_json,
+        created_at,
+        updated_at
+      ) VALUES (?, ?, 'registering', ?, ?, ?, ?, 1, 1)
+    `)
+    .run(
+      "IS-42",
+      "sandbox-1",
+      "generation:staged",
+      "registration:staged",
+      Number.MAX_SAFE_INTEGER,
+      JSON.stringify([
+        {
+          generation: "generation:existing",
+          policy: {
+            allowedHosts: [],
+            githubCredentialSource: "none",
+            githubRepo: "openclaw/crabfleet",
+            owner: "operator",
+            sandboxId: "do-old",
+            sessionId: "IS-42",
+          },
+        },
+      ]),
+    );
+  sqlite.exec(
+    readFileSync(
+      new URL("../migrations/0037_credential_policy_registration_lookup_ids.sql", import.meta.url),
+      "utf8",
+    ),
+  );
+
+  const row = sqlite
+    .prepare(`
+      SELECT lookup_ids_json, repair_generation
+      FROM interactive_session_credential_policy_registrations
+      WHERE session_id = 'IS-42' AND sandbox_id = 'sandbox-1'
+    `)
+    .get();
+  assert.deepEqual(JSON.parse(String(row?.lookup_ids_json)), ["do-1", "do-old", "sandbox-1"]);
+  assert.equal(row?.repair_generation, null);
 });
 
 test("post-migration legacy registration claims block new staged generations", async () => {
@@ -855,6 +966,48 @@ test("completed credential-policy rotation atomically promotes every active look
       .prepare("SELECT count(*) AS count FROM interactive_session_credential_policy_registrations")
       .get()?.count,
     0,
+  );
+});
+
+test("completed credential-policy rotation tolerates an ambiguous committed batch", async () => {
+  const sqlite = credentialPolicyDatabase();
+  const staged = await beginSandboxCredentialPolicyRegistration(
+    sqliteRuntimeEnv(sqlite),
+    "IS-42",
+    "sandbox-1",
+    ownershipFence,
+  );
+
+  assert.equal(
+    await finishSandboxCredentialPolicyRegistration(
+      sqliteRuntimeEnv(sqlite, { throwAfterCommit: true }),
+      "IS-42",
+      "sandbox-1",
+      staged,
+      ownershipFence,
+    ),
+    true,
+  );
+});
+
+test("completed credential-policy rotation retries an ambiguous verification read", async () => {
+  const sqlite = credentialPolicyDatabase();
+  const staged = await beginSandboxCredentialPolicyRegistration(
+    sqliteRuntimeEnv(sqlite),
+    "IS-42",
+    "sandbox-1",
+    ownershipFence,
+  );
+
+  assert.equal(
+    await finishSandboxCredentialPolicyRegistration(
+      sqliteRuntimeEnv(sqlite, { failNextReadAfterBatch: true }),
+      "IS-42",
+      "sandbox-1",
+      staged,
+      ownershipFence,
+    ),
+    true,
   );
 });
 

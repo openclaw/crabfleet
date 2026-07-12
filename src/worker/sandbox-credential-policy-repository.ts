@@ -506,6 +506,7 @@ export function sandboxCredentialPolicyRegistrationQueries(
         registration_generation,
         registration_claim,
         registration_claim_expires_at,
+        lookup_ids_json,
         attempt_count,
         last_attempt_at,
         last_error,
@@ -521,6 +522,7 @@ export function sandboxCredentialPolicyRegistrationQueries(
         ${registration.generation},
         ${registration.claim},
         ${registrationExpiresAt},
+        ${JSON.stringify(registration.lookupIds)},
         0,
         NULL,
         NULL,
@@ -542,6 +544,7 @@ export function sandboxCredentialPolicyRegistrationQueries(
         registration_generation = excluded.registration_generation,
         registration_claim = excluded.registration_claim,
         registration_claim_expires_at = excluded.registration_claim_expires_at,
+        lookup_ids_json = excluded.lookup_ids_json,
         repair_generation = NULL,
         rollback_policies_json = NULL,
         last_error = NULL,
@@ -599,6 +602,7 @@ export async function beginSandboxCredentialPolicyRegistration(
       "registration_generation",
       "registration_claim",
       "registration_claim_expires_at",
+      "lookup_ids_json",
     ])
     .where("session_id", "=", sessionId)
     .where("sandbox_id", "=", sandboxId)
@@ -607,7 +611,8 @@ export async function beginSandboxCredentialPolicyRegistration(
     claimed?.state !== "registering" ||
     claimed.registration_generation !== registration.generation ||
     claimed.registration_claim !== registration.claim ||
-    claimed.registration_claim_expires_at !== registrationExpiresAt
+    claimed.registration_claim_expires_at !== registrationExpiresAt ||
+    claimed.lookup_ids_json !== JSON.stringify(registration.lookupIds)
   ) {
     await abandonSandboxCredentialPolicyRegistration(
       env,
@@ -882,18 +887,50 @@ export async function finishSandboxCredentialPolicyRegistration(
   ownershipFence: SandboxCredentialPolicyOwnershipFence,
 ): Promise<boolean> {
   const now = Date.now();
-  const db = database(env);
-  await executeBatch(
-    env,
-    sandboxCredentialPolicyPromotionQueries(
+  let batchError: unknown;
+  try {
+    await executeBatch(
       env,
-      sessionId,
-      sandboxId,
-      registration,
-      ownershipFence,
-      now,
-    ),
-  );
+      sandboxCredentialPolicyPromotionQueries(
+        env,
+        sessionId,
+        sandboxId,
+        registration,
+        ownershipFence,
+        now,
+      ),
+    );
+  } catch (error) {
+    batchError = error;
+  }
+  try {
+    if (await sandboxCredentialPolicyPromotionCompleted(env, sessionId, sandboxId, registration)) {
+      return true;
+    }
+  } catch (readError) {
+    try {
+      if (
+        await sandboxCredentialPolicyPromotionCompleted(env, sessionId, sandboxId, registration)
+      ) {
+        return true;
+      }
+    } catch {
+      // Preserve the first observable failure when verification remains unavailable.
+    }
+    if (batchError) throw batchError;
+    throw readError;
+  }
+  if (batchError) throw batchError;
+  return false;
+}
+
+async function sandboxCredentialPolicyPromotionCompleted(
+  env: RuntimeEnv,
+  sessionId: string,
+  sandboxId: string,
+  registration: SandboxCredentialPolicyRegistration,
+): Promise<boolean> {
+  const db = database(env);
   const active = await db
     .selectFrom("interactive_session_credential_policies")
     .select(["lookup_id", "state", "registration_generation", "registration_claim"])

@@ -14,11 +14,13 @@ import {
   finishSandboxCredentialPolicyRegistration,
   recordSandboxCredentialPolicyRefs,
   sandboxCredentialPolicyCleanupAuthorizedCondition,
-  sandboxLookupIds,
   type SandboxCredentialPolicyOwnershipFence,
 } from "./sandbox-credential-policy-repository.ts";
 import { sandboxLeaseInfo, sandboxLeasePrefix } from "./sandbox-lease.ts";
-import type { SandboxCredentialPolicyRegistration } from "./session-control-policy.ts";
+import {
+  sandboxCredentialPolicyRegistrationLookupIds,
+  type SandboxCredentialPolicyRegistration,
+} from "./session-control-policy.ts";
 
 const credentialPolicyScanLimit = 32;
 export const credentialPolicyProvisioningStaleMs = 15 * 60_000;
@@ -70,6 +72,7 @@ type StagedCredentialPolicyScanRow = CredentialPolicyOwnershipRow & {
   registration_generation: string;
   registration_claim: string;
   registration_claim_expires_at: number;
+  lookup_ids_json: string | null;
   rollback_policies_json: string | null;
 };
 
@@ -77,6 +80,7 @@ export type SandboxCredentialPolicyExists = (
   env: RuntimeEnv,
   sandboxId: string,
   generation: string,
+  lookupIds?: readonly string[],
 ) => Promise<boolean>;
 
 export type RestoreSandboxCredentialPolicyRollback = (input: {
@@ -310,6 +314,7 @@ async function scanStagedCredentialPolicyRegistrations(
       registration.registration_generation,
       registration.registration_claim,
       registration.registration_claim_expires_at,
+      registration.lookup_ids_json,
       registration.rollback_policies_json,
       session.id AS matched_session_id,
       session.adapter AS session_adapter,
@@ -336,7 +341,7 @@ async function scanStagedCredentialPolicyRegistrations(
     const registration: SandboxCredentialPolicyRegistration = {
       generation: row.registration_generation,
       claim: row.registration_claim,
-      lookupIds: sandboxLookupIds(env, row.sandbox_id),
+      lookupIds: sandboxCredentialPolicyRegistrationLookupIds(row.lookup_ids_json, row.sandbox_id),
     };
     try {
       const ownershipFence = credentialPolicyScanOwnershipFence(row, now);
@@ -360,7 +365,12 @@ async function scanStagedCredentialPolicyRegistrations(
       );
       if (!recovery) continue;
       if (
-        (await policyExists(env, row.sandbox_id, row.registration_generation)) &&
+        (await policyExists(
+          env,
+          row.sandbox_id,
+          row.registration_generation,
+          registration.lookupIds,
+        )) &&
         (await finishSandboxCredentialPolicyRegistration(
           env,
           row.session_id,
