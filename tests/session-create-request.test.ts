@@ -81,6 +81,21 @@ test("session create requests fail before allocation when adapter routing is inc
       resolveInteractiveSessionCreateRequest(
         runtimeEnv({
           CRABBOX_RUNTIME_ADAPTER_URL: "https://adapter.example.test",
+          CRABBOX_RUNTIME_ADAPTER_URL_TEMPLATE:
+            "https://controller.example.test/adapters/{profile}",
+          CRABBOX_RUNTIME_ADAPTER_TOKEN: "adapter-token",
+          CRABBOX_RUNTIME_ADAPTER_NAMESPACE: "fleet",
+        }),
+        { repo: "openclaw/crabfleet" },
+        { owner: "maintainer", createdBy: "maintainer" },
+      ),
+    /runtime adapter URL or profile route template must be valid and unambiguous/,
+  );
+  assert.throws(
+    () =>
+      resolveInteractiveSessionCreateRequest(
+        runtimeEnv({
+          CRABBOX_RUNTIME_ADAPTER_URL: "https://adapter.example.test",
           CRABBOX_RUNTIME_ADAPTER_NAMESPACE: "fleet",
         }),
         { repo: "openclaw/crabfleet" },

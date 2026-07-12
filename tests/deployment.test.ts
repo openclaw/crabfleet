@@ -77,14 +77,13 @@ test("configured runtime profiles are allowlisted behaviorally", () => {
   );
 });
 
-test("profile-routed deployments reject profiles the adapter template cannot address", () => {
-  assert.throws(
-    () =>
-      deploymentConfig({
-        CRABBOX_RUNTIME_ADAPTER_URL: "https://controller.example.test/adapter",
-        CRABBOX_RUNTIME_ADAPTER_URL_TEMPLATE: "https://controller.example.test/adapters/{profile}",
-      }),
-    /are mutually exclusive/,
+test("deployment reads tolerate adapter migration ambiguity and validate template routes", () => {
+  assert.equal(
+    deploymentConfig({
+      CRABBOX_RUNTIME_ADAPTER_URL: "https://controller.example.test/adapter",
+      CRABBOX_RUNTIME_ADAPTER_URL_TEMPLATE: "https://controller.example.test/adapters/{profile}",
+    }).defaultProfile,
+    "default",
   );
   assert.throws(
     () =>
