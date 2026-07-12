@@ -500,18 +500,8 @@ export async function beginSandboxCredentialPolicyRegistration(
 ): Promise<SandboxCredentialPolicyRegistration> {
   const db = database(env);
   const lookupIds = sandboxLookupIds(env, sandboxId);
-  const existing = await db
-    .selectFrom("interactive_session_credential_policies")
-    .select("registration_generation")
-    .distinct()
-    .where("session_id", "=", sessionId)
-    .where("sandbox_id", "=", sandboxId)
-    .execute();
-  const existingGeneration = currentSandboxCredentialPolicyGeneration(
-    existing.map((row) => row.registration_generation),
-  );
   const registration = {
-    generation: existingGeneration ?? newSandboxCredentialPolicyGeneration(),
+    generation: newSandboxCredentialPolicyGeneration(),
     claim: `registration:${crypto.randomUUID()}`,
     lookupIds,
   };

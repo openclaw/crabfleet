@@ -3,6 +3,7 @@ import test from "node:test";
 
 import {
   activeSandboxCredentialPolicyGeneration,
+  beginSandboxCredentialPolicyRegistration,
   currentSandboxCredentialPolicyGeneration,
   recordSandboxCredentialPolicyRefs,
   sandboxCredentialPolicyRegistrationQueries,
@@ -153,6 +154,67 @@ test("credential-policy registration SQL proves every supported ownership fence"
   assert.match(standalone.sql, /owner\.ownership_claim_expires_at >/i);
   assert.ok(standalone.parameters.includes("external-42"));
   assert.ok(standalone.parameters.includes("standalone-1"));
+});
+
+test("credential-policy rotation always claims a fresh generation", async () => {
+  let generation = "";
+  let claim = "";
+  let registrationExpiresAt = 0;
+  let statements: PreparedStatement[] = [];
+  const env = runtimeEnv(
+    (sql, _parameters, kind) => {
+      if (kind === "all" && /select .*lookup_id/i.test(sql)) {
+        return {
+          results: [
+            {
+              lookup_id: "sandbox-1",
+              state: "registering",
+              registration_generation: generation,
+              registration_claim: claim,
+              registration_claim_expires_at: registrationExpiresAt,
+            },
+          ],
+        };
+      }
+      if (kind === "all" && /select .*registration_generation/i.test(sql)) {
+        return {
+          results: [{ registration_generation: "generation:existing" }],
+        };
+      }
+      return {};
+    },
+    (prepared) => {
+      statements = prepared;
+      const parameters = prepared.flatMap((statement) => statement.parameters);
+      generation = String(
+        parameters.find(
+          (parameter) =>
+            typeof parameter === "string" &&
+            parameter.startsWith("generation:") &&
+            parameter !== "generation:existing",
+        ),
+      );
+      claim = String(
+        parameters.find(
+          (parameter) => typeof parameter === "string" && parameter.startsWith("registration:"),
+        ),
+      );
+      registrationExpiresAt = Math.max(
+        ...parameters.filter((parameter): parameter is number => typeof parameter === "number"),
+      );
+      return prepared.map(() => ({ results: [], meta: { changes: 1 } }));
+    },
+  );
+
+  const rotated = await beginSandboxCredentialPolicyRegistration(env, "IS-42", "sandbox-1", {
+    leaseId: "sandbox:sandbox-1:terminal-1:autostart-v4",
+    sandboxId: "sandbox-1",
+  });
+
+  assert.equal(statements.length, 1);
+  assert.match(rotated.generation, /^generation:/);
+  assert.notEqual(rotated.generation, "generation:existing");
+  assert.equal(rotated.generation, generation);
 });
 
 test("active credential-policy generation requires every exact lookup row", async () => {

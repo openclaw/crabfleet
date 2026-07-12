@@ -237,7 +237,11 @@ export async function commitManagedSandboxLeaseRefresh(
     db
       .updateTable("interactive_sessions")
       .set({
-        status: provisioned.status,
+        status: sql<InteractiveSessionRow["status"]>`CASE
+          WHEN ${provisioned.status} = 'ready' AND status IN ('attached', 'detached')
+          THEN status
+          ELSE ${provisioned.status}
+        END`,
         lease_id: provisioned.leaseId,
         attach_url: provisioned.attachUrl,
         vnc_url: provisioned.vncUrl,

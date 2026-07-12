@@ -754,7 +754,7 @@ test("managed Sandbox commit fences activation and previous-policy cleanup", asy
   assert.ok(parameters.includes(claim.previousSandboxId));
 });
 
-test("managed Sandbox refresh commit clears the claim before prior-policy cleanup", async () => {
+test("managed Sandbox refresh commit preserves detached state before prior-policy cleanup", async () => {
   let statements: PreparedStatement[] = [];
   const expectedLeaseId = sandboxLeaseId(claim.lease);
   const env = runtimeEnv(
@@ -764,7 +764,7 @@ test("managed Sandbox refresh commit clears the claim before prior-policy cleanu
             results: [
               {
                 lease_id: expectedLeaseId,
-                status: "ready",
+                status: "detached",
                 credential_cleanup_terminal_status: null,
                 agent_token_hash: claim.agentTokenHash,
               },
@@ -796,6 +796,8 @@ test("managed Sandbox refresh commit clears the claim before prior-policy cleanu
   assert.match(batchSql, /sandbox_refresh_claim_expires_at/);
   assert.match(batchSql, /agent_token_hash/);
   assert.match(batchSql, /interactive_session_credential_policies/);
+  assert.match(batchSql, /when \? = 'ready' and status in \('attached', 'detached'\)/i);
+  assert.match(batchSql, /then status/i);
   const parameters = statements.flatMap((statement) => statement.parameters);
   assert.ok(parameters.includes("cleanup_pending"));
   assert.ok(parameters.includes(claim.fence.claim));
