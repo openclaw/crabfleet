@@ -206,6 +206,7 @@ extension VNCConnection {
 		}
 		let payload = Data("royalvnc-pixel-format".utf8)
 		pixelFormatFenceCapabilityProbePayload = payload
+		schedulePixelFormatFenceNegotiationTimeoutLocked()
 		framebufferRequestLock.unlock()
 
 		enqueueClientToServerMessage(
@@ -240,16 +241,33 @@ extension VNCConnection {
 	func expirePixelFormatFenceNegotiation() {
 		framebufferRequestLock.lock()
 		cancelPixelFormatFenceNegotiationTimeoutLocked()
-		guard !state.areFencesSupported,
-			  pendingPixelFormatTransition != nil,
-			  !isPixelFormatTransitionInFlight else {
+		let probeTimedOut = pixelFormatFenceCapabilityProbePayload != nil
+		let negotiationTimedOut =
+			!state.areFencesSupported
+			&& pendingPixelFormatTransition != nil
+			&& !isPixelFormatTransitionInFlight
+		guard probeTimedOut || negotiationTimedOut else {
 			framebufferRequestLock.unlock()
 			return
 		}
-		pendingPixelFormatTransition = nil
+		pixelFormatFenceCapabilityProbePayload = nil
+		if negotiationTimedOut {
+			pendingPixelFormatTransition = nil
+		}
+		let transition = probeTimedOut ? takePendingPixelFormatTransitionLocked() : nil
+		let shouldResumeUpdates =
+			transition == nil
+			&& pendingPixelFormatTransition == nil
+			&& !framebufferUpdateRequestOutstanding
+			&& !isPixelFormatTransitionInFlight
 		framebufferRequestLock.unlock()
 
-		logger.logDebug("Rejecting pixel format transition because Fence support was not negotiated")
+		if let transition {
+			enqueuePixelFormatTransition(transition)
+		} else if shouldResumeUpdates {
+			scheduleNextFramebufferUpdate()
+		}
+		logger.logDebug("Fence capability negotiation timed out")
 	}
 
 	func completePixelFormatFence(_ fence: VNCProtocol.ServerFence) throws {

@@ -158,6 +158,40 @@ struct AuditFindingsTests {
   }
 
   @Test
+  func expiresUnansweredFenceCapabilityProbeWithoutStallingUpdates() async throws {
+    let connection = VNCConnection(
+      settings: makeSettings(),
+      framebufferAllocator: VNCFramebufferMallocAllocator()
+    )
+    let framebuffer = try makeFramebuffer(width: 2, height: 2, depth: 24)
+    connection.framebuffer = framebuffer
+    connection.state.pixelFormat = framebuffer.sourcePixelFormat
+    connection.connectionState = .connected
+    connection._framebufferUpdatePolicy = .paused
+
+    try connection.handleServerFence(
+      VNCProtocol.ServerFence(
+        messageType: VNCProtocol.ServerFence.messageType,
+        flags: [.request, .blockBefore, .syncNext],
+        payload: Data("support".utf8)
+      )
+    )
+    _ = try #require(connection.clientToServerMessageQueue.dequeue())
+    _ = try #require(connection.clientToServerMessageQueue.dequeue())
+
+    connection.updateColorDepth(.depth8Bit)
+    #expect(connection.pendingPixelFormatTransition?.depth == 8)
+
+    connection.expirePixelFormatFenceNegotiation()
+
+    #expect(connection.pixelFormatFenceCapabilityProbePayload == nil)
+    let transition = try #require(connection.clientToServerMessageQueue.dequeue())
+    try await transition.message.send(connection: AuditWritingConnection())
+    #expect(connection.pendingPixelFormatTransition == nil)
+    #expect(connection.state.pixelFormat?.depth == 8)
+  }
+
+  @Test
   func rejectsPartialFenceBoundariesDuringContinuousUpdates() throws {
     let connection = VNCConnection(
       settings: makeSettings(),
