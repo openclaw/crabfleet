@@ -1528,6 +1528,51 @@ func TestAttachReturnsWhenContextCancelsAnUncancelableRead(t *testing.T) {
 	close(terminal.release)
 }
 
+func TestAttachWaitsForFrameConsumerWithUncancelableRead(t *testing.T) {
+	client := &Client{
+		readerDone:      make(chan struct{}),
+		attachmentReady: make(chan struct{}),
+	}
+	terminal := newUncancelableReadBlockingWriteTerminal()
+	ctx, cancel := context.WithCancel(context.Background())
+	attachDone := make(chan error, 1)
+	go func() {
+		attachDone <- client.Attach(ctx, terminal, nil)
+	}()
+
+	<-terminal.readStarted
+	client.stateMu.Lock()
+	attachment := client.attachment
+	client.stateMu.Unlock()
+	if attachment == nil {
+		t.Fatal("attachment was not registered")
+	}
+	delivered := make(chan bool, 1)
+	go func() {
+		delivered <- client.deliverAttachment(context.Background(), frame{
+			messageType: messageOutput,
+			payload:     []byte("old output\n"),
+		})
+	}()
+	<-terminal.writeStarted
+	if !<-delivered {
+		t.Fatal("output was not delivered to the attachment")
+	}
+
+	cancel()
+	select {
+	case err := <-attachDone:
+		t.Fatalf("Attach retired before its frame consumer exited: %v", err)
+	case <-time.After(20 * time.Millisecond):
+	}
+
+	close(terminal.releaseWrite)
+	if err := <-attachDone; !errors.Is(err, context.Canceled) {
+		t.Fatalf("error = %v", err)
+	}
+	close(terminal.releaseRead)
+}
+
 func TestClientSubscribesReadOnlyAndSuppressesInput(t *testing.T) {
 	acknowledged := make(chan uint32, 1)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -1813,6 +1858,42 @@ type uncancelableTerminal struct {
 	startOnce sync.Once
 	release   chan struct{}
 	bytes.Buffer
+}
+
+var errBlockedTerminalWrite = errors.New("blocked terminal write")
+
+type uncancelableReadBlockingWriteTerminal struct {
+	readStarted  chan struct{}
+	readOnce     sync.Once
+	releaseRead  chan struct{}
+	writeStarted chan struct{}
+	writeOnce    sync.Once
+	releaseWrite chan struct{}
+}
+
+func newUncancelableReadBlockingWriteTerminal() *uncancelableReadBlockingWriteTerminal {
+	return &uncancelableReadBlockingWriteTerminal{
+		readStarted:  make(chan struct{}),
+		releaseRead:  make(chan struct{}),
+		writeStarted: make(chan struct{}),
+		releaseWrite: make(chan struct{}),
+	}
+}
+
+func (terminal *uncancelableReadBlockingWriteTerminal) Read(_ []byte) (int, error) {
+	terminal.readOnce.Do(func() {
+		close(terminal.readStarted)
+	})
+	<-terminal.releaseRead
+	return 0, io.EOF
+}
+
+func (terminal *uncancelableReadBlockingWriteTerminal) Write(payload []byte) (int, error) {
+	terminal.writeOnce.Do(func() {
+		close(terminal.writeStarted)
+	})
+	<-terminal.releaseWrite
+	return 0, errBlockedTerminalWrite
 }
 
 func newUncancelableTerminal() *uncancelableTerminal {

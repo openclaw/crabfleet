@@ -380,6 +380,7 @@ func (c *Client) Attach(ctx context.Context, terminal io.ReadWriter, resizes <-c
 	}
 
 	errCh := make(chan error, 3)
+	frameConsumerDone := make(chan struct{})
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
@@ -430,6 +431,7 @@ func (c *Client) Attach(ctx context.Context, terminal io.ReadWriter, resizes <-c
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
+		defer close(frameConsumerDone)
 		for {
 			select {
 			case <-ctx.Done():
@@ -483,6 +485,7 @@ func (c *Client) Attach(ctx context.Context, terminal io.ReadWriter, resizes <-c
 		err = ctx.Err()
 	}
 	cancelRead()
+	<-frameConsumerDone
 	if cancelableRead {
 		wg.Wait()
 	}
