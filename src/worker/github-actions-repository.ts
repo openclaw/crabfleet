@@ -13,7 +13,7 @@ type GitHubActionsSessionUpdate =
   | GitHubActionsWorkStateUpdate
   | GitHubActionsRunnerConnectionUpdate;
 
-const terminalWorkStates = ["completed", "failed", "canceled"];
+const terminalWorkStates = ["completed", "failed", "canceled", "blocked"];
 const terminalSessionStatuses = ["stopped", "expired", "failed"] as const;
 
 export class GitHubActionsRepository {

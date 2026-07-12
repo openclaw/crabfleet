@@ -93,7 +93,9 @@ test("GitHub Actions repository owns registration and lifecycle SQL", async () =
   assert.match(executions[3].sql, /"owner_subject" = \?/i);
   assert.doesNotMatch(executions[3].sql, /"work_state" not in/i);
   assert.match(executions[4].sql, /"work_state" not in/i);
+  assert.ok(executions[4].parameters.includes("blocked"));
   assert.match(executions[5].sql, /"status" not in/i);
+  assert.ok(executions[5].parameters.includes("blocked"));
 });
 
 test("GitHub Actions repository rejects stale or invalid state transitions", async () => {
