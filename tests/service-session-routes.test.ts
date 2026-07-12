@@ -304,3 +304,17 @@ test("service-session routes report missing reads and fall through on inexact re
   }
   assert.deepEqual(calls, []);
 });
+
+test("service-session routes reject malformed encoded session ids with a client error", async () => {
+  const calls: string[] = [];
+  const value = request("POST", "/api/agent/interactive-sessions/%/events", {});
+
+  await assert.rejects(dispatch(value, calls), (error) => {
+    assert.equal(
+      typeof error === "object" && error && "status" in error ? error.status : undefined,
+      400,
+    );
+    return true;
+  });
+  assert.deepEqual(calls, []);
+});

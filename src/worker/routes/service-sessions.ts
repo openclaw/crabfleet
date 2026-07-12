@@ -1,4 +1,4 @@
-import { json } from "../http.ts";
+import { badRequest, json } from "../http.ts";
 import type { User } from "../models.ts";
 import type { InteractiveSession } from "../session-model.ts";
 import type { InteractiveSessionSummaryInput } from "../session-metadata.ts";
@@ -92,5 +92,9 @@ export async function handleServiceSessionRoute(
 }
 
 function decoded(value: string | undefined): string {
-  return decodeURIComponent(value ?? "");
+  try {
+    return decodeURIComponent(value ?? "");
+  } catch {
+    throw badRequest("invalid session id");
+  }
 }
