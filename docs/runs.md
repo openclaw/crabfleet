@@ -122,7 +122,7 @@ GitHub Actions PTY contract:
 - OpenClaw registers or resumes work through `POST /api/openclaw/action-sessions`.
 - The returned `runnerPtyUrl` is a `wss:` URL with a rotated session-scoped query credential. Node's global `WebSocket` can open it without custom headers.
 - Legacy runners open the returned URL unchanged and retain raw input/output with relay-level delivery reporting.
-- Framed runners add the exact `runnerProtocol=cfr1-framed-io-v1` query before opening the socket. Viewer input and runner output then use collision-free binary `CFR1` frames, and the runner returns the matching acknowledgement only after its PTY accepts the write.
+- Generation-fenced runners add the exact `runnerProtocol=cfr1-framed-io-v2` query before opening the socket. Viewer input and acknowledgements carry the relay-owned runner generation, stale input is rejected before forwarding, and the runner returns the matching generation and correlation ID only after its PTY accepts the write. The relay continues translating v1 framed and raw sockets during rolling upgrades.
 - `SessionControlDO` allows one current runner and multiple viewers. A new runner replaces the previous runner; viewers remain connected and receive runner lifecycle events.
 - Authorized browser viewers attach through the existing `/api/terminal/ws` hub. Service and agent credentials are never included in viewer responses.
 - The runner updates `state`, `phase`, `summary`, Codex thread/turn IDs, and heartbeat through the agent work-state endpoint. `completed`, `blocked`, `failed`, and `canceled` are terminal.

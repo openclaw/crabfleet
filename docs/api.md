@@ -598,22 +598,22 @@ Response:
 }
 ```
 
-Every new registration and every resume requires `owner`; it must resolve to exactly one active Crabfleet user by login, email, or stable subject. Existing work keys resume only when the supplied owner resolves to the same stable owner subject already stored on the work key. Ownerless resumes fail closed before token rotation, and a work key cannot transfer to a different stable owner. `runnerPtyUrl` can be opened with Node's global `WebSocket` without custom headers. Existing runners retain raw input/output by opening it unchanged; new runners add the exact `runnerProtocol=cfr1-framed-io-v1` query to opt into the framed contract below. The query credential is session-scoped, rotates on registration, is stored only as a hash, and is not exposed through viewer/session APIs.
+Every new registration and every resume requires `owner`; it must resolve to exactly one active Crabfleet user by login, email, or stable subject. Existing work keys resume only when the supplied owner resolves to the same stable owner subject already stored on the work key. Ownerless resumes fail closed before token rotation, and a work key cannot transfer to a different stable owner. `runnerPtyUrl` can be opened with Node's global `WebSocket` without custom headers. Existing runners retain raw input/output by opening it unchanged; new runners add the exact `runnerProtocol=cfr1-framed-io-v2` query to opt into the generation-fenced contract below. The query credential is session-scoped, rotates on registration, is stored only as a hash, and is not exposed through viewer/session APIs.
 
 ### GET /api/agent/interactive-sessions/:id/runner-pty
 
 WebSocket endpoint for the outbound GitHub Actions runner. Authentication uses the scoped `agentToken` query parameter embedded in `runnerPtyUrl`. One runner is current; a reconnect replaces the previous runner while browser viewers remain attached.
 
 Opening the returned URL unchanged selects legacy raw input and output. Adding
-the exact `runnerProtocol=cfr1-framed-io-v1` query selects framed input, output,
-acknowledgements, and relay control traffic. The application propagates only
-that exact value to `SessionControlDO`, which stores the mode on the server
-socket before accepting it. Viewer framing is negotiated independently: framed
-viewers receive `CFR1` output and control frames, while unnegotiated viewers
-retain raw output and legacy JSON notices during rolling upgrades. The relay
-therefore wraps legacy runner output only for framed viewers, and unwraps framed
-runner output for raw viewers. Arbitrary raw PTY bytes cannot be consumed as
-control traffic by framed viewers.
+the exact `runnerProtocol=cfr1-framed-io-v2` query selects generation-fenced
+input, output, acknowledgements, and relay control traffic. `SessionControlDO`
+stores the mode and a relay-owned runner generation on the server socket before
+accepting it. Viewer framing is negotiated independently: v2 viewers receive
+`CFR1` output and generation-bearing control frames, while unnegotiated viewers
+retain raw output and legacy JSON notices. The relay translates the earlier
+`cfr1-framed-io-v1` format and raw sockets at each boundary during rolling
+upgrades. Arbitrary raw PTY bytes cannot be consumed as control traffic by
+framed viewers.
 
 Each `CFR1` frame occupies one binary WebSocket message and starts with:
 
@@ -626,22 +626,26 @@ Each `CFR1` frame occupies one binary WebSocket message and starts with:
 
 Input IDs are nonempty ASCII `[A-Za-z0-9_-]` values of at most 80 bytes.
 
-| Type                   | Direction        | Payload                                                                       |
-| ---------------------- | ---------------- | ----------------------------------------------------------------------------- |
-| `0x01` input           | relay to runner  | raw terminal input bytes                                                      |
-| `0x02` acknowledgement | runner to relay  | one byte: `1` accepted or `0` rejected, followed by optional UTF-8 error text |
-| `0x03` lifecycle event | relay to viewers | empty input ID and one event-code byte                                        |
-| `0x04` output          | runner to relay  | empty input ID followed by raw terminal output bytes                          |
+| Type                   | Direction        | Payload                                                                                       |
+| ---------------------- | ---------------- | --------------------------------------------------------------------------------------------- |
+| `0x05` input           | relay to runner  | generation-length byte, generation, then raw terminal input bytes                             |
+| `0x06` acknowledgement | runner to relay  | generation envelope, then `1` accepted or `0` rejected, followed by optional UTF-8 error text |
+| `0x07` lifecycle event | relay to viewers | empty input ID, generation envelope, and one event-code byte                                  |
+| `0x04` output          | runner to relay  | empty input ID followed by raw terminal output bytes                                          |
 
 Lifecycle event codes are `0x01` runner connected, `0x02` runner disconnected,
 and `0x03` runner waiting.
 
-The runner must copy the input frame's ID into its acknowledgement. It must send
-an accepted acknowledgement only after its PTY write API has accepted the
-payload. Queueing the frame in `WebSocket.send()` is not acceptance. Crabfleet
-generates a rejected acknowledgement only when no current runner is available
-to receive the input frame or the relay send fails. Stale or mismatched
-acknowledgement IDs do not complete another pending input.
+The runner must copy the input frame's ID and generation into its
+acknowledgement. It must send an accepted acknowledgement only after its PTY
+write API has accepted the payload. Queueing the frame in `WebSocket.send()` is
+not acceptance. Crabfleet rejects stale-generation input before forwarding it,
+and rejects input when no current runner is available or the relay send fails.
+Stale or mismatched acknowledgement IDs or generations do not complete another
+pending input.
+
+The v1 `0x01`, `0x02`, and `0x03` frames omit generations. They remain accepted
+for mixed-version deployments and are translated by the relay.
 
 For legacy connections, the relay unwraps viewer input to raw bytes and reports
 acceptance once the runner socket accepts the send. Framed connections provide

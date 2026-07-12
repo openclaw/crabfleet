@@ -267,11 +267,12 @@ The Action connects outbound to the returned `runnerPtyUrl`. Node's global
 
 The returned URL opens a legacy raw-input/raw-output socket. A runner opts into
 collision-free framed I/O by adding the exact
-`runnerProtocol=cfr1-framed-io-v1` query before opening the socket. The relay
-records that mode before accepting the connection. Viewer input then arrives in
-a binary `CFR1` frame carrying a correlation ID, and runner output uses a
-distinct `CFR1` output frame. The runner returns a correlated acknowledgement
-only after its PTY accepts the input write.
+`runnerProtocol=cfr1-framed-io-v2` query before opening the socket. The relay
+records that mode and a relay-owned runner generation before accepting the
+connection. Viewer input then arrives in a binary `CFR1` frame carrying a
+correlation ID and that generation, and runner output uses a distinct `CFR1`
+output frame. The runner copies the generation into its correlated
+acknowledgement only after its PTY accepts the input write.
 
 Complete Node runner integration:
 
@@ -295,7 +296,7 @@ let pendingInputs = [];
 let pendingInputBytes = 0;
 let pendingInputTimer;
 const framedRunnerPtyUrl = new URL(runnerPtyUrl);
-framedRunnerPtyUrl.searchParams.set("runnerProtocol", "cfr1-framed-io-v1");
+framedRunnerPtyUrl.searchParams.set("runnerProtocol", "cfr1-framed-io-v2");
 const terminal = new WebSocket(framedRunnerPtyUrl);
 terminal.binaryType = "arraybuffer";
 
@@ -361,7 +362,7 @@ function settlePendingInputs(accepted) {
   if (pendingInputTimer) clearTimeout(pendingInputTimer);
   pendingInputTimer = undefined;
   for (const input of pendingInputs) {
-    terminal.send(encodeAck(input.inputId, accepted));
+    terminal.send(encodeAck(input.inputId, input.generation, accepted));
   }
   pendingInputs = [];
   pendingInputBytes = 0;
@@ -373,27 +374,45 @@ function decodeInput(data) {
   if (frame.byteLength < 7 || !magic.every((value, index) => frame[index] === value)) {
     return null;
   }
-  if (frame[4] !== 0x01) return null;
+  if (frame[4] !== 0x05) return null;
   const inputIdBytes = frame[5];
   if (!inputIdBytes || inputIdBytes > 80 || 6 + inputIdBytes > frame.byteLength) {
     return null;
   }
   const inputId = inputIdDecoder.decode(frame.subarray(6, 6 + inputIdBytes));
   if (!/^[A-Za-z0-9_-]+$/.test(inputId)) return null;
+  const generationOffset = 6 + inputIdBytes;
+  const generationBytes = frame[generationOffset];
+  if (
+    !generationBytes ||
+    generationBytes > 80 ||
+    generationOffset + 1 + generationBytes > frame.byteLength
+  ) {
+    return null;
+  }
+  const generation = inputIdDecoder.decode(
+    frame.subarray(generationOffset + 1, generationOffset + 1 + generationBytes),
+  );
+  if (!/^[A-Za-z0-9_-]+$/.test(generation)) return null;
   return {
     inputId,
-    payload: frame.slice(6 + inputIdBytes),
+    generation,
+    payload: frame.slice(generationOffset + 1 + generationBytes),
   };
 }
 
-function encodeAck(inputId, accepted) {
+function encodeAck(inputId, generation, accepted) {
   const inputIdBytes = encoder.encode(inputId);
-  const frame = new Uint8Array(7 + inputIdBytes.byteLength);
+  const generationBytes = encoder.encode(generation);
+  const frame = new Uint8Array(8 + inputIdBytes.byteLength + generationBytes.byteLength);
   frame.set(magic);
-  frame[4] = 0x02;
+  frame[4] = 0x06;
   frame[5] = inputIdBytes.byteLength;
   frame.set(inputIdBytes, 6);
-  frame[6 + inputIdBytes.byteLength] = accepted ? 1 : 0;
+  const generationOffset = 6 + inputIdBytes.byteLength;
+  frame[generationOffset] = generationBytes.byteLength;
+  frame.set(generationBytes, generationOffset + 1);
+  frame[generationOffset + 1 + generationBytes.byteLength] = accepted ? 1 : 0;
   return frame;
 }
 
@@ -435,18 +454,25 @@ output as JavaScript strings: it rejects input that is not complete valid UTF-8
 and encodes each output string as UTF-8. Deployments that require lossless
 arbitrary PTY bytes must use a byte-oriented PTY adapter instead of this example.
 
-| Offset | Size     | Value                                                                          |
-| ------ | -------- | ------------------------------------------------------------------------------ |
-| 0      | 4        | ASCII `CFR1`                                                                   |
-| 4      | 1        | `0x01` input, `0x02` acknowledgement, `0x03` lifecycle event, or `0x04` output |
-| 5      | 1        | input ID byte length                                                           |
-| 6      | variable | input ID followed by the type-specific payload                                 |
+| Offset | Size     | Value                                                                                                                                |
+| ------ | -------- | ------------------------------------------------------------------------------------------------------------------------------------ |
+| 0      | 4        | ASCII `CFR1`                                                                                                                         |
+| 4      | 1        | v2 `0x05` input, `0x06` acknowledgement, `0x07` lifecycle event, or shared `0x04` output                                             |
+| 5      | 1        | input ID byte length                                                                                                                 |
+| 6      | variable | input ID, then one generation-length byte, the relay generation, and the type-specific payload; output omits the generation envelope |
 
-Input payloads are raw terminal bytes. An acknowledgement payload starts with
-`1` for accepted or `0` for rejected and may include UTF-8 error text after the
-status byte. Lifecycle events use an empty input ID and event code `0x01` for
-runner connected, `0x02` for runner disconnected, or `0x03` for runner waiting.
-Output uses an empty input ID followed by raw terminal bytes.
+Input payloads are raw terminal bytes after the generation envelope. An
+acknowledgement payload starts with the generation envelope, then `1` for
+accepted or `0` for rejected, followed by optional UTF-8 error text. Lifecycle
+events use an empty input ID, the generation envelope, and event code `0x01`
+for runner connected, `0x02` for runner disconnected, or `0x03` for runner
+waiting. Output uses an empty input ID followed by raw terminal bytes.
+
+The earlier `cfr1-framed-io-v1` mode remains accepted during rolling upgrades.
+Its `0x01`, `0x02`, and `0x03` frames omit generations. The relay translates
+between v1 and v2 at each socket boundary. A v2 viewer must send the generation
+from its latest lifecycle event; stale-generation input is rejected before it
+can reach the replacement runner.
 The full wire contract is also specified in
 [API](/api/#get-api-agent-interactive-sessions-id-runner-pty).
 
@@ -460,9 +486,11 @@ Properties:
   send raw output.
 - Framed runners add the exact protocol query before connecting, receive framed
   input immediately, and wrap every output payload in a `0x04` frame.
-- Framed viewers add `viewerProtocol=cfr1-framed-io-v1` before connecting. They
-  receive `CFR1` output, lifecycle, and acknowledgement frames regardless of the
-  runner's mode.
+- Generation-fenced viewers add `viewerProtocol=cfr1-framed-io-v2` before
+  connecting. They receive `CFR1` output plus relay-generated lifecycle and
+  acknowledgement frames regardless of the runner's mode.
+- Existing v1 runners and viewers remain interoperable through relay-side
+  frame translation.
 - Legacy viewers omit that query. They receive raw terminal output plus JSON
   lifecycle and input-acknowledgement messages for compatibility.
 - Negotiated input produces `input-accepted` only after the correlated runner

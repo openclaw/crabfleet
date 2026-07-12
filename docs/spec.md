@@ -178,7 +178,7 @@ Crabfleet owns:
 
 - session identity and metadata;
 - rotating scoped agent token;
-- outbound runner relay through `SessionControlDO`, preserving legacy raw runner traffic while exact connection-query opt-in selects correlated binary `CFR1` input, output, acknowledgement, and lifecycle frames;
+- outbound runner relay through `SessionControlDO`, preserving raw and v1 framed traffic while exact v2 connection-query opt-in selects relay-generation-fenced binary `CFR1` input, acknowledgement, and lifecycle frames plus framed output;
 - browser terminal steering;
 - work-state heartbeats;
 - event and transcript finalization.
