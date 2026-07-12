@@ -101,7 +101,7 @@ struct AuditFindingsTests {
   }
 
   @Test
-  func serializesPixelFormatAndFramebufferTransitionAtSendBoundary() async throws {
+  func waitsForOutstandingFramebufferBeforeUnfencedPixelFormatTransition() async throws {
     let connection = VNCConnection(
       settings: makeSettings(),
       framebufferAllocator: VNCFramebufferMallocAllocator()
@@ -116,19 +116,9 @@ struct AuditFindingsTests {
     connection.updateColorDepth(.depth8Bit)
     #expect(connection.state.pixelFormat?.depth == 24)
     #expect(connection.state.pixelFormat?.depth == connection.framebuffer?.sourcePixelFormat.depth)
-    let probe = try #require(connection.clientToServerMessageQueue.dequeue())
-    let probeWriter = AuditWritingConnection()
-    try await probe.message.send(connection: probeWriter)
-    #expect(probeWriter.data.count == 10)
-    #expect(probeWriter.data[0] == 3)
-    #expect(probeWriter.data[1] == 0)
-
-    connection.completeFramebufferUpdateRequest()
     #expect(connection.clientToServerMessageQueue.dequeue() == nil)
-    #expect(connection.state.pixelFormat?.depth == 24)
 
     connection.completeFramebufferUpdateRequest()
-
     let queued = try #require(connection.clientToServerMessageQueue.dequeue())
     let writer = AuditWritingConnection {
       #expect(connection.state.pixelFormat?.depth == 8)
@@ -139,6 +129,77 @@ struct AuditFindingsTests {
     #expect(writer.data.count == 20)
     #expect(connection.state.pixelFormat?.depth == 8)
     #expect(connection.state.pixelFormat?.depth == connection.framebuffer?.sourcePixelFormat.depth)
+  }
+
+  @Test
+  func synchronizesPixelFormatTransitionWithFenceResponse() async throws {
+    let connection = VNCConnection(
+      settings: makeSettings(),
+      framebufferAllocator: VNCFramebufferMallocAllocator()
+    )
+    let framebuffer = try makeFramebuffer(width: 2, height: 2, depth: 24)
+    connection.framebuffer = framebuffer
+    connection.state.pixelFormat = framebuffer.sourcePixelFormat
+    connection.connectionState = .connected
+    connection._framebufferUpdatePolicy = .paused
+    connection.framebufferUpdateRequestOutstanding = true
+
+    try connection.handleServerFence(
+      VNCProtocol.ServerFence(
+        messageType: VNCProtocol.ServerFence.messageType,
+        flags: [.request, .syncNext],
+        payload: Data("support".utf8)
+      )
+    )
+    let supportResponse = try #require(connection.clientToServerMessageQueue.dequeue())
+    let supportWriter = AuditWritingConnection()
+    try await supportResponse.message.send(connection: supportWriter)
+    #expect(supportWriter.data[0] == VNCProtocol.ClientFence.messageType)
+    #expect(supportWriter.data[8] == 7)
+
+    connection.updateColorDepth(.depth8Bit)
+    let queued = try #require(connection.clientToServerMessageQueue.dequeue())
+    let writer = AuditWritingConnection {
+      #expect(connection.state.pixelFormat?.depth == 24)
+    }
+    try await queued.message.send(connection: writer)
+
+    #expect(writer.data.count == 37)
+    #expect(writer.data[0] == VNCProtocol.ClientFence.messageType)
+    #expect(writer.data[4..<8] == Data([0x80, 0, 0, 4]))
+    #expect(writer.data[8] == 8)
+    #expect(writer.data[17] == VNCProtocol.SetPixelFormat(pixelFormat: framebuffer.sourcePixelFormat).messageType)
+    #expect(connection.state.pixelFormat?.depth == 24)
+
+    let payload = Data(writer.data[9..<17])
+    try connection.handleServerFence(
+      VNCProtocol.ServerFence(
+        messageType: VNCProtocol.ServerFence.messageType,
+        flags: [.syncNext],
+        payload: payload
+      )
+    )
+
+    #expect(connection.state.pixelFormat?.depth == 8)
+    #expect(connection.state.pixelFormat?.depth == connection.framebuffer?.sourcePixelFormat.depth)
+  }
+
+  @Test
+  func advertisesAndDecodesFenceExtension() async throws {
+    let connection = VNCConnection(settings: makeSettings())
+    #expect(try connection.orderedEncodingTypes().contains(VNCPseudoEncodingType.fence.rawValue))
+
+    var body = Data([0, 0, 0])
+    body.append(UInt32(0x8000_0004), bigEndian: true)
+    body.append(UInt8(3))
+    body.append(Data([1, 2, 3]))
+
+    let fence = try await VNCProtocol.ServerFence.receive(
+      connection: AuditBufferConnection(body)
+    )
+
+    #expect(fence.flags == [.request, .syncNext])
+    #expect(fence.payload == Data([1, 2, 3]))
   }
 
   @Test

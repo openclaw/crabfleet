@@ -55,6 +55,9 @@ private extension VNCConnection {
 			case VNCProtocol.EndOfContinuousUpdates.messageType:
 				try await handleEndOfContinuousUpdatesMessage()
 
+			case VNCProtocol.ServerFence.messageType:
+				try await handleServerFenceMessage()
+
 			default:
 				throw VNCError.protocol(.unsupportedServerToClientMessage(messageType: messageType))
 		}
@@ -195,9 +198,33 @@ private extension VNCConnection {
 	func handleEndOfContinuousUpdatesMessage() async throws {
 		didReceiveEndOfContinuousUpdates()
 	}
+
+	func handleServerFenceMessage() async throws {
+		let fence = try await VNCProtocol.ServerFence.receive(connection: connection)
+		try handleServerFence(fence)
+	}
 }
 
 extension VNCConnection {
+	func handleServerFence(_ fence: VNCProtocol.ServerFence) throws {
+		let first = !state.areFencesSupported
+		state.areFencesSupported = true
+
+		if fence.flags.contains(.request) {
+			let responseFlags = fence.flags.intersection([.blockBefore, .blockAfter])
+			enqueueClientToServerMessage(
+				VNCProtocol.ClientFence(flags: responseFlags, payload: fence.payload)
+			)
+		} else {
+			try completePixelFormatFence(fence)
+		}
+
+		if first {
+			logger.logDebug("Fence supported (server sent ServerFence)")
+			didLearnFenceSupport()
+		}
+	}
+
 	func didReceiveEndOfContinuousUpdates() {
 		let first = !state.areContinuousUpdatesSupported
 

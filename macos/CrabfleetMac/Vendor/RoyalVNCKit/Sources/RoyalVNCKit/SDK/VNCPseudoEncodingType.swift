@@ -8,6 +8,7 @@ public enum VNCPseudoEncodingType: VNCEncodingType {
 	case lastRect = -224
 	case cursor = -239
 	case desktopName = -307
+	case fence = -312
 	case continuousUpdates = -313
 	case desktopSize = -223
 	case extendedDesktopSize = -308
@@ -51,6 +52,8 @@ extension VNCPseudoEncodingType: CustomStringConvertible {
 				"Cursor"
 			case .desktopName:
 				"Desktop Name"
+			case .fence:
+				"Fence"
 			case .continuousUpdates:
 				"Continuous Updates"
 			case .desktopSize:

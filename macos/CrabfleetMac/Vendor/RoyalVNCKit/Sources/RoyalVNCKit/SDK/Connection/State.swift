@@ -18,6 +18,7 @@ extension VNCConnection {
 		private var _pixelFormat: VNCProtocol.PixelFormat?
 		private var _desktopName: String?
 		private var _incrementalUpdatesEnabled = false
+		private var _areFencesSupported = false
 		private var _areContinuousUpdatesSupported = false
 		private var _areContinuousUpdatesEnabled = false
 		private var _extendedClipboardServerCaps: VNCExtendedClipboardCaps?
@@ -68,6 +69,11 @@ extension VNCConnection {
 		var incrementalUpdatesEnabled: Bool {
 			get { withLock { _incrementalUpdatesEnabled } }
 			set { withLock { _incrementalUpdatesEnabled = newValue } }
+		}
+
+		var areFencesSupported: Bool {
+			get { withLock { _areFencesSupported } }
+			set { withLock { _areFencesSupported = newValue } }
 		}
 
 		var areContinuousUpdatesSupported: Bool {

@@ -112,8 +112,9 @@ public final class VNCConnection: NSObjectOrAnyObject, @unchecked Sendable {
 	var framebufferPacingTask: Task<Void, Never>?
 	var pendingPixelFormatTransition: VNCProtocol.PixelFormat?
 	var isPixelFormatTransitionInFlight = false
-	var isPixelFormatTransitionProbeQueued = false
-	var pixelFormatTransitionResponsesRemaining = 0
+	var pixelFormatTransitionInFlight: VNCProtocol.PixelFormat?
+	var pixelFormatTransitionFenceSequence: UInt64 = 0
+	var pixelFormatTransitionFencePayload: Data?
 	private let queue = DispatchQueue(label: "com.royalapps.royalvnc.connectionqueue",
 									  attributes: .concurrent)
 	private let lifecycleLock = NSRecursiveLock()
@@ -269,6 +270,7 @@ public final class VNCConnection: NSObjectOrAnyObject, @unchecked Sendable {
 		// Pseudo Encodings
 		encs.append(contentsOf: [
 			VNCPseudoEncodingType.lastRect.rawValue,
+			VNCPseudoEncodingType.fence.rawValue,
 			VNCPseudoEncodingType.continuousUpdates.rawValue,
 			VNCPseudoEncodingType.extendedDesktopSize.rawValue,
 			VNCPseudoEncodingType.desktopSize.rawValue,
