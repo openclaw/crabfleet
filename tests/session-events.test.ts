@@ -292,7 +292,7 @@ test("structured event redaction spans private-key arrays and underscore secret 
     },
     async archive() {},
   });
-  const secret = `sk_live_${"x".repeat(24)}`;
+  const secret = ["sk", "live", "x".repeat(24)].join("_");
 
   const result = await service.append({
     sessionId: "IS-1",
