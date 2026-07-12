@@ -20,6 +20,10 @@ export const structuredEventPayloadMaxBytes = 64 * 1024;
 export const structuredEventPayloadMaxDepth = 16;
 export const structuredEventPayloadMaxMembers = 1024;
 export const structuredEventPayloadMaxStringBytes = 16 * 1024;
+export const structuredEventLedgerMaxCount = 2048;
+export const structuredEventLedgerMaxBytes = 8 * 1024 * 1024;
+
+const structuredEventLedgerBudgetError = "structured session event budget exceeded";
 
 export type AppendInteractiveSessionEventInput = {
   sessionId: string;
@@ -111,57 +115,66 @@ export async function appendStructuredInteractiveSessionEventRecord(
     archiveInteractiveSessionLogs(env, sessionId, now),
 ): Promise<AppendStructuredInteractiveSessionEventResult> {
   const db = database(env);
-  return new InteractiveSessionEventLedgerService({
-    async persistAndInvalidate(event) {
-      const insert = db
-        .insertInto("interactive_session_events")
-        .values({
-          session_id: event.sessionId,
-          actor: event.actor,
-          event_key: event.eventKey,
-          event_type: event.type,
-          message: event.message,
-          payload_json: event.payloadJson,
-          created_at: event.now,
-        })
-        .onConflict((constraint) => constraint.doNothing())
-        .returningAll();
-      const invalidate = db
-        .updateTable("interactive_sessions")
-        .set({ terminal_finalize_pending: 1 })
-        .where("id", "=", event.sessionId)
-        .where("status", "in", deadInteractiveSessionStatuses)
-        .where(
-          sql<boolean>`EXISTS (
-            SELECT 1
-            FROM interactive_session_events
-            WHERE session_id = ${event.sessionId}
-              AND event_key = ${event.eventKey}
-              AND event_type = ${event.type}
-              AND message = ${event.message}
-              AND payload_json = ${event.payloadJson}
-          )`,
+  try {
+    return await new InteractiveSessionEventLedgerService({
+      async persistAndInvalidate(event) {
+        const insert = db
+          .insertInto("interactive_session_events")
+          .values({
+            session_id: event.sessionId,
+            actor: event.actor,
+            event_key: event.eventKey,
+            event_type: event.type,
+            message: event.message,
+            payload_json: event.payloadJson,
+            created_at: event.now,
+          })
+          .onConflict((constraint) => constraint.doNothing())
+          .returningAll();
+        const invalidate = db
+          .updateTable("interactive_sessions")
+          .set({ terminal_finalize_pending: 1 })
+          .where("id", "=", event.sessionId)
+          .where("status", "in", deadInteractiveSessionStatuses)
+          .where(
+            sql<boolean>`EXISTS (
+              SELECT 1
+              FROM interactive_session_events
+              WHERE session_id = ${event.sessionId}
+                AND event_key = ${event.eventKey}
+                AND event_type = ${event.type}
+                AND message = ${event.message}
+                AND payload_json = ${event.payloadJson}
+            )`,
+          );
+        const results = await env.DB.batch<InteractiveSessionEventRow>(
+          [insert, invalidate].map((query) => {
+            const compiled = query.compile();
+            return env.DB.prepare(compiled.sql).bind(...compiled.parameters);
+          }),
         );
-      const results = await env.DB.batch<InteractiveSessionEventRow>(
-        [insert, invalidate].map((query) => {
-          const compiled = query.compile();
-          return env.DB.prepare(compiled.sql).bind(...compiled.parameters);
-        }),
+        const inserted = results[0]?.results?.[0];
+        const row =
+          inserted ??
+          (await db
+            .selectFrom("interactive_session_events")
+            .selectAll()
+            .where("session_id", "=", event.sessionId)
+            .where("event_key", "=", event.eventKey)
+            .executeTakeFirst());
+        if (!row) throw new Error("structured session event was not persisted");
+        return { row, inserted: Boolean(inserted) };
+      },
+      archive,
+    }).append(input);
+  } catch (error) {
+    if (String(error).toLowerCase().includes(structuredEventLedgerBudgetError)) {
+      throw payloadTooLarge(
+        `structured events must stay within ${structuredEventLedgerMaxCount} events and ${structuredEventLedgerMaxBytes} UTF-8 bytes per session`,
       );
-      const inserted = results[0]?.results?.[0];
-      const row =
-        inserted ??
-        (await db
-          .selectFrom("interactive_session_events")
-          .selectAll()
-          .where("session_id", "=", event.sessionId)
-          .where("event_key", "=", event.eventKey)
-          .executeTakeFirst());
-      if (!row) throw new Error("structured session event was not persisted");
-      return { row, inserted: Boolean(inserted) };
-    },
-    archive,
-  }).append(input);
+    }
+    throw error;
+  }
 }
 
 function normalizeStructuredEvent(
