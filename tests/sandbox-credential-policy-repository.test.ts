@@ -442,6 +442,7 @@ test("credential-policy registration SQL proves every supported ownership fence"
   assert.match(current.sql, /sandbox_refresh_claim is null/i);
   assert.match(current.sql, /state = 'registering'/i);
   assert.match(current.sql, /registration_claim_expires_at >/i);
+  assert.match(current.sql, /registration_write_started = 0/i);
   assert.ok(current.parameters.includes("sandbox:sandbox-1:terminal-1:autostart-v4"));
   assert.doesNotMatch(current.sql, /1 = 1/);
 
@@ -913,6 +914,82 @@ test("staged rotations fence old-worker writes until the staged row is removed",
     `)
     .run(Number.MAX_SAFE_INTEGER);
   assert.equal(postFenceClaim.changes, 2);
+});
+
+test("expired write-started registrations remain reserved for recovery", async () => {
+  const sqlite = credentialPolicyDatabase();
+  const env = sqliteRuntimeEnv(sqlite);
+  const staged = await beginSandboxCredentialPolicyRegistration(
+    env,
+    "IS-42",
+    "sandbox-1",
+    ownershipFence,
+  );
+  const rollback = ["sandbox-1", "do-1"].map((lookupId) => ({
+    generation: "generation:existing",
+    policy: {
+      allowedHosts: [],
+      githubCredentialSource: "none" as const,
+      githubRepo: "openclaw/crabfleet",
+      owner: "operator",
+      sandboxId: lookupId,
+      sessionId: "IS-42",
+    },
+  }));
+  assert.equal(
+    await recordSandboxCredentialPolicyRollback(
+      env,
+      "IS-42",
+      "sandbox-1",
+      staged,
+      rollback,
+      ownershipFence,
+    ),
+    true,
+  );
+  assert.ok(
+    await markSandboxCredentialPolicyRegistrationWriteStarted(
+      env,
+      "IS-42",
+      "sandbox-1",
+      staged,
+      ownershipFence,
+    ),
+  );
+  sqlite
+    .prepare(`
+      UPDATE interactive_session_credential_policy_registrations
+      SET registration_claim_expires_at = 0
+      WHERE session_id = 'IS-42' AND sandbox_id = 'sandbox-1'
+    `)
+    .run();
+
+  await assert.rejects(
+    beginSandboxCredentialPolicyRegistration(env, "IS-42", "sandbox-1", ownershipFence),
+    { message: "sandbox credential policy registration is unavailable" },
+  );
+
+  assert.deepEqual(
+    {
+      ...sqlite
+        .prepare(`
+        SELECT
+          registration_generation,
+          registration_claim,
+          registration_write_started,
+          rollback_policies_json
+        FROM interactive_session_credential_policy_registrations
+        WHERE session_id = 'IS-42' AND sandbox_id = 'sandbox-1'
+      `)
+        .get(),
+    },
+    {
+      registration_generation: staged.generation,
+      registration_claim: staged.claim,
+      registration_write_started: 1,
+      rollback_policies_json: JSON.stringify(rollback),
+    },
+  );
 });
 
 test("expired pre-write staged rotations release the legacy worker compatibility fence", async () => {
@@ -1760,6 +1837,15 @@ test("active credential-policy generation requires every exact lookup row", asyn
   rows[0] = { ...rows[0]!, registration_generation: "generation:test-1" };
   rows[1] = { ...rows[1]!, registration_generation: "generation:test-1" };
   rows[1] = { ...rows[1]!, registration_claim: "stale" };
+  assert.equal(await activeSandboxCredentialPolicyGeneration(env, "IS-42", "sandbox-1"), null);
+
+  rows[1] = { ...rows[1]!, registration_claim: null };
+  rows.push({
+    lookup_id: "do-obsolete",
+    state: "active",
+    registration_generation: "generation:test-1",
+    registration_claim: null,
+  });
   assert.equal(await activeSandboxCredentialPolicyGeneration(env, "IS-42", "sandbox-1"), null);
 });
 

@@ -65,6 +65,7 @@ export function activeSandboxCredentialPolicyCondition(
           state != 'active'
           OR registration_generation != ${generation}
           OR registration_claim IS NOT NULL
+          OR lookup_id NOT IN (${sql.join(lookupIds)})
           OR NOT (${updatedAtCondition})
         )
     )
@@ -82,11 +83,12 @@ export async function activeSandboxCredentialPolicyGeneration(
     .where("session_id", "=", sessionId)
     .where("sandbox_id", "=", sandboxId)
     .execute();
-  const expected = sandboxLookupIds(env, sandboxId);
+  const expected = new Set(sandboxLookupIds(env, sandboxId));
   const generation = rows[0]?.registration_generation;
   if (
     !isCurrentCredentialPolicyGeneration(generation) ||
-    !expected.every((lookupId) =>
+    rows.length !== expected.size ||
+    ![...expected].every((lookupId) =>
       rows.some(
         (row) =>
           row.lookup_id === lookupId &&
@@ -97,6 +99,7 @@ export async function activeSandboxCredentialPolicyGeneration(
     ) ||
     rows.some(
       (row) =>
+        !expected.has(row.lookup_id) ||
         row.state !== "active" ||
         row.registration_generation !== generation ||
         row.registration_claim !== null,
@@ -586,6 +589,7 @@ export function sandboxCredentialPolicyRegistrationQueries(
         cleanup_claim_expires_at = NULL,
         updated_at = excluded.updated_at
       WHERE interactive_session_credential_policy_registrations.state != 'cleanup_pending'
+        AND interactive_session_credential_policy_registrations.registration_write_started = 0
         AND (
           interactive_session_credential_policy_registrations.registration_claim IS NULL
           OR interactive_session_credential_policy_registrations.registration_claim_expires_at <= ${now}
