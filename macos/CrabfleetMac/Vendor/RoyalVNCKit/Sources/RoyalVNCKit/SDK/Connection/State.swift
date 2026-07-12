@@ -19,6 +19,7 @@ extension VNCConnection {
 		private var _desktopName: String?
 		private var _incrementalUpdatesEnabled = false
 		private var _areFencesSupported = false
+		private var _areSyncNextFencesSupported = false
 		private var _areContinuousUpdatesSupported = false
 		private var _areContinuousUpdatesEnabled = false
 		private var _extendedClipboardServerCaps: VNCExtendedClipboardCaps?
@@ -74,6 +75,11 @@ extension VNCConnection {
 		var areFencesSupported: Bool {
 			get { withLock { _areFencesSupported } }
 			set { withLock { _areFencesSupported = newValue } }
+		}
+
+		var areSyncNextFencesSupported: Bool {
+			get { withLock { _areSyncNextFencesSupported } }
+			set { withLock { _areSyncNextFencesSupported = newValue } }
 		}
 
 		var areContinuousUpdatesSupported: Bool {

@@ -211,7 +211,7 @@ extension VNCConnection {
 		state.areFencesSupported = true
 
 		if fence.flags.contains(.request) {
-			let responseFlags = fence.flags.intersection([.blockBefore, .blockAfter])
+			let responseFlags = fence.flags.intersection(.blockBefore)
 			enqueueClientToServerMessage(
 				VNCProtocol.ClientFence(flags: responseFlags, payload: fence.payload)
 			)
@@ -221,7 +221,7 @@ extension VNCConnection {
 
 		if first {
 			logger.logDebug("Fence supported (server sent ServerFence)")
-			didLearnFenceSupport()
+			probeSyncNextFenceSupport()
 		}
 	}
 

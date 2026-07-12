@@ -116,7 +116,12 @@ struct AuditFindingsTests {
     connection.updateColorDepth(.depth8Bit)
     #expect(connection.state.pixelFormat?.depth == 24)
     #expect(connection.state.pixelFormat?.depth == connection.framebuffer?.sourcePixelFormat.depth)
-    #expect(connection.clientToServerMessageQueue.dequeue() == nil)
+    let probe = try #require(connection.clientToServerMessageQueue.dequeue())
+    let probeWriter = AuditWritingConnection()
+    try await probe.message.send(connection: probeWriter)
+    #expect(probeWriter.data.count == 10)
+    #expect(probeWriter.data[0] == 3)
+    #expect(probeWriter.data[1] == 0)
 
     connection.completeFramebufferUpdateRequest()
     let queued = try #require(connection.clientToServerMessageQueue.dequeue())
@@ -147,7 +152,7 @@ struct AuditFindingsTests {
     try connection.handleServerFence(
       VNCProtocol.ServerFence(
         messageType: VNCProtocol.ServerFence.messageType,
-        flags: [.request, .syncNext],
+        flags: [.request, .blockAfter, .syncNext],
         payload: Data("support".utf8)
       )
     )
@@ -155,7 +160,23 @@ struct AuditFindingsTests {
     let supportWriter = AuditWritingConnection()
     try await supportResponse.message.send(connection: supportWriter)
     #expect(supportWriter.data[0] == VNCProtocol.ClientFence.messageType)
+    #expect(supportWriter.data[4..<8] == Data([0, 0, 0, 0]))
     #expect(supportWriter.data[8] == 7)
+
+    let capabilityProbe = try #require(connection.clientToServerMessageQueue.dequeue())
+    let capabilityWriter = AuditWritingConnection()
+    try await capabilityProbe.message.send(connection: capabilityWriter)
+    let capabilityLength = Int(capabilityWriter.data[8])
+    let capabilityPayload = Data(capabilityWriter.data[9..<(9 + capabilityLength)])
+    #expect(capabilityWriter.data[0] == VNCProtocol.ClientFence.messageType)
+    #expect(capabilityWriter.data[(9 + capabilityLength)] == 0)
+    try connection.handleServerFence(
+      VNCProtocol.ServerFence(
+        messageType: VNCProtocol.ServerFence.messageType,
+        flags: [.syncNext],
+        payload: capabilityPayload
+      )
+    )
 
     connection.updateColorDepth(.depth8Bit)
     let queued = try #require(connection.clientToServerMessageQueue.dequeue())
@@ -182,6 +203,51 @@ struct AuditFindingsTests {
 
     #expect(connection.state.pixelFormat?.depth == 8)
     #expect(connection.state.pixelFormat?.depth == connection.framebuffer?.sourcePixelFormat.depth)
+  }
+
+  @Test
+  func fallsBackToForcedUpdateWhenSyncNextIsUnsupported() async throws {
+    let connection = VNCConnection(
+      settings: makeSettings(),
+      framebufferAllocator: VNCFramebufferMallocAllocator()
+    )
+    let framebuffer = try makeFramebuffer(width: 2, height: 2, depth: 24)
+    connection.framebuffer = framebuffer
+    connection.state.pixelFormat = framebuffer.sourcePixelFormat
+    connection.connectionState = .connected
+    connection._framebufferUpdatePolicy = .paused
+    connection.framebufferUpdateRequestOutstanding = true
+
+    try connection.handleServerFence(
+      VNCProtocol.ServerFence(
+        messageType: VNCProtocol.ServerFence.messageType,
+        flags: [.request],
+        payload: Data()
+      )
+    )
+    _ = try #require(connection.clientToServerMessageQueue.dequeue())
+    let capabilityProbe = try #require(connection.clientToServerMessageQueue.dequeue())
+    let capabilityWriter = AuditWritingConnection()
+    try await capabilityProbe.message.send(connection: capabilityWriter)
+    let capabilityLength = Int(capabilityWriter.data[8])
+    let capabilityPayload = Data(capabilityWriter.data[9..<(9 + capabilityLength)])
+
+    connection.updateColorDepth(.depth8Bit)
+    #expect(connection.clientToServerMessageQueue.dequeue() == nil)
+
+    try connection.handleServerFence(
+      VNCProtocol.ServerFence(
+        messageType: VNCProtocol.ServerFence.messageType,
+        flags: [],
+        payload: capabilityPayload
+      )
+    )
+
+    let probe = try #require(connection.clientToServerMessageQueue.dequeue())
+    let probeWriter = AuditWritingConnection()
+    try await probe.message.send(connection: probeWriter)
+    #expect(probeWriter.data[0] == 3)
+    #expect(probeWriter.data[1] == 0)
   }
 
   @Test
