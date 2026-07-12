@@ -9,6 +9,7 @@ import {
   runtimeProfileByID,
   type RuntimeProfileDescriptor,
 } from "../runtime-profiles.ts";
+import { runtimeAdapterControlPlaneForProfile } from "../runtime-adapter.ts";
 import { trustedProxyPublicOrigin, type TrustedProxyEnv } from "../trusted-proxy-auth.ts";
 import { configuredHttpOrigin } from "../url-security.ts";
 import { badRequest } from "./http.ts";
@@ -43,6 +44,8 @@ export type DeploymentEnv = TrustedProxyEnv & {
   CRABFLEET_INTERACTIVE_RUNTIMES?: string;
   CRABFLEET_DEFAULT_PROFILE?: string;
   CRABFLEET_RUNTIME_PROFILES_JSON?: string;
+  CRABBOX_RUNTIME_ADAPTER_URL?: string;
+  CRABBOX_RUNTIME_ADAPTER_URL_TEMPLATE?: string;
 };
 
 export function deploymentConfig(env: DeploymentEnv): DeploymentConfig {
@@ -52,6 +55,7 @@ export function deploymentConfig(env: DeploymentEnv): DeploymentConfig {
   if (runtimeProfiles.length > 0 && !runtimeProfileByID(runtimeProfiles, defaultProfile)) {
     throw new TypeError("CRABFLEET_DEFAULT_PROFILE must name a configured runtime profile");
   }
+  validateRuntimeProfileRoutes(env, runtimeProfiles, defaultProfile);
   return {
     label: clean(env.CRABFLEET_LABEL, 80) || "Crabfleet",
     canonicalUrl: configuredHttpOrigin(env.CRABFLEET_CANONICAL_URL, appCanonicalOrigin),
@@ -63,6 +67,26 @@ export function deploymentConfig(env: DeploymentEnv): DeploymentConfig {
     defaultProfile,
     runtimeProfiles,
   };
+}
+
+function validateRuntimeProfileRoutes(
+  env: DeploymentEnv,
+  runtimeProfiles: RuntimeProfileDescriptor[],
+  defaultProfile: string,
+): void {
+  const direct = env.CRABBOX_RUNTIME_ADAPTER_URL;
+  const template = env.CRABBOX_RUNTIME_ADAPTER_URL_TEMPLATE;
+  if (!template || direct) return;
+  const profileIDs =
+    runtimeProfiles.length > 0 ? runtimeProfiles.map((profile) => profile.id) : [defaultProfile];
+  const unroutable = profileIDs.find(
+    (profile) => !runtimeAdapterControlPlaneForProfile(undefined, template, profile),
+  );
+  if (unroutable) {
+    throw new TypeError(
+      `runtime profile ${unroutable} cannot be routed by CRABBOX_RUNTIME_ADAPTER_URL_TEMPLATE`,
+    );
+  }
 }
 
 export function selectedRuntimeProfile(

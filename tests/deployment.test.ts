@@ -77,6 +77,30 @@ test("configured runtime profiles are allowlisted behaviorally", () => {
   );
 });
 
+test("profile-routed deployments reject profiles the adapter template cannot address", () => {
+  assert.throws(
+    () =>
+      deploymentConfig({
+        CRABFLEET_DEFAULT_PROFILE: "Desktop.PROFILE_2026",
+        CRABFLEET_RUNTIME_PROFILES_JSON: JSON.stringify([
+          { id: "Desktop.PROFILE_2026", label: "Desktop" },
+        ]),
+        CRABBOX_RUNTIME_ADAPTER_URL_TEMPLATE: "https://controller.example.test/adapters/{profile}",
+      }),
+    /runtime profile Desktop\.PROFILE_2026 cannot be routed/,
+  );
+  assert.equal(
+    deploymentConfig({
+      CRABFLEET_DEFAULT_PROFILE: "Desktop.PROFILE_2026",
+      CRABFLEET_RUNTIME_PROFILES_JSON: JSON.stringify([
+        { id: "Desktop.PROFILE_2026", label: "Desktop" },
+      ]),
+      CRABBOX_RUNTIME_ADAPTER_URL: "https://controller.example.test/adapter",
+    }).defaultProfile,
+    "Desktop.PROFILE_2026",
+  );
+});
+
 test("public and client deployment views exclude server-only routing data", () => {
   const env: DeploymentEnv = {
     CRABFLEET_CANONICAL_URL: "https://backend.example",
