@@ -1522,6 +1522,39 @@ struct PrivateMacShareTests {
   }
 
   @Test
+  func inputSessionFinishWaitsForProducersAndRejectsLateInput() {
+    let input = BlockingRemoteInputRecorder()
+    let gate = RemoteInputSessionGate(input: input, viewOnly: false)
+    let producerFinished = DispatchSemaphore(value: 0)
+    let finishAttempted = DispatchSemaphore(value: 0)
+    let finishCompleted = DispatchSemaphore(value: 0)
+
+    DispatchQueue.global().async {
+      gate.keyEvent(down: true, keysym: 0x61)
+      producerFinished.signal()
+    }
+    #expect(input.waitForKeyEntry())
+
+    DispatchQueue.global().async {
+      finishAttempted.signal()
+      gate.finish()
+      finishCompleted.signal()
+    }
+    #expect(finishAttempted.wait(timeout: .now() + 1) == .success)
+    #expect(input.events == [.key(down: true, keysym: 0x61)])
+    #expect(finishCompleted.wait(timeout: .now() + 0.01) == .timedOut)
+
+    input.allowKeyReturn()
+    #expect(producerFinished.wait(timeout: .now() + 1) == .success)
+    #expect(finishCompleted.wait(timeout: .now() + 1) == .success)
+    #expect(input.events == [.key(down: true, keysym: 0x61), .release])
+
+    gate.keyEvent(down: false, keysym: 0x61)
+    gate.pointerEvent(buttonMask: 0x01, x: 1, y: 1)
+    #expect(input.events == [.key(down: true, keysym: 0x61), .release])
+  }
+
+  @Test
   func retriesHeldInputReleaseAfterAccessibilityReturns() async {
     let trust = AccessibilityTrust(granted: true)
     let events = RemoteInputEventRecorder()
@@ -2361,6 +2394,53 @@ private final class RemoteInputRecorder: RemoteInputForwarding, @unchecked Senda
     lock.lock()
     releases += 1
     lock.unlock()
+  }
+}
+
+private final class BlockingRemoteInputRecorder: RemoteInputForwarding, @unchecked Sendable {
+  enum Event: Equatable {
+    case key(down: Bool, keysym: UInt32)
+    case pointer
+    case release
+  }
+
+  private let lock = NSLock()
+  private let keyEntered = DispatchSemaphore(value: 0)
+  private let keyMayReturn = DispatchSemaphore(value: 0)
+  private var storage: [Event] = []
+
+  var events: [Event] {
+    lock.lock()
+    defer { lock.unlock() }
+    return storage
+  }
+
+  func keyEvent(down: Bool, keysym: UInt32) {
+    lock.lock()
+    storage.append(.key(down: down, keysym: keysym))
+    lock.unlock()
+    keyEntered.signal()
+    keyMayReturn.wait()
+  }
+
+  func pointerEvent(buttonMask: UInt8, x: UInt16, y: UInt16) {
+    lock.lock()
+    storage.append(.pointer)
+    lock.unlock()
+  }
+
+  func releaseAllInput() {
+    lock.lock()
+    storage.append(.release)
+    lock.unlock()
+  }
+
+  func waitForKeyEntry() -> Bool {
+    keyEntered.wait(timeout: .now() + 1) == .success
+  }
+
+  func allowKeyReturn() {
+    keyMayReturn.signal()
   }
 }
 

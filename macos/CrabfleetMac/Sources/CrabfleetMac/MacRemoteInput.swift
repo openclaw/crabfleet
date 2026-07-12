@@ -14,6 +14,57 @@ extension RemoteInputForwarding {
   func releaseAllInput() {}
 }
 
+final class RemoteInputSessionGate: @unchecked Sendable {
+  private let input: any RemoteInputForwarding
+  private let lock = NSLock()
+  private var acceptingInput = true
+  private var viewOnly: Bool
+
+  init(input: any RemoteInputForwarding, viewOnly: Bool) {
+    self.input = input
+    self.viewOnly = viewOnly
+  }
+
+  func setViewOnly(_ enabled: Bool) {
+    withLock {
+      guard acceptingInput else { return }
+      let shouldReleaseInput = enabled && !viewOnly
+      viewOnly = enabled
+      if shouldReleaseInput {
+        input.releaseAllInput()
+      }
+    }
+  }
+
+  func keyEvent(down: Bool, keysym: UInt32) {
+    withLock {
+      guard acceptingInput, !viewOnly else { return }
+      input.keyEvent(down: down, keysym: keysym)
+    }
+  }
+
+  func pointerEvent(buttonMask: UInt8, x: UInt16, y: UInt16) {
+    withLock {
+      guard acceptingInput, !viewOnly else { return }
+      input.pointerEvent(buttonMask: buttonMask, x: x, y: y)
+    }
+  }
+
+  func finish() {
+    withLock {
+      guard acceptingInput else { return }
+      acceptingInput = false
+      input.releaseAllInput()
+    }
+  }
+
+  private func withLock<T>(_ body: () -> T) -> T {
+    lock.lock()
+    defer { lock.unlock() }
+    return body()
+  }
+}
+
 final class MacRemoteInputController: RemoteInputForwarding, @unchecked Sendable {
   private static let releaseRetryDelay: DispatchTimeInterval = .milliseconds(250)
   private static let releaseRetryLimit = 120

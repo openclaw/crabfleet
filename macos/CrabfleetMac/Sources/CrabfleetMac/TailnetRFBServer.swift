@@ -174,6 +174,7 @@ private final class RFBHostSession: @unchecked Sendable {
   private let capture: MacScreenCapture
   private let descriptor: CapturedDisplayDescriptor
   private let input: any RemoteInputForwarding
+  private let inputGate: RemoteInputSessionGate
   private let clipboard: (any HostClipboardSyncing)?
   private let requiredLocalAddress: String
   private let desktopName: String
@@ -200,7 +201,6 @@ private final class RFBHostSession: @unchecked Sendable {
   private var clientClipboardCaps: VNCExtendedClipboardCaps?
   private var currentWidth: Int
   private var currentHeight: Int
-  private var viewOnly: Bool
   private var videoEncoder: MacVideoEncoder?
   private var videoFrameMailbox: VideoMailbox<EncodedVideoFrame>?
   private var videoPixelMailbox: VideoMailbox<VideoPixelSource>?
@@ -231,11 +231,11 @@ private final class RFBHostSession: @unchecked Sendable {
     self.capture = capture
     self.descriptor = descriptor
     self.input = input
+    inputGate = RemoteInputSessionGate(input: input, viewOnly: viewOnly)
     self.clipboard = clipboard
     self.requiredLocalAddress = requiredLocalAddress
     self.desktopName = desktopName
     self.handshakeTimeout = handshakeTimeout
-    self.viewOnly = viewOnly
     self.didAuthorize = didAuthorize
     self.eventHandler = eventHandler
     self.didFinish = didFinish
@@ -267,11 +267,7 @@ private final class RFBHostSession: @unchecked Sendable {
   }
 
   func setViewOnly(_ enabled: Bool) {
-    let shouldReleaseInput = withLock { () -> Bool in
-      defer { viewOnly = enabled }
-      return enabled && !viewOnly
-    }
-    if shouldReleaseInput { input.releaseAllInput() }
+    inputGate.setViewOnly(enabled)
   }
 
   private func beginProtocolIfNeeded() {
@@ -524,23 +520,15 @@ private final class RFBHostSession: @unchecked Sendable {
 
       case 4:  // KeyEvent
         let payload = try await io.readExactly(7)
-        withLock {
-          if !viewOnly {
-            input.keyEvent(down: payload[0] != 0, keysym: payload.readUInt32(at: 3))
-          }
-        }
+        inputGate.keyEvent(down: payload[0] != 0, keysym: payload.readUInt32(at: 3))
 
       case 5:  // PointerEvent
         let payload = try await io.readExactly(5)
-        withLock {
-          if !viewOnly {
-            input.pointerEvent(
-              buttonMask: payload[0],
-              x: payload.readUInt16(at: 1),
-              y: payload.readUInt16(at: 3)
-            )
-          }
-        }
+        inputGate.pointerEvent(
+          buttonMask: payload[0],
+          x: payload.readUInt16(at: 1),
+          y: payload.readUInt16(at: 3)
+        )
 
       case 6:  // ClientCutText
         try await receiveClientCutText(io: io)
@@ -1037,7 +1025,7 @@ private final class RFBHostSession: @unchecked Sendable {
     finishPixelMailbox()
     let encoder = replaceVideoEncoder(with: nil)
     encoder?.invalidate()
-    input.releaseAllInput()
+    inputGate.finish()
     clipboard?.detach()
     connection.cancel()
     guard encoder != nil else {
