@@ -69,6 +69,10 @@ test("runtime profile catalog fails closed on malformed or ambiguous input", () 
     '[{"id":"a","label":"A","capabilities":null}]',
     '[{"id":"a","label":"A","capabilities":{"unknown":true}}]',
     '[{"id":"a","label":"A","privateProvider":"hidden"}]',
+    '[{"id":"Desktop","label":"Desktop"}]',
+    '[{"id":"desktop.profile","label":"Desktop"}]',
+    '[{"id":"desktop_profile","label":"Desktop"}]',
+    `[{"id":"${"a".repeat(64)}","label":"Desktop"}]`,
     '[{"id":"a","label":"A","codexSsh":null}]',
     '[{"id":"a","label":"A","codexSsh":{"aliasTemplate":"box {sessionId}"}}]',
     '[{"id":"a","label":"A","codexSsh":{"aliasTemplate":"box-{unknown}"}}]',
@@ -81,6 +85,10 @@ test("runtime profile catalog fails closed on malformed or ambiguous input", () 
   for (const value of invalid) {
     assert.throws(() => parseRuntimeProfiles(value));
   }
+  assert.equal(
+    parseRuntimeProfiles(JSON.stringify([{ id: "a".repeat(63), label: "Maximum" }]))[0]?.id.length,
+    63,
+  );
   assert.deepEqual(parseRuntimeProfiles(undefined), []);
   assert.deepEqual(parseRuntimeProfiles(""), []);
 });

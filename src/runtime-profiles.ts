@@ -32,7 +32,7 @@ export type RuntimeProfileCodexSshValues = {
   profile: string;
 };
 
-const profileIDPattern = /^[A-Za-z0-9](?:[A-Za-z0-9._-]{0,118}[A-Za-z0-9])?$/;
+const profileIDPattern = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/;
 const targetPattern = /^[A-Za-z0-9](?:[A-Za-z0-9._-]{0,38}[A-Za-z0-9])?$/;
 const capabilityNames = ["terminal", "takeover", "vnc", "desktop", "logs", "artifacts"] as const;
 const capabilityNameSet = new Set<string>(capabilityNames);
