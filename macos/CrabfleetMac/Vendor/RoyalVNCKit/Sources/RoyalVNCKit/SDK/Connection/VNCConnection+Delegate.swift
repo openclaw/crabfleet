@@ -136,38 +136,39 @@ extension VNCConnection {
 
 private extension VNCConnection {
 	func askDelegateForCredential(authenticationType: VNCAuthenticationType) async throws -> VNCCredential {
-		let requestID = UUID()
-		let credential: VNCCredential? = await withTaskCancellationHandler {
-			await withCheckedContinuation { continuation in
-				guard registerCredentialContinuation(continuation, id: requestID) else {
-					continuation.resume(returning: nil)
-					return
-				}
-
-				if Task.isCancelled {
-					cancelPendingCredentialRequest(id: requestID)
-					return
-				}
-
-				DispatchQueue.main.async { [weak self] in
-					guard let self, let delegate = self.delegate else {
-						self?.resolveCredentialRequest(id: requestID, credential: nil)
-						return
-					}
-
-					delegate.connection(self, credentialFor: authenticationType) { [weak self] credential in
-						self?.resolveCredentialRequest(id: requestID, credential: credential)
-					}
-				}
-			}
-		} onCancel: {
-			cancelPendingCredentialRequest(id: requestID)
-		}
+		let request = beginCredentialRequest(authenticationType: authenticationType)
+		let credential = await request.value()
 
 		guard let credential else {
 			throw VNCError.authentication(.noAuthenticationDataProvided)
 		}
 
 		return credential
+	}
+}
+
+extension VNCConnection {
+	func beginCredentialRequest(authenticationType: VNCAuthenticationType) -> PendingCredentialRequest {
+		let requestID = UUID()
+		let request = PendingCredentialRequest { [weak self] in
+			self?.removeCredentialRequest(id: requestID)
+		}
+		guard registerCredentialRequest(request, id: requestID) else {
+			request.resolve(with: nil)
+			return request
+		}
+
+		DispatchQueue.main.async { [weak self, request] in
+			guard request.pending else { return }
+			guard let self, let delegate = self.delegate else {
+				request.resolve(with: nil)
+				return
+			}
+
+			delegate.connection(self, credentialFor: authenticationType) { [request] credential in
+				request.resolve(with: credential)
+			}
+		}
+		return request
 	}
 }

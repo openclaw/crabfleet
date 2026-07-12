@@ -538,6 +538,59 @@ struct AuditFindingsTests {
     delegate.completion?(VNCPasswordCredential(password: "late"))
   }
 
+  @Test @MainActor
+  func unresolvedCredentialDelegateRequestDoesNotRetainConnection() async {
+    var connection: VNCConnection? = VNCConnection(settings: makeSettings())
+    weak var weakConnection = connection
+    let delegate = PendingCredentialDelegate()
+    connection?.delegate = delegate
+
+    let request = connection!.beginCredentialRequest(authenticationType: .vnc)
+    let credentialTask = Task {
+      await request.value()
+    }
+
+    while delegate.completion == nil {
+      await Task.yield()
+    }
+
+    connection = nil
+    for _ in 0..<100 where weakConnection != nil {
+      await Task.yield()
+    }
+
+    #expect(weakConnection == nil)
+    #expect(await credentialTask.value == nil)
+
+    delegate.completion?(VNCPasswordCredential(password: "late"))
+  }
+
+  @Test @MainActor
+  func taskCancellationResolvesPendingCredentialRequest() async {
+    let connection = VNCConnection(settings: makeSettings())
+    let delegate = PendingCredentialDelegate()
+    connection.delegate = delegate
+
+    let credentialTask = Task {
+      try await connection.askDelegateForPasswordCredential(authenticationType: .vnc)
+    }
+
+    while delegate.completion == nil {
+      await Task.yield()
+    }
+
+    credentialTask.cancel()
+
+    do {
+      _ = try await credentialTask.value
+      Issue.record("Expected task cancellation to resolve the pending credential request")
+    } catch {
+      #expect(credentialTask.isCancelled)
+    }
+
+    delegate.completion?(VNCPasswordCredential(password: "late"))
+  }
+
   @Test
   func preservesAlreadyRGBAFormattedCursorChannels() {
     let cursor = VNCCursor(

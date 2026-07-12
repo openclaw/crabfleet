@@ -123,9 +123,9 @@ public final class VNCConnection: NSObjectOrAnyObject, @unchecked Sendable {
 	private let queue = DispatchQueue(label: "com.royalapps.royalvnc.connectionqueue",
 									  attributes: .concurrent)
 	private let lifecycleLock = NSRecursiveLock()
-	private let credentialContinuationLock = NSLock()
-	private var pendingCredentialContinuations = [
-		UUID: CheckedContinuation<VNCCredential?, Never>
+	private let credentialRequestLock = NSLock()
+	private var pendingCredentialRequests = [
+		UUID: WeakCredentialRequest
 	]()
 
 	private let sharedZStream: ZlibStream
@@ -446,8 +446,8 @@ extension VNCConnection {
 		return operation()
 	}
 
-	func registerCredentialContinuation(
-		_ continuation: CheckedContinuation<VNCCredential?, Never>,
+	func registerCredentialRequest(
+		_ request: PendingCredentialRequest,
 		id: UUID
 	) -> Bool {
 		lifecycleLock.lock()
@@ -457,33 +457,27 @@ extension VNCConnection {
 			return false
 		}
 
-		credentialContinuationLock.lock()
-		defer { credentialContinuationLock.unlock() }
+		credentialRequestLock.lock()
+		defer { credentialRequestLock.unlock() }
 
-		pendingCredentialContinuations[id] = continuation
+		pendingCredentialRequests[id] = WeakCredentialRequest(request)
 		return true
 	}
 
-	func resolveCredentialRequest(id: UUID, credential: VNCCredential?) {
-		credentialContinuationLock.lock()
-		let continuation = pendingCredentialContinuations.removeValue(forKey: id)
-		credentialContinuationLock.unlock()
-
-		continuation?.resume(returning: credential)
-	}
-
-	func cancelPendingCredentialRequest(id: UUID) {
-		resolveCredentialRequest(id: id, credential: nil)
+	func removeCredentialRequest(id: UUID) {
+		credentialRequestLock.lock()
+		pendingCredentialRequests.removeValue(forKey: id)
+		credentialRequestLock.unlock()
 	}
 
 	func cancelPendingCredentialRequests() {
-		credentialContinuationLock.lock()
-		let continuations = Array(pendingCredentialContinuations.values)
-		pendingCredentialContinuations.removeAll()
-		credentialContinuationLock.unlock()
+		credentialRequestLock.lock()
+		let requests = pendingCredentialRequests.values.compactMap(\.request)
+		pendingCredentialRequests.removeAll()
+		credentialRequestLock.unlock()
 
-		for continuation in continuations {
-			continuation.resume(returning: nil)
+		for request in requests {
+			request.resolve(with: nil)
 		}
 	}
 
@@ -505,6 +499,68 @@ extension VNCConnection {
 		}
 
 		notifyDelegateAboutConnectionStateChange(newConnectionState)
+	}
+}
+
+final class PendingCredentialRequest: @unchecked Sendable {
+	private let lock = NSLock()
+	private var continuation: CheckedContinuation<VNCCredential?, Never>?
+	private var isResolved = false
+	private var resolvedCredential: VNCCredential?
+	private var onResolution: (() -> Void)?
+
+	init(onResolution: @escaping () -> Void) {
+		self.onResolution = onResolution
+	}
+
+	var pending: Bool {
+		lock.lock()
+		defer { lock.unlock() }
+		return !isResolved
+	}
+
+	func value() async -> VNCCredential? {
+		await withTaskCancellationHandler {
+			await withCheckedContinuation { continuation in
+				lock.lock()
+				if isResolved {
+					let credential = resolvedCredential
+					lock.unlock()
+					continuation.resume(returning: credential)
+				} else {
+					self.continuation = continuation
+					lock.unlock()
+				}
+			}
+		} onCancel: {
+			resolve(with: nil)
+		}
+	}
+
+	func resolve(with credential: VNCCredential?) {
+		lock.lock()
+		guard !isResolved else {
+			lock.unlock()
+			return
+		}
+		isResolved = true
+		resolvedCredential = credential
+		let continuation = self.continuation
+		self.continuation = nil
+		let onResolution = self.onResolution
+		self.onResolution = nil
+		lock.unlock()
+
+		continuation?.resume(returning: credential)
+		onResolution?()
+	}
+}
+
+private final class WeakCredentialRequest {
+	weak var request: PendingCredentialRequest?
+
+	init(_ request: PendingCredentialRequest) {
+		self.request = request
 	}
 }
 
