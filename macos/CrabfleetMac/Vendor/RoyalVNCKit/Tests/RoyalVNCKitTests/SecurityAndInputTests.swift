@@ -54,6 +54,9 @@ struct SecurityAndInputTests {
     #expect(VNCKeyCode.withCharacter("é").map(\.rawValue) == [0xe9])
     #expect(VNCKeyCode.withCharacter("α").map(\.rawValue) == [0x0100_03b1])
     #expect(VNCKeyCode.withCharacter("🦀").map(\.rawValue) == [0x0101_f980])
+    #expect(
+      VNCKeyCode.withCharacter("e\u{301}").map(\.rawValue) == [0x65, 0x0100_0301]
+    )
   }
 
   @Test

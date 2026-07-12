@@ -159,12 +159,13 @@ public extension VNCKeyCode {
 
 		var codes = [VNCKeyCode]()
 
-		for scalar in character.unicodeScalars {
-			let unicodeValue = scalar.value
-			let keySym =
-				(0x00a0...0x00ff).contains(unicodeValue)
-				? unicodeValue
-				: 0x0100_0000 | unicodeValue
+			for scalar in character.unicodeScalars {
+				let unicodeValue = scalar.value
+				let keySym =
+					(0x0020...0x007e).contains(unicodeValue)
+					|| (0x00a0...0x00ff).contains(unicodeValue)
+					? unicodeValue
+					: 0x0100_0000 | unicodeValue
 
 			codes.append(.init(keySym))
 		}
