@@ -113,11 +113,7 @@ export function acceptGitHubActionsRunnerInput(
       queue.bytes -= input.payload.byteLength;
     });
   queue.tail = queued;
-  return queued
-    .finally(() => {
-      deleteIdleRunnerInputQueue(socket, queue, queued);
-    })
-    .then(() => true);
+  return queued.then(() => true);
 }
 
 function sendRunnerInputAcknowledgement(
@@ -157,14 +153,4 @@ function isActiveRunnerInputQueue(
     return false;
   }
   return true;
-}
-
-function deleteIdleRunnerInputQueue(
-  socket: GitHubActionsRelaySocket,
-  queue: RunnerInputQueue,
-  tail: Promise<void>,
-): void {
-  if (runnerInputQueues.get(socket) === queue && queue.tail === tail && queue.frames === 0) {
-    runnerInputQueues.delete(socket);
-  }
 }

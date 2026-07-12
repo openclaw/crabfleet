@@ -403,6 +403,49 @@ test("runner copies the relay generation into its acknowledgement", async () => 
   });
 });
 
+test("runner retains its relay generation after the input queue drains", async () => {
+  const socket = relaySocket();
+  const writes: string[] = [];
+
+  assert.equal(
+    await acceptGitHubActionsRunnerInput(
+      socket,
+      encodeGitHubActionsRelayInput("first", "first", "generation-one"),
+      async (payload) => {
+        writes.push(new TextDecoder().decode(payload));
+      },
+    ),
+    true,
+  );
+  assert.equal(
+    await acceptGitHubActionsRunnerInput(
+      socket,
+      encodeGitHubActionsRelayInput("replacement", "replacement", "generation-two"),
+      async () => {
+        assert.fail("replacement input must not reach the PTY after the queue drains");
+      },
+    ),
+    true,
+  );
+
+  assert.deepEqual(writes, ["first"]);
+  assert.deepEqual(socket.closes, [
+    { code: 1012, reason: "GitHub Actions runner generation changed" },
+  ]);
+  assert.deepEqual(
+    socket.sent.map((message) => parseGitHubActionsRelayInputAcknowledgement(message)),
+    [
+      { inputId: "first", accepted: true, generation: "generation-one" },
+      {
+        inputId: "replacement",
+        accepted: false,
+        error: "GitHub Actions runner generation changed",
+        generation: "generation-two",
+      },
+    ],
+  );
+});
+
 test("runner rejects failed writes and ignores unframed terminal data", async () => {
   const socket = relaySocket();
 
