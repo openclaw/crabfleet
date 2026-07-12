@@ -5,6 +5,12 @@ protocol DesktopHostRegistering: Sendable {
   func unregister(identity: TailnetIdentity, ownershipToken: String?) async throws
 }
 
+struct DesktopHostRegistrationResultUncertainError: LocalizedError, Equatable, Sendable {
+  let message: String
+
+  var errorDescription: String? { message }
+}
+
 actor DesktopHostRegistrationCoordinator {
   private let registration: any DesktopHostRegistering
   private var pendingOperation: Task<Void, Never>?
@@ -107,18 +113,37 @@ struct CrabfleetDesktopRegistration: DesktopHostRegistering, @unchecked Sendable
 
   func register(identity: TailnetIdentity, port: UInt16) async throws -> String? {
     let request = try registrationRequest(identity: identity, port: port)
-    let (data, http) = try await transport.data(for: request)
-    try validate(response: http, for: request, acceptingNotFound: false)
+    let data: Data
+    let http: HTTPURLResponse
+    do {
+      (data, http) = try await transport.data(for: request)
+    } catch {
+      throw DesktopHostRegistrationResultUncertainError(message: error.localizedDescription)
+    }
+    do {
+      try validate(response: http, for: request, acceptingNotFound: false)
+    } catch let error as DesktopHostRegistrationError {
+      if case .httpStatus(let status) = error, status >= 500 {
+        throw DesktopHostRegistrationResultUncertainError(
+          message: error.localizedDescription
+        )
+      }
+      throw error
+    }
     guard
       let response = try? JSONDecoder().decode(RegistrationResponse.self, from: data),
       response.host.id == Self.hostID(identity: identity)
     else {
-      throw DesktopHostRegistrationError.invalidResponse
+      throw DesktopHostRegistrationResultUncertainError(
+        message: DesktopHostRegistrationError.invalidResponse.localizedDescription
+      )
     }
     if let ownershipToken = response.ownershipToken,
       !Self.isValidOwnershipToken(ownershipToken)
     {
-      throw DesktopHostRegistrationError.invalidResponse
+      throw DesktopHostRegistrationResultUncertainError(
+        message: DesktopHostRegistrationError.invalidResponse.localizedDescription
+      )
     }
     return response.ownershipToken
   }

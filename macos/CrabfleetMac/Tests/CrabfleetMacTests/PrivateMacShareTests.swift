@@ -441,6 +441,27 @@ struct PrivateMacShareTests {
   }
 
   @Test @MainActor
+  func ambiguousDesktopPublicationIsReacquiredBeforeCleanup() async throws {
+    let identity = desktopIdentity(name: "ambiguous-publish", address: "100.64.12.46")
+    let registration = AmbiguousDesktopRegistration()
+    let lifecycle = DesktopHostRegistrationLifecycle(registration: registration)
+
+    await #expect(throws: DesktopHostRegistrationResultUncertainError.self) {
+      try await lifecycle.publish(identity: identity, port: 5_901)
+    }
+    try await lifecycle.removePublishedIdentities()
+
+    #expect(
+      await registration.events
+        == [
+          .register(identity.dnsName),
+          .register(identity.dnsName),
+          .unregister(identity.dnsName, "reacquired-token"),
+        ]
+    )
+  }
+
+  @Test @MainActor
   func failedDesktopRemovalSurvivesLaterIdentityChanges() async throws {
     let first = desktopIdentity(name: "first-host", address: "100.64.12.41")
     let second = desktopIdentity(name: "second-host", address: "100.64.12.42")
@@ -791,7 +812,7 @@ struct PrivateMacShareTests {
   }
 
   @Test
-  func desktopRegistrationRejectsMalformedAdvertisedOwnershipTokens() async throws {
+  func desktopRegistrationTreatsMalformedCommittedResponsesAsUncertain() async throws {
     let transport = DesktopRegistrationTransport { request in
       let responseURL = try #require(request.url)
       return (
@@ -815,7 +836,27 @@ struct PrivateMacShareTests {
       ))
     let identity = try TailnetIdentityPolicy.identity(from: statusDocument())
 
-    await #expect(throws: DesktopHostRegistrationError.invalidResponse) {
+    await #expect(throws: DesktopHostRegistrationResultUncertainError.self) {
+      try await registration.register(identity: identity, port: 5_901)
+    }
+  }
+
+  @Test
+  func desktopRegistrationTreatsTransportFailuresAsUncertain() async throws {
+    let transport = DesktopRegistrationTransport { _ in
+      throw URLError(.timedOut)
+    }
+    let registration = try #require(
+      CrabfleetDesktopRegistration(
+        environment: [
+          "CRABFLEET_API_URL": "https://fleet.example/api/fleet",
+          "CRABFLEET_SESSION_COOKIE": "crabbox_session=secret",
+        ],
+        transport: transport
+      ))
+    let identity = try TailnetIdentityPolicy.identity(from: statusDocument())
+
+    await #expect(throws: DesktopHostRegistrationResultUncertainError.self) {
       try await registration.register(identity: identity, port: 5_901)
     }
   }
@@ -1594,6 +1635,29 @@ private actor RecordingDesktopRegistration: DesktopHostRegistering {
     guard let remaining = failures[identity], remaining > 0 else { return false }
     failures[identity] = remaining - 1
     return true
+  }
+}
+
+private actor AmbiguousDesktopRegistration: DesktopHostRegistering {
+  enum Event: Equatable {
+    case register(String)
+    case unregister(String, String?)
+  }
+
+  private(set) var events: [Event] = []
+  private var registerCount = 0
+
+  func register(identity: TailnetIdentity, port: UInt16) async throws -> String? {
+    events.append(.register(identity.dnsName))
+    registerCount += 1
+    if registerCount == 1 {
+      throw DesktopHostRegistrationResultUncertainError(message: "response lost")
+    }
+    return "reacquired-token"
+  }
+
+  func unregister(identity: TailnetIdentity, ownershipToken: String?) async throws {
+    events.append(.unregister(identity.dnsName, ownershipToken))
   }
 }
 

@@ -38,6 +38,11 @@ final class PrivateMacShareStopCoordinator {
 
 @MainActor
 final class DesktopHostRegistrationLifecycle {
+  private struct RegistrationTarget: Equatable {
+    let identity: TailnetIdentity
+    let port: UInt16
+  }
+
   private struct PublishedRegistration: Equatable {
     let identity: TailnetIdentity
     let ownershipToken: String?
@@ -45,6 +50,7 @@ final class DesktopHostRegistrationLifecycle {
 
   private let coordinator: DesktopHostRegistrationCoordinator
   private var publishedRegistration: PublishedRegistration?
+  private var uncertainRegistrations: [RegistrationTarget] = []
   private var pendingRemovals: [PublishedRegistration] = []
 
   init(registration: any DesktopHostRegistering) {
@@ -52,7 +58,19 @@ final class DesktopHostRegistrationLifecycle {
   }
 
   func publish(identity: TailnetIdentity, port: UInt16) async throws {
-    let ownershipToken = try await coordinator.register(identity: identity, port: port)
+    let target = RegistrationTarget(identity: identity, port: port)
+    let ownershipToken: String?
+    do {
+      ownershipToken = try await coordinator.register(identity: identity, port: port)
+    } catch {
+      if error is DesktopHostRegistrationResultUncertainError,
+        !uncertainRegistrations.contains(target)
+      {
+        uncertainRegistrations.append(target)
+      }
+      throw error
+    }
+    uncertainRegistrations.removeAll { $0 == target }
     if let publishedRegistration, publishedRegistration.identity != identity,
       !pendingRemovals.contains(publishedRegistration)
     {
@@ -66,6 +84,27 @@ final class DesktopHostRegistrationLifecycle {
   }
 
   func removePublishedIdentities() async throws {
+    var firstError: Error?
+    let uncertainRegistrations = uncertainRegistrations
+    for target in uncertainRegistrations {
+      do {
+        let ownershipToken = try await coordinator.register(
+          identity: target.identity,
+          port: target.port
+        )
+        let recovered = PublishedRegistration(
+          identity: target.identity,
+          ownershipToken: ownershipToken
+        )
+        if !pendingRemovals.contains(recovered) {
+          pendingRemovals.append(recovered)
+        }
+        self.uncertainRegistrations.removeAll { $0 == target }
+      } catch {
+        firstError = firstError ?? error
+      }
+    }
+
     if let publishedRegistration {
       if !pendingRemovals.contains(publishedRegistration) {
         pendingRemovals.append(publishedRegistration)
@@ -73,7 +112,6 @@ final class DesktopHostRegistrationLifecycle {
       self.publishedRegistration = nil
     }
 
-    var firstError: Error?
     let removals = pendingRemovals
     for removal in removals {
       do {
