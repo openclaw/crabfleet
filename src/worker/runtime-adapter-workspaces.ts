@@ -36,6 +36,9 @@ import {
 } from "./runtime-adapter-preflight.ts";
 import type { RuntimeAdapterWorkspaceStopResult } from "./session-runtime-adapter-stop.ts";
 
+export const runtimeAdapterCapabilitiesHeader = "x-crabfleet-runtime-adapter-capabilities";
+export const runtimeAdapterDeleteTombstoneCapability = "delete-tombstone-v1";
+
 export type RuntimeAdapterWorkspaceLifecycleDependencies = {
   now(): number;
   fetch(input: string, init: RequestInit): Promise<Response>;
@@ -538,7 +541,12 @@ export class RuntimeAdapterWorkspaceLifecycle {
     );
     const response = await this.dependencies.fetch(
       runtimeAdapterWorkspaceUrl(controlPlane, adapterWorkspaceId),
-      { method: "DELETE" },
+      {
+        method: "DELETE",
+        headers: {
+          [runtimeAdapterCapabilitiesHeader]: runtimeAdapterDeleteTombstoneCapability,
+        },
+      },
     );
     const body =
       response.status === 204 ? null : await this.dependencies.readResponseBody(response);
@@ -553,7 +561,11 @@ export class RuntimeAdapterWorkspaceLifecycle {
     const message =
       parsed?.message ??
       redactedAdapterResponseMessage(body, fallbackMessage, [adapterWorkspaceId]);
-    if (response.status === 404 && retryMissing) {
+    if (
+      response.status === 404 &&
+      retryMissing &&
+      adapterAdvertisesCapability(response, runtimeAdapterDeleteTombstoneCapability)
+    ) {
       // An ambiguous create may still appear. Accepted DELETE retries must replay
       // the adapter's retained stopping or terminal tombstone instead.
       return {
@@ -571,6 +583,12 @@ export class RuntimeAdapterWorkspaceLifecycle {
     }
     return { status: outcome, message };
   }
+}
+
+function adapterAdvertisesCapability(response: Response, capability: string): boolean {
+  return (response.headers.get(runtimeAdapterCapabilitiesHeader) ?? "")
+    .split(/[\s,]+/u)
+    .includes(capability);
 }
 
 export function runtimeAdapterProviderConfigured(env: RuntimeEnv): boolean {

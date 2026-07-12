@@ -5,6 +5,8 @@ import { containerCapabilities } from "../src/worker/session-model.ts";
 import type { RuntimeEnv } from "../src/worker/env.ts";
 import {
   RuntimeAdapterWorkspaceLifecycle,
+  runtimeAdapterCapabilitiesHeader,
+  runtimeAdapterDeleteTombstoneCapability,
   type RuntimeAdapterWorkspaceLifecycleDependencies,
 } from "../src/worker/runtime-adapter-workspaces.ts";
 import type { InteractiveProvisionResult } from "../src/worker/provisioning/types.ts";
@@ -411,7 +413,15 @@ test("superseded pending creates retry DELETE until the old workspace becomes vi
         requests.push({ url: input, method: init.method });
         return responseStatus === 204
           ? new Response(null, { status: 204 })
-          : Response.json({ message: "workspace not found" }, { status: responseStatus });
+          : Response.json(
+              { message: "workspace not found" },
+              {
+                status: responseStatus,
+                headers: {
+                  [runtimeAdapterCapabilitiesHeader]: runtimeAdapterDeleteTombstoneCapability,
+                },
+              },
+            );
       },
     }),
   );
@@ -448,6 +458,39 @@ test("superseded pending creates retry DELETE until the old workspace becomes vi
   ]);
 });
 
+test("create-pending cleanup preserves legacy 404 release semantics", async () => {
+  let requestHeaders = new Headers();
+  const service = new RuntimeAdapterWorkspaceLifecycle(
+    runtimeEnv(),
+    dependencies({
+      async fetch(_input, init) {
+        requestHeaders = new Headers(init.headers);
+        return Response.json({ message: "workspace not found" }, { status: 404 });
+      },
+    }),
+  );
+
+  assert.deepEqual(
+    await service.stopForSession(
+      "IS-42",
+      "workspace-superseded",
+      {
+        profile: "default",
+        controlPlane: "https://adapter.example.test/",
+      },
+      true,
+    ),
+    {
+      status: "stopped",
+      message: "workspace not found",
+    },
+  );
+  assert.equal(
+    requestHeaders.get(runtimeAdapterCapabilitiesHeader),
+    runtimeAdapterDeleteTombstoneCapability,
+  );
+});
+
 test("create-pending cleanup recovers a lost DELETE response from the terminal tombstone", async () => {
   let attempt = 0;
   const service = new RuntimeAdapterWorkspaceLifecycle(
@@ -456,7 +499,15 @@ test("create-pending cleanup recovers a lost DELETE response from the terminal t
       async fetch() {
         attempt += 1;
         if (attempt === 1) {
-          return Response.json({ message: "workspace not found" }, { status: 404 });
+          return Response.json(
+            { message: "workspace not found" },
+            {
+              status: 404,
+              headers: {
+                [runtimeAdapterCapabilitiesHeader]: runtimeAdapterDeleteTombstoneCapability,
+              },
+            },
+          );
         }
         if (attempt === 2) {
           throw new Error("response lost after delete commit");
