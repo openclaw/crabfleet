@@ -511,7 +511,7 @@ test("post-migration legacy registration claims block new staged generations", a
   );
 });
 
-test("legacy claims created after staging block promotion without interleaving generations", async () => {
+test("staged rotations fence old-worker writes until the staged row is removed", async () => {
   const sqlite = credentialPolicyDatabase();
   const env = sqliteRuntimeEnv(sqlite);
   const staged = await beginSandboxCredentialPolicyRegistration(
@@ -520,48 +520,120 @@ test("legacy claims created after staging block promotion without interleaving g
     "sandbox-1",
     ownershipFence,
   );
-  sqlite
+  const legacyClaim = sqlite
     .prepare(`
       UPDATE interactive_session_credential_policies
       SET
         state = 'registering',
         registration_generation = 'generation:legacy-race',
         registration_claim = 'legacy-race-claim',
-        registration_claim_expires_at = ?
+        registration_claim_expires_at = ?,
+        updated_at = 2000
       WHERE session_id = 'IS-42' AND sandbox_id = 'sandbox-1'
     `)
     .run(Number.MAX_SAFE_INTEGER);
+  assert.equal(legacyClaim.changes, 0);
 
-  assert.equal(
-    await finishSandboxCredentialPolicyRegistration(
-      env,
-      "IS-42",
-      "sandbox-1",
-      staged,
-      ownershipFence,
-    ),
-    false,
-  );
   assert.deepEqual(
     activeCredentialPolicyRows(sqlite).map((row) => ({
       generation: row.registration_generation,
       state: row.state,
     })),
     [
-      { generation: "generation:legacy-race", state: "registering" },
-      { generation: "generation:legacy-race", state: "registering" },
+      { generation: "generation:existing", state: "active" },
+      { generation: "generation:existing", state: "active" },
     ],
   );
+
+  await abandonSandboxCredentialPolicyRegistration(
+    env,
+    "IS-42",
+    "sandbox-1",
+    staged,
+    "simulated registration failure after rollback",
+  );
+
+  const legacyCompletion = sqlite
+    .prepare(`
+      UPDATE interactive_session_credential_policies
+      SET
+        state = 'active',
+        registration_claim = NULL,
+        registration_claim_expires_at = NULL,
+        updated_at = 3000
+      WHERE session_id = 'IS-42'
+        AND sandbox_id = 'sandbox-1'
+        AND registration_generation = 'generation:legacy-race'
+        AND registration_claim = 'legacy-race-claim'
+    `)
+    .run();
+  assert.equal(legacyCompletion.changes, 0);
+
+  const legacyDelete = sqlite
+    .prepare(`
+      DELETE FROM interactive_session_credential_policies
+      WHERE session_id = 'IS-42' AND sandbox_id = 'sandbox-1'
+    `)
+    .run();
+  assert.equal(legacyDelete.changes, 0);
+
+  const legacyInsert = sqlite
+    .prepare(`
+      INSERT INTO interactive_session_credential_policies (
+        session_id,
+        sandbox_id,
+        lookup_id,
+        state,
+        registration_generation,
+        registration_claim,
+        registration_claim_expires_at,
+        created_at,
+        updated_at
+      ) VALUES (
+        'IS-42',
+        'sandbox-1',
+        'legacy-extra',
+        'registering',
+        'generation:legacy-race',
+        'legacy-race-claim',
+        ?,
+        2000,
+        2000
+      )
+    `)
+    .run(Number.MAX_SAFE_INTEGER);
+  assert.equal(legacyInsert.changes, 0);
+
   assert.equal(
     sqlite
       .prepare(`
-        SELECT registration_generation
+        SELECT state
         FROM interactive_session_credential_policy_registrations
         WHERE session_id = 'IS-42' AND sandbox_id = 'sandbox-1'
       `)
-      .get()?.registration_generation,
-    staged.generation,
+      .get()?.state,
+    "cleanup_pending",
   );
+
+  sqlite
+    .prepare(`
+      DELETE FROM interactive_session_credential_policy_registrations
+      WHERE session_id = 'IS-42' AND sandbox_id = 'sandbox-1'
+    `)
+    .run();
+  const postFenceClaim = sqlite
+    .prepare(`
+      UPDATE interactive_session_credential_policies
+      SET
+        state = 'registering',
+        registration_generation = 'generation:legacy-after-fence',
+        registration_claim = 'legacy-after-fence-claim',
+        registration_claim_expires_at = ?,
+        updated_at = 4000
+      WHERE session_id = 'IS-42' AND sandbox_id = 'sandbox-1'
+    `)
+    .run(Number.MAX_SAFE_INTEGER);
+  assert.equal(postFenceClaim.changes, 2);
 });
 
 test("partial credential-policy rotation failure preserves the prior active generation", async () => {

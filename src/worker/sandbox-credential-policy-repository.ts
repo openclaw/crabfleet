@@ -188,6 +188,16 @@ export function sandboxCredentialPolicyRefQueries(
   now: number,
   authorizationCondition: RawBuilder<boolean>,
 ): CompilableQuery[] {
+  const stagedWriteAllowed =
+    state === "cleanup_pending"
+      ? sql<boolean>`1 = 1`
+      : sql<boolean>`NOT EXISTS (
+          SELECT 1
+          FROM interactive_session_credential_policy_registrations AS staged
+          WHERE staged.session_id = ${sessionId}
+            AND staged.sandbox_id = ${sandboxId}
+            AND staged.registration_generation != ${generation}
+        )`;
   return sandboxLookupIds(env, sandboxId).map(
     (lookupId) => sql`
     INSERT INTO interactive_session_credential_policies (
@@ -221,6 +231,7 @@ export function sandboxCredentialPolicyRefQueries(
       ${now},
       ${now}
     WHERE ${authorizationCondition}
+      AND ${stagedWriteAllowed}
     ON CONFLICT(session_id, sandbox_id, lookup_id) DO UPDATE SET
       state = CASE
         WHEN interactive_session_credential_policies.state = 'cleanup_pending'
