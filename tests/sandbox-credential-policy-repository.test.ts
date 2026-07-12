@@ -89,7 +89,7 @@ function runtimeEnv(
   } as RuntimeEnv;
 }
 
-function credentialPolicyDatabase(): DatabaseSync {
+function credentialPolicyDatabase(options: { applyMigrations?: boolean } = {}): DatabaseSync {
   const db = new DatabaseSync(":memory:");
   db.exec(`
     CREATE TABLE interactive_sessions (
@@ -149,18 +149,20 @@ function credentialPolicyDatabase(): DatabaseSync {
       ('IS-42', 'sandbox-1', 'sandbox-1', 'active', 'generation:existing', NULL, NULL, 1, 1),
       ('IS-42', 'sandbox-1', 'do-1', 'active', 'generation:existing', NULL, NULL, 1, 1);
   `);
-  db.exec(
-    readFileSync(
-      new URL("../migrations/0034_credential_policy_registration_staging.sql", import.meta.url),
-      "utf8",
-    ),
-  );
-  db.exec(
-    readFileSync(
-      new URL("../migrations/0035_credential_policy_registration_rollback.sql", import.meta.url),
-      "utf8",
-    ),
-  );
+  if (options.applyMigrations !== false) {
+    db.exec(
+      readFileSync(
+        new URL("../migrations/0034_credential_policy_registration_staging.sql", import.meta.url),
+        "utf8",
+      ),
+    );
+    db.exec(
+      readFileSync(
+        new URL("../migrations/0035_credential_policy_registration_rollback.sql", import.meta.url),
+        "utf8",
+      ),
+    );
+  }
   return db;
 }
 
@@ -394,6 +396,68 @@ test("credential-policy rotation always claims a fresh generation", async () => 
   assert.match(rotated.generation, /^generation:/);
   assert.notEqual(rotated.generation, "generation:existing");
   assert.equal(rotated.generation, generation);
+});
+
+test("migration leaves live legacy registrations unstaged while old workers renew them", () => {
+  const sqlite = credentialPolicyDatabase({ applyMigrations: false });
+  sqlite
+    .prepare(`
+      UPDATE interactive_session_credential_policies
+      SET
+        state = 'registering',
+        registration_generation = 'generation:legacy-worker',
+        registration_claim = 'legacy-registration',
+        registration_claim_expires_at = 1000,
+        updated_at = 500
+      WHERE session_id = 'IS-42' AND sandbox_id = 'sandbox-1'
+    `)
+    .run();
+  sqlite.exec(
+    readFileSync(
+      new URL("../migrations/0034_credential_policy_registration_staging.sql", import.meta.url),
+      "utf8",
+    ),
+  );
+
+  sqlite
+    .prepare(`
+      UPDATE interactive_session_credential_policies
+      SET registration_claim_expires_at = 3000, updated_at = 2000
+      WHERE session_id = 'IS-42'
+        AND sandbox_id = 'sandbox-1'
+        AND registration_claim = 'legacy-registration'
+    `)
+    .run();
+
+  assert.equal(
+    sqlite
+      .prepare(`
+        SELECT count(*) AS count
+        FROM interactive_session_credential_policy_registrations
+        WHERE state = 'registering' AND registration_claim_expires_at <= 2000
+      `)
+      .get()?.count,
+    0,
+  );
+  assert.deepEqual(
+    sqlite
+      .prepare(`
+        SELECT DISTINCT state, registration_generation, registration_claim,
+          registration_claim_expires_at
+        FROM interactive_session_credential_policies
+        WHERE session_id = 'IS-42' AND sandbox_id = 'sandbox-1'
+      `)
+      .all()
+      .map((row) => ({ ...row })),
+    [
+      {
+        state: "registering",
+        registration_generation: "generation:legacy-worker",
+        registration_claim: "legacy-registration",
+        registration_claim_expires_at: 3000,
+      },
+    ],
+  );
 });
 
 test("post-migration legacy registration claims block new staged generations", async () => {

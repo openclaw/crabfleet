@@ -1,8 +1,71 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import { DatabaseSync } from "node:sqlite";
 import test from "node:test";
 
 import { DesktopHostRepository } from "../src/worker/desktop-host-repository.ts";
 import type { RuntimeEnv } from "../src/worker/env.ts";
+
+type BoundStatement = {
+  execute(): {
+    results: Record<string, unknown>[];
+    success: true;
+    meta: { changes: number; last_row_id?: number };
+  };
+};
+
+function sqliteRuntimeEnv(sqlite: DatabaseSync): RuntimeEnv {
+  function execute(sql: string, parameters: unknown[]) {
+    const statement = sqlite.prepare(sql);
+    if (/^\s*(?:select|pragma|with)\b|\breturning\b/i.test(sql)) {
+      const results = statement.all(...parameters).map((row) => ({ ...row }));
+      const changes = Number(sqlite.prepare("SELECT changes() AS changes").get()?.changes ?? 0);
+      return { results, success: true as const, meta: { changes } };
+    }
+    const result = statement.run(...parameters);
+    return {
+      results: [],
+      success: true as const,
+      meta: {
+        changes: Number(result.changes),
+        last_row_id: Number(result.lastInsertRowid),
+      },
+    };
+  }
+  return {
+    DB: {
+      prepare(sql: string) {
+        return {
+          bind(...parameters: unknown[]) {
+            const bound = {
+              execute: () => execute(sql, parameters),
+              async all() {
+                return bound.execute();
+              },
+              async run() {
+                return bound.execute();
+              },
+            };
+            return bound;
+          },
+        };
+      },
+      async batch(statements: D1PreparedStatement[]) {
+        sqlite.exec("BEGIN IMMEDIATE");
+        try {
+          const results = statements.map((statement) =>
+            (statement as unknown as BoundStatement).execute(),
+          );
+          sqlite.exec("COMMIT");
+          return results;
+        } catch (error) {
+          sqlite.exec("ROLLBACK");
+          throw error;
+        }
+      },
+    } as unknown as D1Database,
+  } as RuntimeEnv;
+}
 
 test("desktop host repository scopes reads, upserts, and deletes by owner subject", async () => {
   const executions: Array<{ sql: string; parameters: unknown[] }> = [];
@@ -33,6 +96,9 @@ test("desktop host repository scopes reads, upserts, and deletes by owner subjec
             };
           },
         };
+      },
+      async batch() {
+        return [];
       },
     } as unknown as D1Database,
   } as RuntimeEnv;
@@ -70,14 +136,18 @@ test("desktop host repository scopes reads, upserts, and deletes by owner subjec
   assert.match(executions[1]?.sql ?? "", /\breturning \*/i);
 
   await repository.remove("github:1", "studio", "ownership-token");
-  assert.match(executions[2]?.sql ?? "", /^delete from "desktop_hosts"/i);
+  assert.match(executions[2]?.sql ?? "", /^update "desktop_hosts"/i);
   assert.match(executions[2]?.sql ?? "", /"ownership_token" = \?/i);
-  assert.deepEqual(executions[2]?.parameters, ["github:1", "studio", "ownership-token"]);
+  assert.deepEqual(executions[2]?.parameters.slice(1), ["github:1", "studio", "ownership-token"]);
+  const deleteMarker = executions[2]?.parameters[0];
+  assert.match(String(deleteMarker), /^delete-authorized:/);
+  assert.match(executions[3]?.sql ?? "", /^delete from "desktop_hosts"/i);
+  assert.deepEqual(executions[3]?.parameters, ["github:1", "studio", deleteMarker]);
 
   await repository.remove("github:1", "legacy-studio", null);
-  assert.match(executions[3]?.sql ?? "", /^delete from "desktop_hosts"/i);
-  assert.match(executions[3]?.sql ?? "", /"ownership_token" = \?/i);
-  assert.deepEqual(executions[3]?.parameters, ["github:1", "legacy-studio", ""]);
+  assert.match(executions[4]?.sql ?? "", /^delete from "desktop_hosts"/i);
+  assert.match(executions[4]?.sql ?? "", /"ownership_token" = \?/i);
+  assert.deepEqual(executions[4]?.parameters, ["github:1", "legacy-studio", ""]);
 });
 
 test("desktop host upsert returns the row written by the same atomic statement", async () => {
@@ -185,6 +255,67 @@ test("legacy desktop host upserts preserve token ownership", async () => {
   });
 
   const updateClause = statement.split(/do update set/i)[1] ?? "";
-  assert.doesNotMatch(updateClause, /ownership_token/i);
+  for (const column of ["owner", "name", "address", "port", "updated_at"]) {
+    assert.match(
+      updateClause,
+      new RegExp(
+        `"${column}" = CASE\\s+WHEN desktop_hosts\\.ownership_token = '' THEN excluded\\.${column}\\s+ELSE desktop_hosts\\.${column}\\s+END`,
+        "i",
+      ),
+    );
+  }
   assert.equal(row.ownershipToken, "current-token");
+});
+
+test("legacy desktop host writes and cleanup cannot mutate token-owned rows", async () => {
+  const sqlite = new DatabaseSync(":memory:");
+  sqlite.exec(
+    readFileSync(new URL("../migrations/0030_desktop_hosts.sql", import.meta.url), "utf8"),
+  );
+  sqlite.exec(
+    readFileSync(new URL("../migrations/0033_desktop_host_ownership.sql", import.meta.url), "utf8"),
+  );
+  sqlite.exec(`
+    INSERT INTO desktop_hosts (
+      owner_subject, id, owner, name, address, port, ownership_token, created_at, updated_at
+    ) VALUES (
+      'github:1', 'studio', 'alice', 'Token Studio', '100.64.1.2', 5901,
+      'current-token', 1, 2
+    )
+  `);
+  const repository = new DesktopHostRepository(sqliteRuntimeEnv(sqlite));
+
+  const preserved = await repository.upsert({
+    ownerSubject: "github:1",
+    id: "studio",
+    owner: "legacy-worker",
+    name: "Overwritten Studio",
+    address: "100.64.1.99",
+    port: 5902,
+    ownershipToken: "",
+    createdAt: 10,
+    updatedAt: 20,
+  });
+  assert.deepEqual(preserved, {
+    ownerSubject: "github:1",
+    id: "studio",
+    owner: "alice",
+    name: "Token Studio",
+    address: "100.64.1.2",
+    port: 5901,
+    ownershipToken: "current-token",
+    createdAt: 1,
+    updatedAt: 2,
+  });
+
+  await repository.remove("github:1", "studio", null);
+  await repository.remove("github:1", "studio", "stale-token");
+  assert.equal(
+    sqlite.prepare("SELECT ownership_token FROM desktop_hosts WHERE id = 'studio'").get()
+      ?.ownership_token,
+    "current-token",
+  );
+
+  await repository.remove("github:1", "studio", "current-token");
+  assert.equal(sqlite.prepare("SELECT count(*) AS count FROM desktop_hosts").get()?.count, 0);
 });

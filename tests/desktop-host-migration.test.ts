@@ -47,3 +47,100 @@ test("desktop host migration creates an owner-scoped registry with bounded ports
     "idx_desktop_hosts_owner_updated",
   );
 });
+
+test("desktop host ownership migration blocks old-worker mutations of token-owned rows", () => {
+  const database = new DatabaseSync(":memory:");
+  database.exec(
+    readFileSync(new URL("../migrations/0030_desktop_hosts.sql", import.meta.url), "utf8"),
+  );
+  database.exec(
+    readFileSync(new URL("../migrations/0033_desktop_host_ownership.sql", import.meta.url), "utf8"),
+  );
+  database.exec(`
+    INSERT INTO desktop_hosts (
+      owner_subject, id, owner, name, address, port, ownership_token, created_at, updated_at
+    ) VALUES
+      ('github:1', 'owned', 'alice', 'Owned Studio', '100.64.1.2', 5901, 'token-1', 1, 2),
+      ('github:1', 'legacy', 'alice', 'Legacy Studio', '100.64.1.3', 5901, '', 1, 2);
+  `);
+
+  const oldWorkerUpsert = database.prepare(`
+    INSERT INTO desktop_hosts (
+      owner_subject, id, owner, name, address, port, created_at, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(owner_subject, id) DO UPDATE SET
+      owner = excluded.owner,
+      name = excluded.name,
+      address = excluded.address,
+      port = excluded.port,
+      updated_at = excluded.updated_at
+  `);
+  oldWorkerUpsert.run(
+    "github:1",
+    "owned",
+    "old-worker",
+    "Overwritten",
+    "100.64.1.99",
+    5902,
+    10,
+    20,
+  );
+  oldWorkerUpsert.run(
+    "github:1",
+    "legacy",
+    "old-worker",
+    "Updated Legacy",
+    "100.64.1.4",
+    5902,
+    10,
+    20,
+  );
+
+  assert.deepEqual(
+    {
+      ...database
+        .prepare(`
+          SELECT owner, name, address, port, ownership_token, created_at, updated_at
+          FROM desktop_hosts
+          WHERE id = 'owned'
+        `)
+        .get(),
+    },
+    {
+      owner: "alice",
+      name: "Owned Studio",
+      address: "100.64.1.2",
+      port: 5901,
+      ownership_token: "token-1",
+      created_at: 1,
+      updated_at: 2,
+    },
+  );
+  assert.equal(
+    database.prepare("SELECT name FROM desktop_hosts WHERE id = 'legacy'").get()?.name,
+    "Updated Legacy",
+  );
+
+  database.exec("DELETE FROM desktop_hosts WHERE owner_subject = 'github:1' AND id = 'owned'");
+  database.exec("DELETE FROM desktop_hosts WHERE owner_subject = 'github:1' AND id = 'legacy'");
+  assert.equal(
+    database.prepare("SELECT count(*) AS count FROM desktop_hosts WHERE id = 'owned'").get()?.count,
+    1,
+  );
+  assert.equal(
+    database.prepare("SELECT count(*) AS count FROM desktop_hosts WHERE id = 'legacy'").get()
+      ?.count,
+    0,
+  );
+
+  database.exec(`
+    UPDATE desktop_hosts
+    SET ownership_token = 'delete-authorized:test'
+    WHERE owner_subject = 'github:1' AND id = 'owned' AND ownership_token = 'token-1';
+    DELETE FROM desktop_hosts
+    WHERE owner_subject = 'github:1'
+      AND id = 'owned'
+      AND ownership_token = 'delete-authorized:test';
+  `);
+  assert.equal(database.prepare("SELECT count(*) AS count FROM desktop_hosts").get()?.count, 0);
+});
