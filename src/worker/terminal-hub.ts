@@ -223,11 +223,7 @@ export class TerminalHub {
               });
               return;
             }
-            const inputs = await this.dependencies.inputPayloads(
-              subscription,
-              user,
-              frame.payload,
-            );
+            const inputs = await this.dependencies.inputPayloads(subscription, user, frame.payload);
             for (const [index, input] of inputs.entries()) {
               if (index > 0) await sleep(index === inputs.length - 1 ? 80 : 2);
               subscription.upstream.send(input);
