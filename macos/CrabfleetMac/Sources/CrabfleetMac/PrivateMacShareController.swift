@@ -432,8 +432,8 @@ final class PrivateMacShareController: ObservableObject {
       connectedPeer = nil
       streamStats = nil
     case .listenerFailed(let message):
-      registrationTask?.cancel()
-      registrationTask = nil
+      let pendingRegistration = registrationTask
+      pendingRegistration?.cancel()
       phase = .failed
       connectedPeer = nil
       streamStats = nil
@@ -446,6 +446,7 @@ final class PrivateMacShareController: ObservableObject {
       let failedCapture = capture
       capture = nil
       Task { await failedCapture?.stop() }
+      removeDesktopHost(after: pendingRegistration)
     case .sessionFailed(let message):
       phase = .sharing
       connectedPeer = nil
@@ -470,6 +471,23 @@ final class PrivateMacShareController: ObservableObject {
         return
       } catch {
         guard self?.serverGeneration == generation else { return }
+        self?.registryPhase = .failed(error.localizedDescription)
+      }
+    }
+  }
+
+  private func removeDesktopHost(after pendingRegistration: Task<Void, Never>?) {
+    guard let desktopRegistrationCoordinator, let activeIdentity else {
+      registrationTask = nil
+      registryPhase = desktopRegistration == nil ? .notConfigured : .notPublished
+      return
+    }
+    registrationTask = Task { [weak self] in
+      await pendingRegistration?.value
+      do {
+        try await desktopRegistrationCoordinator.unregister(identity: activeIdentity)
+        self?.registryPhase = .notPublished
+      } catch {
         self?.registryPhase = .failed(error.localizedDescription)
       }
     }
