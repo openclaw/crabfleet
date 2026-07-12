@@ -432,6 +432,66 @@ func TestDialUsesConfiguredHTTPClientAndTimeout(t *testing.T) {
 	}
 }
 
+func TestDialDoesNotApplyHTTPClientTimeoutToEstablishedConnection(t *testing.T) {
+	receivedInput := make(chan []byte, 1)
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := websocket.Accept(w, r, nil)
+		if err != nil {
+			t.Error(err)
+			return
+		}
+		defer conn.Close(websocket.StatusNormalClosure, "")
+		for range 2 {
+			if _, _, err := conn.Read(r.Context()); err != nil {
+				t.Error(err)
+				return
+			}
+		}
+		subscribed, _ := json.Marshal(eventPayload{Type: "subscribed", CanInput: true})
+		if err := conn.Write(r.Context(), websocket.MessageBinary, encodeFrame(frame{
+			messageType: messageEvent,
+			sessionID:   "IS-established",
+			payload:     subscribed,
+		})); err != nil {
+			t.Error(err)
+			return
+		}
+		_, payload, err := conn.Read(r.Context())
+		if err != nil {
+			t.Error(err)
+			return
+		}
+		current, err := decodeFrame(payload)
+		if err != nil {
+			t.Error(err)
+			return
+		}
+		receivedInput <- append([]byte(nil), current.payload...)
+	}))
+	defer server.Close()
+
+	endpoint, err := Endpoint(server.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	httpClient := server.Client()
+	httpClient.Timeout = 25 * time.Millisecond
+	client, err := Dial(context.Background(), endpoint, "IS-established", Options{
+		HTTPClient: httpClient,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+	time.Sleep(2 * httpClient.Timeout)
+	if err := client.SendInput(context.Background(), []byte("still-open\n")); err != nil {
+		t.Fatal(err)
+	}
+	if input := <-receivedInput; string(input) != "still-open\n" {
+		t.Fatalf("input = %q", input)
+	}
+}
+
 func TestAttachClosesCloseableTerminalAfterRemoteClosure(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		conn, err := websocket.Accept(w, r, nil)

@@ -12,6 +12,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/coder/websocket"
 )
@@ -77,6 +78,7 @@ type Client struct {
 	conn                         *websocket.Conn
 	sessionID                    string
 	supportsInputAcknowledgement bool
+	cancel                       context.CancelFunc
 	canInput                     atomic.Bool
 	lastSize                     atomic.Uint64
 	writeMu                      sync.Mutex
@@ -128,16 +130,33 @@ func Dial(ctx context.Context, endpoint string, sessionID string, options Option
 	if sessionID == "" {
 		return nil, errors.New("terminal session id is required")
 	}
+	httpClient := options.HTTPClient
+	var setupCancel context.CancelFunc
+	var setupTimer *time.Timer
+	var setupFinished atomic.Bool
 	if options.HTTPClient != nil && options.HTTPClient.Timeout > 0 {
-		var cancel context.CancelFunc
-		ctx, cancel = context.WithTimeout(ctx, options.HTTPClient.Timeout)
-		defer cancel()
+		cloned := *options.HTTPClient
+		cloned.Timeout = 0
+		httpClient = &cloned
+		ctx, setupCancel = context.WithCancel(ctx)
+		setupTimer = time.AfterFunc(options.HTTPClient.Timeout, func() {
+			if setupFinished.CompareAndSwap(false, true) {
+				setupCancel()
+			}
+		})
 	}
 	conn, resp, err := websocket.Dial(ctx, endpoint, &websocket.DialOptions{
-		HTTPClient: options.HTTPClient,
+		HTTPClient: httpClient,
 		HTTPHeader: options.Header,
 	})
 	if err != nil {
+		setupFinished.Store(true)
+		if setupTimer != nil {
+			setupTimer.Stop()
+		}
+		if setupCancel != nil {
+			setupCancel()
+		}
 		if resp != nil {
 			body := ""
 			if resp.Body != nil {
@@ -150,9 +169,16 @@ func Dial(ctx context.Context, endpoint string, sessionID string, options Option
 		return nil, err
 	}
 	conn.SetReadLimit(maxFrameBytes)
-	client := &Client{conn: conn, sessionID: sessionID}
+	client := &Client{conn: conn, sessionID: sessionID, cancel: setupCancel}
 	client.rememberSize(Size{Cols: options.Cols, Rows: options.Rows})
 	closeWithError := func(err error) (*Client, error) {
+		setupFinished.Store(true)
+		if setupTimer != nil {
+			setupTimer.Stop()
+		}
+		if setupCancel != nil {
+			setupCancel()
+		}
 		_ = conn.Close(websocket.StatusInternalError, "terminal setup failed")
 		return nil, err
 	}
@@ -189,7 +215,13 @@ func Dial(ctx context.Context, endpoint string, sessionID string, options Option
 				return closeWithError(fmt.Errorf("decode terminal event: %w", err))
 			}
 			if event.Type == "subscribed" {
+				if setupTimer != nil && !setupFinished.CompareAndSwap(false, true) {
+					return closeWithError(errors.New("terminal subscription timed out"))
+				}
 				client.canInput.Store(event.CanInput)
+				if setupTimer != nil {
+					setupTimer.Stop()
+				}
 				return client, nil
 			}
 			if event.Type == "closed" {
@@ -200,7 +232,11 @@ func Dial(ctx context.Context, endpoint string, sessionID string, options Option
 }
 
 func (c *Client) Close() error {
-	return c.conn.Close(websocket.StatusNormalClosure, "")
+	err := c.conn.Close(websocket.StatusNormalClosure, "")
+	if c.cancel != nil {
+		c.cancel()
+	}
+	return err
 }
 
 func (c *Client) SendInput(ctx context.Context, payload []byte) error {
