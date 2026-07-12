@@ -204,6 +204,7 @@ test("GitHub Actions sessions are attachable through the Worker relay", () => {
         runtime: "github_actions",
         leaseId: "github-actions:s1",
         attachUrl: null,
+        ptyAvailable: true,
         workKey: "openclaw/crabfleet:pr:42",
         workKind: "pr_repair",
         workState: "running",
@@ -226,6 +227,30 @@ test("GitHub Actions sessions are attachable through the Worker relay", () => {
   assert.equal(fleet.totals.attachable, 1);
   assert.equal(fleet.sessions[0]?.workState, "running");
   assert.equal(fleet.sessions[0]?.workPhase, "fixing");
+});
+
+test("GitHub Actions sessions require an available Worker relay", () => {
+  const fleet = buildFleetState(
+    [
+      {
+        ...baseSession,
+        runtime: "github_actions",
+        leaseId: "github-actions:s1",
+        attachUrl: null,
+        ptyAvailable: false,
+      },
+    ],
+    [],
+    {
+      canonicalUrl: "https://crabfleet.openclaw.ai",
+      defaultEgressHosts: [],
+      generatedAt: 100,
+      productUrl: "https://clawfleet.ai",
+    },
+  );
+
+  assert.equal(fleet.totals.attachable, 0);
+  assert.equal(fleet.sessions[0]?.attachable, false);
 });
 
 test("sandbox lease parser ignores non-sandbox leases", () => {

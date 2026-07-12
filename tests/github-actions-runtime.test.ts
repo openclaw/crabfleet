@@ -90,6 +90,25 @@ test("relay replaces the current runner and routes messages by role", () => {
   assert.deepEqual(runner.sent, ["input"]);
 });
 
+test("relay sends viewer input to the first open runner", () => {
+  const closedRunner = relaySocket(3);
+  const openRunner = relaySocket();
+  const laterRunner = relaySocket();
+
+  assert.equal(
+    forwardGitHubActionsRelayMessage(
+      "viewer",
+      "input",
+      [closedRunner, openRunner, laterRunner],
+      [],
+    ),
+    1,
+  );
+  assert.deepEqual(closedRunner.sent, []);
+  assert.deepEqual(openRunner.sent, ["input"]);
+  assert.deepEqual(laterRunner.sent, []);
+});
+
 test("relay consumes viewer resize controls without corrupting raw runner input", () => {
   const runner = relaySocket();
   const resize = JSON.stringify({ type: "resize", cols: 120, rows: 40 });

@@ -111,7 +111,10 @@ export function forwardGitHubActionsRelayMessage(
   viewers: readonly GitHubActionsRelaySocket[],
 ): number {
   if (sender === "viewer" && isGitHubActionsViewerControlMessage(message)) return 0;
-  const targets = sender === "runner" ? viewers : runners.slice(0, 1);
+  const targets =
+    sender === "runner"
+      ? viewers
+      : runners.filter((socket) => socket.readyState === webSocketOpen).slice(0, 1);
   let forwarded = 0;
   for (const socket of targets) {
     if (socket.readyState !== webSocketOpen) continue;

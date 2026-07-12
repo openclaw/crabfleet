@@ -301,13 +301,13 @@ export function fleetSessionSummary(
       terminalCapable &&
       (session.ptyAvailable === true ||
         (session.canControl !== false &&
-          (session.runtime === "github_actions" ||
-            (session.ptyAvailable ??
-              Boolean(
-                ptyRouteKind(session, {
-                  sandboxAvailable: options.sandboxAvailable,
-                }),
-              ))))) &&
+          session.runtime !== "github_actions" &&
+          (session.ptyAvailable ??
+            Boolean(
+              ptyRouteKind(session, {
+                sandboxAvailable: options.sandboxAvailable,
+              }),
+            )))) &&
       ptyReadyStatuses.has(session.status),
     vnc:
       !inactiveStatuses.has(session.status) &&
