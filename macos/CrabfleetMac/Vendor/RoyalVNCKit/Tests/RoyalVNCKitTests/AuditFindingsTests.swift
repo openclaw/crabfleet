@@ -116,7 +116,12 @@ struct AuditFindingsTests {
     connection.updateColorDepth(.depth8Bit)
     #expect(connection.state.pixelFormat?.depth == 24)
     #expect(connection.state.pixelFormat?.depth == connection.framebuffer?.sourcePixelFormat.depth)
-    #expect(connection.clientToServerMessageQueue.dequeue() == nil)
+    let probe = try #require(connection.clientToServerMessageQueue.dequeue())
+    let probeWriter = AuditWritingConnection()
+    try await probe.message.send(connection: probeWriter)
+    #expect(probeWriter.data.count == 10)
+    #expect(probeWriter.data[0] == 3)
+    #expect(probeWriter.data[1] == 0)
 
     connection.completeFramebufferUpdateRequest()
 

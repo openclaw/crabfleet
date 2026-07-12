@@ -92,11 +92,33 @@ private extension VNCConnection {
 		framebufferPacingTask?.cancel()
 		framebufferPacingTask = nil
 		let transition = takePendingPixelFormatTransitionLocked()
+		let probe = takePixelFormatTransitionProbeLocked()
 		framebufferRequestLock.unlock()
 
 		if let transition {
 			enqueuePixelFormatTransition(transition)
+		} else if let probe {
+			enqueueClientToServerMessage(probe)
 		}
+	}
+
+	func takePixelFormatTransitionProbeLocked() -> VNCProtocol.FramebufferUpdateRequest? {
+		guard framebufferUpdateRequestOutstanding,
+			  !isPixelFormatTransitionProbeQueued,
+			  !isPixelFormatTransitionInFlight,
+			  pendingPixelFormatTransition != nil,
+			  let framebuffer else {
+			return nil
+		}
+
+		isPixelFormatTransitionProbeQueued = true
+		return VNCProtocol.FramebufferUpdateRequest(
+			incremental: false,
+			xPosition: 0,
+			yPosition: 0,
+			width: framebuffer.size.width,
+			height: framebuffer.size.height
+		)
 	}
 
 	func takePendingPixelFormatTransitionLocked() -> VNCProtocol.PixelFormat? {
@@ -331,6 +353,7 @@ extension VNCConnection {
 	func completeFramebufferUpdateRequest() {
 		framebufferRequestLock.lock()
 		framebufferUpdateRequestOutstanding = false
+		isPixelFormatTransitionProbeQueued = false
 		let transition = takePendingPixelFormatTransitionLocked()
 		framebufferRequestLock.unlock()
 
