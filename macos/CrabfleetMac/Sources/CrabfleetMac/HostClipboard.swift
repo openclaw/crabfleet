@@ -78,8 +78,16 @@ final class HostClipboardBridge: HostClipboardSyncing, @unchecked Sendable {
     guard text.utf8.count <= RFBWire.maximumClipboardBytes else { return }
     DispatchQueue.main.async { [weak self] in
       guard let self else { return }
-      let alreadyCurrent = self.withLock { self.lastKnownText == text }
-      if alreadyCurrent { return }
+      let changeCount = self.pasteboard.changeCount
+      let currentText = self.pasteboard.string(forType: .string)
+      guard self.pasteboard.changeCount == changeCount else { return }
+      if currentText == text {
+        self.withLock {
+          self.lastObservedChangeCount = changeCount
+          self.lastKnownText = text
+        }
+        return
+      }
       self.pasteboard.clearContents()
       guard self.pasteboard.setString(text, forType: .string) else { return }
       self.withLock {
