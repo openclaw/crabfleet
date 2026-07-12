@@ -121,10 +121,10 @@ final class HostClipboardBridge: HostClipboardSyncing, @unchecked Sendable {
         suppressedChangeCount = nil
         return
       }
+      lastKnownText = text
       guard let outboundText = text ?? (types.isEmpty ? "" : nil) else {
         return
       }
-      lastKnownText = text
       guard outboundText.utf8.count <= RFBWire.maximumClipboardBytes else {
         return
       }

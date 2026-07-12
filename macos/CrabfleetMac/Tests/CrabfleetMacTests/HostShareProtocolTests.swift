@@ -212,7 +212,7 @@ struct HostClipboardBridgeTests {
     pasteboard.writeObjects([item])
     bridge.poll()
     #expect(recorder.values.isEmpty)
-    #expect(bridge.currentText() == "initial")
+    #expect(bridge.currentText() == nil)
 
     bridge.receiveClientText("initial")
     try await waitUntil { pasteboard.string(forType: .string) == "initial" }
