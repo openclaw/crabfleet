@@ -526,6 +526,7 @@ final class PendingCredentialRequest: @unchecked Sendable {
 				lock.lock()
 				if isResolved {
 					let credential = resolvedCredential
+					resolvedCredential = nil
 					lock.unlock()
 					continuation.resume(returning: credential)
 				} else {
@@ -545,9 +546,11 @@ final class PendingCredentialRequest: @unchecked Sendable {
 			return
 		}
 		isResolved = true
-		resolvedCredential = credential
 		let continuation = self.continuation
 		self.continuation = nil
+		if continuation == nil {
+			resolvedCredential = credential
+		}
 		let onResolution = self.onResolution
 		self.onResolution = nil
 		lock.unlock()

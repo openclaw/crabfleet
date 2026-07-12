@@ -91,12 +91,14 @@ extension ZlibStream {
 				let actualOut = bufferSize - UInt(stream.availOut)
 
 				if actualOut > 0 {
-					guard decompressedData.count <= maximumOutputSize - Int(actualOut) else {
+					let actualOutCount = Int(actualOut)
+					guard decompressedData.count <= maximumOutputSize,
+						  actualOutCount <= maximumOutputSize - decompressedData.count else {
 						throw VNCError.protocol(.zlibDecompress(
 							underlyingError: ZlibStreamError.decompressedDataOverflow
 						))
 					}
-					decompressedData.append(buffer, count: Int(actualOut))
+					decompressedData.append(buffer, count: actualOutCount)
 				}
 
 				if isDone {

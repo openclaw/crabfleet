@@ -370,6 +370,10 @@ extension VNCConnection {
 			framebufferRequestLock.unlock()
 			return
 		}
+		guard pixelFormatTransitionFenceWasSent else {
+			framebufferRequestLock.unlock()
+			throw VNCError.protocol(.invalidData)
+		}
 		let requiredFlags = pixelFormatTransitionRequiredFenceFlags
 		guard fence.flags.intersection(requiredFlags) == requiredFlags else {
 			framebufferRequestLock.unlock()

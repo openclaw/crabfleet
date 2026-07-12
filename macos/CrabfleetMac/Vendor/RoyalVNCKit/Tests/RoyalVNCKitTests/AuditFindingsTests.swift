@@ -63,6 +63,18 @@ struct AuditFindingsTests {
   }
 
   @Test
+  func rejectsInflatedChunkLargerThanOutputLimitWithoutTrapping() throws {
+    let compressed = try ZlibOneShot.deflate(Data(repeating: 0xA5, count: 385))
+
+    #expect(throws: (any Error).self) {
+      _ = try ZlibStream().decompressedData(
+        compressedData: compressed,
+        maximumOutputSize: 384
+      )
+    }
+  }
+
+  @Test
   func consumesSyncFlushBytesAfterFixedSizeOutputIsFull() throws {
     let firstCompressed = Data([
       0x78, 0x9C, 0x72, 0x74, 0x1C, 0x05, 0xA3, 0x60, 0x14,
@@ -382,6 +394,29 @@ struct AuditFindingsTests {
   }
 
   @Test
+  func rejectsPixelFormatFenceResponseBeforeRequestIsSent() async throws {
+    let connection = try await makeFenceCapableConnection()
+
+    connection.updateColorDepth(.depth8Bit)
+    let queued = try #require(connection.clientToServerMessageQueue.dequeue())
+    let payload = try #require(connection.pixelFormatTransitionFencePayload)
+
+    #expect(throws: (any Error).self) {
+      try connection.handleServerFence(
+        VNCProtocol.ServerFence(
+          messageType: VNCProtocol.ServerFence.messageType,
+          flags: [.blockBefore, .syncNext],
+          payload: payload
+        )
+      )
+    }
+    #expect(connection.state.pixelFormat?.depth == 24)
+
+    try await queued.message.send(connection: AuditWritingConnection())
+    connection.cancelFramebufferUpdateScheduling()
+  }
+
+  @Test
   func waitsForSlowFramebufferBoundaryBeforeArmingTransitionDeadline() async throws {
     let connection = try await makeFenceCapableConnection()
 
@@ -635,6 +670,21 @@ struct AuditFindingsTests {
     }
 
     delegate.completion?(VNCPasswordCredential(password: "late"))
+  }
+
+  @Test
+  func releasesResolvedCredentialAfterValueIsConsumed() async {
+    let request = PendingCredentialRequest(onResolution: {})
+    var credential: VNCPasswordCredential? = VNCPasswordCredential(password: "secret")
+    weak var weakCredential = credential
+
+    request.resolve(with: credential)
+    credential = nil
+    var received = await request.value() as? VNCPasswordCredential
+
+    #expect(received === weakCredential)
+    received = nil
+    #expect(weakCredential == nil)
   }
 
   @Test
