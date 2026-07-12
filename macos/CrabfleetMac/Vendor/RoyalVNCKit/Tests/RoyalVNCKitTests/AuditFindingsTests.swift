@@ -101,7 +101,7 @@ struct AuditFindingsTests {
   }
 
   @Test
-  func waitsForOutstandingFramebufferBeforeUnfencedPixelFormatTransition() async throws {
+  func forcesLegacyFramebufferBeforeUnfencedPixelFormatTransition() async throws {
     let connection = VNCConnection(
       settings: makeSettings(),
       framebufferAllocator: VNCFramebufferMallocAllocator()
@@ -116,7 +116,12 @@ struct AuditFindingsTests {
     connection.updateColorDepth(.depth8Bit)
     #expect(connection.state.pixelFormat?.depth == 24)
     #expect(connection.state.pixelFormat?.depth == connection.framebuffer?.sourcePixelFormat.depth)
-    #expect(connection.clientToServerMessageQueue.dequeue() == nil)
+    let probe = try #require(connection.clientToServerMessageQueue.dequeue())
+    let probeWriter = AuditWritingConnection()
+    try await probe.message.send(connection: probeWriter)
+    #expect(probeWriter.data.count == 10)
+    #expect(probeWriter.data[0] == 3)
+    #expect(probeWriter.data[1] == 0)
 
     connection.completeFramebufferUpdateRequest()
     let queued = try #require(connection.clientToServerMessageQueue.dequeue())
@@ -129,6 +134,28 @@ struct AuditFindingsTests {
     #expect(writer.data.count == 20)
     #expect(connection.state.pixelFormat?.depth == 8)
     #expect(connection.state.pixelFormat?.depth == connection.framebuffer?.sourcePixelFormat.depth)
+  }
+
+  @Test
+  func rejectsPartialFallbackFenceBoundaries() throws {
+    let connection = VNCConnection(
+      settings: makeSettings(),
+      framebufferAllocator: VNCFramebufferMallocAllocator()
+    )
+    let framebuffer = try makeFramebuffer(width: 2, height: 2, depth: 24)
+    connection.framebuffer = framebuffer
+    connection.state.pixelFormat = framebuffer.sourcePixelFormat
+    connection.state.areFencesSupported = true
+    connection.state.pixelFormatTransitionFenceFlags = [.blockAfter]
+    connection.connectionState = .connected
+    connection._framebufferUpdatePolicy = .paused
+    connection.framebufferUpdateRequestOutstanding = true
+
+    connection.updateColorDepth(.depth8Bit)
+
+    #expect(connection.clientToServerMessageQueue.dequeue() == nil)
+    #expect(connection.pendingPixelFormatTransition == nil)
+    #expect(connection.state.pixelFormat?.depth == 24)
   }
 
   @Test
