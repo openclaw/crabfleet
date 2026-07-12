@@ -68,7 +68,7 @@ test("GitHub Actions repository owns registration and lifecycle SQL", async () =
       now: 100,
     }),
   );
-  await repository.updateSession("IS-101", registrationUpdate);
+  await repository.updateSession("IS-101", registrationUpdate, registrationExpectation);
   await repository.updateSession("IS-101", workStateUpdate);
   await repository.updateSession("IS-101", runnerConnectionUpdate);
 
@@ -87,9 +87,14 @@ test("GitHub Actions repository owns registration and lifecycle SQL", async () =
     assert.match(execution.sql, /update "interactive_sessions"/i);
     assert.match(execution.sql, /where "id" = \?/i);
     assert.match(execution.sql, /"runtime" = \?/i);
-    assert.match(execution.sql, /"updated_at" <= \?/i);
     assert.ok(execution.parameters.includes("IS-101"));
   }
+  assert.match(executions[3].sql, /"updated_at" = \?/i);
+  assert.match(executions[3].sql, /"status" = \?/i);
+  assert.match(executions[3].sql, /"work_state" = \?/i);
+  assert.match(executions[3].sql, /"work_phase" = \?/i);
+  assert.match(executions[4].sql, /"updated_at" <= \?/i);
+  assert.match(executions[5].sql, /"updated_at" <= \?/i);
   assert.match(executions[3].sql, /"owner_subject" = \?/i);
   assert.doesNotMatch(executions[3].sql, /"work_state" not in/i);
   assert.match(executions[4].sql, /"work_state" not in/i);
@@ -139,6 +144,13 @@ const registrationUpdate: GitHubActionsSessionRegistrationUpdate = {
   last_heartbeat_at: null,
   completion_reason: null,
 };
+
+const registrationExpectation = {
+  updated_at: 90,
+  status: "stopped",
+  work_state: "completed",
+  work_phase: "finished",
+} as const;
 
 const workStateUpdate: GitHubActionsWorkStateUpdate = {
   status: "attached",

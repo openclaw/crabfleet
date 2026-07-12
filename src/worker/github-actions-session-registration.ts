@@ -47,6 +47,11 @@ export type GitHubActionsSessionRegistrationUpdate = {
   completion_reason: null;
 };
 
+export type GitHubActionsSessionRegistrationExpectation = Pick<
+  InteractiveSessionRow,
+  "updated_at" | "status" | "work_state" | "work_phase"
+>;
+
 export type GitHubActionsSessionRegistrationStore = {
   now(): number;
   newAgentToken(): string;
@@ -57,7 +62,11 @@ export type GitHubActionsSessionRegistrationStore = {
   nextSessionId(): Promise<string>;
   insertSession(values: Insertable<InteractiveSessionTable>): Promise<void>;
   readById(id: string): Promise<InteractiveSessionRow | null>;
-  updateSession(id: string, values: GitHubActionsSessionRegistrationUpdate): Promise<void>;
+  updateSession(
+    id: string,
+    values: GitHubActionsSessionRegistrationUpdate,
+    expected: GitHubActionsSessionRegistrationExpectation,
+  ): Promise<void>;
   isConstraintError(error: unknown): boolean;
   disconnectRunner(id: string): Promise<void>;
   appendEvent(id: string, message: string, now: number): Promise<void>;
@@ -148,33 +157,42 @@ export class GitHubActionsSessionRegistrationService {
 
     const resumed = existing.work_state !== "registered" || existing.status !== "ready";
     const message = resumed ? "GitHub Actions work resumed" : "GitHub Actions work registered";
-    await this.store.updateSession(existing.id, {
-      owner,
-      owner_subject: ownerSubject,
-      repo,
-      branch,
-      purpose,
-      summary,
-      prompt: purpose,
-      status: "ready",
-      lease_id: null,
-      stopped_at: null,
-      terminal_status: null,
-      terminal_failure_reason: null,
-      terminal_finalize_pending: 0,
-      credential_cleanup_terminal_status: null,
-      updated_at: now,
-      last_seen_at: now,
-      last_event: message,
-      agent_token_hash: agentTokenHash,
-      work_kind: workKind,
-      work_state: "registered",
-      work_phase: "waiting_for_runner",
-      source_url: input.sourceUrl === undefined ? existing.source_url : sourceUrl,
-      github_run_url: input.runUrl === undefined ? existing.github_run_url : runUrl,
-      last_heartbeat_at: null,
-      completion_reason: null,
-    });
+    await this.store.updateSession(
+      existing.id,
+      {
+        owner,
+        owner_subject: ownerSubject,
+        repo,
+        branch,
+        purpose,
+        summary,
+        prompt: purpose,
+        status: "ready",
+        lease_id: null,
+        stopped_at: null,
+        terminal_status: null,
+        terminal_failure_reason: null,
+        terminal_finalize_pending: 0,
+        credential_cleanup_terminal_status: null,
+        updated_at: now,
+        last_seen_at: now,
+        last_event: message,
+        agent_token_hash: agentTokenHash,
+        work_kind: workKind,
+        work_state: "registered",
+        work_phase: "waiting_for_runner",
+        source_url: input.sourceUrl === undefined ? existing.source_url : sourceUrl,
+        github_run_url: input.runUrl === undefined ? existing.github_run_url : runUrl,
+        last_heartbeat_at: null,
+        completion_reason: null,
+      },
+      {
+        updated_at: existing.updated_at,
+        status: existing.status,
+        work_state: existing.work_state,
+        work_phase: existing.work_phase,
+      },
+    );
     await this.store.disconnectRunner(existing.id).catch(() => undefined);
     await this.store.appendEvent(existing.id, message, now);
     await this.store.audit(

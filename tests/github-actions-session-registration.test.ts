@@ -8,6 +8,7 @@ import {
   actionWorkIdentifier,
   buildGitHubActionsSessionValues,
   optionalHttpUrl,
+  type GitHubActionsSessionRegistrationExpectation,
   type GitHubActionsSessionRegistrationStore,
   type GitHubActionsSessionRegistrationUpdate,
 } from "../src/worker/github-actions-session-registration.ts";
@@ -18,7 +19,11 @@ type StoreState = {
   rows: Map<string, InteractiveSessionRow>;
   workKeyReads: number;
   inserted: InteractiveSessionTable[];
-  updates: Array<{ id: string; values: GitHubActionsSessionRegistrationUpdate }>;
+  updates: Array<{
+    id: string;
+    values: GitHubActionsSessionRegistrationUpdate;
+    expected: GitHubActionsSessionRegistrationExpectation;
+  }>;
   events: string[];
   audits: string[];
   operations: string[];
@@ -73,9 +78,9 @@ function registrationStore(initialRows: InteractiveSessionRow[] = []): {
       state.rows.set(row.id, row);
     },
     readById: async (id) => state.rows.get(id) ?? null,
-    updateSession: async (id, values) => {
+    updateSession: async (id, values, expected) => {
       state.operations.push("update");
-      state.updates.push({ id, values });
+      state.updates.push({ id, values, expected });
       const row = state.rows.get(id);
       if (row) state.rows.set(id, { ...row, ...values });
     },
@@ -260,6 +265,12 @@ test("GitHub Actions work keys can be resumed by the matching owner", async () =
   assert.equal(state.updates[0]?.values.owner, "operator");
   assert.equal(state.updates[0]?.values.owner_subject, "github:42");
   assert.equal(state.updates[0]?.values.agent_token_hash, "agent-token-hash");
+  assert.deepEqual(state.updates[0]?.expected, {
+    updated_at: existing.updated_at,
+    status: existing.status,
+    work_state: existing.work_state,
+    work_phase: existing.work_phase,
+  });
 });
 
 test("GitHub Actions rejects work keys without a stable owner", async () => {

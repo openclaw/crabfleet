@@ -84,7 +84,7 @@ export class GitHubActionsApplication {
       nextSessionId: () => nextInteractiveSessionId(this.env),
       insertSession: (values) => repository.insertSession(values),
       readById: (id) => repository.readById(id),
-      updateSession: (id, values) => repository.updateSession(id, values),
+      updateSession: (id, values, expected) => repository.updateSession(id, values, expected),
       isConstraintError,
       disconnectRunner: (id) => this.disconnectRunner(id),
       appendEvent: (id, message, now) => this.appendMessageEvent(id, user, message, now),

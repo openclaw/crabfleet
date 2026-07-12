@@ -4,7 +4,10 @@ import type { InteractiveSessionRow, InteractiveSessionTable } from "./database.
 import { database } from "./database.ts";
 import type { RuntimeEnv } from "./env.ts";
 import type { GitHubActionsRunnerConnectionUpdate } from "./github-actions-runner-connection.ts";
-import type { GitHubActionsSessionRegistrationUpdate } from "./github-actions-session-registration.ts";
+import type {
+  GitHubActionsSessionRegistrationExpectation,
+  GitHubActionsSessionRegistrationUpdate,
+} from "./github-actions-session-registration.ts";
 import type { GitHubActionsWorkStateUpdate } from "./github-actions-session-work-state.ts";
 import { conflict } from "./http.ts";
 
@@ -47,25 +50,39 @@ export class GitHubActionsRepository {
     await database(this.env).insertInto("interactive_sessions").values(values).execute();
   }
 
-  async updateSession(id: string, values: GitHubActionsSessionUpdate): Promise<void> {
+  async updateSession(
+    id: string,
+    values: GitHubActionsSessionUpdate,
+    expectedRegistration?: GitHubActionsSessionRegistrationExpectation,
+  ): Promise<void> {
     let update = database(this.env)
       .updateTable("interactive_sessions")
       .set(values)
       .where("id", "=", id)
-      .where("runtime", "=", "github_actions")
-      .where("updated_at", "<=", values.updated_at);
+      .where("runtime", "=", "github_actions");
 
     if (isRegistrationUpdate(values)) {
-      update = update.where("owner_subject", "=", values.owner_subject);
+      if (!expectedRegistration) {
+        throw new Error("GitHub Actions registration update requires expected state");
+      }
+      update = update
+        .where("updated_at", "=", expectedRegistration.updated_at)
+        .where("status", "=", expectedRegistration.status)
+        .where("work_state", "=", expectedRegistration.work_state)
+        .where("work_phase", "=", expectedRegistration.work_phase)
+        .where("owner_subject", "=", values.owner_subject);
     } else if (isWorkStateUpdate(values) && terminalWorkStates.includes(values.work_state)) {
-      update = update.where((expressions) =>
-        expressions.or([
-          expressions("work_state", "not in", terminalWorkStates),
-          expressions("work_state", "=", values.work_state),
-        ]),
-      );
+      update = update
+        .where("updated_at", "<=", values.updated_at)
+        .where((expressions) =>
+          expressions.or([
+            expressions("work_state", "not in", terminalWorkStates),
+            expressions("work_state", "=", values.work_state),
+          ]),
+        );
     } else {
       update = update
+        .where("updated_at", "<=", values.updated_at)
         .where("work_state", "not in", terminalWorkStates)
         .where("status", "not in", terminalSessionStatuses);
     }
