@@ -38,9 +38,13 @@ const terminalPreAuthorizationRelayEventMax = 32;
 type PendingTerminalInputAcknowledgement = {
   inputId: string;
   runnerGeneration: number | string;
-  promise: Promise<GitHubActionsRelayInputAcknowledgement>;
-  resolve(result: GitHubActionsRelayInputAcknowledgement): void;
+  promise: Promise<TerminalInputAcknowledgementResult>;
+  resolve(result: TerminalInputAcknowledgementResult): void;
   timeout: ReturnType<typeof setTimeout>;
+};
+
+type TerminalInputAcknowledgementResult = GitHubActionsRelayInputAcknowledgement & {
+  deliveryUnknown?: boolean;
 };
 
 export type TerminalUpstream = {
@@ -121,6 +125,7 @@ export type TerminalHubDependencies = {
     error?: unknown,
   ): Promise<void>;
   markDetached(user: User | null, sessionId: string, message: string): Promise<void>;
+  inputAcknowledgementTimeoutMs?: number;
 };
 
 type PendingTerminalSubscription = {
@@ -301,6 +306,8 @@ export class TerminalHub {
                           subscription,
                           inputId,
                           subscription.runnerGeneration,
+                          this.dependencies.inputAcknowledgementTimeoutMs ??
+                            terminalInputAcknowledgementTimeoutMs,
                         )
                       : null;
                     if (acknowledgement) acknowledgements.push(acknowledgement);
@@ -806,9 +813,10 @@ function beginTerminalInputAcknowledgement(
   subscription: TerminalHubSubscription,
   inputId: string,
   runnerGeneration: number | string,
+  timeoutMs: number,
 ): PendingTerminalInputAcknowledgement {
-  let resolve!: (result: GitHubActionsRelayInputAcknowledgement) => void;
-  const promise = new Promise<GitHubActionsRelayInputAcknowledgement>((complete) => {
+  let resolve!: (result: TerminalInputAcknowledgementResult) => void;
+  const promise = new Promise<TerminalInputAcknowledgementResult>((complete) => {
     resolve = complete;
   });
   const pending: PendingTerminalInputAcknowledgement = {
@@ -820,7 +828,8 @@ function beginTerminalInputAcknowledgement(
       if (
         completeAllTerminalInputAcknowledgements(subscription, {
           accepted: false,
-          error: "terminal input delivery was not acknowledged",
+          deliveryUnknown: true,
+          error: "terminal input delivery outcome is unknown; the runner may still complete it",
         }) === 0
       ) {
         return;
@@ -828,7 +837,7 @@ function beginTerminalInputAcknowledgement(
       if (subscription.upstream.readyState === WebSocket.OPEN) {
         subscription.upstream.close(1011, "input acknowledgement timed out");
       }
-    }, terminalInputAcknowledgementTimeoutMs),
+    }, timeoutMs),
   };
   subscription.pendingInputAcknowledgements.set(inputId, pending);
   return pending;
@@ -875,7 +884,7 @@ function completeTerminalInputAcknowledgement(
 
 function completeAllTerminalInputAcknowledgements(
   subscription: TerminalHubSubscription,
-  result: Omit<GitHubActionsRelayInputAcknowledgement, "inputId">,
+  result: Omit<TerminalInputAcknowledgementResult, "inputId">,
 ): number {
   return completeTerminalInputAcknowledgements(subscription, () => true, result);
 }
@@ -883,7 +892,7 @@ function completeAllTerminalInputAcknowledgements(
 function completeTerminalInputAcknowledgementsBeforeGeneration(
   subscription: TerminalHubSubscription,
   runnerGeneration: number,
-  result: Omit<GitHubActionsRelayInputAcknowledgement, "inputId">,
+  result: Omit<TerminalInputAcknowledgementResult, "inputId">,
 ): number {
   return completeTerminalInputAcknowledgements(
     subscription,
@@ -895,7 +904,7 @@ function completeTerminalInputAcknowledgementsBeforeGeneration(
 function completeTerminalInputAcknowledgements(
   subscription: TerminalHubSubscription,
   matches: (pending: PendingTerminalInputAcknowledgement) => boolean,
-  result: Omit<GitHubActionsRelayInputAcknowledgement, "inputId">,
+  result: Omit<TerminalInputAcknowledgementResult, "inputId">,
 ): number {
   const pending = [...subscription.pendingInputAcknowledgements.values()].filter(matches);
   for (const acknowledgement of pending) {
@@ -921,7 +930,7 @@ function parseSynchronousGitHubActionsRelayEvent(
 async function reportTerminalInputCompletion(
   socket: WebSocket,
   sessionId: string,
-  acknowledgements: Promise<GitHubActionsRelayInputAcknowledgement>[],
+  acknowledgements: Promise<TerminalInputAcknowledgementResult>[],
 ): Promise<void> {
   if (acknowledgements.length === 0) {
     sendTerminalJson(socket, TerminalMessageType.Event, sessionId, {
@@ -931,6 +940,14 @@ async function reportTerminalInputCompletion(
   }
   const results = await Promise.all(acknowledgements);
   if (socket.readyState !== WebSocket.OPEN) return;
+  const unknown = results.find((result) => result.deliveryUnknown);
+  if (unknown) {
+    sendTerminalJson(socket, TerminalMessageType.Event, sessionId, {
+      type: "input-delivery-unknown",
+      error: unknown.error ?? "terminal input delivery outcome is unknown",
+    });
+    return;
+  }
   const rejection = results.find((result) => !result.accepted);
   if (rejection) {
     sendTerminalJson(socket, TerminalMessageType.Event, sessionId, {

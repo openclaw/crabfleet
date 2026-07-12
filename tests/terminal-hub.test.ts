@@ -649,6 +649,65 @@ test("GitHub Actions input waits for the correlated runner acknowledgement", asy
   server.emit("close");
 });
 
+test("GitHub Actions acknowledgement timeout reports an ambiguous delivery outcome", async () => {
+  const client = socket();
+  const server = socket();
+  const upstream = socket();
+  const hub = new TerminalHub(
+    dependencies(client, server, upstream, {
+      async readSession() {
+        return githubActionsSession;
+      },
+      inputAcknowledgementTimeoutMs: 1,
+    }),
+  );
+  await hub.open(
+    new Request("https://fleet.example/api/terminal/ws", {
+      headers: { upgrade: "websocket" },
+    }),
+    user,
+  );
+  server.emit("message", {
+    data: encodeTerminalFrame({
+      type: TerminalMessageType.Subscribe,
+      sessionId: githubActionsSession.id,
+      payload: encodeSubscribePayload({ flags: 0, columns: 120, rows: 34 }),
+    }),
+  });
+  await flushQueues();
+  await flushQueues();
+
+  server.emit("message", {
+    data: encodeTerminalFrame({
+      type: TerminalMessageType.Input,
+      sessionId: githubActionsSession.id,
+      payload: new TextEncoder().encode("possibly-delivered"),
+    }),
+  });
+  await new Promise<void>((resolve) => setTimeout(resolve, 10));
+  await flushQueues();
+
+  assert.deepEqual(upstream.closed, [{ code: 1011, reason: "input acknowledgement timed out" }]);
+  const completions = server.sent
+    .map((payload) => frame(payload))
+    .filter((message) => message.type === TerminalMessageType.Event)
+    .map((message) => decodeJsonPayload(message.payload))
+    .filter(
+      (message) =>
+        typeof message === "object" &&
+        message !== null &&
+        "type" in message &&
+        String(message.type).startsWith("input-"),
+    );
+  assert.deepEqual(completions, [
+    {
+      type: "input-delivery-unknown",
+      error: "terminal input delivery outcome is unknown; the runner may still complete it",
+    },
+  ]);
+  server.emit("close");
+});
+
 test("GitHub Actions falls back to raw relay input when viewer negotiation is absent", async () => {
   const client = socket();
   const server = socket();
