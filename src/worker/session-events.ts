@@ -107,6 +107,14 @@ export async function appendInteractiveSessionEventRecord(
   archive: InteractiveSessionEventArchive = (sessionId, now) =>
     archiveInteractiveSessionLogs(env, sessionId, now),
 ): Promise<void> {
+  await persistInteractiveSessionEventRecord(env, input);
+  await archive(input.sessionId, input.now).catch(() => undefined);
+}
+
+export async function persistInteractiveSessionEventRecord(
+  env: RuntimeEnv,
+  input: AppendInteractiveSessionEventInput,
+): Promise<void> {
   const db = database(env);
   await executeBatch(env, [
     db.insertInto("interactive_session_events").values({
@@ -117,7 +125,6 @@ export async function appendInteractiveSessionEventRecord(
     }),
     terminalFinalizationPendingQuery(db, input.sessionId),
   ]);
-  await archive(input.sessionId, input.now).catch(() => undefined);
 }
 
 export async function appendStructuredInteractiveSessionEventRecord(

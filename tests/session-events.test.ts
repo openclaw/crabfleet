@@ -6,6 +6,7 @@ import {
   appendInteractiveSessionEventRecord,
   appendStructuredInteractiveSessionEventRecord,
   InteractiveSessionEventLedgerService,
+  persistInteractiveSessionEventRecord,
   structuredEventLedgerMaxBytes,
   structuredEventLedgerMaxCount,
   structuredEventPayloadMaxBytes,
@@ -91,6 +92,24 @@ test("session event archive refresh remains best effort after durable persistenc
   );
 
   assert.equal(persisted, true);
+});
+
+test("session event persistence can defer archive publication", async () => {
+  let statements: PreparedStatement[] = [];
+  const env = runtimeEnv((batch) => {
+    statements = batch;
+  });
+
+  await persistInteractiveSessionEventRecord(env, {
+    sessionId: "IS-1",
+    actor: "operator",
+    message: "interactive workspace requested",
+    now: 123,
+  });
+
+  assert.equal(statements.length, 2);
+  assert.match(statements[0]?.sql ?? "", /insert into "interactive_session_events"/i);
+  assert.match(statements[1]?.sql ?? "", /update "interactive_sessions"/i);
 });
 
 test("structured session events canonicalize additive payloads and replay idempotently", async () => {

@@ -24,7 +24,10 @@ import {
   sandboxLeasePrefix,
 } from "./sandbox-lease.ts";
 import { ServiceRegistry } from "./service-registry.ts";
-import { appendInteractiveSessionEventRecord } from "./session-events.ts";
+import {
+  appendInteractiveSessionEventRecord,
+  persistInteractiveSessionEventRecord,
+} from "./session-events.ts";
 import {
   canChangeInteractiveSessionMultiplayer,
   canControlInteractiveSession,
@@ -480,7 +483,7 @@ export class InteractiveSessionApplication {
       activateReservation: (insertedSessionId, insertedAt, adapterWorkspaceId) =>
         supervision.requireReservationActivation(insertedSessionId, insertedAt, adapterWorkspaceId),
       recordRequest: (insertedSessionId, insertedAt) =>
-        appendInteractiveSessionEventRecord(this.env, {
+        persistInteractiveSessionEventRecord(this.env, {
           sessionId: insertedSessionId,
           actor: actor(user),
           message: "interactive workspace requested",
