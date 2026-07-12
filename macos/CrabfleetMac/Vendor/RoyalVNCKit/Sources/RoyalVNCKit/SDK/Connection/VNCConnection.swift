@@ -116,6 +116,7 @@ public final class VNCConnection: NSObjectOrAnyObject, @unchecked Sendable {
 	var pixelFormatTransitionFenceSequence: UInt64 = 0
 	var pixelFormatTransitionFencePayload: Data?
 	var pixelFormatTransitionRequiredFenceFlags: VNCProtocol.FenceFlags = []
+	var pixelFormatTransitionFenceWasSent = false
 	var pixelFormatTransitionDeadlineTask: Task<Void, Never>?
 	var pixelFormatFenceCapabilityProbePayload: Data?
 	var pixelFormatFenceNegotiationTask: Task<Void, Never>?

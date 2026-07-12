@@ -173,9 +173,11 @@ extension VNCConnection {
 			fencePayload = withUnsafeBytes(of: &sequence) { Data($0) }
 			pixelFormatTransitionFencePayload = fencePayload
 			pixelFormatTransitionRequiredFenceFlags = [.blockBefore, .syncNext]
+			pixelFormatTransitionFenceWasSent = false
 		} else {
 			fencePayload = nil
 			pixelFormatTransitionRequiredFenceFlags = []
+			pixelFormatTransitionFenceWasSent = false
 		}
 		return PixelFormatTransition(
 			pixelFormat: pixelFormat,
@@ -214,7 +216,17 @@ extension VNCConnection {
 			return
 		}
 
-		cancelPixelFormatTransitionDeadlineLocked()
+		pixelFormatTransitionFenceWasSent = true
+		schedulePixelFormatTransitionDeadlineIfReadyLocked(payload: payload)
+	}
+
+	private func schedulePixelFormatTransitionDeadlineIfReadyLocked(payload: Data) {
+		guard pixelFormatTransitionFenceWasSent,
+			  !framebufferUpdateRequestOutstanding,
+			  pixelFormatTransitionDeadlineTask == nil else {
+			return
+		}
+
 		pixelFormatTransitionDeadlineTask = Task { [weak self] in
 			do {
 				try await Task.sleep(nanoseconds: 5_000_000_000)
@@ -233,7 +245,8 @@ extension VNCConnection {
 	func expirePixelFormatTransitionDeadline(payload: Data) {
 		framebufferRequestLock.lock()
 		guard isPixelFormatTransitionInFlight,
-			  pixelFormatTransitionFencePayload == payload else {
+			  pixelFormatTransitionFencePayload == payload,
+			  pixelFormatTransitionDeadlineTask != nil else {
 			framebufferRequestLock.unlock()
 			return
 		}
@@ -361,6 +374,7 @@ extension VNCConnection {
 			throw VNCError.protocol(.invalidData)
 		}
 		cancelPixelFormatTransitionDeadlineLocked()
+		pixelFormatTransitionFenceWasSent = false
 		pixelFormatTransitionFencePayload = nil
 		pixelFormatTransitionRequiredFenceFlags = []
 		framebufferRequestLock.unlock()
@@ -577,6 +591,9 @@ extension VNCConnection {
 	func completeFramebufferUpdateRequest() {
 		framebufferRequestLock.lock()
 		framebufferUpdateRequestOutstanding = false
+		if let payload = pixelFormatTransitionFencePayload {
+			schedulePixelFormatTransitionDeadlineIfReadyLocked(payload: payload)
+		}
 		let transition = takePendingPixelFormatTransitionLocked()
 		framebufferRequestLock.unlock()
 
@@ -641,6 +658,7 @@ extension VNCConnection {
 		pixelFormatTransitionInFlight = nil
 		pixelFormatTransitionFencePayload = nil
 		pixelFormatTransitionRequiredFenceFlags = []
+		pixelFormatTransitionFenceWasSent = false
 		cancelPixelFormatTransitionDeadlineLocked()
 		pixelFormatFenceCapabilityProbePayload = nil
 		cancelPixelFormatFenceNegotiationTimeoutLocked()

@@ -310,7 +310,7 @@ struct AuditFindingsTests {
     }
     try await queued.message.send(connection: writer)
 
-    #expect(connection.pixelFormatTransitionDeadlineTask != nil)
+    #expect(connection.pixelFormatTransitionDeadlineTask == nil)
     #expect(writer.data.count == 37)
     #expect(writer.data[0] == VNCProtocol.ClientFence.messageType)
     #expect(writer.data[4..<8] == Data([0x80, 0, 0, 5]))
@@ -319,6 +319,8 @@ struct AuditFindingsTests {
     #expect(connection.state.pixelFormat?.depth == 24)
 
     let payload = Data(writer.data[9..<17])
+    connection.completeFramebufferUpdateRequest()
+    #expect(connection.pixelFormatTransitionDeadlineTask != nil)
     try connection.handleServerFence(
       VNCProtocol.ServerFence(
         messageType: VNCProtocol.ServerFence.messageType,
@@ -334,6 +336,24 @@ struct AuditFindingsTests {
   }
 
   @Test
+  func waitsForSlowFramebufferBoundaryBeforeArmingTransitionDeadline() async throws {
+    let connection = try await makeFenceCapableConnection()
+
+    connection.updateColorDepth(.depth8Bit)
+    let queued = try #require(connection.clientToServerMessageQueue.dequeue())
+    try await queued.message.send(connection: AuditWritingConnection())
+
+    try await Task.sleep(nanoseconds: 100_000_000)
+    #expect(connection.pixelFormatTransitionDeadlineTask == nil)
+    #expect(connection.connectionState.status == .connected)
+
+    connection.completeFramebufferUpdateRequest()
+    #expect(connection.pixelFormatTransitionDeadlineTask != nil)
+
+    connection.cancelFramebufferUpdateScheduling()
+  }
+
+  @Test
   func disconnectsWhenPixelFormatTransitionFenceIsMissing() async throws {
     let connection = try await makeFenceCapableConnection()
 
@@ -342,9 +362,14 @@ struct AuditFindingsTests {
     try await queued.message.send(connection: AuditWritingConnection())
     let payload = try #require(connection.pixelFormatTransitionFencePayload)
 
-    #expect(connection.pixelFormatTransitionDeadlineTask != nil)
+    #expect(connection.pixelFormatTransitionDeadlineTask == nil)
     #expect(connection.isPixelFormatTransitionInFlight)
 
+    connection.expirePixelFormatTransitionDeadline(payload: payload)
+    #expect(connection.connectionState.status == .connected)
+
+    connection.completeFramebufferUpdateRequest()
+    #expect(connection.pixelFormatTransitionDeadlineTask != nil)
     connection.expirePixelFormatTransitionDeadline(payload: payload)
 
     #expect(connection.connectionState.status == .disconnected)
@@ -361,6 +386,8 @@ struct AuditFindingsTests {
     try await queued.message.send(connection: AuditWritingConnection())
     let payload = try #require(connection.pixelFormatTransitionFencePayload)
 
+    #expect(connection.pixelFormatTransitionDeadlineTask == nil)
+    connection.completeFramebufferUpdateRequest()
     #expect(connection.pixelFormatTransitionDeadlineTask != nil)
 
     connection.cancelFramebufferUpdateScheduling()
