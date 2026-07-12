@@ -607,7 +607,9 @@ WebSocket endpoint for the outbound GitHub Actions runner. Authentication uses t
 Runner sockets begin in legacy mode with raw input and output. A runner
 negotiates framed I/O by sending
 `{"type":"crabfleet_runner_capabilities","capabilities":["cfr1-framed-io-v1"]}`.
-The relay responds with the accepted capability. Negotiated input, output,
+The relay responds with the accepted capability. The runner must keep accepting
+raw input and sending raw output until that response arrives because viewer
+input can race the advertisement on another socket. Negotiated input, output,
 acknowledgements, and relay control traffic use binary `CFR1` frames. The relay
 wraps legacy output before forwarding it to viewers, so arbitrary raw PTY bytes
 cannot be consumed as control traffic.

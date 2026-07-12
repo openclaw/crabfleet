@@ -186,7 +186,9 @@ Crabfleet owns:
 The Action remains the execution host and mutation authority. A negotiated
 runner acknowledges viewer input only after its PTY accepts the correlated
 write; relay queueing is not acceptance. Legacy runners keep raw input/output
-and relay-level delivery reporting. Ending the Crabfleet session does not
+and relay-level delivery reporting. A runner remains in that legacy mode until
+the relay confirms its framed-I/O capability, so input racing negotiation is
+not dropped. Ending the Crabfleet session does not
 cancel the workflow run.
 
 ## Session Lifecycle

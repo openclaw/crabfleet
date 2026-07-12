@@ -265,9 +265,10 @@ returns only the sanitized event.
 The Action connects outbound to the returned `runnerPtyUrl`. Node's global
 `WebSocket` can open the URL without custom headers.
 
-Runner sockets begin in legacy mode with raw input and output. A runner opts
-into collision-free framed I/O by advertising `cfr1-framed-io-v1` immediately
-after connecting. Negotiated viewer input arrives in a binary `CFR1` frame
+Runner sockets begin in legacy mode with raw input and output. A runner requests
+collision-free framed I/O by advertising `cfr1-framed-io-v1` immediately after
+connecting, but it remains in legacy mode until the relay accepts the
+capability. Negotiated viewer input arrives in a binary `CFR1` frame
 carrying a correlation ID; runner output uses a distinct `CFR1` output frame.
 The runner returns a correlated acknowledgement only after its PTY accepts the
 input write.
@@ -289,6 +290,7 @@ const decoder = new TextDecoder();
 const encoder = new TextEncoder();
 const terminal = new WebSocket(runnerPtyUrl);
 terminal.binaryType = "arraybuffer";
+let framed = false;
 
 await new Promise((resolve, reject) => {
   terminal.addEventListener("open", resolve, { once: true });
@@ -307,22 +309,45 @@ const pty = spawn(process.env.SHELL || "/bin/bash", [], {
 });
 
 pty.onData((output) => {
-  terminal.send(encodeOutput(output));
+  terminal.send(framed ? encodeOutput(output) : output);
 });
 
 terminal.addEventListener("message", (event) => {
+  if (acceptCapabilities(event.data)) {
+    framed = true;
+    return;
+  }
   acceptInput(event.data);
 });
 
 function acceptInput(data) {
   const input = decodeInput(data);
-  if (!input) return;
+  if (!input) {
+    if (!framed) {
+      pty.write(typeof data === "string" ? data : decoder.decode(data));
+    }
+    return;
+  }
   try {
     // A successful node-pty write is this adapter's PTY acceptance point.
     pty.write(decoder.decode(input.payload));
     terminal.send(encodeAck(input.inputId, true));
   } catch {
     terminal.send(encodeAck(input.inputId, false));
+  }
+}
+
+function acceptCapabilities(data) {
+  if (typeof data !== "string") return false;
+  try {
+    const message = JSON.parse(data);
+    return (
+      message.type === "crabfleet_runner_capabilities" &&
+      Array.isArray(message.accepted) &&
+      message.accepted.includes("cfr1-framed-io-v1")
+    );
+  } catch {
+    return false;
   }
 }
 
@@ -382,8 +407,10 @@ the WebSocket merely queues the input frame.
 
 The relay answers the advertisement with
 `{"type":"crabfleet_runner_capabilities","accepted":["cfr1-framed-io-v1"]}`.
-WebSocket ordering applies the negotiated mode before subsequent runner
-messages. Each `CFR1` frame occupies one binary WebSocket message:
+The runner must continue accepting raw input and sending raw output until that
+acceptance arrives. Viewer input can race the advertisement because it comes
+from another socket; messages already sent in legacy mode arrive before the
+acceptance response. Each `CFR1` frame occupies one binary WebSocket message:
 
 | Offset | Size     | Value                                                                          |
 | ------ | -------- | ------------------------------------------------------------------------------ |
@@ -407,8 +434,8 @@ Properties:
 - A new runner connection replaces the previous runner.
 - Multiple browser viewers may remain connected.
 - Legacy runners receive raw viewer input and send raw output.
-- Negotiated runners receive framed input and must wrap every output payload in
-  a `0x04` frame.
+- Runners switch to framed input and `0x04` output only after receiving the
+  capability acceptance response.
 - Negotiated input produces `input-accepted` only after the correlated runner
   acknowledgement. Legacy input reports acceptance after relay delivery.
 - Runner lifecycle events are typed binary frames even while no runner is

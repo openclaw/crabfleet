@@ -335,6 +335,23 @@ export function parseGitHubActionsRunnerCapabilities(
   }
 }
 
+export function parseGitHubActionsRunnerCapabilitiesAccepted(
+  message: string | ArrayBuffer,
+): string[] | null {
+  if (typeof message !== "string") return null;
+  try {
+    const parsed = JSON.parse(message) as Record<string, unknown>;
+    if (parsed.type !== runnerCapabilitiesMessageType || !Array.isArray(parsed.accepted)) {
+      return null;
+    }
+    return parsed.accepted.filter((capability): capability is string => {
+      return typeof capability === "string";
+    });
+  } catch {
+    return null;
+  }
+}
+
 export function encodeGitHubActionsRelayInputAcknowledgement(
   acknowledgement: GitHubActionsRelayInputAcknowledgement,
 ): ArrayBuffer {
