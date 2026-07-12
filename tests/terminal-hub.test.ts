@@ -653,10 +653,14 @@ test("GitHub Actions acknowledgement timeout reports an ambiguous delivery outco
   const client = socket();
   const server = socket();
   const upstream = socket();
+  const detachedSessions: string[] = [];
   const hub = new TerminalHub(
     dependencies(client, server, upstream, {
       async readSession() {
         return githubActionsSession;
+      },
+      async markDetached(_user, sessionId) {
+        detachedSessions.push(sessionId);
       },
       inputAcknowledgementTimeoutMs: 1,
     }),
@@ -705,6 +709,9 @@ test("GitHub Actions acknowledgement timeout reports an ambiguous delivery outco
       error: "terminal input delivery outcome is unknown; the runner may still complete it",
     },
   ]);
+  upstream.emit("close", { code: 1011, reason: "input acknowledgement timed out" });
+  await flushQueues();
+  assert.deepEqual(detachedSessions, []);
   server.emit("close");
 });
 

@@ -835,6 +835,7 @@ function beginTerminalInputAcknowledgement(
         return;
       }
       if (subscription.upstream.readyState === WebSocket.OPEN) {
+        subscription.markClosing("input acknowledgement timed out");
         subscription.upstream.close(1011, "input acknowledgement timed out");
       }
     }, timeoutMs),
@@ -1048,7 +1049,10 @@ function terminalCloseMessage(code: number, reason: string): string {
 
 function isPassiveTerminalClose(reason: string | undefined): boolean {
   return (
-    reason === "unsubscribed" || reason === "client closed" || reason === "no terminals mounted"
+    reason === "unsubscribed" ||
+    reason === "client closed" ||
+    reason === "no terminals mounted" ||
+    reason === "input acknowledgement timed out"
   );
 }
 
