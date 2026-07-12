@@ -27,20 +27,20 @@
     "test:changed": "pnpm run test"
   },
   "dependencies": {
-    "@cloudflare/sandbox": "0.12.2",
+    "@cloudflare/sandbox": "0.12.3",
     "@openclaw/libterminal": "0.3.1",
-    "kysely": "^0.29.2",
-    "lucide-static": "^1.22.0",
-    "preact": "^10.29.3"
+    "kysely": "^0.29.3",
+    "lucide-static": "^1.24.0",
+    "preact": "^10.29.7"
   },
   "devDependencies": {
-    "@cloudflare/workers-types": "4.20260702.1",
+    "@cloudflare/workers-types": "5.20260710.1",
     "@preact/preset-vite": "^2.10.5",
     "oxfmt": "^0.58.0",
     "oxlint": "^1.73.0",
     "typescript": "^7.0.2",
     "vite": "^8.1.4",
-    "wrangler": "^4.107.1"
+    "wrangler": "^4.110.0"
   },
   "engines": {
     "node": ">=24"
