@@ -763,10 +763,12 @@ struct PrivateMacShareTests {
     let defaults = try #require(UserDefaults(suiteName: suiteName))
     defer { defaults.removePersistentDomain(forName: suiteName) }
     let stateStore = UserDefaultsDesktopHostRegistrationStateStore(defaults: defaults)
+    let recoveryScope = desktopRecoveryScope()
     let lifecycle = DesktopHostRegistrationLifecycle(
       registration: registration,
       createPublicationID: { "durable-publication" },
-      stateStore: stateStore
+      stateStore: stateStore,
+      recoveryScopeProvider: { recoveryScope }
     )
     await #expect(throws: DesktopHostRegistrationResultUncertainError.self) {
       try await lifecycle.publish(identity: identity, port: 5_901)
@@ -793,7 +795,8 @@ struct PrivateMacShareTests {
 
     let reloadedLifecycle = DesktopHostRegistrationLifecycle(
       registration: registration,
-      stateStore: stateStore
+      stateStore: stateStore,
+      recoveryScopeProvider: { recoveryScope }
     )
     try await reloadedLifecycle.removePublishedIdentities()
 
@@ -813,11 +816,13 @@ struct PrivateMacShareTests {
     let identity = desktopIdentity(name: "persisted-cleanup", address: "100.64.12.56")
     let registration = IdentityAwareAmbiguousDesktopRegistration(uncertainPublicationIDs: [])
     let stateStore = ToggleDesktopRegistrationStateStore()
+    let recoveryScope = desktopRecoveryScope()
     do {
       let lifecycle = DesktopHostRegistrationLifecycle(
         registration: registration,
         createPublicationID: { "persisted-publication" },
-        stateStore: stateStore
+        stateStore: stateStore,
+        recoveryScopeProvider: { recoveryScope }
       )
       try await lifecycle.publish(identity: identity, port: 5_901)
     }
@@ -827,7 +832,8 @@ struct PrivateMacShareTests {
 
     let reloadedLifecycle = DesktopHostRegistrationLifecycle(
       registration: registration,
-      stateStore: stateStore
+      stateStore: stateStore,
+      recoveryScopeProvider: { recoveryScope }
     )
     try await reloadedLifecycle.removePublishedIdentities()
 
@@ -846,10 +852,12 @@ struct PrivateMacShareTests {
     let identity = desktopIdentity(name: "unsaved-cleanup", address: "100.64.12.55")
     let registration = RecoverableAmbiguousDesktopRegistration()
     let stateStore = ToggleDesktopRegistrationStateStore()
+    let recoveryScope = desktopRecoveryScope()
     let lifecycle = DesktopHostRegistrationLifecycle(
       registration: registration,
       createPublicationID: { "unsaved-publication" },
-      stateStore: stateStore
+      stateStore: stateStore,
+      recoveryScopeProvider: { recoveryScope }
     )
     await #expect(throws: DesktopHostRegistrationResultUncertainError.self) {
       try await lifecycle.publish(identity: identity, port: 5_901)
@@ -877,6 +885,32 @@ struct PrivateMacShareTests {
     } else {
       Issue.record("expected failed registry persistence state")
     }
+  }
+
+  @Test @MainActor
+  func persistedRecoveryDoesNotCrossDeployments() async throws {
+    try await assertPersistedRecoveryIsScoped(
+      originalScope: desktopRecoveryScope(),
+      otherScope: desktopRecoveryScope(origin: "https://other.example")
+    )
+  }
+
+  @Test @MainActor
+  func persistedRecoveryDoesNotCrossAccounts() async throws {
+    try await assertPersistedRecoveryIsScoped(
+      originalScope: desktopRecoveryScope(),
+      otherScope: desktopRecoveryScope(ownerSubject: "github:other")
+    )
+  }
+
+  @Test @MainActor
+  func definitiveRegistrationHTTPFailureDoesNotBecomeRecoveryIntent() async throws {
+    try await assertDefinitiveRegistrationFailureClearsIntent(.httpStatus(403))
+  }
+
+  @Test @MainActor
+  func redirectedRegistrationDoesNotBecomeRecoveryIntent() async throws {
+    try await assertDefinitiveRegistrationFailureClearsIntent(.redirect)
   }
 
   @Test
@@ -1050,6 +1084,43 @@ struct PrivateMacShareTests {
         == "desktop-ownership-token"
     )
     #expect(removal.httpBody == nil)
+  }
+
+  @Test
+  func desktopRegistrationScopesRecoveryToNormalizedOriginAndStableOwner() async throws {
+    let transport = DesktopRegistrationTransport { request in
+      let responseURL = try #require(request.url)
+      #expect(responseURL.host?.lowercased() == "fleet.example")
+      #expect(responseURL.path == "/api/native/v1/session")
+      #expect(request.httpMethod == "GET")
+      #expect(request.value(forHTTPHeaderField: "Cookie") == "crabbox_session=secret")
+      return (
+        Data(#"{"user":{"subject":"github:123"}}"#.utf8),
+        try #require(
+          HTTPURLResponse(
+            url: responseURL,
+            statusCode: 200,
+            httpVersion: nil,
+            headerFields: nil
+          ))
+      )
+    }
+    let registration = try #require(
+      CrabfleetDesktopRegistration(
+        environment: [
+          "CRABFLEET_API_URL": "https://FLEET.EXAMPLE:443/api/fleet",
+          "CRABFLEET_SESSION_COOKIE": "crabbox_session=secret",
+        ],
+        transport: transport
+      ))
+
+    #expect(
+      try await registration.recoveryScope()
+        == DesktopHostRegistrationRecoveryScope(
+          apiOrigin: "https://fleet.example",
+          ownerSubject: "github:123"
+        )
+    )
   }
 
   @Test
@@ -1973,6 +2044,90 @@ struct PrivateMacShareTests {
     let assembly = try #require(contents.range(of: "mkdir -p \"$macos_dir\" \"$resources_dir\""))
     #expect(removal.lowerBound < assembly.lowerBound)
   }
+
+  @MainActor
+  private func assertPersistedRecoveryIsScoped(
+    originalScope: DesktopHostRegistrationRecoveryScope,
+    otherScope: DesktopHostRegistrationRecoveryScope
+  ) async throws {
+    let identity = desktopIdentity(name: "scoped-recovery", address: "100.64.12.57")
+    let registration = RecoverableAmbiguousDesktopRegistration()
+    let stateStore = ToggleDesktopRegistrationStateStore()
+    let originalLifecycle = DesktopHostRegistrationLifecycle(
+      registration: registration,
+      createPublicationID: { "scoped-publication" },
+      stateStore: stateStore,
+      recoveryScopeProvider: { originalScope }
+    )
+    await #expect(throws: DesktopHostRegistrationResultUncertainError.self) {
+      try await originalLifecycle.publish(identity: identity, port: 5_901)
+    }
+
+    let otherLifecycle = DesktopHostRegistrationLifecycle(
+      registration: registration,
+      stateStore: stateStore,
+      recoveryScopeProvider: { otherScope }
+    )
+    try await otherLifecycle.removePublishedIdentities()
+    #expect(await registration.events == [.register("scoped-publication")])
+
+    let reloadedLifecycle = DesktopHostRegistrationLifecycle(
+      registration: registration,
+      stateStore: stateStore,
+      recoveryScopeProvider: { originalScope }
+    )
+    try await reloadedLifecycle.removePublishedIdentities()
+    #expect(
+      await registration.events
+        == [
+          .register("scoped-publication"),
+          .recover("scoped-publication"),
+          .unregister("recovered:scoped-publication"),
+        ]
+    )
+  }
+
+  @MainActor
+  private func assertDefinitiveRegistrationFailureClearsIntent(
+    _ failure: DefinitiveRegistrationFailureTransport.Failure
+  ) async throws {
+    let transport = DefinitiveRegistrationFailureTransport(failure: failure)
+    let registration = try #require(
+      CrabfleetDesktopRegistration(
+        environment: [
+          "CRABFLEET_API_URL": "https://fleet.example/api/fleet",
+          "CRABFLEET_SESSION_COOKIE": "crabbox_session=secret",
+        ],
+        transport: transport
+      ))
+    let stateStore = ToggleDesktopRegistrationStateStore()
+    let recoveryScope = desktopRecoveryScope()
+    var publicationIDs = ["publication-a", "publication-b"]
+    let lifecycle = DesktopHostRegistrationLifecycle(
+      registration: registration,
+      createPublicationID: { publicationIDs.removeFirst() },
+      stateStore: stateStore,
+      recoveryScopeProvider: { recoveryScope }
+    )
+    let identity = desktopIdentity(name: "definitive-failure", address: "100.64.12.58")
+
+    await #expect(throws: DesktopHostRegistrationError.self) {
+      try await lifecycle.publish(identity: identity, port: 5_901)
+    }
+    await #expect(throws: DesktopHostRegistrationError.self) {
+      try await lifecycle.publish(identity: identity, port: 5_901)
+    }
+    #expect(await transport.publicationIDs == ["publication-a", "publication-b"])
+    #expect(stateStore.data(for: recoveryScope) == nil)
+
+    let reloadedLifecycle = DesktopHostRegistrationLifecycle(
+      registration: registration,
+      stateStore: stateStore,
+      recoveryScopeProvider: { recoveryScope }
+    )
+    try await reloadedLifecycle.removePublishedIdentities()
+    #expect(await transport.publicationIDs == ["publication-a", "publication-b"])
+  }
 }
 
 private struct StaticTailscaleRunner: TailscaleCommandRunning {
@@ -2250,17 +2405,22 @@ private final class ToggleDesktopRegistrationStateStore:
   DesktopHostRegistrationStateStoring
 {
   var failsWrites = false
-  private(set) var data: Data?
+  private var dataByScope: [DesktopHostRegistrationRecoveryScope: Data] = [:]
+  var data: Data? { dataByScope.values.first }
 
-  func load() throws -> Data? {
-    data
+  func load(scope: DesktopHostRegistrationRecoveryScope) throws -> Data? {
+    dataByScope[scope]
   }
 
-  func save(_ data: Data?) throws {
+  func save(_ data: Data?, scope: DesktopHostRegistrationRecoveryScope) throws {
     if failsWrites {
       throw DesktopRegistrationTestError.failed
     }
-    self.data = data
+    dataByScope[scope] = data
+  }
+
+  func data(for scope: DesktopHostRegistrationRecoveryScope) -> Data? {
+    dataByScope[scope]
   }
 }
 
@@ -2526,6 +2686,50 @@ private final class DesktopRegistrationTransport: HTTPDataTransport {
   func close() {}
 }
 
+private actor DefinitiveRegistrationFailureTransport: HTTPDataTransport {
+  enum Failure {
+    case httpStatus(Int)
+    case redirect
+  }
+
+  let failure: Failure
+  private(set) var publicationIDs: [String] = []
+
+  init(failure: Failure) {
+    self.failure = failure
+  }
+
+  func data(for request: URLRequest) async throws -> (Data, HTTPURLResponse) {
+    let requestURL = try #require(request.url)
+    let publicationID = try #require(
+      request.value(forHTTPHeaderField: CrabfleetDesktopRegistration.publicationIDHeader)
+    )
+    publicationIDs.append(publicationID)
+    let responseURL: URL
+    let statusCode: Int
+    switch failure {
+    case .httpStatus(let status):
+      responseURL = requestURL
+      statusCode = status
+    case .redirect:
+      responseURL = try #require(URL(string: "https://login.example.test/desktop-host"))
+      statusCode = 200
+    }
+    return (
+      Data(),
+      try #require(
+        HTTPURLResponse(
+          url: responseURL,
+          statusCode: statusCode,
+          httpVersion: nil,
+          headerFields: nil
+        ))
+    )
+  }
+
+  nonisolated func close() {}
+}
+
 private actor LegacyDesktopServerTransport: HTTPDataTransport {
   enum Event: Equatable {
     case register
@@ -2592,4 +2796,14 @@ private func waitUntilAsync(
     try? await Task.sleep(for: .milliseconds(10))
   }
   return await condition()
+}
+
+private func desktopRecoveryScope(
+  origin: String = "https://fleet.example",
+  ownerSubject: String = "github:123"
+) -> DesktopHostRegistrationRecoveryScope {
+  DesktopHostRegistrationRecoveryScope(
+    apiOrigin: origin,
+    ownerSubject: ownerSubject
+  )
 }

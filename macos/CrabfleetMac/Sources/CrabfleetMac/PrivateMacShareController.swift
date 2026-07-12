@@ -1,5 +1,6 @@
 import AppKit
 import CoreGraphics
+import CryptoKit
 import Foundation
 import ServiceManagement
 
@@ -38,16 +39,19 @@ final class PrivateMacShareStopCoordinator {
 
 @MainActor
 protocol DesktopHostRegistrationStateStoring: AnyObject {
-  func load() throws -> Data?
-  func save(_ data: Data?) throws
+  func load(scope: DesktopHostRegistrationRecoveryScope) throws -> Data?
+  func save(_ data: Data?, scope: DesktopHostRegistrationRecoveryScope) throws
 }
 
 enum DesktopHostRegistrationPersistenceError: LocalizedError {
+  case missingScope
   case unreadableState
   case writeFailed
 
   var errorDescription: String? {
     switch self {
+    case .missingScope:
+      "The desktop publication recovery scope is unavailable."
     case .unreadableState:
       "The saved desktop publication recovery state is unreadable."
     case .writeFailed:
@@ -70,19 +74,26 @@ final class UserDefaultsDesktopHostRegistrationStateStore:
     self.key = key
   }
 
-  func load() throws -> Data? {
-    defaults.data(forKey: key)
+  func load(scope: DesktopHostRegistrationRecoveryScope) throws -> Data? {
+    defaults.data(forKey: scopedKey(scope))
   }
 
-  func save(_ data: Data?) throws {
+  func save(_ data: Data?, scope: DesktopHostRegistrationRecoveryScope) throws {
+    let scopedKey = scopedKey(scope)
     if let data {
-      defaults.set(data, forKey: key)
+      defaults.set(data, forKey: scopedKey)
     } else {
-      defaults.removeObject(forKey: key)
+      defaults.removeObject(forKey: scopedKey)
     }
     guard defaults.synchronize() else {
       throw DesktopHostRegistrationPersistenceError.writeFailed
     }
+  }
+
+  private func scopedKey(_ scope: DesktopHostRegistrationRecoveryScope) -> String {
+    let scopeData = Data("\(scope.apiOrigin)\u{0}\(scope.ownerSubject)".utf8)
+    let digest = SHA256.hash(data: scopeData).map { String(format: "%02x", $0) }.joined()
+    return "\(key).v2.\(digest)"
   }
 }
 
@@ -174,6 +185,9 @@ final class DesktopHostRegistrationLifecycle {
   private let coordinator: DesktopHostRegistrationCoordinator
   private let createPublicationID: () -> String
   private let stateStore: (any DesktopHostRegistrationStateStoring)?
+  private let recoveryScopeProvider: (() async throws -> DesktopHostRegistrationRecoveryScope)?
+  private var recoveryScope: DesktopHostRegistrationRecoveryScope?
+  private var stateLoaded = false
   private var publishedRegistration: PublishedRegistration?
   private var uncertainRegistrations: [RegistrationTarget] = []
   private var pendingRemovals: [PublishedRegistration] = []
@@ -183,31 +197,23 @@ final class DesktopHostRegistrationLifecycle {
   init(
     registration: any DesktopHostRegistering,
     createPublicationID: @escaping () -> String = { UUID().uuidString },
-    stateStore: (any DesktopHostRegistrationStateStoring)? = nil
+    stateStore: (any DesktopHostRegistrationStateStoring)? = nil,
+    recoveryScopeProvider: (() async throws -> DesktopHostRegistrationRecoveryScope)? = nil
   ) {
     coordinator = DesktopHostRegistrationCoordinator(registration: registration)
     self.createPublicationID = createPublicationID
     self.stateStore = stateStore
-    guard let stateStore else { return }
-    do {
-      guard let data = try stateStore.load() else { return }
-      let state = try JSONDecoder().decode(PersistedState.self, from: data)
-      uncertainRegistrations = state.uncertainRegistrations
-      publishedRegistration = state.publishedRegistration?.registration
-      pendingRemovals = state.pendingRemovals.map(\.registration)
-    } catch {
-      stateLoadError = DesktopHostRegistrationPersistenceError.unreadableState
-    }
+    self.recoveryScopeProvider = recoveryScopeProvider
   }
 
   var hasDurableRecoveryState: Bool {
-    stateStore != nil && stateLoadError == nil && lastPersistenceError == nil
+    stateStore != nil && stateLoaded && stateLoadError == nil && lastPersistenceError == nil
       && (!uncertainRegistrations.isEmpty || publishedRegistration != nil
         || !pendingRemovals.isEmpty)
   }
 
   func publish(identity: TailnetIdentity, port: UInt16) async throws {
-    try ensureStateIsReadable()
+    try await loadStateIfNeeded()
     let hostID = CrabfleetDesktopRegistration.hostID(identity: identity)
     let existingTarget = uncertainRegistrations.first {
       $0.hostID == hostID && $0.identity == identity && $0.port == port
@@ -236,11 +242,19 @@ final class DesktopHostRegistrationLifecycle {
         throw DesktopHostRegistrationSupersededError()
       }
     } else {
-      ownershipToken = try await coordinator.register(
-        identity: identity,
-        port: port,
-        publicationID: target.publicationID
-      )
+      do {
+        ownershipToken = try await coordinator.register(
+          identity: identity,
+          port: port,
+          publicationID: target.publicationID
+        )
+      } catch {
+        if !(error is DesktopHostRegistrationResultUncertainError) {
+          uncertainRegistrations.removeAll { $0 == target }
+          try persistState()
+        }
+        throw error
+      }
     }
     uncertainRegistrations.removeAll { $0 == target }
     if let publishedRegistration, publishedRegistration.hostID != hostID,
@@ -260,7 +274,7 @@ final class DesktopHostRegistrationLifecycle {
   }
 
   func removePublishedIdentities() async throws {
-    try ensureStateIsReadable()
+    try await loadStateIfNeeded()
     var firstError: Error?
     let uncertainRegistrations = uncertainRegistrations
     for target in uncertainRegistrations {
@@ -331,12 +345,36 @@ final class DesktopHostRegistrationLifecycle {
     if let firstError { throw firstError }
   }
 
-  private func ensureStateIsReadable() throws {
-    if let stateLoadError { throw stateLoadError }
+  private func loadStateIfNeeded() async throws {
+    guard stateStore != nil, !stateLoaded else {
+      if let stateLoadError { throw stateLoadError }
+      return
+    }
+    guard let recoveryScopeProvider else {
+      throw DesktopHostRegistrationPersistenceError.missingScope
+    }
+    let scope = try await recoveryScopeProvider()
+    recoveryScope = scope
+    do {
+      if let data = try stateStore?.load(scope: scope) {
+        let state = try JSONDecoder().decode(PersistedState.self, from: data)
+        uncertainRegistrations = state.uncertainRegistrations
+        publishedRegistration = state.publishedRegistration?.registration
+        pendingRemovals = state.pendingRemovals.map(\.registration)
+      }
+      stateLoaded = true
+    } catch {
+      stateLoadError = DesktopHostRegistrationPersistenceError.unreadableState
+      stateLoaded = true
+      throw DesktopHostRegistrationPersistenceError.unreadableState
+    }
   }
 
   private func persistState() throws {
     guard let stateStore else { return }
+    guard stateLoaded, let recoveryScope else {
+      throw DesktopHostRegistrationPersistenceError.missingScope
+    }
     let state = PersistedState(
       uncertainRegistrations: uncertainRegistrations,
       publishedRegistration: publishedRegistration.map(PersistedPublishedRegistration.init),
@@ -347,7 +385,7 @@ final class DesktopHostRegistrationLifecycle {
       || !state.pendingRemovals.isEmpty
     do {
       let data = hasState ? try JSONEncoder().encode(state) : nil
-      try stateStore.save(data)
+      try stateStore.save(data, scope: recoveryScope)
       lastPersistenceError = nil
     } catch {
       lastPersistenceError = error
@@ -467,12 +505,17 @@ final class PrivateMacShareController: ObservableObject {
   ) {
     self.desktopRegistration = desktopRegistration
     let registrationStateStore = UserDefaultsDesktopHostRegistrationStateStore(defaults: defaults)
+    let recoveryScopeProvider = (desktopRegistration as? any DesktopHostRegistrationRecoveryScoping)
+      .map { registration in
+        { try await registration.recoveryScope() }
+      }
     desktopRegistrationLifecycle =
       registrationLifecycle
       ?? desktopRegistration.map {
         DesktopHostRegistrationLifecycle(
           registration: $0,
-          stateStore: registrationStateStore
+          stateStore: registrationStateStore,
+          recoveryScopeProvider: recoveryScopeProvider
         )
       }
     self.defaults = defaults

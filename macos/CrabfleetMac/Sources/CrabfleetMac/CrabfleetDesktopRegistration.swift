@@ -1,5 +1,14 @@
 import Foundation
 
+struct DesktopHostRegistrationRecoveryScope: Equatable, Hashable, Sendable {
+  let apiOrigin: String
+  let ownerSubject: String
+}
+
+protocol DesktopHostRegistrationRecoveryScoping: Sendable {
+  func recoveryScope() async throws -> DesktopHostRegistrationRecoveryScope
+}
+
 protocol DesktopHostRegistering: Sendable {
   func register(
     identity: TailnetIdentity,
@@ -77,7 +86,11 @@ actor DesktopHostRegistrationCoordinator {
   }
 }
 
-struct CrabfleetDesktopRegistration: DesktopHostRegistering, @unchecked Sendable {
+struct CrabfleetDesktopRegistration:
+  DesktopHostRegistering,
+  DesktopHostRegistrationRecoveryScoping,
+  @unchecked Sendable
+{
   private struct RegistrationResponse: Decodable {
     private enum CodingKeys: String, CodingKey {
       case host
@@ -115,7 +128,16 @@ struct CrabfleetDesktopRegistration: DesktopHostRegistering, @unchecked Sendable
     let ownershipToken: String?
   }
 
+  private struct NativeSessionResponse: Decodable {
+    struct User: Decodable {
+      let subject: String
+    }
+
+    let user: User
+  }
+
   private let baseURL: URL
+  private let apiOrigin: String
   private let sessionCookie: String
   private let transport: any HTTPDataTransport
   static let ownershipModeHeader = "X-Crabfleet-Ownership-Mode"
@@ -142,9 +164,29 @@ struct CrabfleetDesktopRegistration: DesktopHostRegistering, @unchecked Sendable
       normalizedURL.deleteLastPathComponent()
     }
     guard normalizedURL.path.isEmpty || normalizedURL.path == "/" else { return nil }
+    guard let apiOrigin = Self.normalizedAPIOrigin(normalizedURL) else { return nil }
     self.baseURL = normalizedURL
+    self.apiOrigin = apiOrigin
     self.sessionCookie = cookie
     self.transport = transport
+  }
+
+  func recoveryScope() async throws -> DesktopHostRegistrationRecoveryScope {
+    let request = nativeSessionRequest()
+    let data: Data
+    let http: HTTPURLResponse
+    (data, http) = try await transport.data(for: request)
+    try validate(response: http, for: request, acceptingNotFound: false)
+    guard
+      let response = try? JSONDecoder().decode(NativeSessionResponse.self, from: data),
+      Self.isValidOwnerSubject(response.user.subject)
+    else {
+      throw DesktopHostRegistrationError.invalidResponse
+    }
+    return DesktopHostRegistrationRecoveryScope(
+      apiOrigin: apiOrigin,
+      ownerSubject: response.user.subject
+    )
   }
 
   func register(
@@ -330,6 +372,21 @@ struct CrabfleetDesktopRegistration: DesktopHostRegistering, @unchecked Sendable
     return request
   }
 
+  private func nativeSessionRequest() -> URLRequest {
+    let url =
+      baseURL
+      .appending(path: "api")
+      .appending(path: "native")
+      .appending(path: "v1")
+      .appending(path: "session")
+    var request = URLRequest(url: url)
+    request.httpMethod = "GET"
+    request.timeoutInterval = 15
+    request.setValue("application/json", forHTTPHeaderField: "Accept")
+    request.setValue(sessionCookie, forHTTPHeaderField: "Cookie")
+    return request
+  }
+
   static func hostID(identity: TailnetIdentity) -> String {
     let dnsLabel = identity.dnsName.split(separator: ".").first.map(String.init) ?? ""
     let normalized = dnsLabel.lowercased().filter {
@@ -351,6 +408,22 @@ struct CrabfleetDesktopRegistration: DesktopHostRegistering, @unchecked Sendable
     else { return false }
     if scheme == "https" { return true }
     return scheme == "http" && (host == "127.0.0.1" || host == "::1")
+  }
+
+  private static func normalizedAPIOrigin(_ url: URL) -> String? {
+    let scheme = url.scheme?.lowercased()
+    var components = URLComponents()
+    components.scheme = scheme
+    components.host = url.host?.lowercased()
+    if !((scheme == "https" && url.port == 443) || (scheme == "http" && url.port == 80)) {
+      components.port = url.port
+    }
+    return components.url?.absoluteString
+  }
+
+  private static func isValidOwnerSubject(_ value: String) -> Bool {
+    !value.isEmpty && value.utf8.count <= 512
+      && !value.unicodeScalars.contains(where: CharacterSet.controlCharacters.contains)
   }
 
   private static func isValidOwnershipToken(_ value: String) -> Bool {
