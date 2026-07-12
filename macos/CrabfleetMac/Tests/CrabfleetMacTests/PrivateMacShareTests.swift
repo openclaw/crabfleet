@@ -634,6 +634,24 @@ struct PrivateMacShareTests {
   }
 
   @Test @MainActor
+  func retainedLegacyCleanupDoesNotDeleteANewerPublisher() async throws {
+    let identity = desktopIdentity(name: "legacy-host", address: "100.64.12.60")
+    let registration = RetainedLegacyDesktopRegistration()
+    let lifecycle = DesktopHostRegistrationLifecycle(registration: registration)
+
+    try await lifecycle.publish(identity: identity, port: 5_901)
+    await #expect(throws: DesktopRegistrationTestError.failed) {
+      try await lifecycle.removePublishedIdentities()
+    }
+    await registration.publishNewerEndpoint()
+
+    try await lifecycle.removePublishedIdentities()
+
+    #expect(await registration.activeEndpoint == "newer-publisher")
+    #expect(await registration.events == [.register, .unregister])
+  }
+
+  @Test @MainActor
   func desktopPublicationReplacementUsesSanitizedHostIDAcrossIdentityChanges() async throws {
     let first = desktopIdentity(name: "shared-host", address: "100.64.12.48")
     let second = TailnetIdentity(
@@ -747,6 +765,79 @@ struct PrivateMacShareTests {
     let delegate = CrabfleetApplicationDelegate(shareController: controller)
 
     #expect(delegate.shareController === controller)
+  }
+
+  @Test @MainActor
+  func applicationTerminationCancelsPendingAutoShareStartup() async throws {
+    let runner = CountingTailscaleRunner(output: statusJSON())
+    let defaults = try #require(
+      UserDefaults(suiteName: "CrabfleetMacTests.\(UUID().uuidString)")
+    )
+    let controller = PrivateMacShareController(
+      runner: runner,
+      desktopRegistration: nil,
+      defaults: defaults
+    )
+    var replies: [Bool] = []
+    let delegate = CrabfleetApplicationDelegate(
+      shareController: controller,
+      replyToTerminationRequest: { replies.append($0) },
+      isAutoShareRequested: { true },
+      autoShareDelay: .seconds(30)
+    )
+    let application = NSApplication.shared
+
+    delegate.applicationDidFinishLaunching(
+      Notification(name: NSApplication.didFinishLaunchingNotification)
+    )
+    #expect(delegate.applicationShouldTerminate(application) == .terminateLater)
+    #expect(await waitUntilAsync { replies == [true] })
+    try await Task.sleep(for: .milliseconds(50))
+
+    #expect(await runner.callCount == 0)
+    #expect(controller.phase == .idle)
+  }
+
+  @Test @MainActor
+  func applicationTerminationCancelsAutoShareDuringInitialRefresh() async throws {
+    let runner = SequencedTailscaleRunner()
+    let defaults = try #require(
+      UserDefaults(suiteName: "CrabfleetMacTests.\(UUID().uuidString)")
+    )
+    let controller = PrivateMacShareController(
+      runner: runner,
+      desktopRegistration: nil,
+      defaults: defaults
+    )
+    var replies: [Bool] = []
+    let delegate = CrabfleetApplicationDelegate(
+      shareController: controller,
+      replyToTerminationRequest: { replies.append($0) },
+      isAutoShareRequested: { true },
+      autoShareDelay: .zero
+    )
+    let application = NSApplication.shared
+
+    delegate.applicationDidFinishLaunching(
+      Notification(name: NSApplication.didFinishLaunchingNotification)
+    )
+    #expect(await waitUntilAsync { await runner.callCount == 1 })
+    #expect(delegate.applicationShouldTerminate(application) == .terminateLater)
+    #expect(await waitUntilAsync { replies == [true] })
+
+    await runner.resumeNext(
+      .success(.init(standardOutput: statusJSON(), standardError: ""))
+    )
+    let continuedPreflight = await waitUntilAsync(timeout: .milliseconds(200)) {
+      await runner.callCount > 1
+    }
+    if continuedPreflight {
+      await runner.resumeNext(.failure(CancellationError()))
+    }
+
+    #expect(!continuedPreflight)
+    #expect(!controller.isRefreshing)
+    #expect(controller.phase == .idle)
   }
 
   @Test @MainActor
@@ -904,6 +995,61 @@ struct PrivateMacShareTests {
           .unregister(identity.ipv4Address, "recovered:persisted-publication"),
         ]
     )
+  }
+
+  @Test @MainActor
+  func loadingPersistedLegacyCleanupClearsUnsafeState() async throws {
+    let identity = desktopIdentity(name: "persisted-legacy", address: "100.64.12.61")
+    let stateStore = ToggleDesktopRegistrationStateStore()
+    let recoveryScope = desktopRecoveryScope()
+    let persistedIdentity: [String: Any] = [
+      "tailnetName": identity.tailnetName,
+      "loginName": identity.loginName,
+      "dnsName": identity.dnsName,
+      "hostName": identity.hostName,
+      "ipv4Address": identity.ipv4Address,
+      "userID": identity.userID,
+    ]
+    let legacyRegistration: [String: Any] = [
+      "persistedIdentity": persistedIdentity,
+      "hostID": CrabfleetDesktopRegistration.hostID(identity: identity),
+      "publicationID": "legacy-publication",
+      "usesLegacyCleanup": true,
+    ]
+    let data = try JSONSerialization.data(withJSONObject: [
+      "uncertainRegistrations": [],
+      "publishedRegistration": legacyRegistration,
+      "pendingRemovals": [legacyRegistration],
+    ])
+    try stateStore.save(data, scope: recoveryScope)
+    let registration = RecordingDesktopRegistration()
+    var recoveryScopeRequests = 0
+    let lifecycle = DesktopHostRegistrationLifecycle(
+      registration: registration,
+      stateStore: stateStore,
+      recoveryScopeProvider: {
+        recoveryScopeRequests += 1
+        return recoveryScope
+      }
+    )
+
+    try await lifecycle.removePublishedIdentities()
+
+    #expect(stateStore.data(for: recoveryScope) == nil)
+    #expect(await registration.events.isEmpty)
+
+    let reloadedLifecycle = DesktopHostRegistrationLifecycle(
+      registration: registration,
+      stateStore: stateStore,
+      recoveryScopeProvider: {
+        recoveryScopeRequests += 1
+        return recoveryScope
+      }
+    )
+    try await reloadedLifecycle.removePublishedIdentities()
+
+    #expect(recoveryScopeRequests == 1)
+    #expect(await registration.events.isEmpty)
   }
 
   @Test @MainActor
@@ -2183,13 +2329,17 @@ struct PrivateMacShareTests {
   private func assertIdleApplicationTerminationContinues(
     transportHandler: @escaping (URLRequest) throws -> (Data, HTTPURLResponse)
   ) async throws {
+    var recoveryScopeRequests = 0
     let registration = try #require(
       CrabfleetDesktopRegistration(
         environment: [
           "CRABFLEET_API_URL": "https://fleet.example/api/fleet",
           "CRABFLEET_SESSION_COOKIE": "crabbox_session=secret",
         ],
-        transport: DesktopRegistrationTransport(handler: transportHandler)
+        transport: DesktopRegistrationTransport { request in
+          recoveryScopeRequests += 1
+          return try transportHandler(request)
+        }
       ))
     let defaults = try #require(
       UserDefaults(suiteName: "CrabfleetMacTests.\(UUID().uuidString)")
@@ -2207,12 +2357,9 @@ struct PrivateMacShareTests {
 
     #expect(delegate.applicationShouldTerminate(NSApplication.shared) == .terminateLater)
     #expect(await waitUntilAsync { replies == [true] })
+    #expect(recoveryScopeRequests == 0)
     #expect(controller.phase == .idle)
-    if case .failed = controller.registryPhase {
-      // Recovery remains available for a later launch without blocking this idle quit.
-    } else {
-      Issue.record("expected recovery lookup failure")
-    }
+    #expect(controller.registryPhase == .notPublished)
   }
 
   @MainActor
@@ -2263,6 +2410,20 @@ private struct StaticTailscaleRunner: TailscaleCommandRunning {
 
   func run(arguments: [String]) async throws -> TailscaleCommandResult {
     .init(standardOutput: output, standardError: "")
+  }
+}
+
+private actor CountingTailscaleRunner: TailscaleCommandRunning {
+  let output: String
+  private(set) var callCount = 0
+
+  init(output: String) {
+    self.output = output
+  }
+
+  func run(arguments: [String]) async throws -> TailscaleCommandResult {
+    callCount += 1
+    return .init(standardOutput: output, standardError: "")
   }
 }
 
@@ -2536,6 +2697,10 @@ private final class ToggleDesktopRegistrationStateStore:
   private var dataByScope: [DesktopHostRegistrationRecoveryScope: Data] = [:]
   var data: Data? { dataByScope.values.first }
 
+  func containsState() -> Bool {
+    !dataByScope.isEmpty
+  }
+
   func load(scope: DesktopHostRegistrationRecoveryScope) throws -> Data? {
     dataByScope[scope]
   }
@@ -2630,6 +2795,45 @@ private actor TwoProcessDesktopRegistration: DesktopHostRegistering {
     events.append(.unregister(ownershipToken ?? ""))
     activePublicationID = nil
     activeOwnershipToken = nil
+  }
+}
+
+private actor RetainedLegacyDesktopRegistration: DesktopHostRegistering {
+  enum Event: Equatable {
+    case register
+    case unregister
+  }
+
+  private var failNextUnregister = true
+  private(set) var activeEndpoint: String?
+  private(set) var events: [Event] = []
+
+  func register(
+    identity: TailnetIdentity,
+    port: UInt16,
+    publicationID: String
+  ) async throws -> String? {
+    events.append(.register)
+    activeEndpoint = "legacy-publisher"
+    return nil
+  }
+
+  func recover(identity: TailnetIdentity, publicationID: String) async throws -> String? {
+    nil
+  }
+
+  func unregister(identity: TailnetIdentity, ownershipToken: String?) async throws {
+    #expect(ownershipToken == nil)
+    events.append(.unregister)
+    if failNextUnregister {
+      failNextUnregister = false
+      throw DesktopRegistrationTestError.failed
+    }
+    activeEndpoint = nil
+  }
+
+  func publishNewerEndpoint() {
+    activeEndpoint = "newer-publisher"
   }
 }
 

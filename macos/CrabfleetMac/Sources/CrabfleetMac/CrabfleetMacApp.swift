@@ -49,6 +49,8 @@ enum VNCConnectionLaunchMode {
 final class CrabfleetApplicationDelegate: NSObject, NSApplicationDelegate {
   let shareController: PrivateMacShareController
   private let replyToTerminationRequest: @MainActor (Bool) -> Void
+  private let isAutoShareRequested: @MainActor () -> Bool
+  private let autoShareDelay: Duration
   private var autoShareTask: Task<Void, Never>?
   private var terminationTask: Task<Void, Never>?
 
@@ -57,6 +59,8 @@ final class CrabfleetApplicationDelegate: NSObject, NSApplicationDelegate {
     replyToTerminationRequest = { shouldTerminate in
       NSApp.reply(toApplicationShouldTerminate: shouldTerminate)
     }
+    isAutoShareRequested = { PrivateMacShareLaunchMode.isRequested() }
+    autoShareDelay = .milliseconds(500)
     super.init()
   }
 
@@ -64,19 +68,30 @@ final class CrabfleetApplicationDelegate: NSObject, NSApplicationDelegate {
     shareController: PrivateMacShareController,
     replyToTerminationRequest: @escaping @MainActor (Bool) -> Void = {
       NSApp.reply(toApplicationShouldTerminate: $0)
-    }
+    },
+    isAutoShareRequested: @escaping @MainActor () -> Bool = {
+      PrivateMacShareLaunchMode.isRequested()
+    },
+    autoShareDelay: Duration = .milliseconds(500)
   ) {
     self.shareController = shareController
     self.replyToTerminationRequest = replyToTerminationRequest
+    self.isAutoShareRequested = isAutoShareRequested
+    self.autoShareDelay = autoShareDelay
     super.init()
   }
 
   func applicationDidFinishLaunching(_ notification: Notification) {
-    guard PrivateMacShareLaunchMode.isRequested() else { return }
+    guard isAutoShareRequested() else { return }
     NSApp.activate(ignoringOtherApps: true)
     autoShareTask = Task { [weak self] in
       guard let self else { return }
-      try? await Task.sleep(for: .milliseconds(500))
+      do {
+        try await Task.sleep(for: autoShareDelay)
+      } catch {
+        return
+      }
+      guard !Task.isCancelled else { return }
       await self.startPrivateShare(shareController)
     }
   }
@@ -99,6 +114,7 @@ final class CrabfleetApplicationDelegate: NSObject, NSApplicationDelegate {
 
   private func startPrivateShare(_ controller: PrivateMacShareController) async {
     await controller.refresh()
+    guard !Task.isCancelled else { return }
     report(
       "private share prerequisites: tailnet \(controller.identity == nil ? "unavailable" : "ready"), "
         + "Screen Recording \(controller.screenRecordingGranted ? "allowed" : "denied")"
@@ -106,23 +122,34 @@ final class CrabfleetApplicationDelegate: NSObject, NSApplicationDelegate {
     )
     if !controller.screenRecordingGranted {
       await controller.requestScreenRecordingPermission()
+      guard !Task.isCancelled else { return }
     }
 
     let clock = ContinuousClock()
     let deadline = clock.now.advanced(by: .seconds(300))
     while !Task.isCancelled, clock.now < deadline {
       await controller.refresh()
+      guard !Task.isCancelled else { return }
       if controller.canStart {
         await controller.start()
+        guard !Task.isCancelled else { return }
         for _ in 0..<50 where controller.phase == .starting {
-          try? await Task.sleep(for: .milliseconds(100))
+          do {
+            try await Task.sleep(for: .milliseconds(100))
+          } catch {
+            return
+          }
         }
         let address = controller.connectionAddress.map { " at \($0)" } ?? ""
         let notice = controller.notice.map { ": \($0)" } ?? ""
         report("private share \(controller.phase.title.lowercased())\(address)\(notice)")
         return
       }
-      try? await Task.sleep(for: .seconds(2))
+      do {
+        try await Task.sleep(for: .seconds(2))
+      } catch {
+        return
+      }
     }
 
     let missing = [

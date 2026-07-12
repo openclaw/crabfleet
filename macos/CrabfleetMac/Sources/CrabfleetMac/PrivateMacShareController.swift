@@ -39,8 +39,13 @@ final class PrivateMacShareStopCoordinator {
 
 @MainActor
 protocol DesktopHostRegistrationStateStoring: AnyObject {
+  func containsState() -> Bool
   func load(scope: DesktopHostRegistrationRecoveryScope) throws -> Data?
   func save(_ data: Data?, scope: DesktopHostRegistrationRecoveryScope) throws
+}
+
+extension DesktopHostRegistrationStateStoring {
+  func containsState() -> Bool { true }
 }
 
 enum DesktopHostRegistrationPersistenceError: LocalizedError {
@@ -72,6 +77,11 @@ final class UserDefaultsDesktopHostRegistrationStateStore:
   init(defaults: UserDefaults = .standard, key: String = defaultKey) {
     self.defaults = defaults
     self.key = key
+  }
+
+  func containsState() -> Bool {
+    let prefix = "\(key).v2."
+    return defaults.dictionaryRepresentation().keys.contains { $0.hasPrefix(prefix) }
   }
 
   func load(scope: DesktopHostRegistrationRecoveryScope) throws -> Data? {
@@ -280,7 +290,7 @@ final class DesktopHostRegistrationLifecycle {
   }
 
   func removePublishedIdentities() async throws {
-    try await loadStateIfNeeded()
+    try await loadStateIfNeeded(requireRecoveryScope: false)
     var firstError: Error?
     let uncertainRegistrations = uncertainRegistrations
     for target in uncertainRegistrations {
@@ -346,27 +356,52 @@ final class DesktopHostRegistrationLifecycle {
         try persistState()
       } catch {
         firstError = firstError ?? error
+        if removal.usesLegacyCleanup {
+          // A tokenless legacy DELETE cannot identify its publication. Try it
+          // only while stopping the process that published it; never retain it
+          // for a delayed retry that could delete a replacement publisher.
+          pendingRemovals.removeAll { $0 == removal }
+          do {
+            try persistState()
+          } catch {
+            firstError = firstError ?? error
+          }
+        }
       }
     }
     if let firstError { throw firstError }
   }
 
-  private func loadStateIfNeeded() async throws {
-    guard stateStore != nil, !stateLoaded else {
+  private func loadStateIfNeeded(requireRecoveryScope: Bool = true) async throws {
+    guard let stateStore else { return }
+    if stateLoaded {
       if let stateLoadError { throw stateLoadError }
+      if requireRecoveryScope, recoveryScope == nil {
+        try await loadRecoveryScope()
+      }
       return
     }
-    guard let recoveryScopeProvider else {
+    if !requireRecoveryScope, !stateStore.containsState() {
+      stateLoaded = true
+      return
+    }
+    try await loadRecoveryScope()
+    guard let recoveryScope else {
       throw DesktopHostRegistrationPersistenceError.missingScope
     }
-    let scope = try await recoveryScopeProvider()
-    recoveryScope = scope
+    var filteredLegacyState = false
     do {
-      if let data = try stateStore?.load(scope: scope) {
+      if let data = try stateStore.load(scope: recoveryScope) {
         let state = try JSONDecoder().decode(PersistedState.self, from: data)
+        filteredLegacyState =
+          state.publishedRegistration?.usesLegacyCleanup == true
+          || state.pendingRemovals.contains { $0.usesLegacyCleanup }
         uncertainRegistrations = state.uncertainRegistrations
-        publishedRegistration = state.publishedRegistration?.registration
+        publishedRegistration = state.publishedRegistration
+          .map(\.registration)
+          .flatMap { $0.usesLegacyCleanup ? nil : $0 }
         pendingRemovals = state.pendingRemovals.map(\.registration)
+          .filter { !$0.usesLegacyCleanup }
       }
       stateLoaded = true
     } catch {
@@ -374,6 +409,16 @@ final class DesktopHostRegistrationLifecycle {
       stateLoaded = true
       throw DesktopHostRegistrationPersistenceError.unreadableState
     }
+    if filteredLegacyState {
+      try persistState()
+    }
+  }
+
+  private func loadRecoveryScope() async throws {
+    guard let recoveryScopeProvider else {
+      throw DesktopHostRegistrationPersistenceError.missingScope
+    }
+    recoveryScope = try await recoveryScopeProvider()
   }
 
   private func persistState() throws {
@@ -383,8 +428,11 @@ final class DesktopHostRegistrationLifecycle {
     }
     let state = PersistedState(
       uncertainRegistrations: uncertainRegistrations,
-      publishedRegistration: publishedRegistration.map(PersistedPublishedRegistration.init),
-      pendingRemovals: pendingRemovals.map(PersistedPublishedRegistration.init)
+      publishedRegistration: publishedRegistration
+        .flatMap { $0.usesLegacyCleanup ? nil : PersistedPublishedRegistration($0) },
+      pendingRemovals: pendingRemovals
+        .filter { !$0.usesLegacyCleanup }
+        .map(PersistedPublishedRegistration.init)
     )
     let hasState =
       !state.uncertainRegistrations.isEmpty || state.publishedRegistration != nil
