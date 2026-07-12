@@ -338,7 +338,7 @@ final class PrivateMacShareController: ObservableObject {
     }
     if removedRegistryEntry { self.activeIdentity = nil }
     guard isCurrent(generation) else { return }
-    phase = removedRegistryEntry ? .idle : .failed
+    phase = .idle
   }
 
   func openPrivacySettings(_ pane: PrivacyPane) {
