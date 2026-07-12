@@ -14,6 +14,7 @@ import {
   finishSandboxCredentialPolicyRegistration,
   recordSandboxCredentialPolicyRefs,
   sandboxCredentialPolicyCleanupAuthorizedCondition,
+  sandboxLookupIds,
   type SandboxCredentialPolicyOwnershipFence,
 } from "./sandbox-credential-policy-repository.ts";
 import { sandboxLeaseInfo, sandboxLeasePrefix } from "./sandbox-lease.ts";
@@ -341,7 +342,11 @@ async function scanStagedCredentialPolicyRegistrations(
     const registration: SandboxCredentialPolicyRegistration = {
       generation: row.registration_generation,
       claim: row.registration_claim,
-      lookupIds: sandboxCredentialPolicyRegistrationLookupIds(row.lookup_ids_json, row.sandbox_id),
+      lookupIds: sandboxCredentialPolicyRegistrationLookupIds(
+        row.lookup_ids_json,
+        row.sandbox_id,
+        sandboxLookupIds(env, row.sandbox_id),
+      ),
     };
     try {
       const ownershipFence = credentialPolicyScanOwnershipFence(row, now);

@@ -665,7 +665,9 @@ export async function renewSandboxCredentialPolicyRegistration(
     .where("state", "=", "registering")
     .where("registration_generation", "=", registration.generation)
     .where("registration_claim", "=", registration.claim)
+    .where("registration_claim_expires_at", ">", now)
     .where(sandboxCredentialPolicyOwnerCondition(sessionId, sandboxId, ownershipFence, now))
+    .where(noLivePolicyTableRegistrationCondition(sessionId, sandboxId, now))
     .executeTakeFirst();
   return Number(renewed.numUpdatedRows ?? 0n) === 1 ? registrationExpiresAt : null;
 }
@@ -702,6 +704,7 @@ export async function claimSandboxCredentialPolicyRegistrationRecovery(
     .where("registration_claim_expires_at", "=", expiredRegistrationExpiresAt)
     .where("registration_claim_expires_at", "<=", now)
     .where(sandboxCredentialPolicyOwnerCondition(sessionId, sandboxId, ownershipFence, now))
+    .where(noLivePolicyTableRegistrationCondition(sessionId, sandboxId, now))
     .executeTakeFirst();
   return Number(claimed.numUpdatedRows ?? 0n) === 1
     ? { registration, registrationExpiresAt }

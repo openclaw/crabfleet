@@ -134,6 +134,7 @@ async function reconcileStagedCredentialPolicyRegistration(
       sandboxCredentialPolicyRegistrationLookupIds(
         registration.lookup_ids_json,
         registration.sandbox_id,
+        sandboxLookupIds(env, registration.sandbox_id),
       ).map((lookupId) =>
         unregisterSandboxCredentialPolicyLookup(
           env,

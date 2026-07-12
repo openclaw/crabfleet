@@ -214,7 +214,7 @@ test("terminal cleanup atomically stages the session and credential-policy refs"
   assert.ok(parameters.includes(leaseId));
 });
 
-test("staged cleanup uses the persisted lookup set", async () => {
+test("staged cleanup uses the persisted lookup set with an exact current fallback", async () => {
   const source = await readFile(
     new URL("../src/worker/sandbox-credential-policy-cleanup-service.ts", import.meta.url),
     "utf8",
@@ -225,5 +225,5 @@ test("staged cleanup uses the persisted lookup set", async () => {
 
   assert.match(stagedCleanup, /sandboxCredentialPolicyRegistrationLookupIds/);
   assert.match(stagedCleanup, /registration\.lookup_ids_json/);
-  assert.doesNotMatch(stagedCleanup, /sandboxLookupIds\(env, registration\.sandbox_id\)/);
+  assert.match(stagedCleanup, /sandboxLookupIds\(env, registration\.sandbox_id\)/);
 });

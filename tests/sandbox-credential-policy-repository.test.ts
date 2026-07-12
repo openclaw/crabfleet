@@ -321,17 +321,38 @@ test("credential-policy lookup identity includes the Sandbox durable object id e
 
 test("staged lookup identity decoder requires the stable sandbox lookup", () => {
   assert.deepEqual(
-    sandboxCredentialPolicyRegistrationLookupIds('["sandbox-1","do-old"]', "sandbox-1"),
+    sandboxCredentialPolicyRegistrationLookupIds('["sandbox-1","do-old"]', "sandbox-1", [
+      "sandbox-1",
+      "do-current",
+    ]),
     ["sandbox-1", "do-old"],
   );
-  assert.deepEqual(sandboxCredentialPolicyRegistrationLookupIds('["do-old"]', "sandbox-1"), [
-    "sandbox-1",
-  ]);
   assert.deepEqual(
-    sandboxCredentialPolicyRegistrationLookupIds('["sandbox-1","sandbox-1"]', "sandbox-1"),
+    sandboxCredentialPolicyRegistrationLookupIds('["do-old"]', "sandbox-1", [
+      "sandbox-1",
+      "do-current",
+    ]),
     ["sandbox-1"],
   );
-  assert.deepEqual(sandboxCredentialPolicyRegistrationLookupIds(null, "sandbox-1"), ["sandbox-1"]);
+  assert.deepEqual(
+    sandboxCredentialPolicyRegistrationLookupIds('["sandbox-1","sandbox-1"]', "sandbox-1", [
+      "sandbox-1",
+      "do-current",
+    ]),
+    ["sandbox-1"],
+  );
+  assert.deepEqual(
+    sandboxCredentialPolicyRegistrationLookupIds(null, "sandbox-1", ["sandbox-1", "do-current"]),
+    ["sandbox-1", "do-current"],
+  );
+  assert.deepEqual(
+    sandboxCredentialPolicyRegistrationLookupIds(null, "sandbox-1", ["do-current"]),
+    ["sandbox-1"],
+  );
+  assert.deepEqual(
+    sandboxCredentialPolicyRegistrationLookupIds("{", "sandbox-1", ["sandbox-1", "do-current"]),
+    ["sandbox-1"],
+  );
 });
 
 test("credential-policy generations reuse exactly one current identity", () => {
@@ -584,6 +605,48 @@ test("lookup identity migration backfills the exact staged legacy lookup set", (
     .get();
   assert.deepEqual(JSON.parse(String(row?.lookup_ids_json)), ["do-1", "do-old", "sandbox-1"]);
   assert.equal(row?.repair_generation, null);
+});
+
+test("post-migration legacy staging recovers the current sandbox lookup set", () => {
+  const sqlite = credentialPolicyDatabase();
+  sqlite
+    .prepare(`
+      INSERT INTO interactive_session_credential_policy_registrations (
+        session_id,
+        sandbox_id,
+        state,
+        registration_generation,
+        registration_claim,
+        registration_claim_expires_at,
+        created_at,
+        updated_at
+      ) VALUES (?, ?, 'registering', ?, ?, ?, 1, 1)
+    `)
+    .run(
+      "IS-42",
+      "sandbox-1",
+      "generation:legacy-staged",
+      "registration:legacy-staged",
+      Number.MAX_SAFE_INTEGER,
+    );
+
+  const row = sqlite
+    .prepare(`
+      SELECT lookup_ids_json
+      FROM interactive_session_credential_policy_registrations
+      WHERE session_id = 'IS-42' AND sandbox_id = 'sandbox-1'
+    `)
+    .get();
+  const env = sqliteRuntimeEnv(sqlite);
+  assert.equal(row?.lookup_ids_json, null);
+  assert.deepEqual(
+    sandboxCredentialPolicyRegistrationLookupIds(
+      row?.lookup_ids_json as string | null,
+      "sandbox-1",
+      sandboxLookupIds(env, "sandbox-1"),
+    ),
+    ["sandbox-1", "do-1"],
+  );
 });
 
 test("post-migration legacy registration claims block new staged generations", async () => {

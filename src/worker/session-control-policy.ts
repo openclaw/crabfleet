@@ -32,8 +32,9 @@ export type SandboxCredentialPolicyRegistration = {
 export function sandboxCredentialPolicyRegistrationLookupIds(
   value: string | null | undefined,
   sandboxId: string,
+  expectedLookupIds: readonly string[],
 ): string[] {
-  if (value) {
+  if (value !== null && value !== undefined) {
     try {
       const parsed = JSON.parse(value) as unknown;
       if (
@@ -48,10 +49,12 @@ export function sandboxCredentialPolicyRegistrationLookupIds(
         if (lookupIds.includes(sandboxId)) return lookupIds;
       }
     } catch {
-      // Upgraded rows are backfilled by migration; malformed rows retain the stable sandbox key.
+      // Malformed persisted state cannot authorize additional lookup identities.
     }
+    return [sandboxId];
   }
-  return [sandboxId];
+  const fallbackLookupIds = [...new Set(expectedLookupIds)];
+  return fallbackLookupIds.includes(sandboxId) ? fallbackLookupIds : [sandboxId];
 }
 
 export function storedSandboxCredentialPolicy(
