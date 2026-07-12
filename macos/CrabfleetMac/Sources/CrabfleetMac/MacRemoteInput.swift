@@ -16,6 +16,7 @@ extension RemoteInputForwarding {
 
 final class MacRemoteInputController: RemoteInputForwarding, @unchecked Sendable {
   private static let releaseRetryDelay: DispatchTimeInterval = .milliseconds(250)
+  private static let releaseRetryLimit = 120
 
   private let descriptor: CapturedDisplayDescriptor
   private let eventQueue = DispatchQueue(
@@ -24,6 +25,7 @@ final class MacRemoteInputController: RemoteInputForwarding, @unchecked Sendable
   )
   private let accessibilityGranted: @Sendable () -> Bool
   private let pendingReleaseRetryDelay: DispatchTimeInterval
+  private let pendingReleaseRetryLimit: Int
   private let keyEventPoster: (@Sendable (Bool, UInt32) -> Void)?
   private let mouseEventPoster:
     (@Sendable (CGEventType, CGPoint, CGMouseButton) -> Void)?
@@ -35,6 +37,7 @@ final class MacRemoteInputController: RemoteInputForwarding, @unchecked Sendable
   private var pressedKeysyms: Set<UInt32> = []
   private var hasPendingRelease = false
   private var pendingReleaseRetryScheduled = false
+  private var pendingReleaseRetriesRemaining = 0
 
   init(
     descriptor: CapturedDisplayDescriptor,
@@ -42,12 +45,14 @@ final class MacRemoteInputController: RemoteInputForwarding, @unchecked Sendable
       MacRemoteInputController.isAccessibilityGranted
     },
     pendingReleaseRetryDelay: DispatchTimeInterval = MacRemoteInputController.releaseRetryDelay,
+    pendingReleaseRetryLimit: Int = MacRemoteInputController.releaseRetryLimit,
     keyEventPoster: (@Sendable (Bool, UInt32) -> Void)? = nil,
     mouseEventPoster: (@Sendable (CGEventType, CGPoint, CGMouseButton) -> Void)? = nil
   ) {
     self.descriptor = descriptor
     self.accessibilityGranted = accessibilityGranted
     self.pendingReleaseRetryDelay = pendingReleaseRetryDelay
+    self.pendingReleaseRetryLimit = max(pendingReleaseRetryLimit, 0)
     self.keyEventPoster = keyEventPoster
     self.mouseEventPoster = mouseEventPoster
     frameWidth = descriptor.frameWidth
@@ -133,6 +138,7 @@ final class MacRemoteInputController: RemoteInputForwarding, @unchecked Sendable
     eventQueue.async { [self] in
       guard !pressedKeysyms.isEmpty || previousButtonMask != 0 else { return }
       hasPendingRelease = true
+      pendingReleaseRetriesRemaining = pendingReleaseRetryLimit
       flushPendingRelease()
     }
   }
@@ -196,10 +202,12 @@ final class MacRemoteInputController: RemoteInputForwarding, @unchecked Sendable
     pressedKeysyms.removeAll()
     previousButtonMask = 0
     hasPendingRelease = false
+    pendingReleaseRetriesRemaining = 0
   }
 
   private func schedulePendingReleaseRetry() {
-    guard !pendingReleaseRetryScheduled else { return }
+    guard !pendingReleaseRetryScheduled, pendingReleaseRetriesRemaining > 0 else { return }
+    pendingReleaseRetriesRemaining -= 1
     pendingReleaseRetryScheduled = true
     eventQueue.asyncAfter(deadline: .now() + pendingReleaseRetryDelay) { [self] in
       self.pendingReleaseRetryScheduled = false
