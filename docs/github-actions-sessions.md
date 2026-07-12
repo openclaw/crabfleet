@@ -249,6 +249,9 @@ returns the original event with `duplicate: true`; changed content under the
 same key returns `409`. This lets retried workflow steps publish once without a
 separate read-before-write race. The endpoint only appends the event ledger: it
 does not update `workState`, `workPhase`, `lastHeartbeatAt`, or `lastEvent`.
+After a terminal work-state update, the same session token can append or replay
+structured events for five minutes. The endpoint rejects that credential after
+the retry window so completed sessions do not retain indefinite write access.
 
 ## Runner PTY
 
