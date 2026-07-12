@@ -1,17 +1,15 @@
 import assert from "node:assert/strict";
-import { execFile } from "node:child_process";
 import { createServer } from "node:http";
 import { test } from "node:test";
-import { promisify } from "node:util";
 
 import { loadGhosttyRuntime } from "@openclaw/libterminal/browser";
 import { GHOSTTY_ASSET_PATHS, readGhosttyAsset } from "@openclaw/libterminal/node";
 import { readGhosttyWorkerAsset } from "@openclaw/libterminal/worker-assets";
 
-const execFileAsync = promisify(execFile);
+import { generateAssetsForTest } from "./helpers/generated-assets.ts";
 
 test("libterminal Worker Ghostty assets are byte-exact and keep Crabfleet response policy", async () => {
-  await execFileAsync(process.execPath, ["scripts/generate-assets.mjs"]);
+  await generateAssetsForTest();
   const generated = await import(`../src/generated.ts?terminal-assets=${Date.now()}`);
   const { terminalAssetResponse } = await import(
     `../src/worker/terminal-assets.ts?terminal-assets=${Date.now()}`
