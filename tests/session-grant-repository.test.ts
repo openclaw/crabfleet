@@ -17,6 +17,7 @@ function runtimeEnv(options: {
   batches?: PreparedStatement[][];
   mutations?: PreparedStatement[];
   mutationChanges?: number;
+  batchChanges?: number[];
   env?: Partial<RuntimeEnv>;
 }): RuntimeEnv {
   return {
@@ -52,7 +53,9 @@ function runtimeEnv(options: {
       },
       async batch(statements: unknown[]) {
         options.batches?.push(statements as PreparedStatement[]);
-        return [];
+        return statements.map((_, index) => ({
+          meta: { changes: options.batchChanges?.[index] ?? 0 },
+        }));
       },
     } as unknown as D1Database,
   } as RuntimeEnv;
@@ -206,23 +209,18 @@ test("grant upsert is atomically fenced to the live session revision", async () 
 
 test("grant revocation atomically removes access and delegated control", async () => {
   const batches: PreparedStatement[][] = [];
-  const mutations: PreparedStatement[] = [];
   const repository = new InteractiveSessionGrantRepository(
     runtimeEnv({
-      mutations,
-      mutationChanges: 1,
       batches,
+      batchChanges: [1, 1, 1, 1],
     }),
   );
 
   assert.equal(await repository.revoke("IS-42", "proxy:collaborator@example.test", 2_000), true);
-  assert.equal(mutations.length, 1);
-  assert.match(mutations[0]?.sql ?? "", /^delete from "interactive_session_grants"/i);
-  assert.ok(mutations[0]?.parameters.includes("IS-42"));
-  assert.ok(mutations[0]?.parameters.includes("proxy:collaborator@example.test"));
   assert.equal(batches.length, 1);
-  assert.equal(batches[0]?.length, 3);
+  assert.equal(batches[0]?.length, 4);
   assert.match(batches[0]?.[0]?.sql ?? "", /^update "interactive_sessions"/i);
+  assert.match(batches[0]?.[0]?.sql ?? "", /exists/i);
   assert.match(batches[0]?.[0]?.sql ?? "", /"control_requested_by_subject" = \?/i);
   assert.doesNotMatch(batches[0]?.[0]?.sql ?? "", /"control_requested_by" in/i);
   assert.doesNotMatch(batches[0]?.[0]?.sql ?? "", /where[^]*"controller_subject" = \?/i);
@@ -231,19 +229,21 @@ test("grant revocation atomically removes access and delegated control", async (
   assert.doesNotMatch(batches[0]?.[1]?.sql ?? "", /"controller" in/i);
   assert.doesNotMatch(batches[0]?.[1]?.sql ?? "", /where[^]*"control_requested_by_subject" = \?/i);
   assert.match(batches[0]?.[2]?.sql ?? "", /"updated_at" = MAX\(updated_at \+ 1, \?\)/i);
+  assert.match(batches[0]?.[3]?.sql ?? "", /^delete from "interactive_session_grants"/i);
   assert.ok(batches[0]?.[0]?.parameters.includes("proxy:collaborator@example.test"));
   assert.ok(batches[0]?.[1]?.parameters.includes("proxy:collaborator@example.test"));
   assert.ok(batches[0]?.[2]?.parameters.includes(2_000));
+  assert.ok(batches[0]?.[3]?.parameters.includes("IS-42"));
+  assert.ok(batches[0]?.[3]?.parameters.includes("proxy:collaborator@example.test"));
 });
 
 test("grant revocation leaves sessions untouched when no grant exists", async () => {
   const batches: PreparedStatement[][] = [];
-  const mutations: PreparedStatement[] = [];
   const repository = new InteractiveSessionGrantRepository(
-    runtimeEnv({ mutations, mutationChanges: 0, batches }),
+    runtimeEnv({ batches, batchChanges: [0, 0, 0, 0] }),
   );
 
   assert.equal(await repository.revoke("IS-42", "proxy:missing@example.test"), false);
-  assert.equal(mutations.length, 1);
-  assert.deepEqual(batches, []);
+  assert.equal(batches.length, 1);
+  assert.equal(batches[0]?.length, 4);
 });

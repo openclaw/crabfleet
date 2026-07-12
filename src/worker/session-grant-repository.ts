@@ -2,7 +2,7 @@ import { sql } from "kysely";
 
 import { trustedProxyConfigured } from "../trusted-proxy-auth.ts";
 import { authorize, trustedProxyAutomaticRole } from "./auth.ts";
-import { database, executeBatch, type InteractiveSessionGrantRow } from "./database.ts";
+import { database, type InteractiveSessionGrantRow } from "./database.ts";
 import type { RuntimeEnv } from "./env.ts";
 import type { User } from "./models.ts";
 import type {
@@ -152,12 +152,12 @@ export class InteractiveSessionGrantRepository {
 
   async revoke(sessionId: string, subject: string, now = Date.now()): Promise<boolean> {
     const db = database(this.env);
-    const deleted = await db
-      .deleteFrom("interactive_session_grants")
-      .where("session_id", "=", sessionId)
-      .where("subject", "=", subject)
-      .executeTakeFirst();
-    if (deleted.numDeletedRows < 1n) return false;
+    const grantExists = sql<boolean>`EXISTS (
+      SELECT 1
+      FROM interactive_session_grants
+      WHERE session_id = ${sessionId}
+        AND subject = ${subject}
+    )`;
     const clearPendingControl = db
       .updateTable("interactive_sessions")
       .set({
@@ -166,6 +166,7 @@ export class InteractiveSessionGrantRepository {
         control_requested_at: null,
       })
       .where("id", "=", sessionId)
+      .where(grantExists)
       .where("control_requested_by_subject", "=", subject);
     const clearDelegatedControl = db
       .updateTable("interactive_sessions")
@@ -176,17 +177,26 @@ export class InteractiveSessionGrantRepository {
         control_expires_at: null,
       })
       .where("id", "=", sessionId)
+      .where(grantExists)
       .where("controller_subject", "=", subject);
     const advanceSessionRevision = db
       .updateTable("interactive_sessions")
       .set({ updated_at: sql<number>`MAX(updated_at + 1, ${now})` })
-      .where("id", "=", sessionId);
-    await executeBatch(this.env, [
-      clearPendingControl,
-      clearDelegatedControl,
-      advanceSessionRevision,
-    ]);
-    return true;
+      .where("id", "=", sessionId)
+      .where(grantExists);
+    const deleteGrant = db
+      .deleteFrom("interactive_session_grants")
+      .where("session_id", "=", sessionId)
+      .where("subject", "=", subject);
+    const results = await this.env.DB.batch(
+      [clearPendingControl, clearDelegatedControl, advanceSessionRevision, deleteGrant].map(
+        (query) => {
+          const compiled = query.compile();
+          return this.env.DB.prepare(compiled.sql).bind(...compiled.parameters);
+        },
+      ),
+    );
+    return (results[3]?.meta.changes ?? 0) > 0;
   }
 }
 
