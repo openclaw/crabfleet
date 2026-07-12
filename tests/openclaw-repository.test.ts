@@ -30,6 +30,7 @@ type PreparedStatement = {
 function runtimeEnv(
   handler: D1Handler,
   batchHandler: (statements: PreparedStatement[]) => void = () => undefined,
+  sessionLogs?: Pick<R2Bucket, "delete">,
 ): RuntimeEnv {
   return {
     DB: {
@@ -57,6 +58,7 @@ function runtimeEnv(
         return [];
       },
     } as unknown as D1Database,
+    ...(sessionLogs ? { SESSION_LOGS: sessionLogs as R2Bucket } : {}),
   } as RuntimeEnv;
 }
 
@@ -268,16 +270,60 @@ test("OpenClaw stale reservation reads are bounded and map persistence names", a
 
 test("OpenClaw reservation rollback deletes all owned records in one batch", async () => {
   let batch: PreparedStatement[] = [];
+  const deletedKeys: string[] = [];
   const removed = await removeInteractiveSessionReservation(
     runtimeEnv(
       (sql, parameters, kind) => {
+        if (/^update "interactive_sessions"/i.test(sql)) {
+          assert.equal(kind, "run");
+          assert.match(sql, /set "reconcile_error" = .+, "updated_at" =/i);
+          assert.match(sql, /"updated_at" =/i);
+          assert.deepEqual(parameters, [
+            "reservation-rollback:100",
+            101,
+            "IS-2",
+            "provisioning",
+            1,
+            100,
+            100,
+          ]);
+          return { changes: 1 };
+        }
         assert.equal(kind, "all");
+        if (/from "interactive_session_log_archives"/i.test(sql)) {
+          assert.deepEqual(parameters, ["IS-2"]);
+          return {
+            results: [
+              {
+                events_key: "events",
+                transcript_key: "transcript",
+                summary_key: "summary",
+              },
+            ],
+          };
+        }
         assert.match(sql, /^select "id" from "interactive_sessions"/i);
+        if (parameters.length > 1) {
+          assert.deepEqual(parameters, [
+            "IS-2",
+            "provisioning",
+            1,
+            100,
+            101,
+            "reservation-rollback:100",
+          ]);
+          return { results: [{ id: "IS-2" }] };
+        }
         assert.deepEqual(parameters, ["IS-2"]);
         return { results: [] };
       },
       (statements) => {
         batch = statements;
+      },
+      {
+        async delete(key) {
+          deletedKeys.push(key);
+        },
       },
     ),
     "IS-2",
@@ -285,6 +331,7 @@ test("OpenClaw reservation rollback deletes all owned records in one batch", asy
   );
 
   assert.equal(removed, true);
+  assert.deepEqual(deletedKeys.sort(), ["events", "summary", "transcript"]);
   assert.equal(batch.length, 4);
   assert.match(batch[0]?.sql ?? "", /^delete from "openclaw_request_replays"/i);
   assert.match(batch[1]?.sql ?? "", /^delete from "interactive_session_events"/i);
@@ -292,6 +339,92 @@ test("OpenClaw reservation rollback deletes all owned records in one batch", asy
   assert.match(batch[3]?.sql ?? "", /^delete from "interactive_sessions"/i);
   assert.ok(batch.every((statement) => statement.parameters.includes("IS-2")));
   assert.ok(batch.every((statement) => statement.parameters.includes(100)));
+  assert.ok(batch.every((statement) => statement.parameters.includes(101)));
+  assert.ok(batch.every((statement) => statement.parameters.includes("reservation-rollback:100")));
+});
+
+test("OpenClaw reservation rollback retains its durable claim when archive cleanup fails", async () => {
+  let batched = false;
+  await assert.rejects(
+    removeInteractiveSessionReservation(
+      runtimeEnv(
+        (sql, _parameters, kind) => {
+          if (/^update "interactive_sessions"/i.test(sql)) {
+            assert.equal(kind, "run");
+            return { changes: 1 };
+          }
+          assert.equal(kind, "all");
+          if (/from "interactive_session_log_archives"/i.test(sql)) {
+            return {
+              results: [
+                {
+                  events_key: "events",
+                  transcript_key: "transcript",
+                  summary_key: "summary",
+                },
+              ],
+            };
+          }
+          return { results: [{ id: "IS-2" }] };
+        },
+        () => {
+          batched = true;
+        },
+        {
+          async delete() {
+            throw new Error("R2 unavailable");
+          },
+        },
+      ),
+      "IS-2",
+      100,
+    ),
+    /R2 unavailable/,
+  );
+  assert.equal(batched, false);
+});
+
+test("OpenClaw reservation rollback resumes an existing archive cleanup claim", async () => {
+  let batched = false;
+  const deletedKeys: string[] = [];
+  const removed = await removeInteractiveSessionReservation(
+    runtimeEnv(
+      (sql, _parameters, kind) => {
+        if (/^update "interactive_sessions"/i.test(sql)) {
+          assert.equal(kind, "run");
+          return { changes: 0 };
+        }
+        assert.equal(kind, "all");
+        if (/from "interactive_session_log_archives"/i.test(sql)) {
+          return {
+            results: [
+              {
+                events_key: "events",
+                transcript_key: "transcript",
+                summary_key: "summary",
+              },
+            ],
+          };
+        }
+        if (/reconcile_error/i.test(sql)) return { results: [{ id: "IS-2" }] };
+        return { results: [] };
+      },
+      () => {
+        batched = true;
+      },
+      {
+        async delete(key) {
+          deletedKeys.push(key);
+        },
+      },
+    ),
+    "IS-2",
+    100,
+  );
+
+  assert.equal(removed, true);
+  assert.equal(batched, true);
+  assert.deepEqual(deletedKeys.sort(), ["events", "summary", "transcript"]);
 });
 
 test("OpenClaw reservation activation reports the fenced compare-and-set result", async () => {

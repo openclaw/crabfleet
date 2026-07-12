@@ -3,6 +3,7 @@ import { sql } from "kysely";
 import { database, executeBatch, type InteractiveSessionRow } from "./database.ts";
 import type { RuntimeEnv } from "./env.ts";
 import { interactiveSession, type InteractiveSession } from "./session-model.ts";
+import { cleanupSessionLogArchiveObjects } from "./session-log-archive.ts";
 
 export type OpenClawRoomSessions = {
   sessions: InteractiveSession[];
@@ -172,35 +173,70 @@ export async function removeInteractiveSessionReservation(
   insertedAt: number,
 ): Promise<boolean> {
   const db = database(env);
-  const ownsReservation = sql<boolean>`EXISTS (
+  const rollbackClaim = `reservation-rollback:${insertedAt}`;
+  const rollbackClaimedAt = insertedAt + 1;
+  await db
+    .updateTable("interactive_sessions")
+    .set({
+      reconcile_error: rollbackClaim,
+      updated_at: rollbackClaimedAt,
+    })
+    .where("id", "=", insertedSessionId)
+    .where("status", "=", "provisioning")
+    .where("preparation_pending", "=", 1)
+    .where("created_at", "=", insertedAt)
+    .where("updated_at", "=", insertedAt)
+    .execute();
+  const claimed = await db
+    .selectFrom("interactive_sessions")
+    .select("id")
+    .where("id", "=", insertedSessionId)
+    .where("status", "=", "provisioning")
+    .where("preparation_pending", "=", 1)
+    .where("created_at", "=", insertedAt)
+    .where("updated_at", "=", rollbackClaimedAt)
+    .where("reconcile_error", "=", rollbackClaim)
+    .executeTakeFirst();
+  if (!claimed) return false;
+
+  const archive = await db
+    .selectFrom("interactive_session_log_archives")
+    .select(["events_key", "transcript_key", "summary_key"])
+    .where("session_id", "=", insertedSessionId)
+    .executeTakeFirst();
+  await cleanupSessionLogArchiveObjects(env, archive);
+
+  const ownsRollbackClaim = sql<boolean>`EXISTS (
     SELECT 1
     FROM interactive_sessions
     WHERE id = ${insertedSessionId}
       AND status = 'provisioning'
       AND preparation_pending = 1
       AND created_at = ${insertedAt}
-      AND updated_at = ${insertedAt}
+      AND updated_at = ${rollbackClaimedAt}
+      AND reconcile_error = ${rollbackClaim}
   )`;
   await executeBatch(env, [
     db
       .deleteFrom("openclaw_request_replays")
       .where("session_id", "=", insertedSessionId)
-      .where(ownsReservation),
+      .where(ownsRollbackClaim),
     db
       .deleteFrom("interactive_session_events")
       .where("session_id", "=", insertedSessionId)
-      .where(ownsReservation),
+      .where(ownsRollbackClaim),
     db
       .deleteFrom("interactive_session_log_archives")
       .where("session_id", "=", insertedSessionId)
-      .where(ownsReservation),
+      .where(ownsRollbackClaim),
     db
       .deleteFrom("interactive_sessions")
       .where("id", "=", insertedSessionId)
       .where("status", "=", "provisioning")
       .where("preparation_pending", "=", 1)
       .where("created_at", "=", insertedAt)
-      .where("updated_at", "=", insertedAt),
+      .where("updated_at", "=", rollbackClaimedAt)
+      .where("reconcile_error", "=", rollbackClaim),
   ]);
   const current = await db
     .selectFrom("interactive_sessions")
