@@ -225,6 +225,14 @@ export function sessionLogSummary(
   session: InteractiveSessionRow,
   events: InteractiveSessionEventRow[],
 ): Record<string, unknown> {
+  let lastMessageEvent: InteractiveSessionEventRow | undefined;
+  for (let index = events.length - 1; index >= 0; index -= 1) {
+    const event = events[index];
+    if (event && !event.event_key && (!event.event_type || event.event_type === "message")) {
+      lastMessageEvent = event;
+      break;
+    }
+  }
   return {
     id: session.id,
     parentSessionId: session.parent_session_id,
@@ -249,8 +257,8 @@ export function sessionLogSummary(
     completionReason: session.completion_reason,
     eventCount: events.length,
     firstEventAt: events[0]?.created_at ?? null,
-    lastEventAt: events.at(-1)?.created_at ?? null,
-    lastEvent: events.at(-1)?.message ?? session.last_event,
+    lastEventAt: lastMessageEvent?.created_at ?? null,
+    lastEvent: lastMessageEvent?.message ?? session.last_event,
     updatedAt: session.updated_at,
   };
 }

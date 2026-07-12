@@ -39,7 +39,7 @@ function eventDatabase(): DatabaseSync {
     CREATE UNIQUE INDEX idx_interactive_session_events_session_event_key
       ON interactive_session_events(session_id, event_key)
       WHERE event_key IS NOT NULL AND event_key <> '';
-    INSERT INTO interactive_sessions (id, status) VALUES ('IS-1', 'stopped');
+    INSERT INTO interactive_sessions (id, status) VALUES ('IS-1', 'ready');
   `);
   return database;
 }
@@ -146,39 +146,53 @@ test("structured event batch interruption rolls back insert and terminal invalid
   assert.equal(archived, false);
 });
 
-test("structured event races deduplicate and invalidate only exact replays", async () => {
+test("structured event races deduplicate and keep terminal replays side-effect free", async () => {
   const database = eventDatabase();
   const env = runtimeEnv(database);
+  let archiveCalls = 0;
   const append = (input: ReturnType<typeof eventInput>) =>
-    appendStructuredInteractiveSessionEventRecord(env, input, async () => undefined);
+    appendStructuredInteractiveSessionEventRecord(env, input, async () => {
+      archiveCalls += 1;
+    });
   const results = await Promise.all([
     append(eventInput("updated pull request", 100)),
     append(eventInput("updated pull request", 200)),
   ]);
 
   assert.deepEqual(results.map((result) => result.duplicate).sort(), [false, true]);
+  assert.equal(archiveCalls, 2);
   assert.equal(
     database.prepare("SELECT count(*) AS count FROM interactive_session_events").get()?.count,
     1,
   );
+  const sequenceBeforeReplay = database
+    .prepare("SELECT seq FROM sqlite_sequence WHERE name = 'interactive_session_events'")
+    .get()?.seq;
+  assert.equal(sequenceBeforeReplay, 1);
   assert.equal(
     database
       .prepare("SELECT terminal_finalize_pending FROM interactive_sessions WHERE id = 'IS-1'")
       .get()?.terminal_finalize_pending,
-    1,
+    0,
   );
 
-  database.exec("UPDATE interactive_sessions SET terminal_finalize_pending = 0 WHERE id = 'IS-1'");
+  database.exec("UPDATE interactive_sessions SET status = 'stopped' WHERE id = 'IS-1'");
   const replay = await append(eventInput("updated pull request", 300));
   assert.equal(replay.duplicate, true);
+  assert.equal(archiveCalls, 2);
+  assert.equal(
+    database
+      .prepare("SELECT seq FROM sqlite_sequence WHERE name = 'interactive_session_events'")
+      .get()?.seq,
+    sequenceBeforeReplay,
+  );
   assert.equal(
     database
       .prepare("SELECT terminal_finalize_pending FROM interactive_sessions WHERE id = 'IS-1'")
       .get()?.terminal_finalize_pending,
-    1,
+    0,
   );
 
-  database.exec("UPDATE interactive_sessions SET terminal_finalize_pending = 0 WHERE id = 'IS-1'");
   await assert.rejects(append(eventInput("changed content", 400)), (error) => {
     assert.equal(
       typeof error === "object" && error && "status" in error ? error.status : undefined,
@@ -191,5 +205,20 @@ test("structured event races deduplicate and invalidate only exact replays", asy
       .prepare("SELECT terminal_finalize_pending FROM interactive_sessions WHERE id = 'IS-1'")
       .get()?.terminal_finalize_pending,
     0,
+  );
+
+  await assert.rejects(
+    append({ ...eventInput("new content", 500), eventKey: "run:2" }),
+    (error) => {
+      assert.equal(
+        typeof error === "object" && error && "status" in error ? error.status : undefined,
+        403,
+      );
+      return true;
+    },
+  );
+  assert.equal(
+    database.prepare("SELECT count(*) AS count FROM interactive_session_events").get()?.count,
+    1,
   );
 });

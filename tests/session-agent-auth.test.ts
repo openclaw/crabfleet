@@ -170,7 +170,7 @@ test("terminal event authentication is limited to the stopped-at retry window", 
         request,
         "IS-agent",
         {
-          allowTerminalEvent: true,
+          allowTerminalEventReplay: true,
         },
       ),
     );
@@ -179,7 +179,7 @@ test("terminal event authentication is limited to the stopped-at retry window", 
     await assert.rejects(
       () =>
         authenticator({ status, stopped_at: now }, () => now).require(request, "IS-agent", {
-          allowTerminalEvent: true,
+          allowTerminalEventReplay: true,
         }),
       { message: "agent session is not active" },
     );
@@ -190,7 +190,7 @@ test("terminal event authentication is limited to the stopped-at retry window", 
         authenticator({ status: "stopped", stopped_at: stoppedAt }, () => now).require(
           request,
           "IS-agent",
-          { allowTerminalEvent: true },
+          { allowTerminalEventReplay: true },
         ),
       { message: "agent session is not active" },
     );

@@ -18,7 +18,7 @@ export type AgentSessionAuthenticationStore = {
 
 export type AgentSessionAuthenticationOptions = {
   allowQueryToken?: boolean;
-  allowTerminalEvent?: boolean;
+  allowTerminalEventReplay?: boolean;
 };
 
 export const terminalAgentEventGraceMs = 5 * 60 * 1000;
@@ -53,8 +53,8 @@ export class AgentSessionAuthenticator {
     }
     const now = this.now();
     const stoppedAt = credential.session.stoppedAt;
-    const terminalEventAllowed =
-      options.allowTerminalEvent &&
+    const terminalEventReplayAllowed =
+      options.allowTerminalEventReplay &&
       (credential.session.status === "stopped" || credential.session.status === "failed") &&
       typeof stoppedAt === "number" &&
       Number.isFinite(stoppedAt) &&
@@ -62,7 +62,8 @@ export class AgentSessionAuthenticator {
       now - stoppedAt <= terminalAgentEventGraceMs;
     if (
       credential.session.status === "stopping" ||
-      (deadInteractiveSessionStatuses.includes(credential.session.status) && !terminalEventAllowed)
+      (deadInteractiveSessionStatuses.includes(credential.session.status) &&
+        !terminalEventReplayAllowed)
     ) {
       throw forbidden("agent session is not active");
     }
