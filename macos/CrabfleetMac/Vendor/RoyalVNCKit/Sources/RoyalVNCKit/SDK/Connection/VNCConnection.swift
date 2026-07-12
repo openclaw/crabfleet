@@ -113,6 +113,7 @@ public final class VNCConnection: NSObjectOrAnyObject, @unchecked Sendable {
 	var pendingPixelFormatTransition: VNCProtocol.PixelFormat?
 	var isPixelFormatTransitionInFlight = false
 	var pixelFormatTransitionInFlight: VNCProtocol.PixelFormat?
+	var pixelFormatTransitionInFlightSequence: UInt64?
 	var pixelFormatTransitionFenceSequence: UInt64 = 0
 	var pixelFormatTransitionFencePayload: Data?
 	var pixelFormatTransitionRequiredFenceFlags: VNCProtocol.FenceFlags = []
@@ -120,7 +121,9 @@ public final class VNCConnection: NSObjectOrAnyObject, @unchecked Sendable {
 	var pixelFormatTransitionDeadlineTask: Task<Void, Never>?
 	var pixelFormatFenceCapabilityProbePayload: Data?
 	var expiredPixelFormatFenceCapabilityProbePayload: Data?
+	var pixelFormatFenceCapabilityProbeSequence: UInt64?
 	var pixelFormatFenceNegotiationTask: Task<Void, Never>?
+	var nextPixelFormatChangeSequence: UInt64 = 0
 	private let queue = DispatchQueue(label: "com.royalapps.royalvnc.connectionqueue",
 									  attributes: .concurrent)
 	private let lifecycleLock = NSRecursiveLock()
@@ -131,6 +134,8 @@ public final class VNCConnection: NSObjectOrAnyObject, @unchecked Sendable {
 
 	private let sharedZStream: ZlibStream
     private let sharedZRLEZStream: ZlibStream
+	private let zrleCompressionStateLock = NSLock()
+	private var lastZRLECompressionResetSequence: UInt64 = 0
 
 	// MARK: - Internal Properties
     let taskPriority = TaskPriority.high
@@ -306,6 +311,15 @@ public final class VNCConnection: NSObjectOrAnyObject, @unchecked Sendable {
 		return uniqueEncs
 	}
 
+	func resetZRLECompressionState(for sequence: UInt64) throws {
+		zrleCompressionStateLock.lock()
+		defer { zrleCompressionStateLock.unlock() }
+		guard sequence > lastZRLECompressionResetSequence else { return }
+
+		try sharedZRLEZStream.reset()
+		lastZRLECompressionResetSequence = sequence
+	}
+
 	// MARK: - Public Initializers
     public init(settings: Settings,
                 logger: VNCLogger,
@@ -442,10 +456,10 @@ extension VNCConnection {
 		beginDisconnecting(error: error)
 	}
 
-	func withLifecycleLock<T>(_ operation: () -> T) -> T {
+	func withLifecycleLock<T>(_ operation: () throws -> T) rethrows -> T {
 		lifecycleLock.lock()
 		defer { lifecycleLock.unlock() }
-		return operation()
+		return try operation()
 	}
 
 	func registerCredentialRequest(

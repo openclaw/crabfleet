@@ -505,7 +505,7 @@ struct AuditFindingsTests {
   }
 
   @Test
-  func preservesZRLECompressionAcrossPixelFormatProbeAndTransitionBoundaries() async throws {
+  func resetsZRLECompressionAtSynchronizedPixelFormatBoundaries() async throws {
     let connection = VNCConnection(
       settings: makeSettings(frameEncodings: [.zrle, .raw]),
       framebufferAllocator: VNCFramebufferMallocAllocator()
@@ -550,16 +550,108 @@ struct AuditFindingsTests {
         payload: capabilityPayload
       )
     )
+    let restartedAfterProbe = try zrle.zStream.decompressedData(
+      compressedData: compressedChunks[0],
+      uncompressedSize: 1_000
+    )
+    #expect(restartedAfterProbe == Data(repeating: 0x41, count: 1_000))
 
     connection.framebufferUpdateRequestOutstanding = true
     connection.updateColorDepth(.depth8Bit)
     let transition = try #require(connection.clientToServerMessageQueue.dequeue())
-    try await transition.message.send(connection: AuditWritingConnection())
-    let third = try zrle.zStream.decompressedData(
+    let transitionWriter = AuditWritingConnection()
+    try await transition.message.send(connection: transitionWriter)
+    let continuedBeforeBoundary = try zrle.zStream.decompressedData(
+      compressedData: compressedChunks[1],
+      uncompressedSize: 1_000
+    )
+    #expect(continuedBeforeBoundary == Data(repeating: 0x42, count: 1_000))
+
+    let completionFenceOffset = setEncodingsEndOffset(in: transitionWriter.data, at: 37)
+    let synchronizationPayload = Data(transitionWriter.data[9..<17])
+    let completionPayload = Data(
+      transitionWriter.data[(completionFenceOffset + 9)..<(completionFenceOffset + 17)]
+    )
+    try connection.handleServerFence(
+      VNCProtocol.ServerFence(
+        messageType: VNCProtocol.ServerFence.messageType,
+        flags: [.blockBefore, .syncNext],
+        payload: synchronizationPayload
+      )
+    )
+    let continuedAfterSynchronizationFence = try zrle.zStream.decompressedData(
       compressedData: compressedChunks[2],
       uncompressedSize: 1_000
     )
-    #expect(third == Data(repeating: 0x43, count: 1_000))
+    #expect(continuedAfterSynchronizationFence == Data(repeating: 0x43, count: 1_000))
+
+    try connection.handleServerFence(
+      VNCProtocol.ServerFence(
+        messageType: VNCProtocol.ServerFence.messageType,
+        flags: [.blockBefore],
+        payload: completionPayload
+      )
+    )
+    try verifyFreshZRLEStream(zrle.zStream, byte: 0x44)
+
+    connection.cancelFramebufferUpdateScheduling()
+  }
+
+  @Test
+  func ignoresStaleZRLEResetFromLateCapabilityProbeResponse() async throws {
+    let connection = VNCConnection(
+      settings: makeSettings(frameEncodings: [.zrle, .raw]),
+      framebufferAllocator: VNCFramebufferMallocAllocator()
+    )
+    let framebuffer = try makeFramebuffer(width: 2, height: 2, depth: 24)
+    connection.framebuffer = framebuffer
+    connection.state.pixelFormat = framebuffer.sourcePixelFormat
+    connection.connectionState = .connected
+    connection._framebufferUpdatePolicy = .paused
+    let zrle = try #require(
+      connection.encodings[VNCFrameEncodingType.zrle.rawValue] as? VNCProtocol.ZRLEEncoding
+    )
+
+    try connection.handleServerFence(
+      VNCProtocol.ServerFence(
+        messageType: VNCProtocol.ServerFence.messageType,
+        flags: [.request, .blockBefore, .syncNext],
+        payload: Data("support".utf8)
+      )
+    )
+    _ = try #require(connection.clientToServerMessageQueue.dequeue())
+    let capabilityProbe = try #require(connection.clientToServerMessageQueue.dequeue())
+    try await capabilityProbe.message.send(connection: AuditWritingConnection())
+    let capabilityPayload = try #require(connection.pixelFormatFenceCapabilityProbePayload)
+
+    let compressedChunks = continuousZlibChunks()
+    _ = try zrle.zStream.decompressedData(
+      compressedData: compressedChunks[0],
+      uncompressedSize: 1_000
+    )
+    connection.updateColorDepth(.depth8Bit)
+    connection.expirePixelFormatFenceNegotiation()
+    let transition = try #require(connection.clientToServerMessageQueue.dequeue())
+    try await transition.message.send(connection: AuditWritingConnection())
+
+    let restartedAfterTransition = try zrle.zStream.decompressedData(
+      compressedData: compressedChunks[0],
+      uncompressedSize: 1_000
+    )
+    #expect(restartedAfterTransition == Data(repeating: 0x41, count: 1_000))
+
+    try connection.handleServerFence(
+      VNCProtocol.ServerFence(
+        messageType: VNCProtocol.ServerFence.messageType,
+        flags: [.blockBefore, .syncNext],
+        payload: capabilityPayload
+      )
+    )
+    let continuedAfterLateProbe = try zrle.zStream.decompressedData(
+      compressedData: compressedChunks[1],
+      uncompressedSize: 1_000
+    )
+    #expect(continuedAfterLateProbe == Data(repeating: 0x42, count: 1_000))
 
     connection.cancelFramebufferUpdateScheduling()
   }
@@ -1004,6 +1096,15 @@ struct AuditFindingsTests {
 
   private func setEncodingsEndOffset(in data: Data, at offset: Int) -> Int {
     offset + 4 + setEncodingValues(in: data, at: offset).count * 4
+  }
+
+  private func verifyFreshZRLEStream(_ stream: ZlibStream, byte: UInt8) throws {
+    let expected = Data(repeating: byte, count: 64)
+    let actual = try stream.decompressedData(
+      compressedData: ZlibOneShot.deflate(expected),
+      maximumOutputSize: expected.count
+    )
+    #expect(actual == expected)
   }
 
   private func continuousZlibChunks() -> [Data] {

@@ -9,7 +9,7 @@ private struct PixelFormatTransitionMessage: VNCSendableMessage {
 	let pixelFormatMessage: VNCProtocol.SetPixelFormat
 	let encodingsMessage: VNCProtocol.SetEncodings
 	let completionFenceMessage: VNCProtocol.ClientFence?
-	let willSend: () -> Void
+	let willSend: () throws -> Void
 	let didSend: () -> Void
 	let willSendFence: () -> Void
 	let didSendFence: () -> Void
@@ -27,7 +27,7 @@ private struct PixelFormatTransitionMessage: VNCSendableMessage {
 
 	func send(connection: NetworkConnectionWriting) async throws {
 		if synchronizationFenceMessage == nil {
-			willSend()
+			try willSend()
 		} else {
 			willSendFence()
 		}
@@ -52,6 +52,7 @@ private struct PixelFormatTransition {
 	let fenceFlags: VNCProtocol.FenceFlags
 	let synchronizationFencePayload: Data?
 	let completionFencePayload: Data?
+	let sequence: UInt64
 }
 
 private struct FenceCapabilityProbeMessage: VNCSendableMessage {
@@ -185,6 +186,9 @@ extension VNCConnection {
 		pendingPixelFormatTransition = nil
 		isPixelFormatTransitionInFlight = true
 		pixelFormatTransitionInFlight = pixelFormat
+		nextPixelFormatChangeSequence &+= 1
+		let sequence = nextPixelFormatChangeSequence
+		pixelFormatTransitionInFlightSequence = sequence
 		let synchronizationFencePayload: Data?
 		let completionFencePayload: Data?
 		if !fenceFlags.isEmpty {
@@ -207,7 +211,8 @@ extension VNCConnection {
 			pixelFormat: pixelFormat,
 			fenceFlags: fenceFlags,
 			synchronizationFencePayload: synchronizationFencePayload,
-			completionFencePayload: completionFencePayload
+			completionFencePayload: completionFencePayload,
+			sequence: sequence
 		)
 	}
 
@@ -231,7 +236,10 @@ extension VNCConnection {
 			encodingsMessage: VNCProtocol.SetEncodings(encodingTypes: encodingTypes),
 			completionFenceMessage: completionFenceMessage,
 			willSend: { [weak self] in
-				self?.beginPixelFormatTransition(transition.pixelFormat)
+				try self?.beginPixelFormatTransition(
+					transition.pixelFormat,
+					sequence: transition.sequence
+				)
 			},
 			didSend: { [weak self] in
 				self?.completePixelFormatTransition()
@@ -340,6 +348,8 @@ extension VNCConnection {
 			framebufferRequestLock.unlock()
 			return
 		}
+		nextPixelFormatChangeSequence &+= 1
+		pixelFormatFenceCapabilityProbeSequence = nextPixelFormatChangeSequence
 		framebufferRequestLock.unlock()
 
 		enqueueClientToServerMessage(
@@ -424,9 +434,14 @@ extension VNCConnection {
 		framebufferRequestLock.lock()
 		if fence.payload == pixelFormatFenceCapabilityProbePayload
 			|| fence.payload == expiredPixelFormatFenceCapabilityProbePayload {
+			guard let sequence = pixelFormatFenceCapabilityProbeSequence else {
+				framebufferRequestLock.unlock()
+				throw VNCError.protocol(.invalidData)
+			}
 			cancelPixelFormatFenceNegotiationTimeoutLocked()
 			pixelFormatFenceCapabilityProbePayload = nil
 			expiredPixelFormatFenceCapabilityProbePayload = nil
+			pixelFormatFenceCapabilityProbeSequence = nil
 			state.pixelFormatTransitionFenceFlags = fence.flags.intersection([
 				.blockBefore,
 				.blockAfter,
@@ -435,6 +450,7 @@ extension VNCConnection {
 			let transition = takePendingPixelFormatTransitionLocked()
 			framebufferRequestLock.unlock()
 
+			try resetZRLECompressionState(for: sequence)
 			if let transition {
 				enqueuePixelFormatTransition(transition)
 			}
@@ -453,7 +469,8 @@ extension VNCConnection {
 			framebufferRequestLock.unlock()
 			throw VNCError.protocol(.invalidData)
 		}
-		guard let pixelFormat = pixelFormatTransitionInFlight else {
+		guard let pixelFormat = pixelFormatTransitionInFlight,
+			  let sequence = pixelFormatTransitionInFlightSequence else {
 			framebufferRequestLock.unlock()
 			throw VNCError.protocol(.invalidData)
 		}
@@ -463,17 +480,21 @@ extension VNCConnection {
 		pixelFormatTransitionRequiredFenceFlags = []
 		framebufferRequestLock.unlock()
 
-		beginPixelFormatTransition(pixelFormat)
+		try beginPixelFormatTransition(pixelFormat, sequence: sequence)
 		completePixelFormatTransition()
 	}
 
-	private func beginPixelFormatTransition(_ pixelFormat: VNCProtocol.PixelFormat) {
-		withLifecycleLock {
+	private func beginPixelFormatTransition(
+		_ pixelFormat: VNCProtocol.PixelFormat,
+		sequence: UInt64
+	) throws {
+		try withLifecycleLock {
 			guard connectionState.status == .connected,
 				  let framebuffer = framebuffer else {
 				return
 			}
 
+			try resetZRLECompressionState(for: sequence)
 			state.pixelFormat = pixelFormat
 			recreateFramebuffer(size: framebuffer.size,
 								screens: framebuffer.screens,
@@ -485,6 +506,7 @@ extension VNCConnection {
 		framebufferRequestLock.lock()
 		isPixelFormatTransitionInFlight = false
 		pixelFormatTransitionInFlight = nil
+		pixelFormatTransitionInFlightSequence = nil
 		let nextTransition = takePendingPixelFormatTransitionLocked()
 		framebufferRequestLock.unlock()
 
@@ -740,12 +762,14 @@ extension VNCConnection {
 		pendingPixelFormatTransition = nil
 		isPixelFormatTransitionInFlight = false
 		pixelFormatTransitionInFlight = nil
+		pixelFormatTransitionInFlightSequence = nil
 		pixelFormatTransitionFencePayload = nil
 		pixelFormatTransitionRequiredFenceFlags = []
 		pixelFormatTransitionFenceWasSent = false
 		cancelPixelFormatTransitionDeadlineLocked()
 		pixelFormatFenceCapabilityProbePayload = nil
 		expiredPixelFormatFenceCapabilityProbePayload = nil
+		pixelFormatFenceCapabilityProbeSequence = nil
 		cancelPixelFormatFenceNegotiationTimeoutLocked()
 		framebufferRequestLock.unlock()
 	}
