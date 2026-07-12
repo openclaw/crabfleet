@@ -873,6 +873,151 @@ test("GitHub Actions serializes completion events for overlapping client inputs"
   server.emit("close");
 });
 
+test("terminal input queue rejects excess frames after earlier completions", async () => {
+  const client = socket();
+  const server = socket();
+  const upstream = socket();
+  let releaseFirstInput: (() => void) | undefined;
+  const firstInput = new Promise<void>((resolve) => {
+    releaseFirstInput = resolve;
+  });
+  let inputCalls = 0;
+  const hub = new TerminalHub(
+    dependencies(client, server, upstream, {
+      async inputPayloads(_subscription, _user, payload) {
+        inputCalls += 1;
+        if (inputCalls === 1) await firstInput;
+        return [payload];
+      },
+    }),
+  );
+  await hub.open(
+    new Request("https://fleet.example/api/terminal/ws", {
+      headers: { upgrade: "websocket" },
+    }),
+    user,
+  );
+  server.emit("message", {
+    data: encodeTerminalFrame({
+      type: TerminalMessageType.Subscribe,
+      sessionId: session.id,
+      payload: encodeSubscribePayload({ flags: 0, columns: 120, rows: 34 }),
+    }),
+  });
+  await flushQueues();
+  await flushQueues();
+
+  for (let index = 0; index < 128; index += 1) {
+    server.emit("message", {
+      data: encodeTerminalFrame({
+        type: TerminalMessageType.Input,
+        sessionId: session.id,
+        payload: new Uint8Array([index]),
+      }),
+    });
+  }
+  await flushQueues();
+  await flushQueues();
+
+  assert.equal(inputCalls, 1);
+  assert.equal(upstream.sent.length, 0);
+  assert.equal(
+    server.sent.some(
+      (payload) =>
+        (decodeJsonPayload(frame(payload).payload) as { error?: string }).error ===
+        "terminal input backlog exceeded",
+    ),
+    false,
+  );
+
+  releaseFirstInput?.();
+  await flushQueues();
+  await flushQueues();
+  await flushQueues();
+
+  assert.equal(inputCalls, 32);
+  assert.equal(upstream.sent.length, 32);
+  const completions = server.sent
+    .map((payload) => frame(payload))
+    .filter((message) => message.type === TerminalMessageType.Event)
+    .map((message) => decodeJsonPayload(message.payload) as { type?: string; error?: string })
+    .filter((message) => message.type === "input-accepted" || message.type === "input-rejected");
+  assert.equal(completions.length, 33);
+  assert.deepEqual(completions.slice(0, 32), Array(32).fill({ type: "input-accepted" }));
+  assert.deepEqual(completions[32], {
+    type: "input-rejected",
+    error: "terminal input backlog exceeded",
+  });
+  server.emit("close");
+});
+
+test("terminal input queue enforces the protocol-sized byte budget", async () => {
+  const client = socket();
+  const server = socket();
+  const upstream = socket();
+  let releaseFirstInput: (() => void) | undefined;
+  const firstInput = new Promise<void>((resolve) => {
+    releaseFirstInput = resolve;
+  });
+  let inputCalls = 0;
+  const hub = new TerminalHub(
+    dependencies(client, server, upstream, {
+      async inputPayloads(_subscription, _user, payload) {
+        inputCalls += 1;
+        if (inputCalls === 1) await firstInput;
+        return [payload];
+      },
+    }),
+  );
+  await hub.open(
+    new Request("https://fleet.example/api/terminal/ws", {
+      headers: { upgrade: "websocket" },
+    }),
+    user,
+  );
+  server.emit("message", {
+    data: encodeTerminalFrame({
+      type: TerminalMessageType.Subscribe,
+      sessionId: session.id,
+      payload: encodeSubscribePayload({ flags: 0, columns: 120, rows: 34 }),
+    }),
+  });
+  await flushQueues();
+  await flushQueues();
+
+  for (const payload of [new Uint8Array(9 * 1024 * 1024), new Uint8Array(8 * 1024 * 1024)]) {
+    server.emit("message", {
+      data: encodeTerminalFrame(
+        {
+          type: TerminalMessageType.Input,
+          sessionId: session.id,
+          payload,
+        },
+        { maxFrameBytes: 16 * 1024 * 1024 },
+      ),
+    });
+  }
+  await flushQueues();
+  await flushQueues();
+  assert.equal(inputCalls, 1);
+
+  releaseFirstInput?.();
+  await flushQueues();
+  await flushQueues();
+
+  assert.equal(inputCalls, 1);
+  const completions = server.sent
+    .map((payload) => frame(payload))
+    .filter((message) => message.type === TerminalMessageType.Event)
+    .map((message) => decodeJsonPayload(message.payload) as { type?: string; error?: string })
+    .filter((message) => message.type === "input-accepted" || message.type === "input-rejected");
+  assert.deepEqual(completions, [
+    { type: "input-accepted" },
+    { type: "input-rejected", error: "terminal input backlog exceeded" },
+  ]);
+  server.emit("close");
+});
+
 test("GitHub Actions framed output preserves control-shaped terminal bytes", async () => {
   const client = socket();
   const server = socket();
