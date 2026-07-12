@@ -789,7 +789,7 @@ func TestAttachRejectsSessionClosedBeforeAttachment(t *testing.T) {
 
 func TestRetiredAttachmentCannotAcceptBufferedFrames(t *testing.T) {
 	attachment := &terminalAttachment{
-		frames: make(chan frame),
+		frames: make(chan attachmentDelivery),
 		done:   make(chan struct{}),
 	}
 	close(attachment.done)
@@ -799,6 +799,96 @@ func TestRetiredAttachmentCannotAcceptBufferedFrames(t *testing.T) {
 		if client.deliverAttachment(context.Background(), frame{messageType: messageOutput}) {
 			t.Fatal("retired attachment accepted output")
 		}
+	}
+}
+
+func TestRetiredAttachmentRejectsReceivedDelivery(t *testing.T) {
+	oldAttachment := &terminalAttachment{
+		frames: make(chan attachmentDelivery),
+		done:   make(chan struct{}),
+	}
+	replacement := &terminalAttachment{
+		frames: make(chan attachmentDelivery),
+		done:   make(chan struct{}),
+	}
+	client := &Client{attachment: replacement}
+	close(oldAttachment.done)
+
+	for range 1_000 {
+		delivery := attachmentDelivery{
+			frame:    frame{messageType: messageOutput, payload: []byte("replacement output\n")},
+			accepted: make(chan bool, 1),
+		}
+		if client.acceptAttachmentDelivery(oldAttachment, delivery) {
+			t.Fatal("retired attachment accepted a received delivery")
+		}
+		if accepted := <-delivery.accepted; accepted {
+			t.Fatal("retired attachment acknowledged a received delivery")
+		}
+	}
+}
+
+func TestStaleAttachmentDeliveryRetriesReplacement(t *testing.T) {
+	oldAttachment := &terminalAttachment{
+		frames: make(chan attachmentDelivery),
+		done:   make(chan struct{}),
+	}
+	replacement := &terminalAttachment{
+		frames: make(chan attachmentDelivery),
+		done:   make(chan struct{}),
+	}
+	client := &Client{
+		attachment:      oldAttachment,
+		attachmentReady: make(chan struct{}),
+	}
+
+	staleCaptured := make(chan struct{})
+	releaseStale := make(chan struct{})
+	go func() {
+		delivery := <-oldAttachment.frames
+		close(staleCaptured)
+		<-releaseStale
+		client.acceptAttachmentDelivery(oldAttachment, delivery)
+	}()
+
+	delivered := make(chan error, 1)
+	go func() {
+		delivered <- client.deliverOrQueueOutput(context.Background(), frame{
+			messageType: messageOutput,
+			payload:     []byte("replacement output\n"),
+		})
+	}()
+	<-staleCaptured
+
+	client.stateMu.Lock()
+	client.attachment = replacement
+	close(oldAttachment.done)
+	client.stateMu.Unlock()
+
+	replacementReceived := make(chan frame, 1)
+	go func() {
+		delivery := <-replacement.frames
+		if client.acceptAttachmentDelivery(replacement, delivery) {
+			replacementReceived <- delivery.frame
+		}
+	}()
+	close(releaseStale)
+
+	select {
+	case err := <-delivered:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("stale delivery did not retry the replacement attachment")
+	}
+	select {
+	case current := <-replacementReceived:
+		if got := string(current.payload); got != "replacement output\n" {
+			t.Fatalf("replacement payload = %q", got)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("replacement attachment did not receive retried output")
 	}
 }
 

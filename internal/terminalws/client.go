@@ -106,8 +106,13 @@ type frame struct {
 }
 
 type terminalAttachment struct {
-	frames chan frame
+	frames chan attachmentDelivery
 	done   chan struct{}
+}
+
+type attachmentDelivery struct {
+	frame    frame
+	accepted chan bool
 }
 
 type eventPayload struct {
@@ -477,7 +482,11 @@ func (c *Client) Attach(ctx context.Context, terminal io.ReadWriter, resizes <-c
 			case <-c.readerDone:
 				errCh <- c.readerError()
 				return
-			case current := <-attachment.frames:
+			case delivery := <-attachment.frames:
+				if !c.acceptAttachmentDelivery(attachment, delivery) {
+					return
+				}
+				current := delivery.frame
 				switch current.messageType {
 				case messageOutput:
 					if _, err := terminal.Write(current.payload); err != nil {
@@ -684,7 +693,7 @@ func (c *Client) registerAttachment() (*terminalAttachment, error) {
 	default:
 	}
 	attachment := &terminalAttachment{
-		frames: make(chan frame),
+		frames: make(chan attachmentDelivery),
 		done:   make(chan struct{}),
 	}
 	c.attachment = attachment
@@ -742,11 +751,10 @@ func (c *Client) deliverOrQueueOutput(ctx context.Context, current frame) error 
 				return ctx.Err()
 			}
 		}
-		select {
-		case attachment.frames <- current:
+		if c.deliverToAttachment(ctx, attachment, current) {
 			return nil
-		case <-attachment.done:
-		case <-ctx.Done():
+		}
+		if err := ctx.Err(); err != nil {
 			return ctx.Err()
 		}
 	}
@@ -759,14 +767,42 @@ func (c *Client) deliverAttachment(ctx context.Context, current frame) bool {
 	if attachment == nil {
 		return false
 	}
+	return c.deliverToAttachment(ctx, attachment, current)
+}
+
+func (c *Client) deliverToAttachment(
+	ctx context.Context,
+	attachment *terminalAttachment,
+	current frame,
+) bool {
+	delivery := attachmentDelivery{
+		frame:    current,
+		accepted: make(chan bool, 1),
+	}
 	select {
-	case attachment.frames <- current:
-		return true
+	case attachment.frames <- delivery:
 	case <-attachment.done:
 		return false
 	case <-ctx.Done():
 		return false
 	}
+	select {
+	case accepted := <-delivery.accepted:
+		return accepted
+	case <-ctx.Done():
+		return false
+	}
+}
+
+func (c *Client) acceptAttachmentDelivery(
+	attachment *terminalAttachment,
+	delivery attachmentDelivery,
+) bool {
+	c.stateMu.Lock()
+	accepted := c.attachment == attachment
+	c.stateMu.Unlock()
+	delivery.accepted <- accepted
+	return accepted
 }
 
 func (c *Client) finishReader(err error) {
