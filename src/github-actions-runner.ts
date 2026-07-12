@@ -10,10 +10,13 @@ const runnerInputQueueMaxFrames = 32;
 const runnerInputQueueMaxAgeMs = 5_000;
 const runnerInputBacklogError = "GitHub Actions runner input backlog exceeded";
 const runnerInputExpiredError = "GitHub Actions runner input expired";
+const runnerInputGenerationError = "GitHub Actions runner generation changed";
 
 type RunnerInputQueue = {
   bytes: number;
   frames: number;
+  generation: string | undefined;
+  retired: boolean;
   tail: Promise<void>;
 };
 
@@ -35,29 +38,46 @@ export function acceptGitHubActionsRunnerInput(
   const input = parseGitHubActionsRelayInput(message);
   if (!input) return Promise.resolve(false);
 
-  const queue = runnerInputQueues.get(socket) ?? {
-    bytes: 0,
-    frames: 0,
-    tail: Promise.resolve(),
-  };
-  runnerInputQueues.set(socket, queue);
+  const existingQueue = runnerInputQueues.get(socket);
+  if (existingQueue?.retired || socket.readyState !== WebSocket.OPEN) {
+    return Promise.resolve(true);
+  }
+  if (existingQueue && existingQueue.generation !== input.generation) {
+    existingQueue.retired = true;
+    sendRunnerInputAcknowledgement(
+      socket,
+      input.inputId,
+      input.generation,
+      false,
+      runnerInputGenerationError,
+    );
+    closeRunnerInputSocket(socket, runnerInputGenerationError);
+    return Promise.resolve(true);
+  }
+
+  const queue =
+    existingQueue ??
+    ({
+      bytes: 0,
+      frames: 0,
+      generation: input.generation,
+      retired: false,
+      tail: Promise.resolve(),
+    } satisfies RunnerInputQueue);
+  if (!existingQueue) runnerInputQueues.set(socket, queue);
 
   if (
     queue.frames >= runnerInputQueueMaxFrames ||
     queue.bytes + input.payload.byteLength > runnerInputQueueMaxBytes
   ) {
-    const { generation, inputId } = input;
-    const rejected = queue.tail
-      .catch(() => undefined)
-      .then(() => {
-        sendRunnerInputAcknowledgement(socket, inputId, generation, false, runnerInputBacklogError);
-      });
-    queue.tail = rejected;
-    return rejected
-      .finally(() => {
-        deleteIdleRunnerInputQueue(socket, queue, rejected);
-      })
-      .then(() => true);
+    sendRunnerInputAcknowledgement(
+      socket,
+      input.inputId,
+      input.generation,
+      false,
+      runnerInputBacklogError,
+    );
+    return Promise.resolve(true);
   }
 
   const queuedAt = now();
@@ -66,6 +86,7 @@ export function acceptGitHubActionsRunnerInput(
   const queued = queue.tail
     .catch(() => undefined)
     .then(async () => {
+      if (!isActiveRunnerInputQueue(socket, queue)) return;
       if (now() - queuedAt >= runnerInputQueueMaxAgeMs) {
         sendRunnerInputAcknowledgement(
           socket,
@@ -78,9 +99,13 @@ export function acceptGitHubActionsRunnerInput(
       }
       try {
         await writeToPty(input.payload);
-        sendRunnerInputAcknowledgement(socket, input.inputId, input.generation, true);
+        if (isActiveRunnerInputQueue(socket, queue)) {
+          sendRunnerInputAcknowledgement(socket, input.inputId, input.generation, true);
+        }
       } catch {
-        sendRunnerInputAcknowledgement(socket, input.inputId, input.generation, false);
+        if (isActiveRunnerInputQueue(socket, queue)) {
+          sendRunnerInputAcknowledgement(socket, input.inputId, input.generation, false);
+        }
       }
     })
     .finally(() => {
@@ -108,6 +133,30 @@ function sendRunnerInputAcknowledgement(
     ...(error ? { error } : {}),
     ...(generation ? { generation } : {}),
   });
+}
+
+function closeRunnerInputSocket(socket: GitHubActionsRelaySocket, reason: string): void {
+  if (socket.readyState !== WebSocket.OPEN) return;
+  try {
+    socket.close(1012, reason);
+  } catch {
+    // Queue retirement still prevents later writes when the socket cannot be closed cleanly.
+  }
+}
+
+function isActiveRunnerInputQueue(
+  socket: GitHubActionsRelaySocket,
+  queue: RunnerInputQueue,
+): boolean {
+  if (
+    runnerInputQueues.get(socket) !== queue ||
+    queue.retired ||
+    socket.readyState !== WebSocket.OPEN
+  ) {
+    queue.retired = true;
+    return false;
+  }
+  return true;
 }
 
 function deleteIdleRunnerInputQueue(

@@ -12,14 +12,21 @@ import {
   type GitHubActionsRelaySocket,
 } from "../src/github-actions-runtime.ts";
 
-function relaySocket(): GitHubActionsRelaySocket & { sent: Array<string | ArrayBuffer> } {
+function relaySocket(): GitHubActionsRelaySocket & {
+  closes: Array<{ code: number | undefined; reason: string | undefined }>;
+  sent: Array<string | ArrayBuffer>;
+} {
   return {
     readyState: WebSocket.OPEN,
+    closes: [],
     sent: [],
     send(message) {
       this.sent.push(message);
     },
-    close() {},
+    close(code, reason) {
+      this.closes.push({ code, reason });
+      this.readyState = WebSocket.CLOSED;
+    },
   };
 }
 
@@ -90,7 +97,7 @@ test("runner serializes concurrent input writes and acknowledgements per socket"
   );
 });
 
-test("runner bounds queued frames and rejects overflow in acknowledgement order", async () => {
+test("runner bounds queued frames and rejects overflow without extending a stalled tail", async () => {
   const socket = relaySocket();
   let completeFirstWrite!: () => void;
   const firstWrite = new Promise<void>((resolve) => {
@@ -111,6 +118,11 @@ test("runner bounds queued frames and rejects overflow in acknowledgement order"
   await Promise.resolve();
   await Promise.resolve();
   assert.deepEqual(writes, [0]);
+  assert.deepEqual(parseGitHubActionsRelayInputAcknowledgement(socket.sent[0]!), {
+    inputId: "input-32",
+    accepted: false,
+    error: "GitHub Actions runner input backlog exceeded",
+  });
   completeFirstWrite();
   assert.deepEqual(await Promise.all(pending), Array(33).fill(true));
   assert.deepEqual(
@@ -120,17 +132,64 @@ test("runner bounds queued frames and rejects overflow in acknowledgement order"
   assert.deepEqual(
     socket.sent.map((message) => parseGitHubActionsRelayInputAcknowledgement(message)),
     [
-      ...Array.from({ length: 32 }, (_, index) => ({
-        inputId: `input-${index}`,
-        accepted: true,
-      })),
       {
         inputId: "input-32",
         accepted: false,
         error: "GitHub Actions runner input backlog exceeded",
       },
+      ...Array.from({ length: 32 }, (_, index) => ({
+        inputId: `input-${index}`,
+        accepted: true,
+      })),
     ],
   );
+});
+
+test("runner keeps overflow floods off the accepted input queue", async () => {
+  const socket = relaySocket();
+  let completeFirstWrite!: () => void;
+  const firstWrite = new Promise<void>((resolve) => {
+    completeFirstWrite = resolve;
+  });
+  const writes: number[] = [];
+  const accepted = Array.from({ length: 32 }, (_, index) =>
+    acceptGitHubActionsRunnerInput(
+      socket,
+      encodeGitHubActionsRelayInput(`accepted-${index}`, new Uint8Array([index])),
+      async (payload) => {
+        writes.push(new Uint8Array(payload)[0]!);
+        if (index === 0) await firstWrite;
+      },
+    ),
+  );
+
+  let settledOverflows = 0;
+  const overflows = Array.from({ length: 512 }, (_, index) =>
+    acceptGitHubActionsRunnerInput(
+      socket,
+      encodeGitHubActionsRelayInput(`overflow-${index}`, new Uint8Array([index])),
+      async () => {
+        assert.fail("overflow input must not reach the PTY");
+      },
+    ).then((handled) => {
+      settledOverflows += 1;
+      return handled;
+    }),
+  );
+
+  await Promise.resolve();
+  await Promise.resolve();
+  assert.equal(settledOverflows, 512);
+  assert.deepEqual(await Promise.all(overflows), Array(512).fill(true));
+  assert.deepEqual(writes, [0]);
+
+  completeFirstWrite();
+  assert.deepEqual(await Promise.all(accepted), Array(32).fill(true));
+  assert.deepEqual(
+    writes,
+    Array.from({ length: 32 }, (_, index) => index),
+  );
+  assert.equal(socket.sent.length, 544);
 });
 
 test("runner bounds queued bytes while a PTY write is stalled", async () => {
@@ -159,20 +218,125 @@ test("runner bounds queued bytes while a PTY write is stalled", async () => {
   await Promise.resolve();
   await Promise.resolve();
   assert.equal(writes, 1);
+  assert.equal(await overflow, true);
+  assert.deepEqual(parseGitHubActionsRelayInputAcknowledgement(socket.sent[0]!), {
+    inputId: "input-overflow",
+    accepted: false,
+    error: "GitHub Actions runner input backlog exceeded",
+  });
   completeFirstWrite();
-  assert.deepEqual(await Promise.all([first, overflow]), [true, true]);
+  assert.equal(await first, true);
   assert.equal(writes, 1);
   assert.deepEqual(
     socket.sent.map((message) => parseGitHubActionsRelayInputAcknowledgement(message)),
     [
-      { inputId: "input-first", accepted: true },
       {
         inputId: "input-overflow",
         accepted: false,
         error: "GitHub Actions runner input backlog exceeded",
       },
+      { inputId: "input-first", accepted: true },
     ],
   );
+});
+
+test("runner does not execute queued input after its socket is replaced", async () => {
+  const replaced = relaySocket();
+  const replacement = relaySocket();
+  let completeBlockedWrite!: () => void;
+  const blockedWrite = new Promise<void>((resolve) => {
+    completeBlockedWrite = resolve;
+  });
+  const writes: string[] = [];
+  const first = acceptGitHubActionsRunnerInput(
+    replaced,
+    encodeGitHubActionsRelayInput("old-first", "old-first", "old-generation"),
+    async (payload) => {
+      writes.push(`${new TextDecoder().decode(payload)}:start`);
+      await blockedWrite;
+      writes.push("old-first:end");
+    },
+  );
+  const queued = acceptGitHubActionsRunnerInput(
+    replaced,
+    encodeGitHubActionsRelayInput("old-queued", "old-queued", "old-generation"),
+    async (payload) => {
+      writes.push(new TextDecoder().decode(payload));
+    },
+  );
+
+  await Promise.resolve();
+  await Promise.resolve();
+  assert.deepEqual(writes, ["old-first:start"]);
+  replaced.close(1012, "runner replaced");
+  const current = acceptGitHubActionsRunnerInput(
+    replacement,
+    encodeGitHubActionsRelayInput("new-input", "new-input", "new-generation"),
+    async (payload) => {
+      writes.push(new TextDecoder().decode(payload));
+    },
+  );
+  assert.equal(await current, true);
+
+  completeBlockedWrite();
+  assert.deepEqual(await Promise.all([first, queued]), [true, true]);
+  assert.deepEqual(writes, ["old-first:start", "new-input", "old-first:end"]);
+  assert.deepEqual(replaced.sent, []);
+  assert.deepEqual(parseGitHubActionsRelayInputAcknowledgement(replacement.sent[0]!), {
+    inputId: "new-input",
+    accepted: true,
+    generation: "new-generation",
+  });
+});
+
+test("runner retires queued input when its relay generation changes", async () => {
+  const socket = relaySocket();
+  let completeBlockedWrite!: () => void;
+  const blockedWrite = new Promise<void>((resolve) => {
+    completeBlockedWrite = resolve;
+  });
+  const writes: string[] = [];
+  const first = acceptGitHubActionsRunnerInput(
+    socket,
+    encodeGitHubActionsRelayInput("first", "first", "generation-one"),
+    async (payload) => {
+      writes.push(new TextDecoder().decode(payload));
+      await blockedWrite;
+    },
+  );
+  const queued = acceptGitHubActionsRunnerInput(
+    socket,
+    encodeGitHubActionsRelayInput("queued", "queued", "generation-one"),
+    async (payload) => {
+      writes.push(new TextDecoder().decode(payload));
+    },
+  );
+
+  await Promise.resolve();
+  await Promise.resolve();
+  assert.equal(
+    await acceptGitHubActionsRunnerInput(
+      socket,
+      encodeGitHubActionsRelayInput("replacement", "replacement", "generation-two"),
+      async () => {
+        assert.fail("replacement input must not reach the retired socket");
+      },
+    ),
+    true,
+  );
+  assert.deepEqual(socket.closes, [
+    { code: 1012, reason: "GitHub Actions runner generation changed" },
+  ]);
+
+  completeBlockedWrite();
+  assert.deepEqual(await Promise.all([first, queued]), [true, true]);
+  assert.deepEqual(writes, ["first"]);
+  assert.deepEqual(parseGitHubActionsRelayInputAcknowledgement(socket.sent[0]!), {
+    inputId: "replacement",
+    accepted: false,
+    error: "GitHub Actions runner generation changed",
+    generation: "generation-two",
+  });
 });
 
 test("runner rejects queued input that outlives the viewer acknowledgement timeout", async () => {
