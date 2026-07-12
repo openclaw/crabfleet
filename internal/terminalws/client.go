@@ -293,7 +293,7 @@ func (c *Client) SendInputConfirmed(ctx context.Context, payload []byte) error {
 		return err
 	case <-c.readerDone:
 		c.clearInputWaiter(waiter)
-		return c.readerError()
+		return readerUnavailableError(c.readerError())
 	case <-ctx.Done():
 		c.clearInputWaiter(waiter)
 		_ = c.Close()
@@ -530,6 +530,10 @@ func (c *Client) registerInputWaiter(waiter chan error) error {
 	default:
 	}
 	c.inputWaiter = waiter
+	if c.attachment == nil && c.attachmentReady != nil {
+		close(c.attachmentReady)
+		c.attachmentReady = make(chan struct{})
+	}
 	return nil
 }
 
