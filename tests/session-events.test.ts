@@ -127,11 +127,14 @@ test("structured session events canonicalize additive payloads and replay idempo
     actor: "operator",
     eventKey: " run:1 ",
     type: " clawsweeper.action ",
-    message: " updated pull request ",
+    message: " updated pull request: authorization: Bearer credential-one ",
     payload: {
       version: 2,
       target: { z: true, a: 1 },
       additiveField: ["kept"],
+      secretKey: "dummy",
+      secretAccessKey: "dummy",
+      accessKeyId: "dummy",
       credentials: {
         authorization: "Bearer credential-one",
         githubToken: "dummy",
@@ -145,9 +148,12 @@ test("structured session events canonicalize additive payloads and replay idempo
     actor: "operator",
     eventKey: "run:1",
     type: "clawsweeper.action",
-    message: "updated pull request",
+    message: "updated pull request: authorization: Bearer credential-two",
     payload: {
       additiveField: ["kept"],
+      secretKey: "fake",
+      secretAccessKey: "fake",
+      accessKeyId: "fake",
       credentials: {
         authorization: "Bearer credential-two",
         githubToken: "fake",
@@ -165,19 +171,22 @@ test("structured session events canonicalize additive payloads and replay idempo
     actor: "operator",
     eventKey: "run:1",
     type: "clawsweeper.action",
-    message: "updated pull request",
+    message: "updated pull request: [credential]",
     payload: {
+      accessKeyId: "[redacted]",
       additiveField: ["kept"],
       credentials: "[redacted]",
       note: "request failed: [credential]",
+      secretAccessKey: "[redacted]",
+      secretKey: "[redacted]",
       target: { a: 1, z: true },
       version: 2,
     },
     createdAt: 123,
   });
   assert.deepEqual(persistedPayloads, [
-    '{"additiveField":["kept"],"credentials":"[redacted]","note":"request failed: [credential]","target":{"a":1,"z":true},"version":2}',
-    '{"additiveField":["kept"],"credentials":"[redacted]","note":"request failed: [credential]","target":{"a":1,"z":true},"version":2}',
+    '{"accessKeyId":"[redacted]","additiveField":["kept"],"credentials":"[redacted]","note":"request failed: [credential]","secretAccessKey":"[redacted]","secretKey":"[redacted]","target":{"a":1,"z":true},"version":2}',
+    '{"accessKeyId":"[redacted]","additiveField":["kept"],"credentials":"[redacted]","note":"request failed: [credential]","secretAccessKey":"[redacted]","secretKey":"[redacted]","target":{"a":1,"z":true},"version":2}',
   ]);
   assert.deepEqual(invalidations, ["IS-1", "IS-1"]);
   assert.deepEqual(archives, ["IS-1", "IS-1"]);

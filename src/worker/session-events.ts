@@ -221,7 +221,7 @@ function normalizeStructuredEvent(
 ): PersistedStructuredInteractiveSessionEvent {
   const eventKey = requiredString(input.eventKey, "eventKey", 240);
   const type = requiredString(input.type, "type", 120);
-  const message = requiredString(input.message, "message", 1000);
+  const message = redactedStructuredEventText(requiredString(input.message, "message", 1000));
   const payloadJson = structuredPayloadJson(input.payload);
   return {
     sessionId: input.sessionId,
@@ -274,7 +274,7 @@ function structuredPayloadJson(value: unknown): string {
 }
 
 const sensitivePayloadField =
-  /^(?:api_?key|apikey|auth|authorization|client_?secret|cookie|credential|credentials|id_?token|password|passwd|private_?key|proxy_?authorization|refresh_?token|secret|session_?token|set_?cookie|sig|signature|signed_?url|ticket|token|x_?api_?key|.+(?:_api_?key|_credential|_credentials|_password|_private_?key|_secret|_signature|_ticket|_token))$/i;
+  /^(?:access_?key_?id|api_?key|apikey|auth|authorization|client_?secret|cookie|credential|credentials|id_?token|password|passwd|private_?key|proxy_?authorization|refresh_?token|secret|secret_?access_?key|secret_?key|session_?token|set_?cookie|sig|signature|signed_?url|ticket|token|x_?api_?key|.+(?:_access_?key_?id|_api_?key|_credential|_credentials|_password|_private_?key|_secret|_secret_?access_?key|_secret_?key|_signature|_ticket|_token))$/i;
 
 function redactStructuredPayload(
   value: InteractiveSessionEventPayload,
@@ -300,7 +300,7 @@ function redactStructuredPayloadValue(
 
 function redactedStructuredEventText(value: string): string {
   const sensitiveName =
-    "access[_-]?token|api[_-]?key|apikey|auth|authorization|client[_-]?secret|cookie|credential|id[_-]?token|password|passwd|private[_-]?key|proxy[_-]?authorization|refresh[_-]?token|secret|session[_-]?token|set[_-]?cookie|sig|signature|ticket|token|x[_-]?api[_-]?key";
+    "access[_-]?key[_-]?id|access[_-]?token|api[_-]?key|apikey|auth|authorization|client[_-]?secret|cookie|credential|id[_-]?token|password|passwd|private[_-]?key|proxy[_-]?authorization|refresh[_-]?token|secret|secret[_-]?access[_-]?key|secret[_-]?key|session[_-]?token|set[_-]?cookie|sig|signature|ticket|token|x[_-]?api[_-]?key";
   return value
     .replace(
       /\b(?:authorization|proxy-authorization|x-api-key|api-key)\s*:\s*[^\r\n]+/giu,
