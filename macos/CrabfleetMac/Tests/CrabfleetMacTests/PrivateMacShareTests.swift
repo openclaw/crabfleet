@@ -824,6 +824,52 @@ struct PrivateMacShareTests {
   }
 
   @Test
+  func retriesHeldInputReleaseAfterAccessibilityReturns() async {
+    let trust = AccessibilityTrust(granted: true)
+    let events = RemoteInputEventRecorder()
+    let controller = MacRemoteInputController(
+      descriptor: CapturedDisplayDescriptor(
+        displayID: 1,
+        displayBounds: CGRect(x: 0, y: 0, width: 100, height: 100),
+        frameWidth: 100,
+        frameHeight: 100,
+        sourcePixelWidth: 100,
+        sourcePixelHeight: 100
+      ),
+      accessibilityGranted: { trust.isGranted() },
+      pendingReleaseRetryDelay: .milliseconds(10),
+      keyEventPoster: { down, keysym in
+        events.append(.key(down: down, keysym: keysym))
+      },
+      mouseEventPoster: { type, _, button in
+        events.append(.mouse(type: type, button: button))
+      }
+    )
+
+    controller.keyEvent(down: true, keysym: 0x61)
+    controller.pointerEvent(buttonMask: 0x01, x: 50, y: 50)
+    #expect(await waitUntilAsync {
+      events.contains(.key(down: true, keysym: 0x61))
+        && events.contains(.mouse(type: .leftMouseDown, button: .left))
+    })
+
+    let checksBeforeRevocation = trust.checkCount
+    trust.setGranted(false)
+    controller.releaseAllInput()
+    #expect(await waitUntilAsync {
+      trust.checkCount > checksBeforeRevocation
+    })
+    #expect(!events.contains(.key(down: false, keysym: 0x61)))
+    #expect(!events.contains(.mouse(type: .leftMouseUp, button: .left)))
+
+    trust.setGranted(true)
+    #expect(await waitUntilAsync {
+      events.contains(.key(down: false, keysym: 0x61))
+        && events.contains(.mouse(type: .leftMouseUp, button: .left))
+    })
+  }
+
+  @Test
   func decodesX11UnicodeKeysymsForMacInput() {
     #expect(MacRemoteInputController.unicodeScalar(for: 0x0100_03BB) == "λ")
     #expect(MacRemoteInputController.unicodeScalar(for: 0x0101_F980) == "🦀")
@@ -1298,6 +1344,57 @@ private final class RFBEventRecorder: @unchecked Sendable {
   func append(_ event: TailnetRFBServerEvent) {
     lock.lock()
     storage.append(event)
+    lock.unlock()
+  }
+}
+
+private enum RecordedRemoteInputEvent: Equatable {
+  case key(down: Bool, keysym: UInt32)
+  case mouse(type: CGEventType, button: CGMouseButton)
+}
+
+private final class RemoteInputEventRecorder: @unchecked Sendable {
+  private let lock = NSLock()
+  private var events: [RecordedRemoteInputEvent] = []
+
+  func append(_ event: RecordedRemoteInputEvent) {
+    lock.lock()
+    events.append(event)
+    lock.unlock()
+  }
+
+  func contains(_ event: RecordedRemoteInputEvent) -> Bool {
+    lock.lock()
+    defer { lock.unlock() }
+    return events.contains(event)
+  }
+}
+
+private final class AccessibilityTrust: @unchecked Sendable {
+  private let lock = NSLock()
+  private var granted: Bool
+  private var checks = 0
+
+  init(granted: Bool) {
+    self.granted = granted
+  }
+
+  var checkCount: Int {
+    lock.lock()
+    defer { lock.unlock() }
+    return checks
+  }
+
+  func isGranted() -> Bool {
+    lock.lock()
+    defer { lock.unlock() }
+    checks += 1
+    return granted
+  }
+
+  func setGranted(_ granted: Bool) {
+    lock.lock()
+    self.granted = granted
     lock.unlock()
   }
 }

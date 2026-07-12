@@ -15,20 +15,41 @@ extension RemoteInputForwarding {
 }
 
 final class MacRemoteInputController: RemoteInputForwarding, @unchecked Sendable {
+  private static let releaseRetryDelay: DispatchTimeInterval = .milliseconds(250)
+
   private let descriptor: CapturedDisplayDescriptor
   private let eventQueue = DispatchQueue(
     label: "org.openclaw.crabfleet.remote-input",
     qos: .userInteractive
   )
+  private let accessibilityGranted: @Sendable () -> Bool
+  private let pendingReleaseRetryDelay: DispatchTimeInterval
+  private let keyEventPoster: (@Sendable (Bool, UInt32) -> Void)?
+  private let mouseEventPoster:
+    (@Sendable (CGEventType, CGPoint, CGMouseButton) -> Void)?
   private let frameSizeLock = NSLock()
   private var frameWidth: Int
   private var frameHeight: Int
   private var previousButtonMask: UInt8 = 0
   private var previousPointerLocation: CGPoint
   private var pressedKeysyms: Set<UInt32> = []
+  private var hasPendingRelease = false
+  private var pendingReleaseRetryScheduled = false
 
-  init(descriptor: CapturedDisplayDescriptor) {
+  init(
+    descriptor: CapturedDisplayDescriptor,
+    accessibilityGranted: @escaping @Sendable () -> Bool = {
+      MacRemoteInputController.isAccessibilityGranted
+    },
+    pendingReleaseRetryDelay: DispatchTimeInterval = MacRemoteInputController.releaseRetryDelay,
+    keyEventPoster: (@Sendable (Bool, UInt32) -> Void)? = nil,
+    mouseEventPoster: (@Sendable (CGEventType, CGPoint, CGMouseButton) -> Void)? = nil
+  ) {
     self.descriptor = descriptor
+    self.accessibilityGranted = accessibilityGranted
+    self.pendingReleaseRetryDelay = pendingReleaseRetryDelay
+    self.keyEventPoster = keyEventPoster
+    self.mouseEventPoster = mouseEventPoster
     frameWidth = descriptor.frameWidth
     frameHeight = descriptor.frameHeight
     previousPointerLocation = descriptor.displayBounds.origin
@@ -58,7 +79,8 @@ final class MacRemoteInputController: RemoteInputForwarding, @unchecked Sendable
 
   func keyEvent(down: Bool, keysym: UInt32) {
     eventQueue.async { [self] in
-      guard Self.isAccessibilityGranted else { return }
+      guard accessibilityGranted() else { return }
+      flushPendingRelease()
       postKeyEvent(down: down, keysym: keysym)
       if down {
         pressedKeysyms.insert(keysym)
@@ -70,7 +92,8 @@ final class MacRemoteInputController: RemoteInputForwarding, @unchecked Sendable
 
   func pointerEvent(buttonMask: UInt8, x: UInt16, y: UInt16) {
     eventQueue.async { [self] in
-      guard Self.isAccessibilityGranted else { return }
+      guard accessibilityGranted() else { return }
+      flushPendingRelease()
       let location = mappedLocation(x: x, y: y)
       previousPointerLocation = location
       let changedButtons = previousButtonMask ^ buttonMask
@@ -79,12 +102,7 @@ final class MacRemoteInputController: RemoteInputForwarding, @unchecked Sendable
       for button in Self.mouseButtons where changedButtons & button.mask != 0 {
         let isDown = buttonMask & button.mask != 0
         let type = isDown ? button.downType : button.upType
-        CGEvent(
-          mouseEventSource: eventSource(),
-          mouseType: type,
-          mouseCursorPosition: location,
-          mouseButton: button.button
-        )?.post(tap: .cghidEventTap)
+        postMouseEvent(type: type, location: location, button: button.button)
         postedButtonChange = true
       }
 
@@ -99,12 +117,7 @@ final class MacRemoteInputController: RemoteInputForwarding, @unchecked Sendable
         } else {
           moveType = .mouseMoved
         }
-        CGEvent(
-          mouseEventSource: eventSource(),
-          mouseType: moveType,
-          mouseCursorPosition: location,
-          mouseButton: .left
-        )?.post(tap: .cghidEventTap)
+        postMouseEvent(type: moveType, location: location, button: .left)
       }
 
       let newWheelBits = buttonMask & ~previousButtonMask
@@ -118,29 +131,16 @@ final class MacRemoteInputController: RemoteInputForwarding, @unchecked Sendable
 
   func releaseAllInput() {
     eventQueue.async { [self] in
-      let canPostEvents = Self.isAccessibilityGranted
-      if canPostEvents {
-        for keysym in pressedKeysyms {
-          postKeyEvent(down: false, keysym: keysym)
-        }
-      }
-      pressedKeysyms.removeAll()
-
-      if canPostEvents {
-        for button in Self.mouseButtons where previousButtonMask & button.mask != 0 {
-          CGEvent(
-            mouseEventSource: eventSource(),
-            mouseType: button.upType,
-            mouseCursorPosition: previousPointerLocation,
-            mouseButton: button.button
-          )?.post(tap: .cghidEventTap)
-        }
-      }
-      previousButtonMask = 0
+      hasPendingRelease = true
+      flushPendingRelease()
     }
   }
 
   private func postKeyEvent(down: Bool, keysym: UInt32) {
+    if let keyEventPoster {
+      keyEventPoster(down, keysym)
+      return
+    }
     let event: CGEvent?
     if let keyCode = Self.keyCode(for: keysym) {
       event = CGEvent(keyboardEventSource: eventSource(), virtualKey: keyCode, keyDown: down)
@@ -156,6 +156,55 @@ final class MacRemoteInputController: RemoteInputForwarding, @unchecked Sendable
       event = nil
     }
     event?.post(tap: .cghidEventTap)
+  }
+
+  private func postMouseEvent(
+    type: CGEventType,
+    location: CGPoint,
+    button: CGMouseButton
+  ) {
+    if let mouseEventPoster {
+      mouseEventPoster(type, location, button)
+      return
+    }
+    CGEvent(
+      mouseEventSource: eventSource(),
+      mouseType: type,
+      mouseCursorPosition: location,
+      mouseButton: button
+    )?.post(tap: .cghidEventTap)
+  }
+
+  private func flushPendingRelease() {
+    guard hasPendingRelease else { return }
+    guard accessibilityGranted() else {
+      schedulePendingReleaseRetry()
+      return
+    }
+
+    for keysym in pressedKeysyms {
+      postKeyEvent(down: false, keysym: keysym)
+    }
+    for button in Self.mouseButtons where previousButtonMask & button.mask != 0 {
+      postMouseEvent(
+        type: button.upType,
+        location: previousPointerLocation,
+        button: button.button
+      )
+    }
+    pressedKeysyms.removeAll()
+    previousButtonMask = 0
+    hasPendingRelease = false
+  }
+
+  private func schedulePendingReleaseRetry() {
+    guard !pendingReleaseRetryScheduled else { return }
+    pendingReleaseRetryScheduled = true
+    eventQueue.asyncAfter(deadline: .now() + pendingReleaseRetryDelay) { [weak self] in
+      guard let self else { return }
+      self.pendingReleaseRetryScheduled = false
+      self.flushPendingRelease()
+    }
   }
 
   private func eventSource() -> CGEventSource? {
