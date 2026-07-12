@@ -54,12 +54,14 @@ export function wantsMarkdown(request: Request): boolean {
 }
 
 export async function readJson<T>(request: Request): Promise<T> {
+  const source = await request.text();
   let parsed: unknown;
   try {
-    parsed = JSON.parse(await request.text()) as unknown;
+    parsed = JSON.parse(source) as unknown;
   } catch {
     throw badRequest("invalid json");
   }
+  assertRoundTrippableJsonIntegerLexemes(source);
   assertRoundTrippableJsonIntegers(parsed);
   return parsed as T;
 }
@@ -100,12 +102,14 @@ export async function readBoundedJson<T>(request: Request, maximumBytes: number)
     bytes.set(chunk, offset);
     offset += chunk.byteLength;
   }
+  const source = new TextDecoder().decode(bytes);
   let parsed: unknown;
   try {
-    parsed = JSON.parse(new TextDecoder().decode(bytes)) as unknown;
+    parsed = JSON.parse(source) as unknown;
   } catch {
     throw badRequest("invalid json");
   }
+  assertRoundTrippableJsonIntegerLexemes(source);
   assertRoundTrippableJsonIntegers(parsed);
   return parsed as T;
 }
@@ -197,4 +201,71 @@ function assertRoundTrippableJsonIntegers(value: unknown): void {
     }
     for (const item of Object.values(current)) pending.push(item);
   }
+}
+
+function assertRoundTrippableJsonIntegerLexemes(source: string): void {
+  const numberPattern = /-?(?:0|[1-9]\d*)(?:\.\d+)?(?:[eE][+-]?\d+)?/y;
+  let inString = false;
+  let escaped = false;
+  for (let index = 0; index < source.length; index += 1) {
+    const character = source[index]!;
+    if (inString) {
+      if (escaped) {
+        escaped = false;
+      } else if (character === "\\") {
+        escaped = true;
+      } else if (character === '"') {
+        inString = false;
+      }
+      continue;
+    }
+    if (character === '"') {
+      inString = true;
+      continue;
+    }
+    if (character !== "-" && (character < "0" || character > "9")) continue;
+    numberPattern.lastIndex = index;
+    const match = numberPattern.exec(source);
+    if (!match) continue;
+    const token = match[0];
+    const value = Number(token);
+    if (
+      Number.isInteger(value) &&
+      (!Number.isSafeInteger(value) ||
+        Object.is(value, -0) ||
+        exactJsonInteger(token) !== String(value))
+    ) {
+      throw badRequest("json integers must be safe and round-trippable");
+    }
+    index = numberPattern.lastIndex - 1;
+  }
+}
+
+function exactJsonInteger(token: string): string | null {
+  const negative = token.startsWith("-");
+  const unsigned = negative ? token.slice(1) : token;
+  const exponentIndex = unsigned.search(/[eE]/u);
+  const mantissa = exponentIndex === -1 ? unsigned : unsigned.slice(0, exponentIndex);
+  const exponentText = exponentIndex === -1 ? "" : unsigned.slice(exponentIndex + 1);
+  const decimalIndex = mantissa.indexOf(".");
+  const integerDigits = decimalIndex === -1 ? mantissa.length : decimalIndex;
+  const digits =
+    decimalIndex === -1
+      ? mantissa
+      : mantissa.slice(0, decimalIndex) + mantissa.slice(decimalIndex + 1);
+  if (/^0+$/u.test(digits)) return negative ? "-0" : "0";
+
+  const exponent = exponentText ? Number(exponentText) : 0;
+  if (!Number.isSafeInteger(exponent)) return null;
+  const decimalPosition = integerDigits + exponent;
+  if (decimalPosition <= 0) return null;
+  if (decimalPosition < digits.length && !/^0+$/u.test(digits.slice(decimalPosition))) {
+    return null;
+  }
+  const exactDigits =
+    decimalPosition >= digits.length
+      ? digits + "0".repeat(decimalPosition - digits.length)
+      : digits.slice(0, decimalPosition);
+  const canonicalDigits = exactDigits.replace(/^0+/u, "") || "0";
+  return negative ? `-${canonicalDigits}` : canonicalDigits;
 }

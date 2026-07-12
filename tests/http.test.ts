@@ -114,7 +114,13 @@ test("bounded JSON parsing rejects declared and streamed bodies before unbounded
 });
 
 test("JSON parsing rejects integers that cannot round-trip exactly", async () => {
-  for (const body of ['{"value":9007199254740993}', '{"value":-0}', '{"nested":[1e400]}']) {
+  for (const body of [
+    '{"value":9007199254740993}',
+    '{"value":9007199254740991.1}',
+    '{"value":1.0000000000000001}',
+    '{"value":-0}',
+    '{"nested":[1e400]}',
+  ]) {
     for (const parse of [
       () => readJson(new Request("https://fleet.example", { method: "POST", body })),
       () =>
@@ -132,6 +138,17 @@ test("JSON parsing rejects integers that cannot round-trip exactly", async () =>
         return true;
       });
     }
+  }
+});
+
+test("JSON parsing accepts exact integer-equivalent numeric forms", async () => {
+  for (const body of ['{"value":1.0}', '{"value":1e0}', '{"value":100e-2}']) {
+    assert.deepEqual(
+      await readJson<{ value: number }>(
+        new Request("https://fleet.example", { method: "POST", body }),
+      ),
+      { value: 1 },
+    );
   }
 });
 
