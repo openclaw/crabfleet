@@ -1,5 +1,6 @@
 import AppKit
 import Foundation
+import RoyalVNCKit
 import Testing
 
 @testable import CrabfleetMac
@@ -51,6 +52,21 @@ struct HostShareWireTests {
       encoded == Data([3, 0, 0, 0, 0, 0, 0, 5]) + Data([0x68, 0xE9, 0x6C, 0x6C, 0x6F])
     )
     #expect(RFBWire.legacyServerCutText(text: "emoji 🦀") == nil)
+  }
+
+  @Test
+  func emptyExtendedClipboardTextRemainsRequestable() throws {
+    let caps = VNCExtendedClipboardCaps(
+      supportsText: true,
+      maximumUnsolicitedTextBytes: 0,
+      actions: VNCExtendedClipboard.notifyAction
+    )
+    let packet = try #require(
+      RFBWire.hostClipboardPayload(text: "", extendedNegotiated: true, caps: caps)
+    )
+
+    #expect(packet[0] == 3)
+    #expect(try VNCExtendedClipboard.decode(body: packet.subdata(in: 8..<packet.count)) == .notify(text: true))
   }
 
   @Test

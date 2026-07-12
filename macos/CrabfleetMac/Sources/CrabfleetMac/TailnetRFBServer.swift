@@ -636,27 +636,11 @@ private final class RFBHostSession: @unchecked Sendable {
     }
     guard let io else { return }
 
-    let payload: Data?
-    if extendedNegotiated, let caps, caps.supportsText {
-      let wireByteCount = VNCExtendedClipboard.wireTextByteCount(text)
-      switch VNCExtendedClipboard.textRoute(wireByteCount: wireByteCount, caps: caps) {
-      case .provide:
-        payload = (try? VNCExtendedClipboard.encodeProvide(text: text)).map {
-          VNCExtendedClipboard.frame(messageType: 3, body: $0)
-        }
-      case .notify:
-        payload = VNCExtendedClipboard.frame(
-          messageType: 3,
-          body: VNCExtendedClipboard.encodeNotify(hasText: !text.isEmpty)
-        )
-      case .legacy:
-        payload = RFBWire.legacyServerCutText(text: text)
-      }
-    } else {
-      // Legacy path: silently skip text that cannot survive Latin-1.
-      payload = RFBWire.legacyServerCutText(text: text)
-    }
-
+    let payload = RFBWire.hostClipboardPayload(
+      text: text,
+      extendedNegotiated: extendedNegotiated,
+      caps: caps
+    )
     guard let payload else { return }
     Task {
       try? await io.send(payload)
@@ -1081,6 +1065,34 @@ private final class RFBHostSession: @unchecked Sendable {
     guard case .hostPort(let host, _) = endpoint else { return nil }
     let value = String(describing: host)
     return value.split(separator: "%", maxSplits: 1).first.map(String.init)
+  }
+}
+
+extension RFBWire {
+  static func hostClipboardPayload(
+    text: String,
+    extendedNegotiated: Bool,
+    caps: VNCExtendedClipboardCaps?
+  ) -> Data? {
+    guard extendedNegotiated, let caps, caps.supportsText else {
+      // Legacy path: silently skip text that cannot survive Latin-1.
+      return legacyServerCutText(text: text)
+    }
+
+    let wireByteCount = VNCExtendedClipboard.wireTextByteCount(text)
+    switch VNCExtendedClipboard.textRoute(wireByteCount: wireByteCount, caps: caps) {
+    case .provide:
+      return (try? VNCExtendedClipboard.encodeProvide(text: text)).map {
+        VNCExtendedClipboard.frame(messageType: 3, body: $0)
+      }
+    case .notify:
+      return VNCExtendedClipboard.frame(
+        messageType: 3,
+        body: VNCExtendedClipboard.encodeNotify(hasText: true)
+      )
+    case .legacy:
+      return legacyServerCutText(text: text)
+    }
   }
 }
 
