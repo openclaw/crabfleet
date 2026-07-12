@@ -157,7 +157,7 @@ An optional `CRABFLEET_RUNTIME_PROFILES_JSON` allowlist exposes generic Crabbox 
 
 - `POST /v1/workspaces`: idempotent create using an immutable namespaced ID and request snapshot.
 - `GET /v1/workspaces/:id`: inspect status, capabilities, expiry, provider identity, and terminal connection. Native-only VNC uses a separate `nativeVnc` capability and does not imply the browser desktop endpoint.
-- `DELETE /v1/workspaces/:id`: release the provider workspace.
+- `DELETE /v1/workspaces/:id`: idempotently release the provider workspace while retaining an exact-ID stopping or terminal tombstone for retries after response loss.
 - `POST /v1/workspaces/:id/connections/desktop`: mint a short-lived desktop URL.
 
 Important invariants:
@@ -167,6 +167,7 @@ Important invariants:
 - Redirects are rejected so bearer credentials cannot cross origins.
 - Request/response bodies are bounded before parsing.
 - Create ambiguity replays the exact original idempotent request before inspection.
+- Delete retries replay the retained exact-ID stopping or terminal lifecycle instead of degrading to an ambiguous 404.
 - An explicit workspace-ID conflict never adopts or deletes the existing provider workspace.
 - Provider failure is not terminal until DELETE confirms release.
 - Status, capabilities, expiry, terminal state, and cleanup use compare-and-swap ownership fences.

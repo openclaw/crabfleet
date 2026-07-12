@@ -28,7 +28,6 @@ const registration: RuntimeAdapterWorkspaceRegistration = {
   profile: "default",
   controlPlane: "https://adapter.example.test/",
 };
-const deleteIdempotencyKey = "runtime-cleanup-delete:test-operation";
 
 type PreparedStatement = {
   sql: string;
@@ -49,7 +48,6 @@ function releaseDependencies(
         registration: input.registration,
         createPending: input.createPending,
         deletionObserved: false,
-        deleteIdempotencyKey,
         claim: "claim-1",
       };
     },
@@ -121,16 +119,15 @@ test("superseded release clears the create marker before stopping and confirming
           registration,
           createPending: false,
           deletionObserved: false,
-          deleteIdempotencyKey,
           claim: "claim-1",
         };
       },
       async clearCreatePending(sessionId, adapterWorkspaceId) {
         calls.push(`clear:${sessionId}:${adapterWorkspaceId}`);
       },
-      async stopWorkspace(sessionId, adapterWorkspaceId, retained, createPending, idempotencyKey) {
+      async stopWorkspace(sessionId, adapterWorkspaceId, retained, createPending) {
         calls.push(
-          `stop:${sessionId}:${adapterWorkspaceId}:${retained?.profile}:${retained?.controlPlane}:${createPending}:${idempotencyKey}`,
+          `stop:${sessionId}:${adapterWorkspaceId}:${retained?.profile}:${retained?.controlPlane}:${createPending}`,
         );
         return { status: "stopped", message: "runtime workspace released" };
       },
@@ -155,7 +152,7 @@ test("superseded release clears the create marker before stopping and confirming
   assert.deepEqual(calls, [
     "stage:IS-101:fleet-a-is-101",
     "clear:IS-101:fleet-a-is-101",
-    `stop:IS-101:fleet-a-is-101:default:https://adapter.example.test/:false:${deleteIdempotencyKey}`,
+    "stop:IS-101:fleet-a-is-101:default:https://adapter.example.test/:false",
     "confirm:IS-101:fleet-a-is-101:200:runtime workspace released",
     "complete:IS-101:fleet-a-is-101",
   ]);
@@ -237,7 +234,6 @@ test("superseded cleanup survives ownership loss and retries only the old worksp
           registration: input.registration,
           createPending: input.createPending,
           deletionObserved: false,
-          deleteIdempotencyKey,
           claim: "claim-1",
         });
       },
@@ -307,7 +303,6 @@ test("superseded provider failures remain independently retryable", async () => 
           registration: input.registration,
           createPending: input.createPending,
           deletionObserved: false,
-          deleteIdempotencyKey,
           claim: "claim-1",
         });
       },
@@ -348,6 +343,85 @@ test("superseded provider failures remain independently retryable", async () => 
   assert.equal(cleanupRows.length, 0);
 });
 
+test("create-pending cleanup recovers from a crash before DELETE success is persisted", async () => {
+  let cleanup: RuntimeAdapterWorkspaceCleanup | null = null;
+  const retryMissing: boolean[] = [];
+  let stopAttempt = 0;
+  let deletionPersistenceAttempt = 0;
+  const service = new RuntimeAdapterReleaseService(
+    releaseDependencies({
+      async stageCleanup(input) {
+        cleanup = {
+          sessionId: input.sessionId,
+          adapterWorkspaceId: input.adapterWorkspaceId,
+          registration: input.registration,
+          createPending: input.createPending,
+          deletionObserved: false,
+          claim: "claim-1",
+        };
+      },
+      async claimCleanup() {
+        return cleanup;
+      },
+      async claimPendingCleanups() {
+        return cleanup ? [{ ...cleanup, claim: `claim-${stopAttempt + 1}` }] : [];
+      },
+      async stopWorkspace(_sessionId, _adapterWorkspaceId, _registration, retry) {
+        retryMissing.push(retry);
+        stopAttempt += 1;
+        if (stopAttempt === 1) {
+          return {
+            status: "stopping",
+            message: "runtime adapter workspace not yet visible; cleanup retry pending",
+          };
+        }
+        return {
+          status: "stopped",
+          message:
+            stopAttempt === 2
+              ? "runtime adapter workspace released"
+              : "workspace stopped tombstone",
+        };
+      },
+      async persistCleanupEvidence(current) {
+        cleanup = { ...current, claim: "" };
+      },
+      async markCleanupDeletionObserved(current) {
+        deletionPersistenceAttempt += 1;
+        if (deletionPersistenceAttempt === 1) {
+          throw new Error("crash before DELETE success persistence");
+        }
+        cleanup = { ...current, deletionObserved: true };
+      },
+      async completeCleanup() {
+        cleanup = null;
+      },
+      providerError(error) {
+        assert.ok(error instanceof Error);
+        return error.message;
+      },
+    }),
+  );
+
+  await service.stopSuperseded({
+    sessionId: "IS-101",
+    adapterWorkspaceId: "fleet-a-is-101-old",
+    registration,
+    createPending: true,
+    now: 200,
+  });
+  assert.ok(cleanup);
+
+  await service.retryPending(15_200);
+  assert.ok(cleanup);
+
+  await service.retryPending(30_200);
+
+  assert.deepEqual(retryMissing, [true, true, true]);
+  assert.equal(deletionPersistenceAttempt, 2);
+  assert.equal(cleanup, null);
+});
+
 test("observed create-pending deletion survives completion persistence failure", async () => {
   let cleanup: RuntimeAdapterWorkspaceCleanup | null = null;
   const retryMissing: boolean[] = [];
@@ -361,7 +435,6 @@ test("observed create-pending deletion survives completion persistence failure",
           registration: input.registration,
           createPending: input.createPending,
           deletionObserved: false,
-          deleteIdempotencyKey,
           claim: "claim-1",
         };
       },
@@ -371,8 +444,7 @@ test("observed create-pending deletion survives completion persistence failure",
       async claimPendingCleanups() {
         return cleanup ? [{ ...cleanup, claim: "claim-2" }] : [];
       },
-      async stopWorkspace(_sessionId, _adapterWorkspaceId, _registration, retry, idempotencyKey) {
-        assert.equal(idempotencyKey, deleteIdempotencyKey);
+      async stopWorkspace(_sessionId, _adapterWorkspaceId, _registration, retry) {
         retryMissing.push(retry);
         return {
           status: "stopped",
@@ -426,12 +498,6 @@ test("runtime adapter cleanup storage is independent and claim fenced", async ()
       "utf8",
     ),
   );
-  sqlite.exec(
-    readFileSync(
-      new URL("../migrations/0040_runtime_adapter_cleanup_delete_idempotency.sql", import.meta.url),
-      "utf8",
-    ),
-  );
   const env = sqliteRuntimeEnv(sqlite);
   await stageRuntimeAdapterWorkspaceCleanup(env, {
     sessionId: "IS-101",
@@ -450,7 +516,6 @@ test("runtime adapter cleanup storage is independent and claim fenced", async ()
   assert.ok(claimed);
   assert.equal(claimed.createPending, true);
   assert.equal(claimed.deletionObserved, false);
-  assert.match(claimed.deleteIdempotencyKey, /^runtime-cleanup-delete:/u);
   assert.deepEqual(claimed.registration, registration);
   assert.equal((await claimRuntimeAdapterWorkspaceCleanupBatch(env, 200, 3)).length, 0);
 
@@ -466,81 +531,11 @@ test("runtime adapter cleanup storage is independent and claim fenced", async ()
   const retry = await claimRuntimeAdapterWorkspaceCleanupBatch(env, 15_200, 3);
   assert.equal(retry.length, 1);
   assert.equal(retry[0].deletionObserved, true);
-  assert.equal(retry[0].deleteIdempotencyKey, claimed.deleteIdempotencyKey);
   await completeRuntimeAdapterWorkspaceCleanup(env, retry[0]);
   assert.equal(
     sqlite.prepare("SELECT COUNT(*) AS count FROM runtime_adapter_workspace_cleanups").get()?.count,
     0,
   );
-});
-
-test("legacy cleanup rows receive one stable delete idempotency key on claim", async () => {
-  const sqlite = new DatabaseSync(":memory:");
-  sqlite.exec(
-    readFileSync(
-      new URL("../migrations/0037_runtime_adapter_workspace_cleanup.sql", import.meta.url),
-      "utf8",
-    ),
-  );
-  sqlite.exec(
-    readFileSync(
-      new URL("../migrations/0039_runtime_adapter_cleanup_deletion_observed.sql", import.meta.url),
-      "utf8",
-    ),
-  );
-  sqlite
-    .prepare(
-      `INSERT INTO runtime_adapter_workspace_cleanups (
-        session_id,
-        adapter_workspace_id,
-        profile,
-        control_plane,
-        create_pending,
-        message,
-        next_attempt_at,
-        created_at,
-        updated_at
-      ) VALUES (?, ?, ?, ?, 1, ?, 200, 200, 200)`,
-    )
-    .run(
-      "IS-legacy",
-      "fleet-a-is-legacy",
-      registration.profile,
-      registration.controlPlane,
-      "superseded runtime adapter cleanup pending",
-    );
-  sqlite.exec(
-    readFileSync(
-      new URL("../migrations/0040_runtime_adapter_cleanup_delete_idempotency.sql", import.meta.url),
-      "utf8",
-    ),
-  );
-  const env = sqliteRuntimeEnv(sqlite);
-
-  const claimed = await claimRuntimeAdapterWorkspaceCleanup(
-    env,
-    "IS-legacy",
-    "fleet-a-is-legacy",
-    200,
-  );
-  assert.ok(claimed);
-  assert.match(claimed.deleteIdempotencyKey, /^runtime-cleanup-delete:/u);
-
-  await persistRuntimeAdapterWorkspaceCleanupEvidence(
-    env,
-    claimed,
-    "provider stop pending",
-    200,
-    null,
-  );
-  const retry = await claimRuntimeAdapterWorkspaceCleanup(
-    env,
-    "IS-legacy",
-    "fleet-a-is-legacy",
-    15_200,
-  );
-  assert.ok(retry);
-  assert.equal(retry.deleteIdempotencyKey, claimed.deleteIdempotencyKey);
 });
 
 test("confirmed release waits for create resolution behind an exact lifecycle fence", async () => {

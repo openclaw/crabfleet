@@ -189,7 +189,6 @@ export class RuntimeAdapterWorkspaceLifecycle {
     adapterWorkspaceId: string,
     retainedRegistration?: RuntimeAdapterWorkspaceRegistration | null,
     retryMissing?: boolean,
-    deleteIdempotencyKey?: string,
   ): Promise<RuntimeAdapterWorkspaceStopResult> {
     const supersededCleanup = retainedRegistration !== undefined;
     const registration = retainedRegistration
@@ -221,7 +220,6 @@ export class RuntimeAdapterWorkspaceLifecycle {
       controlPlane,
       adapterWorkspaceId,
       supersededCleanup && registration?.adapter_create_pending !== 0,
-      deleteIdempotencyKey,
     );
   }
 
@@ -532,7 +530,6 @@ export class RuntimeAdapterWorkspaceLifecycle {
     registeredControlPlane: string,
     adapterWorkspaceId: string,
     retryMissing = false,
-    deleteIdempotencyKey?: string,
   ): Promise<RuntimeAdapterWorkspaceStopResult> {
     const controlPlane = requireRegisteredRuntimeAdapterControlPlane(
       this.env,
@@ -541,10 +538,7 @@ export class RuntimeAdapterWorkspaceLifecycle {
     );
     const response = await this.dependencies.fetch(
       runtimeAdapterWorkspaceUrl(controlPlane, adapterWorkspaceId),
-      {
-        method: "DELETE",
-        ...(deleteIdempotencyKey ? { headers: { "idempotency-key": deleteIdempotencyKey } } : {}),
-      },
+      { method: "DELETE" },
     );
     const body =
       response.status === 204 ? null : await this.dependencies.readResponseBody(response);
@@ -560,6 +554,8 @@ export class RuntimeAdapterWorkspaceLifecycle {
       parsed?.message ??
       redactedAdapterResponseMessage(body, fallbackMessage, [adapterWorkspaceId]);
     if (response.status === 404 && retryMissing) {
+      // An ambiguous create may still appear. Accepted DELETE retries must replay
+      // the adapter's retained stopping or terminal tombstone instead.
       return {
         status: "stopping",
         message: "runtime adapter workspace not yet visible; cleanup retry pending",

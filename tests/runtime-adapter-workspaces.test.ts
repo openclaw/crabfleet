@@ -402,21 +402,13 @@ test("superseded stop uses retained registration after the session row moves on"
 });
 
 test("superseded pending creates retry DELETE until the old workspace becomes visible", async () => {
-  const requests: Array<{
-    url: string;
-    method: string | undefined;
-    idempotencyKey: string | null;
-  }> = [];
+  const requests: Array<{ url: string; method: string | undefined }> = [];
   let responseStatus = 404;
   const service = new RuntimeAdapterWorkspaceLifecycle(
     runtimeEnv(),
     dependencies({
       async fetch(input, init) {
-        requests.push({
-          url: input,
-          method: init.method,
-          idempotencyKey: new Headers(init.headers).get("idempotency-key"),
-        });
+        requests.push({ url: input, method: init.method });
         return responseStatus === 204
           ? new Response(null, { status: 204 })
           : Response.json({ message: "workspace not found" }, { status: responseStatus });
@@ -427,16 +419,9 @@ test("superseded pending creates retry DELETE until the old workspace becomes vi
     profile: "default",
     controlPlane: "https://adapter.example.test/",
   };
-  const deleteIdempotencyKey = "runtime-cleanup-delete:test-operation";
 
   assert.deepEqual(
-    await service.stopForSession(
-      "IS-42",
-      "workspace-superseded",
-      registration,
-      true,
-      deleteIdempotencyKey,
-    ),
+    await service.stopForSession("IS-42", "workspace-superseded", registration, true),
     {
       status: "stopping",
       message: "runtime adapter workspace not yet visible; cleanup retry pending",
@@ -445,13 +430,7 @@ test("superseded pending creates retry DELETE until the old workspace becomes vi
 
   responseStatus = 204;
   assert.deepEqual(
-    await service.stopForSession(
-      "IS-42",
-      "workspace-superseded",
-      registration,
-      true,
-      deleteIdempotencyKey,
-    ),
+    await service.stopForSession("IS-42", "workspace-superseded", registration, true),
     {
       status: "stopped",
       message: "runtime adapter workspace released",
@@ -461,33 +440,32 @@ test("superseded pending creates retry DELETE until the old workspace becomes vi
     {
       url: "https://adapter.example.test/v1/workspaces/workspace-superseded",
       method: "DELETE",
-      idempotencyKey: deleteIdempotencyKey,
     },
     {
       url: "https://adapter.example.test/v1/workspaces/workspace-superseded",
       method: "DELETE",
-      idempotencyKey: deleteIdempotencyKey,
     },
   ]);
 });
 
-test("superseded cleanup replays a committed DELETE after response loss", async () => {
-  const deleteIdempotencyKey = "runtime-cleanup-delete:committed-operation";
-  const committedDeletes = new Set<string>();
-  let loseFirstResponse = true;
+test("create-pending cleanup recovers a lost DELETE response from the terminal tombstone", async () => {
+  let attempt = 0;
   const service = new RuntimeAdapterWorkspaceLifecycle(
     runtimeEnv(),
     dependencies({
-      async fetch(_input, init) {
-        const key = new Headers(init.headers).get("idempotency-key");
-        assert.equal(key, deleteIdempotencyKey);
-        if (loseFirstResponse) {
-          loseFirstResponse = false;
-          committedDeletes.add(key);
+      async fetch() {
+        attempt += 1;
+        if (attempt === 1) {
+          return Response.json({ message: "workspace not found" }, { status: 404 });
+        }
+        if (attempt === 2) {
           throw new Error("response lost after delete commit");
         }
-        assert.equal(committedDeletes.has(key), true);
-        return new Response(null, { status: 204 });
+        return Response.json({
+          id: "workspace-superseded",
+          status: "stopped",
+          message: "workspace stopped",
+        });
       },
     }),
   );
@@ -496,27 +474,22 @@ test("superseded cleanup replays a committed DELETE after response loss", async 
     controlPlane: "https://adapter.example.test/",
   };
 
+  assert.deepEqual(
+    await service.stopForSession("IS-42", "workspace-superseded", registration, true),
+    {
+      status: "stopping",
+      message: "runtime adapter workspace not yet visible; cleanup retry pending",
+    },
+  );
   await assert.rejects(
-    service.stopForSession(
-      "IS-42",
-      "workspace-superseded",
-      registration,
-      true,
-      deleteIdempotencyKey,
-    ),
+    service.stopForSession("IS-42", "workspace-superseded", registration, true),
     /response lost after delete commit/u,
   );
   assert.deepEqual(
-    await service.stopForSession(
-      "IS-42",
-      "workspace-superseded",
-      registration,
-      true,
-      deleteIdempotencyKey,
-    ),
+    await service.stopForSession("IS-42", "workspace-superseded", registration, true),
     {
       status: "stopped",
-      message: "runtime adapter workspace released",
+      message: "workspace stopped",
     },
   );
 });
