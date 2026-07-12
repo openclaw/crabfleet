@@ -107,6 +107,36 @@ export async function activeSandboxCredentialPolicyGeneration(
   return generation;
 }
 
+export async function incompleteSandboxCredentialPolicyGeneration(
+  env: RuntimeEnv,
+  sessionId: string,
+  sandboxId: string,
+): Promise<string | null> {
+  const rows = await database(env)
+    .selectFrom("interactive_session_credential_policies")
+    .select(["lookup_id", "state", "registration_generation", "registration_claim"])
+    .where("session_id", "=", sessionId)
+    .where("sandbox_id", "=", sandboxId)
+    .execute();
+  const expected = new Set(sandboxLookupIds(env, sandboxId));
+  const generation = rows[0]?.registration_generation;
+  if (
+    rows.length === 0 ||
+    rows.length >= expected.size ||
+    !isCurrentCredentialPolicyGeneration(generation) ||
+    rows.some(
+      (row) =>
+        !expected.has(row.lookup_id) ||
+        row.state !== "active" ||
+        row.registration_generation !== generation ||
+        row.registration_claim !== null,
+    )
+  ) {
+    return null;
+  }
+  return generation;
+}
+
 export async function sandboxCredentialPolicyHasDurableOwner(
   env: RuntimeEnv,
   lookupId: string,
@@ -512,6 +542,7 @@ export function sandboxCredentialPolicyRegistrationQueries(
         registration_generation = excluded.registration_generation,
         registration_claim = excluded.registration_claim,
         registration_claim_expires_at = excluded.registration_claim_expires_at,
+        repair_generation = NULL,
         rollback_policies_json = NULL,
         last_error = NULL,
         cleanup_claim = NULL,
@@ -677,6 +708,146 @@ export async function recordSandboxCredentialPolicyRollback(
     .where(sandboxCredentialPolicyOwnerCondition(sessionId, sandboxId, ownershipFence, now))
     .executeTakeFirst();
   return Number(recorded.numUpdatedRows ?? 0n) === 1;
+}
+
+export async function stageSandboxCredentialPolicyReferenceRepair(
+  env: RuntimeEnv,
+  sessionId: string,
+  sandboxId: string,
+  registration: SandboxCredentialPolicyRegistration,
+  repairGeneration: string,
+  ownershipFence: SandboxCredentialPolicyOwnershipFence,
+): Promise<boolean> {
+  const now = Date.now();
+  const staged = await sql<{ repair_generation: string }>`
+    UPDATE interactive_session_credential_policy_registrations
+    SET repair_generation = ${repairGeneration}, updated_at = ${now}
+    WHERE session_id = ${sessionId}
+      AND sandbox_id = ${sandboxId}
+      AND state = 'registering'
+      AND registration_generation = ${registration.generation}
+      AND registration_claim = ${registration.claim}
+      AND registration_claim_expires_at > ${now}
+      AND ${sandboxCredentialPolicyOwnerCondition(sessionId, sandboxId, ownershipFence, now)}
+    RETURNING repair_generation
+  `.execute(database(env));
+  return staged.rows.length === 1 && staged.rows[0]?.repair_generation === repairGeneration;
+}
+
+export async function repairSandboxCredentialPolicyReferences(
+  env: RuntimeEnv,
+  sessionId: string,
+  sandboxId: string,
+  registration: SandboxCredentialPolicyRegistration,
+  repairGeneration: string,
+  ownershipFence: SandboxCredentialPolicyOwnershipFence,
+  registrationExpiresAt: number,
+): Promise<boolean> {
+  const now = Date.now();
+  const repairAuthorized = sql<boolean>`
+    EXISTS (
+      SELECT 1
+      FROM interactive_session_credential_policy_registrations AS staged
+      WHERE staged.session_id = ${sessionId}
+        AND staged.sandbox_id = ${sandboxId}
+        AND staged.state = 'registering'
+        AND staged.registration_generation = ${registration.generation}
+        AND staged.registration_claim = ${registration.claim}
+        AND staged.registration_claim_expires_at = ${registrationExpiresAt}
+        AND staged.registration_claim_expires_at > ${now}
+        AND staged.repair_generation = ${repairGeneration}
+    )
+    AND EXISTS (
+      SELECT 1
+      FROM interactive_session_credential_policies AS surviving
+      WHERE surviving.session_id = ${sessionId}
+        AND surviving.sandbox_id = ${sandboxId}
+        AND surviving.state = 'active'
+        AND surviving.registration_generation = ${repairGeneration}
+        AND surviving.registration_claim IS NULL
+    )
+    AND NOT EXISTS (
+      SELECT 1
+      FROM interactive_session_credential_policies AS conflicting
+      WHERE conflicting.session_id = ${sessionId}
+        AND conflicting.sandbox_id = ${sandboxId}
+        AND (
+          conflicting.lookup_id NOT IN (${sql.join(registration.lookupIds)})
+          OR conflicting.registration_generation != ${repairGeneration}
+          OR NOT (
+            (
+              conflicting.state = 'active'
+              AND conflicting.registration_claim IS NULL
+            )
+            OR (
+              conflicting.state = 'registering'
+              AND conflicting.registration_claim = ${registration.claim}
+              AND conflicting.registration_claim_expires_at = ${registrationExpiresAt}
+            )
+          )
+        )
+    )
+    AND ${sandboxCredentialPolicyOwnerCondition(sessionId, sandboxId, ownershipFence, now)}
+  `;
+  const inserts = registration.lookupIds.map(
+    (lookupId) => sql`
+      INSERT INTO interactive_session_credential_policies (
+        session_id,
+        sandbox_id,
+        lookup_id,
+        state,
+        registration_generation,
+        registration_claim,
+        registration_claim_expires_at,
+        attempt_count,
+        last_attempt_at,
+        last_error,
+        cleanup_claim,
+        cleanup_claim_expires_at,
+        created_at,
+        updated_at
+      )
+      SELECT
+        ${sessionId},
+        ${sandboxId},
+        ${lookupId},
+        'registering',
+        ${repairGeneration},
+        ${registration.claim},
+        ${registrationExpiresAt},
+        0,
+        NULL,
+        NULL,
+        NULL,
+        NULL,
+        ${now},
+        ${now}
+      WHERE ${repairAuthorized}
+      ON CONFLICT(session_id, sandbox_id, lookup_id) DO NOTHING
+    `,
+  );
+  const promotions = registration.lookupIds.map(
+    (lookupId) => sql`
+      UPDATE interactive_session_credential_policies
+      SET
+        state = 'active',
+        registration_claim = NULL,
+        registration_claim_expires_at = NULL,
+        updated_at = ${now}
+      WHERE session_id = ${sessionId}
+        AND sandbox_id = ${sandboxId}
+        AND lookup_id = ${lookupId}
+        AND state = 'registering'
+        AND registration_generation = ${repairGeneration}
+        AND registration_claim = ${registration.claim}
+        AND registration_claim_expires_at = ${registrationExpiresAt}
+        AND ${repairAuthorized}
+    `,
+  );
+  await executeBatch(env, [...inserts, ...promotions]);
+  return (
+    (await activeSandboxCredentialPolicyGeneration(env, sessionId, sandboxId)) === repairGeneration
+  );
 }
 
 export async function deferSandboxCredentialPolicyRollback(

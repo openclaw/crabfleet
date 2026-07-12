@@ -10,16 +10,22 @@ import {
   claimSandboxCredentialPolicyRegistrationRecovery,
   currentSandboxCredentialPolicyGeneration,
   finishSandboxCredentialPolicyRegistration,
+  incompleteSandboxCredentialPolicyGeneration,
   recordSandboxCredentialPolicyRefs,
   recordSandboxCredentialPolicyRollback,
+  repairSandboxCredentialPolicyReferences,
   renewSandboxCredentialPolicyRegistration,
   sandboxCredentialPolicyRegistrationQueries,
   sandboxLookupIds,
+  stageSandboxCredentialPolicyReferenceRepair,
   type SandboxCredentialPolicyOwnershipFence,
 } from "../src/worker/sandbox-credential-policy-repository.ts";
+import { captureSandboxCredentialPolicyRollback } from "../src/worker/sandbox-credential-policy-rollback.ts";
+import { credentialPolicyRegistrationAccepted } from "../src/credential-policy-fence.ts";
 import { database } from "../src/worker/database.ts";
 import type { RuntimeEnv } from "../src/worker/env.ts";
 import type { SandboxCredentialPolicyRegistration } from "../src/worker/session-control-policy.ts";
+import type { StoredSandboxCredentialPolicy } from "../src/worker/session-control-policy.ts";
 
 type PreparedStatement = {
   sql: string;
@@ -159,6 +165,12 @@ function credentialPolicyDatabase(options: { applyMigrations?: boolean } = {}): 
     db.exec(
       readFileSync(
         new URL("../migrations/0035_credential_policy_registration_rollback.sql", import.meta.url),
+        "utf8",
+      ),
+    );
+    db.exec(
+      readFileSync(
+        new URL("../migrations/0036_credential_policy_lookup_repair.sql", import.meta.url),
         "utf8",
       ),
     );
@@ -910,6 +922,240 @@ test("active credential-policy generation requires every exact lookup row", asyn
   rows[1] = { ...rows[1]!, registration_generation: "generation:test-1" };
   rows[1] = { ...rows[1]!, registration_claim: "stale" };
   assert.equal(await activeSandboxCredentialPolicyGeneration(env, "IS-42", "sandbox-1"), null);
+});
+
+test("credential refresh repairs an incomplete legacy lookup set before rotation", async () => {
+  const sqlite = credentialPolicyDatabase();
+  sqlite
+    .prepare(`
+      DELETE FROM interactive_session_credential_policies
+      WHERE session_id = 'IS-42' AND sandbox_id = 'sandbox-1' AND lookup_id = 'do-1'
+    `)
+    .run();
+  const now = Date.now();
+  const policies = new Map<string, StoredSandboxCredentialPolicy>([
+    [
+      "sandbox-1",
+      {
+        generation: "generation:existing",
+        registrationClaim: "registration:legacy",
+        registrationExpiresAt: now + 30_000,
+        policy: {
+          allowedHosts: [],
+          githubCredentialSource: "none",
+          githubRepo: "openclaw/crabfleet",
+          owner: "operator",
+          sandboxId: "sandbox-1",
+          sessionId: "IS-42",
+        },
+      },
+    ],
+  ]);
+  const stub = {
+    async fetch(input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
+      const url = new URL(String(input));
+      const egress = url.pathname.match(/^\/api\/session-control\/egress\/([^/]+)$/);
+      if (egress && (!init?.method || init.method === "GET")) {
+        const current = policies.get(decodeURIComponent(egress[1] ?? ""));
+        return current
+          ? Response.json(current.policy, {
+              headers: { "x-crabfleet-policy-generation": current.generation },
+            })
+          : Response.json({ error: "not found" }, { status: 404 });
+      }
+      if (url.pathname === "/api/session-control/register" && init?.method === "POST") {
+        const incoming = JSON.parse(String(init.body)) as StoredSandboxCredentialPolicy;
+        const current = policies.get(incoming.policy.sandboxId);
+        if (!credentialPolicyRegistrationAccepted(current, undefined, incoming, Date.now())) {
+          return Response.json({ error: "conflict" }, { status: 409 });
+        }
+        policies.set(incoming.policy.sandboxId, incoming);
+        return Response.json({ ok: true });
+      }
+      return Response.json({ error: "not found" }, { status: 404 });
+    },
+  };
+  const env = sqliteRuntimeEnv(sqlite);
+
+  assert.equal(await activeSandboxCredentialPolicyGeneration(env, "IS-42", "sandbox-1"), null);
+  assert.equal(
+    await incompleteSandboxCredentialPolicyGeneration(env, "IS-42", "sandbox-1"),
+    "generation:existing",
+  );
+  await assert.rejects(
+    captureSandboxCredentialPolicyRollback(stub, sandboxLookupIds(env, "sandbox-1"), null, "IS-42"),
+    /no durable rollback owner/,
+  );
+
+  const registration = await beginSandboxCredentialPolicyRegistration(
+    env,
+    "IS-42",
+    "sandbox-1",
+    ownershipFence,
+  );
+  const repairGeneration = await incompleteSandboxCredentialPolicyGeneration(
+    env,
+    "IS-42",
+    "sandbox-1",
+  );
+  assert.equal(repairGeneration, "generation:existing");
+  let registrationExpiresAt = await renewSandboxCredentialPolicyRegistration(
+    env,
+    "IS-42",
+    "sandbox-1",
+    registration,
+    ownershipFence,
+  );
+  assert.ok(registrationExpiresAt);
+  assert.equal(
+    await stageSandboxCredentialPolicyReferenceRepair(
+      env,
+      "IS-42",
+      "sandbox-1",
+      registration,
+      repairGeneration,
+      ownershipFence,
+    ),
+    true,
+  );
+  const legacyUpdate = sqlite
+    .prepare(`
+      UPDATE interactive_session_credential_policies
+      SET
+        state = 'registering',
+        registration_claim = 'registration:legacy-race',
+        registration_claim_expires_at = ?
+      WHERE session_id = 'IS-42' AND sandbox_id = 'sandbox-1'
+    `)
+    .run(Number.MAX_SAFE_INTEGER);
+  assert.equal(legacyUpdate.changes, 0);
+  const legacyInsert = sqlite
+    .prepare(`
+      INSERT INTO interactive_session_credential_policies (
+        session_id,
+        sandbox_id,
+        lookup_id,
+        state,
+        registration_generation,
+        registration_claim,
+        registration_claim_expires_at,
+        created_at,
+        updated_at
+      ) VALUES (
+        'IS-42',
+        'sandbox-1',
+        'do-1',
+        'registering',
+        'generation:existing',
+        'registration:legacy-race',
+        ?,
+        1,
+        1
+      )
+    `)
+    .run(Number.MAX_SAFE_INTEGER);
+  assert.equal(legacyInsert.changes, 0);
+  assert.equal(
+    (
+      await stub.fetch("https://crabfleet.internal/api/session-control/register", {
+        method: "POST",
+        body: JSON.stringify({
+          generation: repairGeneration,
+          registrationClaim: registration.claim,
+          registrationExpiresAt: registrationExpiresAt - 1,
+          policy: { ...policies.get("sandbox-1")!.policy, sandboxId: "do-1" },
+        } satisfies StoredSandboxCredentialPolicy),
+      })
+    ).ok,
+    true,
+  );
+  registrationExpiresAt = await renewSandboxCredentialPolicyRegistration(
+    env,
+    "IS-42",
+    "sandbox-1",
+    registration,
+    ownershipFence,
+  );
+  assert.ok(registrationExpiresAt);
+  assert.equal(
+    await repairSandboxCredentialPolicyReferences(
+      env,
+      "IS-42",
+      "sandbox-1",
+      registration,
+      repairGeneration,
+      ownershipFence,
+      registrationExpiresAt,
+    ),
+    true,
+  );
+  const rollback = await captureSandboxCredentialPolicyRollback(
+    stub,
+    registration.lookupIds,
+    repairGeneration,
+    "IS-42",
+  );
+  assert.equal(rollback.length, 2);
+  assert.equal(
+    await recordSandboxCredentialPolicyRollback(
+      env,
+      "IS-42",
+      "sandbox-1",
+      registration,
+      rollback,
+      ownershipFence,
+    ),
+    true,
+  );
+  for (const lookupId of registration.lookupIds) {
+    registrationExpiresAt = await renewSandboxCredentialPolicyRegistration(
+      env,
+      "IS-42",
+      "sandbox-1",
+      registration,
+      ownershipFence,
+    );
+    assert.ok(registrationExpiresAt);
+    assert.equal(
+      (
+        await stub.fetch("https://crabfleet.internal/api/session-control/register", {
+          method: "POST",
+          body: JSON.stringify({
+            generation: registration.generation,
+            registrationClaim: registration.claim,
+            registrationExpiresAt,
+            policy: { ...policies.get(lookupId)!.policy, sandboxId: lookupId },
+          } satisfies StoredSandboxCredentialPolicy),
+        })
+      ).ok,
+      true,
+    );
+  }
+  assert.equal(
+    await finishSandboxCredentialPolicyRegistration(
+      env,
+      "IS-42",
+      "sandbox-1",
+      registration,
+      ownershipFence,
+    ),
+    true,
+  );
+
+  const generation = await activeSandboxCredentialPolicyGeneration(env, "IS-42", "sandbox-1");
+  assert.match(generation ?? "", /^generation:/);
+  assert.notEqual(generation, "generation:existing");
+  assert.deepEqual(
+    [...policies.entries()].map(([lookupId, policy]) => ({
+      lookupId,
+      generation: policy.generation,
+      sandboxId: policy.policy.sandboxId,
+    })),
+    [
+      { lookupId: "sandbox-1", generation, sandboxId: "sandbox-1" },
+      { lookupId: "do-1", generation, sandboxId: "do-1" },
+    ],
+  );
 });
 
 test("recording active policy refs promotes then upserts every lookup under one fence", async () => {

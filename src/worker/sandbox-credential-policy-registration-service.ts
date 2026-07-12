@@ -8,9 +8,12 @@ import {
   deferSandboxCredentialPolicyRollback,
   existingSandboxCredentialPolicyGeneration,
   finishSandboxCredentialPolicyRegistration,
+  incompleteSandboxCredentialPolicyGeneration,
   recordSandboxCredentialPolicyRefs,
   recordSandboxCredentialPolicyRollback,
+  repairSandboxCredentialPolicyReferences,
   renewSandboxCredentialPolicyRegistration,
+  stageSandboxCredentialPolicyReferenceRepair,
   standaloneSandboxPolicyExpiresAt,
   type SandboxCredentialPolicyOwnershipFence,
 } from "./sandbox-credential-policy-repository.ts";
@@ -34,6 +37,110 @@ import type {
 import type { InteractiveSession } from "./session-model.ts";
 
 type RestoreSandboxCredentialPolicyRollback = typeof restoreSandboxCredentialPolicyRollback;
+
+async function repairIncompleteSandboxCredentialPolicyLookupSet(
+  env: RuntimeEnv,
+  stub: Pick<DurableObjectStub, "fetch">,
+  sessionId: string,
+  sandboxId: string,
+  registration: SandboxCredentialPolicyRegistration,
+  ownershipFence: SandboxCredentialPolicyOwnershipFence,
+): Promise<string | null> {
+  const repairGeneration = await incompleteSandboxCredentialPolicyGeneration(
+    env,
+    sessionId,
+    sandboxId,
+  );
+  if (!repairGeneration) return null;
+  const records = await Promise.all(
+    registration.lookupIds.map(async (lookupId) => {
+      const response = await stub.fetch(
+        `https://crabfleet.internal/api/session-control/egress/${encodeURIComponent(lookupId)}`,
+      );
+      if (response.status === 404) return null;
+      if (!response.ok) throw new Error("sandbox credential policy repair snapshot failed");
+      const generation = response.headers.get("x-crabfleet-policy-generation");
+      const policy = (await response.json()) as SandboxCredentialPolicy;
+      if (
+        generation !== repairGeneration ||
+        policy.sessionId !== sessionId ||
+        policy.sandboxId !== lookupId
+      ) {
+        throw new Error("sandbox credential policy repair snapshot is inconsistent");
+      }
+      return { generation, policy };
+    }),
+  );
+  const surviving = records.filter((record) => record !== null);
+  if (surviving.length === 0) return null;
+  const source = surviving[0]!.policy;
+  if (
+    surviving.some(
+      (record) =>
+        JSON.stringify({ ...record.policy, sandboxId: "" }) !==
+        JSON.stringify({ ...source, sandboxId: "" }),
+    )
+  ) {
+    throw new Error("sandbox credential policy repair snapshot is inconsistent");
+  }
+  let registrationExpiresAt = await renewSandboxCredentialPolicyRegistration(
+    env,
+    sessionId,
+    sandboxId,
+    registration,
+    ownershipFence,
+  );
+  if (
+    !registrationExpiresAt ||
+    !(await stageSandboxCredentialPolicyReferenceRepair(
+      env,
+      sessionId,
+      sandboxId,
+      registration,
+      repairGeneration,
+      ownershipFence,
+    ))
+  ) {
+    throw new Error("sandbox credential policy registration claim was revoked");
+  }
+  const repairExpiresAt = registrationExpiresAt - 1;
+  for (const [index, lookupId] of registration.lookupIds.entries()) {
+    if (records[index]) continue;
+    const response = await stub.fetch("https://crabfleet.internal/api/session-control/register", {
+      method: "POST",
+      body: JSON.stringify({
+        generation: repairGeneration,
+        registrationClaim: registration.claim,
+        registrationExpiresAt: repairExpiresAt,
+        policy: { ...source, sandboxId: lookupId },
+      } satisfies StoredSandboxCredentialPolicy),
+      headers: { "content-type": "application/json" },
+    });
+    if (!response.ok) throw new Error("sandbox credential policy lookup repair failed");
+  }
+  registrationExpiresAt = await renewSandboxCredentialPolicyRegistration(
+    env,
+    sessionId,
+    sandboxId,
+    registration,
+    ownershipFence,
+  );
+  if (
+    !registrationExpiresAt ||
+    !(await repairSandboxCredentialPolicyReferences(
+      env,
+      sessionId,
+      sandboxId,
+      registration,
+      repairGeneration,
+      ownershipFence,
+      registrationExpiresAt,
+    ))
+  ) {
+    throw new Error("sandbox credential policy lookup references were not repaired");
+  }
+  return repairGeneration;
+}
 
 export async function restoreSandboxCredentialPolicyRollbackIfOwned(
   env: RuntimeEnv,
@@ -81,11 +188,16 @@ export async function registerSandboxCredentialPolicy(
   let rollbackJson: string | null = null;
   let registrationWriteStarted = false;
   try {
-    const activeGeneration = await activeSandboxCredentialPolicyGeneration(
-      env,
-      session.id,
-      sandboxId,
-    );
+    const activeGeneration =
+      (await activeSandboxCredentialPolicyGeneration(env, session.id, sandboxId)) ??
+      (await repairIncompleteSandboxCredentialPolicyLookupSet(
+        env,
+        stub,
+        session.id,
+        sandboxId,
+        registration,
+        ownershipFence,
+      ));
     const rollback = await captureSandboxCredentialPolicyRollback(
       stub,
       registration.lookupIds,
