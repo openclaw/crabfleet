@@ -499,6 +499,39 @@ struct PrivateMacShareTests {
   }
 
   @Test @MainActor
+  func desktopPublicationReplacementUsesSanitizedHostIDAcrossIdentityChanges() async throws {
+    let first = desktopIdentity(name: "shared-host", address: "100.64.12.48")
+    let second = TailnetIdentity(
+      tailnetName: first.tailnetName,
+      loginName: first.loginName,
+      dnsName: first.dnsName,
+      hostName: "Shared Host Renamed",
+      ipv4Address: "100.64.12.49",
+      userID: first.userID
+    )
+    #expect(first != second)
+    #expect(
+      CrabfleetDesktopRegistration.hostID(identity: first)
+        == CrabfleetDesktopRegistration.hostID(identity: second)
+    )
+    let registration = MutableIdentityDesktopRegistration()
+    let lifecycle = DesktopHostRegistrationLifecycle(registration: registration)
+
+    try await lifecycle.publish(identity: first, port: 5_901)
+    try await lifecycle.publish(identity: second, port: 5_901)
+    try await lifecycle.removePublishedIdentities()
+
+    #expect(
+      await registration.events
+        == [
+          .register(first.ipv4Address),
+          .register(second.ipv4Address),
+          .unregister(second.ipv4Address, "token:\(second.ipv4Address)"),
+        ]
+    )
+  }
+
+  @Test @MainActor
   func failedDesktopRemovalSurvivesLaterIdentityChanges() async throws {
     let first = desktopIdentity(name: "first-host", address: "100.64.12.41")
     let second = desktopIdentity(name: "second-host", address: "100.64.12.42")
@@ -1862,6 +1895,32 @@ private actor RecordingDesktopRegistration: DesktopHostRegistering {
     guard let remaining = failures[identity], remaining > 0 else { return false }
     failures[identity] = remaining - 1
     return true
+  }
+}
+
+private actor MutableIdentityDesktopRegistration: DesktopHostRegistering {
+  enum Event: Equatable {
+    case register(String)
+    case unregister(String, String?)
+  }
+
+  private(set) var events: [Event] = []
+
+  func register(
+    identity: TailnetIdentity,
+    port: UInt16,
+    publicationID: String
+  ) async throws -> String? {
+    events.append(.register(identity.ipv4Address))
+    return "token:\(identity.ipv4Address)"
+  }
+
+  func recover(identity: TailnetIdentity, publicationID: String) async throws -> String? {
+    nil
+  }
+
+  func unregister(identity: TailnetIdentity, ownershipToken: String?) async throws {
+    events.append(.unregister(identity.ipv4Address, ownershipToken))
   }
 }
 

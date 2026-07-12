@@ -40,12 +40,14 @@ final class PrivateMacShareStopCoordinator {
 final class DesktopHostRegistrationLifecycle {
   private struct RegistrationTarget: Equatable {
     let identity: TailnetIdentity
+    let hostID: String
     let port: UInt16
     let publicationID: String
   }
 
   private struct PublishedRegistration: Equatable {
     let identity: TailnetIdentity
+    let hostID: String
     let ownershipToken: String?
   }
 
@@ -64,12 +66,14 @@ final class DesktopHostRegistrationLifecycle {
   }
 
   func publish(identity: TailnetIdentity, port: UInt16) async throws {
+    let hostID = CrabfleetDesktopRegistration.hostID(identity: identity)
     let target =
       uncertainRegistrations.first {
-        $0.identity == identity && $0.port == port
+        $0.hostID == hostID && $0.port == port
       }
       ?? RegistrationTarget(
         identity: identity,
+        hostID: hostID,
         port: port,
         publicationID: createPublicationID()
       )
@@ -100,14 +104,15 @@ final class DesktopHostRegistrationLifecycle {
       throw error
     }
     uncertainRegistrations.removeAll { $0 == target }
-    if let publishedRegistration, publishedRegistration.identity != identity,
+    if let publishedRegistration, publishedRegistration.hostID != hostID,
       !pendingRemovals.contains(publishedRegistration)
     {
       pendingRemovals.append(publishedRegistration)
     }
-    pendingRemovals.removeAll { $0.identity == identity }
+    pendingRemovals.removeAll { $0.hostID == hostID }
     publishedRegistration = PublishedRegistration(
       identity: identity,
+      hostID: hostID,
       ownershipToken: ownershipToken
     )
   }
@@ -124,6 +129,7 @@ final class DesktopHostRegistrationLifecycle {
         if let ownershipToken {
           let recovered = PublishedRegistration(
             identity: target.identity,
+            hostID: target.hostID,
             ownershipToken: ownershipToken
           )
           if !pendingRemovals.contains(recovered) {
