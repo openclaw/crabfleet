@@ -131,6 +131,7 @@ final class MacRemoteInputController: RemoteInputForwarding, @unchecked Sendable
 
   func releaseAllInput() {
     eventQueue.async { [self] in
+      guard !pressedKeysyms.isEmpty || previousButtonMask != 0 else { return }
       hasPendingRelease = true
       flushPendingRelease()
     }

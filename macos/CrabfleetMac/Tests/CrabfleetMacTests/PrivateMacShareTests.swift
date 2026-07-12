@@ -1138,6 +1138,31 @@ struct PrivateMacShareTests {
   }
 
   @Test
+  func emptyInputReleaseDoesNotRetainController() async {
+    let trust = AccessibilityTrust(granted: false)
+    var controller: MacRemoteInputController? = MacRemoteInputController(
+      descriptor: CapturedDisplayDescriptor(
+        displayID: 1,
+        displayBounds: CGRect(x: 0, y: 0, width: 100, height: 100),
+        frameWidth: 100,
+        frameHeight: 100,
+        sourcePixelWidth: 100,
+        sourcePixelHeight: 100
+      ),
+      accessibilityGranted: { trust.isGranted() },
+      pendingReleaseRetryDelay: .milliseconds(10)
+    )
+    weak var retainedController = controller
+    let checksBeforeRelease = trust.checkCount
+
+    controller?.releaseAllInput()
+    controller = nil
+
+    #expect(await waitUntilAsync { retainedController == nil })
+    #expect(trust.checkCount == checksBeforeRelease)
+  }
+
+  @Test
   func decodesX11UnicodeKeysymsForMacInput() {
     #expect(MacRemoteInputController.unicodeScalar(for: 0x0100_03BB) == "λ")
     #expect(MacRemoteInputController.unicodeScalar(for: 0x0101_F980) == "🦀")
