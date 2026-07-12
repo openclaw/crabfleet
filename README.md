@@ -101,13 +101,14 @@ const framedRunnerPtyUrl = new URL(runnerPtyUrl);
 framedRunnerPtyUrl.searchParams.set("runnerProtocol", "cfr1-framed-io-v1");
 const terminal = new WebSocket(framedRunnerPtyUrl);
 terminal.binaryType = "arraybuffer";
+const inputDecoder = new TextDecoder("utf-8", { fatal: true });
 
 pty.onData((output) => terminal.send(encodeCfr1Output(output)));
 terminal.onmessage = ({ data }) => {
   const input = decodeCfr1Input(data);
   if (!input) return;
   try {
-    pty.write(new TextDecoder().decode(input.payload));
+    pty.write(inputDecoder.decode(input.payload));
     terminal.send(encodeCfr1Ack(input.inputId, true));
   } catch {
     terminal.send(encodeCfr1Ack(input.inputId, false));

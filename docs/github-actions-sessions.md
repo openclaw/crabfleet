@@ -286,7 +286,8 @@ const runnerPtyUrl = process.env.CRABFLEET_RUNNER_PTY_URL;
 if (!runnerPtyUrl) throw new Error("CRABFLEET_RUNNER_PTY_URL is required");
 
 const magic = new Uint8Array([0x43, 0x46, 0x52, 0x31]); // CFR1
-const decoder = new TextDecoder();
+const inputIdDecoder = new TextDecoder();
+const inputDecoder = new TextDecoder("utf-8", { fatal: true });
 const encoder = new TextEncoder();
 const framedRunnerPtyUrl = new URL(runnerPtyUrl);
 framedRunnerPtyUrl.searchParams.set("runnerProtocol", "cfr1-framed-io-v1");
@@ -315,8 +316,8 @@ function acceptInput(data) {
   const input = decodeInput(data);
   if (!input) return;
   try {
-    // A successful node-pty write is this adapter's PTY acceptance point.
-    pty.write(decoder.decode(input.payload));
+    // Reject frames that split or contain invalid UTF-8 instead of corrupting PTY input.
+    pty.write(inputDecoder.decode(input.payload));
     terminal.send(encodeAck(input.inputId, true));
   } catch {
     terminal.send(encodeAck(input.inputId, false));
@@ -334,7 +335,7 @@ function decodeInput(data) {
   if (!inputIdBytes || inputIdBytes > 80 || 6 + inputIdBytes > frame.byteLength) {
     return null;
   }
-  const inputId = decoder.decode(frame.subarray(6, 6 + inputIdBytes));
+  const inputId = inputIdDecoder.decode(frame.subarray(6, 6 + inputIdBytes));
   if (!/^[A-Za-z0-9_-]+$/.test(inputId)) return null;
   return {
     inputId,
@@ -375,7 +376,9 @@ terminal.addEventListener("error", () => {
 Set `CRABFLEET_RUNNER_PTY_URL` to the `runnerPtyUrl` returned by registration.
 For a PTY API with an asynchronous write callback or promise, await that
 acceptance signal before sending `encodeAck(..., true)`. Do not acknowledge when
-the WebSocket merely queues the input frame.
+the WebSocket merely queues the input frame. This Node adapter also requires each
+input frame to contain complete, valid UTF-8; invalid or split sequences receive
+a negative acknowledgement and must be resent on valid boundaries.
 
 The protocol query is consumed during connection setup and is not forwarded as
 terminal data. There is no capability message or mode transition after the
