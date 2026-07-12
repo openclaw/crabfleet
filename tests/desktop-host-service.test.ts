@@ -74,6 +74,7 @@ test("desktop hosts are canonicalized and isolated to their stable owner", async
       port: 5901,
     },
     desktopHostTokenOwnershipMode,
+    "publication-1",
   );
   const host = registration.host;
 
@@ -100,6 +101,7 @@ test("desktop hosts are canonicalized and isolated to their stable owner", async
       port: host.port,
     },
     desktopHostTokenOwnershipMode,
+    "publication-2",
   );
   const updated = updatedRegistration.host;
   assert.equal(updated.createdAt, 42);
@@ -128,6 +130,7 @@ test("stale desktop host cleanup cannot remove a newer registration", async () =
     "studio",
     input,
     desktopHostTokenOwnershipMode,
+    "old-publication",
   );
   const newRegistration = await service.register(
     alice,
@@ -137,6 +140,7 @@ test("stale desktop host cleanup cannot remove a newer registration", async () =
       name: "New Studio Process",
     },
     desktopHostTokenOwnershipMode,
+    "new-publication",
   );
 
   await service.remove(alice, "studio", oldRegistration.ownershipToken);
@@ -175,6 +179,7 @@ test("tokenless cleanup removes only migrated legacy desktop hosts", async () =>
       port: 5901,
     },
     desktopHostTokenOwnershipMode,
+    "new-studio-publication",
   );
 
   await service.remove(alice, legacy.id, null);
@@ -209,6 +214,49 @@ test("ambiguous desktop recovery cannot acquire a newer publication", async () =
   assert.deepEqual(await service.recover(alice, "studio", "publication-b"), {
     ownershipToken: newer.ownershipToken,
   });
+  assert.deepEqual(await service.recover(bob, "studio", "publication-b"), {
+    ownershipToken: null,
+  });
+  for (const publicationID of [null, undefined, "", "bad publication", "a".repeat(201)]) {
+    await assert.rejects(
+      service.recover(alice, "studio", publicationID),
+      /desktop host publication id/,
+    );
+  }
+});
+
+test("token ownership requires a valid publication before minting or persistence", async () => {
+  const store = new MemoryDesktopHostStore();
+  let tokenCreations = 0;
+  const service = new DesktopHostService(
+    store,
+    () => 42,
+    () => {
+      tokenCreations += 1;
+      return "ownership-token";
+    },
+  );
+  const input = { name: "Studio", address: "100.64.1.2", port: 5901 };
+
+  for (const publicationID of [
+    null,
+    undefined,
+    "",
+    "bad publication",
+    "bad\npublication",
+    "a".repeat(201),
+  ]) {
+    await assert.rejects(
+      service.register(alice, "studio", input, desktopHostTokenOwnershipMode, publicationID),
+      /desktop host publication id/,
+    );
+  }
+  assert.equal(tokenCreations, 0);
+  assert.equal(store.rows.size, 0);
+
+  const legacy = await service.register(alice, "studio", input, "legacy", "ignored publication");
+  assert.equal(legacy.ownershipToken, undefined);
+  assert.equal(store.rows.get(`${alice.subject}:studio`)?.publicationID, "");
 });
 
 test("legacy clients register tokenless rows they can remove after a server upgrade", async () => {

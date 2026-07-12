@@ -62,12 +62,12 @@ export class DesktopHostService {
     const address = tailscaleIPv4(input.address);
     const port = desktopHostPort(input.port);
     const now = this.now();
-    const ownershipToken =
-      ownershipMode === desktopHostTokenOwnershipMode ? this.createOwnershipToken() : "";
     const publicationID =
       ownershipMode === desktopHostTokenOwnershipMode
-        ? optionalDesktopHostPublicationID(rawPublicationID)
+        ? desktopHostPublicationID(rawPublicationID)
         : "";
+    const ownershipToken =
+      ownershipMode === desktopHostTokenOwnershipMode ? this.createOwnershipToken() : "";
     const host: DesktopHostRow = {
       ownerSubject: tenantSubject(user),
       id,
@@ -207,9 +207,4 @@ function desktopHostPublicationID(value: unknown): string {
     throw badRequest("desktop host publication id is required");
   }
   return value;
-}
-
-function optionalDesktopHostPublicationID(value: unknown): string {
-  if (value === null || value === undefined) return "";
-  return desktopHostPublicationID(value);
 }
