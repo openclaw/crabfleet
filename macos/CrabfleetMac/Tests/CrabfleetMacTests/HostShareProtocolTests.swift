@@ -179,6 +179,33 @@ struct HostClipboardBridgeTests {
     bridge.detach()
   }
 
+  @Test
+  func ignoresNonTextChangesButForwardsEmptyText() async throws {
+    let pasteboard = NSPasteboard(name: .init("CrabfleetMacTests.\(UUID().uuidString)"))
+    pasteboard.clearContents()
+    pasteboard.setString("initial", forType: .string)
+
+    let recorder = PushRecorder()
+    let bridge = HostClipboardBridge(pasteboard: pasteboard, pollingInterval: 0.01)
+    bridge.attach { recorder.append($0) }
+    try await Task.sleep(for: .milliseconds(30))
+
+    let item = NSPasteboardItem()
+    item.setData(Data([0x00, 0x01]), forType: .init("com.example.crabfleet.binary"))
+    pasteboard.clearContents()
+    pasteboard.writeObjects([item])
+    bridge.poll()
+    #expect(recorder.values.isEmpty)
+    #expect(bridge.currentText() == "initial")
+
+    pasteboard.clearContents()
+    pasteboard.setString("", forType: .string)
+    bridge.poll()
+    #expect(recorder.values == [""])
+    #expect(bridge.currentText() == "")
+    bridge.detach()
+  }
+
   private func waitUntil(
     timeout: Duration = .seconds(1),
     condition: @escaping @MainActor () -> Bool

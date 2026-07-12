@@ -100,6 +100,7 @@ final class HostClipboardBridge: HostClipboardSyncing, @unchecked Sendable {
     let previous = withLock { lastObservedChangeCount }
     guard changeCount != previous else { return }
 
+    let types = pasteboard.types ?? []
     let text = pasteboard.string(forType: .string)
     guard pasteboard.changeCount == changeCount else { return }
 
@@ -107,13 +108,15 @@ final class HostClipboardBridge: HostClipboardSyncing, @unchecked Sendable {
     var pushHandler: (@Sendable (String) -> Void)?
     withLock {
       lastObservedChangeCount = changeCount
-      lastKnownText = text
 
       if suppressedChangeCount == changeCount {
         suppressedChangeCount = nil
         return
       }
-      let outboundText = text ?? ""
+      guard let outboundText = text ?? (types.isEmpty ? "" : nil) else {
+        return
+      }
+      lastKnownText = text
       guard outboundText.utf8.count <= RFBWire.maximumClipboardBytes else {
         return
       }

@@ -23,14 +23,24 @@ struct FleetModelsTests {
         "HOME": "/Users/tester",
         "PATH": "/tmp/untrusted",
         "SSH_AUTH_SOCK": "/tmp/agent.sock",
+        "HTTPS_PROXY": "http://proxy.example.test:8443",
+        "NO_PROXY": "localhost,.example.test",
+        "SSL_CERT_FILE": "/etc/ssl/custom-ca.pem",
+        "SSL_CERT_DIR": "/etc/ssl/custom-certs",
         "CRABFLEET_SESSION_COOKIE": "secret",
+        "NODE_TLS_REJECT_UNAUTHORIZED": "0",
       ]
     )
 
     #expect(environment["HOME"] == "/Users/tester")
     #expect(environment["PATH"] == SubprocessEnvironment.safePath)
     #expect(environment["SSH_AUTH_SOCK"] == "/tmp/agent.sock")
+    #expect(environment["HTTPS_PROXY"] == "http://proxy.example.test:8443")
+    #expect(environment["NO_PROXY"] == "localhost,.example.test")
+    #expect(environment["SSL_CERT_FILE"] == "/etc/ssl/custom-ca.pem")
+    #expect(environment["SSL_CERT_DIR"] == "/etc/ssl/custom-certs")
     #expect(environment["CRABFLEET_SESSION_COOKIE"] == nil)
+    #expect(environment["NODE_TLS_REJECT_UNAUTHORIZED"] == nil)
   }
 
   @Test

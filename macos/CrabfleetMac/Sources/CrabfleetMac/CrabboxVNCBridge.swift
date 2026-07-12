@@ -36,6 +36,24 @@ private struct CrabboxVNCHandoff: Decodable {
 }
 
 final class CrabboxVNCBridge: @unchecked Sendable {
+  private static let networkEnvironmentKeys = [
+    "ALL_PROXY",
+    "HTTP_PROXY",
+    "HTTPS_PROXY",
+    "NO_PROXY",
+    "all_proxy",
+    "http_proxy",
+    "https_proxy",
+    "no_proxy",
+    "AWS_CA_BUNDLE",
+    "CURL_CA_BUNDLE",
+    "GIT_SSL_CAINFO",
+    "NODE_EXTRA_CA_CERTS",
+    "REQUESTS_CA_BUNDLE",
+    "SSL_CERT_DIR",
+    "SSL_CERT_FILE",
+  ]
+
   let request: VNCConnectionRequest
 
   private let process: Process
@@ -242,7 +260,11 @@ final class CrabboxVNCBridge: @unchecked Sendable {
   }
 
   static func commandEnvironment(from source: [String: String]) -> [String: String] {
-    SubprocessEnvironment.minimal(from: source, includeSSHAgent: true)
+    SubprocessEnvironment.minimal(
+      from: source,
+      includeSSHAgent: true,
+      additionalInheritedKeys: networkEnvironmentKeys
+    )
   }
 
   private static func drain(_ pipe: Pipe) {

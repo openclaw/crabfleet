@@ -14,6 +14,7 @@ enum SubprocessEnvironment {
   static func minimal(
     from source: [String: String],
     includeSSHAgent: Bool = false,
+    additionalInheritedKeys: [String] = [],
     overrides: [String: String] = [:]
   ) -> [String: String] {
     var environment = Dictionary(
@@ -21,6 +22,9 @@ enum SubprocessEnvironment {
         source[key].map { (key, $0) }
       }
     )
+    for key in additionalInheritedKeys {
+      environment[key] = source[key]
+    }
     environment["PATH"] = safePath
     if includeSSHAgent, let socket = source["SSH_AUTH_SOCK"], !socket.isEmpty {
       environment["SSH_AUTH_SOCK"] = socket
