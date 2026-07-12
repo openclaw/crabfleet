@@ -254,6 +254,9 @@ func (c *Client) SendInput(ctx context.Context, payload []byte) error {
 }
 
 func (c *Client) SendInputConfirmed(ctx context.Context, payload []byte) error {
+	if len(payload) == 0 {
+		return nil
+	}
 	if !c.supportsInputAcknowledgement {
 		return c.SendInput(ctx, payload)
 	}

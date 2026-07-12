@@ -334,6 +334,13 @@ func TestSendInputConfirmedReturnsControlRevocation(t *testing.T) {
 	}
 }
 
+func TestSendInputConfirmedReturnsImmediatelyForEmptyInput(t *testing.T) {
+	client := &Client{supportsInputAcknowledgement: true}
+	if err := client.SendInputConfirmed(context.Background(), nil); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestSendInputConfirmedFallsBackWithoutServerCapability(t *testing.T) {
 	receivedInput := make(chan []byte, 1)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
