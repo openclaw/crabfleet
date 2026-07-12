@@ -2,11 +2,11 @@
 
 ## Unreleased
 
-- Harden session lifecycle concurrency with atomic card claims and grant revocation, revision-fenced GitHub Actions updates, rollback-safe creation evidence, preserved Sandbox attachment state, and retained registration data for superseded runtime workspace cleanup.
-- Make terminal input delivery durable across multiplex subscribers, acknowledge one-shot CLI input only after the Worker accepts it, and send attributed commands atomically to prevent interleaving.
-- Reject unroutable runtime profile identifiers, malformed encoded session routes, and lossy or invalid-Unicode JSON event values; also reconcile browser history drawers and focus on back/forward navigation.
-- Harden Share This Mac against stale starts and responses, self-connections, leaked subprocess environment, stalled Tailscale and RFB handshakes, stale desktop registrations, stuck remote input, and lost clipboard clears or reused values.
-- Harden the bundled RoyalVNCKit fork across ARD and UltraVNC authentication, Unicode keysyms, Tight and ZRLE parsing, bounded zlib streams, color-depth transitions, CopyRect, EOF handling, reconnects, credential cancellation, and cursor channel preservation.
+- Harden session lifecycle concurrency with atomic card claims and grant revocation, revision-fenced GitHub Actions updates, R2-clean reservation rollback, preserved Sandbox attachment state, and retained registration data for superseded runtime workspace cleanup.
+- Make terminal input delivery durable across multiplex subscribers, negotiate one-shot input acknowledgements across rolling upgrades, keep configured HTTP timeouts from canceling established sockets, and send attributed commands atomically to prevent interleaving.
+- Preserve bounded opaque profile IDs for fixed runtime adapters while rejecting unroutable profile-routed identifiers, malformed encoded session routes, and lossy or invalid-Unicode JSON event values; also reconcile browser history drawers and focus on back/forward navigation.
+- Harden Share This Mac against stale starts and responses, self-connections, leaked subprocess environment, stalled Tailscale and RFB handshakes, stale desktop registrations, dropped auto-starts, stuck remote input, and destructive non-text clipboard changes while preserving proxy and custom-CA networking.
+- Harden the bundled RoyalVNCKit fork across ARD and UltraVNC authentication, composed Unicode keysyms with legacy ASCII scalars, Tight and ZRLE parsing, bounded zlib streams, color-depth transitions, CopyRect, EOF handling, reconnects, credential cancellation, and cursor channel preservation.
 - Pin Crabbox coordinator deployment to an immutable source revision and verify downloaded Crabbox release archives before image assembly.
 - Add a VideoToolbox-backed Open H.264 RFB pipeline for Share This Mac with up to 60 fps capture, adaptive 1.5–30 Mbit/s rate control, automatic Tight/JPEG fallback, live stream stats, larger resize limits, and a persisted host-enforced view-only mode.
 - Exchange full UTF-8 clipboard text between the native Mac viewer, Share This Mac hosts, and any Extended Clipboard-capable VNC server by completing the RoyalVNCKit fork's extension stub, keeping Latin-1 cut text as the fallback and dropping malformed extension bodies without tearing down the connection.
