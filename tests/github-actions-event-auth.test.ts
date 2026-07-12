@@ -3,7 +3,10 @@ import test from "node:test";
 
 import { sha256 } from "../src/worker/crypto.ts";
 import type { RuntimeEnv } from "../src/worker/env.ts";
-import { GitHubActionsApplication } from "../src/worker/github-actions-application.ts";
+import {
+  GitHubActionsApplication,
+  structuredEventRequestMaxBytes,
+} from "../src/worker/github-actions-application.ts";
 import {
   handleServiceSessionRoute,
   type ServiceSessionRouteDependencies,
@@ -143,6 +146,34 @@ test("agent event endpoint rejects a wrong-session token before persistence", as
     handleServiceSessionRoute(request, new URL(request.url), routeDependencies(application)),
     hasStatus(401),
   );
+  assert.deepEqual(subject.credentialReads, ["IS-target"]);
+  assert.equal(subject.mutationCount(), 0);
+});
+
+test("authenticated event ingress rejects oversized chunked bodies before persistence", async () => {
+  const subject = await authEnvironment();
+  const application = new GitHubActionsApplication(subject.env, { audit: async () => undefined });
+  const body = new ReadableStream<Uint8Array>({
+    start(controller) {
+      controller.enqueue(new Uint8Array(structuredEventRequestMaxBytes));
+      controller.enqueue(new Uint8Array([123]));
+      controller.close();
+    },
+  });
+  const request = new Request(
+    "https://fleet.example/api/agent/interactive-sessions/IS-target/events",
+    {
+      method: "POST",
+      headers: {
+        authorization: "Bearer target-token",
+        "content-type": "application/json",
+      },
+      body,
+      duplex: "half",
+    } as RequestInit & { duplex: "half" },
+  );
+
+  await assert.rejects(application.appendStructuredEvent(request, "IS-target"), hasStatus(413));
   assert.deepEqual(subject.credentialReads, ["IS-target"]);
   assert.equal(subject.mutationCount(), 0);
 });

@@ -61,6 +61,49 @@ export async function readJson<T>(request: Request): Promise<T> {
   }
 }
 
+export async function readBoundedJson<T>(request: Request, maximumBytes: number): Promise<T> {
+  if (!Number.isSafeInteger(maximumBytes) || maximumBytes < 1) {
+    throw new Error("invalid JSON body limit");
+  }
+  const declaredLength = request.headers.get("content-length");
+  if (/^\d+$/u.test(declaredLength ?? "") && Number(declaredLength) > maximumBytes) {
+    await request.body?.cancel().catch(() => undefined);
+    throw payloadTooLarge(`request body must be at most ${maximumBytes} bytes`);
+  }
+  if (!request.body) throw badRequest("invalid json");
+
+  const reader = request.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      if (!value?.byteLength) continue;
+      total += value.byteLength;
+      if (total > maximumBytes) {
+        await reader.cancel().catch(() => undefined);
+        throw payloadTooLarge(`request body must be at most ${maximumBytes} bytes`);
+      }
+      chunks.push(value);
+    }
+  } finally {
+    reader.releaseLock();
+  }
+
+  const bytes = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    bytes.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  try {
+    return JSON.parse(new TextDecoder().decode(bytes)) as T;
+  } catch {
+    throw badRequest("invalid json");
+  }
+}
+
 export function bearerToken(request: Request): string {
   const authorization = request.headers.get("authorization") ?? "";
   const [scheme, token] = authorization.split(/\s+/, 2);

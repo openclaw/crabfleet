@@ -17,7 +17,7 @@ import {
 import { actor } from "./auth.ts";
 import { sha256 } from "./crypto.ts";
 import type { RuntimeEnv } from "./env.ts";
-import { badRequest, readJson, serviceUnavailable } from "./http.ts";
+import { badRequest, readBoundedJson, readJson, serviceUnavailable } from "./http.ts";
 import type { User } from "./models.ts";
 import {
   AgentSessionAuthenticator,
@@ -42,6 +42,8 @@ const services = {
   authenticator: Symbol("authenticator"),
   repository: Symbol("repository"),
 };
+
+export const structuredEventRequestMaxBytes = 96 * 1024;
 
 export type GitHubActionsApplicationDependencies = {
   audit(user: User, message: string, now: number): Promise<void>;
@@ -116,7 +118,7 @@ export class GitHubActionsApplication {
 
   async appendStructuredEvent(request: Request, id: string) {
     const { user } = await this.authenticate(request, id);
-    const input = await readJson<unknown>(request);
+    const input = await readBoundedJson<unknown>(request, structuredEventRequestMaxBytes);
     if (!input || typeof input !== "object" || Array.isArray(input)) {
       throw badRequest("event body must be a JSON object");
     }
