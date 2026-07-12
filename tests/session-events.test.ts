@@ -161,6 +161,7 @@ test("structured session events canonicalize additive payloads and replay idempo
         githubToken: "dummy",
       },
       note: "request failed: authorization: Bearer credential-one",
+      pemAssignment: `private_key=${privateKeyOne}`,
       storageKey: "dummy",
       tokenSamples: [
         githubCredentialOne,
@@ -191,6 +192,7 @@ test("structured session events canonicalize additive payloads and replay idempo
         githubToken: "fake",
       },
       note: "request failed: authorization: Bearer credential-two",
+      pemAssignment: `private_key=${privateKeyTwo}`,
       storageKey: "fake",
       tokenSamples: [
         githubCredentialTwo,
@@ -219,6 +221,7 @@ test("structured session events canonicalize additive payloads and replay idempo
       credentials: "[redacted]",
       connectionString: "[redacted]",
       note: "request failed: [credential]",
+      pemAssignment: "private_key=[credential]",
       secretAccessKey: "[redacted]",
       secretKey: "[redacted]",
       sharedAccessKey: "[redacted]",
@@ -236,8 +239,8 @@ test("structured session events canonicalize additive payloads and replay idempo
     createdAt: 123,
   });
   assert.deepEqual(persistedPayloads, [
-    '{"accessKeyId":"[redacted]","accountKey":"[redacted]","additiveField":["kept"],"connectionString":"[redacted]","credentials":"[redacted]","note":"request failed: [credential]","secretAccessKey":"[redacted]","secretKey":"[redacted]","sharedAccessKey":"[redacted]","storageKey":"[redacted]","target":{"a":1,"z":true},"tokenSamples":["[credential]","[credential]","[credential]","[credential]","[credential]"],"version":2}',
-    '{"accessKeyId":"[redacted]","accountKey":"[redacted]","additiveField":["kept"],"connectionString":"[redacted]","credentials":"[redacted]","note":"request failed: [credential]","secretAccessKey":"[redacted]","secretKey":"[redacted]","sharedAccessKey":"[redacted]","storageKey":"[redacted]","target":{"a":1,"z":true},"tokenSamples":["[credential]","[credential]","[credential]","[credential]","[credential]"],"version":2}',
+    '{"accessKeyId":"[redacted]","accountKey":"[redacted]","additiveField":["kept"],"connectionString":"[redacted]","credentials":"[redacted]","note":"request failed: [credential]","pemAssignment":"private_key=[credential]","secretAccessKey":"[redacted]","secretKey":"[redacted]","sharedAccessKey":"[redacted]","storageKey":"[redacted]","target":{"a":1,"z":true},"tokenSamples":["[credential]","[credential]","[credential]","[credential]","[credential]"],"version":2}',
+    '{"accessKeyId":"[redacted]","accountKey":"[redacted]","additiveField":["kept"],"connectionString":"[redacted]","credentials":"[redacted]","note":"request failed: [credential]","pemAssignment":"private_key=[credential]","secretAccessKey":"[redacted]","secretKey":"[redacted]","sharedAccessKey":"[redacted]","storageKey":"[redacted]","target":{"a":1,"z":true},"tokenSamples":["[credential]","[credential]","[credential]","[credential]","[credential]"],"version":2}',
   ]);
   assert.deepEqual(invalidations, ["IS-1", "IS-1"]);
   assert.deepEqual(archives, ["IS-1", "IS-1"]);
