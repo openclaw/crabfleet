@@ -86,9 +86,9 @@ final class CrabfleetApplicationDelegate: NSObject, NSApplicationDelegate {
     guard terminationTask == nil else { return .terminateLater }
     terminationTask = Task { [weak self] in
       guard let self else { return }
-      await shareController.stopAndWaitForCleanup()
+      let cleanupCanRecover = await shareController.stopAndWaitForCleanup()
       terminationTask = nil
-      replyToTerminationRequest(true)
+      replyToTerminationRequest(cleanupCanRecover)
     }
     return .terminateLater
   }

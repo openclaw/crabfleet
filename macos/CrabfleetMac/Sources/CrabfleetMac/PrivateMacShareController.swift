@@ -37,71 +37,210 @@ final class PrivateMacShareStopCoordinator {
 }
 
 @MainActor
+protocol DesktopHostRegistrationStateStoring: AnyObject {
+  func load() throws -> Data?
+  func save(_ data: Data?) throws
+}
+
+enum DesktopHostRegistrationPersistenceError: LocalizedError {
+  case unreadableState
+  case writeFailed
+
+  var errorDescription: String? {
+    switch self {
+    case .unreadableState:
+      "The saved desktop publication recovery state is unreadable."
+    case .writeFailed:
+      "The desktop publication recovery state could not be saved."
+    }
+  }
+}
+
+@MainActor
+final class UserDefaultsDesktopHostRegistrationStateStore:
+  DesktopHostRegistrationStateStoring
+{
+  nonisolated static let defaultKey = "org.openclaw.crabfleet.share.desktop-publications"
+
+  private let defaults: UserDefaults
+  private let key: String
+
+  init(defaults: UserDefaults = .standard, key: String = defaultKey) {
+    self.defaults = defaults
+    self.key = key
+  }
+
+  func load() throws -> Data? {
+    defaults.data(forKey: key)
+  }
+
+  func save(_ data: Data?) throws {
+    if let data {
+      defaults.set(data, forKey: key)
+    } else {
+      defaults.removeObject(forKey: key)
+    }
+    guard defaults.synchronize() else {
+      throw DesktopHostRegistrationPersistenceError.writeFailed
+    }
+  }
+}
+
+@MainActor
 final class DesktopHostRegistrationLifecycle {
-  private struct RegistrationTarget: Equatable {
-    let identity: TailnetIdentity
+  private struct PersistedIdentity: Codable, Equatable {
+    let tailnetName: String
+    let loginName: String
+    let dnsName: String
+    let hostName: String
+    let ipv4Address: String
+    let userID: Int64
+
+    init(_ identity: TailnetIdentity) {
+      tailnetName = identity.tailnetName
+      loginName = identity.loginName
+      dnsName = identity.dnsName
+      hostName = identity.hostName
+      ipv4Address = identity.ipv4Address
+      userID = identity.userID
+    }
+
+    var identity: TailnetIdentity {
+      TailnetIdentity(
+        tailnetName: tailnetName,
+        loginName: loginName,
+        dnsName: dnsName,
+        hostName: hostName,
+        ipv4Address: ipv4Address,
+        userID: userID
+      )
+    }
+  }
+
+  private struct RegistrationTarget: Codable, Equatable {
+    private let persistedIdentity: PersistedIdentity
     let hostID: String
     let port: UInt16
     let publicationID: String
+
+    init(identity: TailnetIdentity, hostID: String, port: UInt16, publicationID: String) {
+      persistedIdentity = PersistedIdentity(identity)
+      self.hostID = hostID
+      self.port = port
+      self.publicationID = publicationID
+    }
+
+    var identity: TailnetIdentity { persistedIdentity.identity }
   }
 
   private struct PublishedRegistration: Equatable {
     let identity: TailnetIdentity
     let hostID: String
+    let publicationID: String
     let ownershipToken: String?
+    let usesLegacyCleanup: Bool
+  }
+
+  private struct PersistedPublishedRegistration: Codable {
+    private let persistedIdentity: PersistedIdentity
+    let hostID: String
+    let publicationID: String
+    let usesLegacyCleanup: Bool
+
+    init(_ registration: PublishedRegistration) {
+      persistedIdentity = PersistedIdentity(registration.identity)
+      hostID = registration.hostID
+      publicationID = registration.publicationID
+      usesLegacyCleanup = registration.usesLegacyCleanup
+    }
+
+    var registration: PublishedRegistration {
+      PublishedRegistration(
+        identity: persistedIdentity.identity,
+        hostID: hostID,
+        publicationID: publicationID,
+        ownershipToken: nil,
+        usesLegacyCleanup: usesLegacyCleanup
+      )
+    }
+  }
+
+  private struct PersistedState: Codable {
+    var uncertainRegistrations: [RegistrationTarget]
+    var publishedRegistration: PersistedPublishedRegistration?
+    var pendingRemovals: [PersistedPublishedRegistration]
   }
 
   private let coordinator: DesktopHostRegistrationCoordinator
   private let createPublicationID: () -> String
+  private let stateStore: (any DesktopHostRegistrationStateStoring)?
   private var publishedRegistration: PublishedRegistration?
   private var uncertainRegistrations: [RegistrationTarget] = []
   private var pendingRemovals: [PublishedRegistration] = []
+  private var stateLoadError: Error?
+  private var lastPersistenceError: Error?
 
   init(
     registration: any DesktopHostRegistering,
-    createPublicationID: @escaping () -> String = { UUID().uuidString }
+    createPublicationID: @escaping () -> String = { UUID().uuidString },
+    stateStore: (any DesktopHostRegistrationStateStoring)? = nil
   ) {
     coordinator = DesktopHostRegistrationCoordinator(registration: registration)
     self.createPublicationID = createPublicationID
+    self.stateStore = stateStore
+    guard let stateStore else { return }
+    do {
+      guard let data = try stateStore.load() else { return }
+      let state = try JSONDecoder().decode(PersistedState.self, from: data)
+      uncertainRegistrations = state.uncertainRegistrations
+      publishedRegistration = state.publishedRegistration?.registration
+      pendingRemovals = state.pendingRemovals.map(\.registration)
+    } catch {
+      stateLoadError = DesktopHostRegistrationPersistenceError.unreadableState
+    }
+  }
+
+  var hasDurableRecoveryState: Bool {
+    stateStore != nil && stateLoadError == nil && lastPersistenceError == nil
+      && (!uncertainRegistrations.isEmpty || publishedRegistration != nil
+        || !pendingRemovals.isEmpty)
   }
 
   func publish(identity: TailnetIdentity, port: UInt16) async throws {
+    try ensureStateIsReadable()
     let hostID = CrabfleetDesktopRegistration.hostID(identity: identity)
+    let existingTarget = uncertainRegistrations.first {
+      $0.hostID == hostID && $0.identity == identity && $0.port == port
+    }
     let target =
-      uncertainRegistrations.first {
-        $0.hostID == hostID && $0.identity == identity && $0.port == port
-      }
+      existingTarget
       ?? RegistrationTarget(
         identity: identity,
         hostID: hostID,
         port: port,
         publicationID: createPublicationID()
       )
+    if existingTarget == nil {
+      uncertainRegistrations.append(target)
+      try persistState()
+    }
     let ownershipToken: String?
-    do {
-      if uncertainRegistrations.contains(target) {
-        ownershipToken = try await coordinator.recover(
-          identity: identity,
-          publicationID: target.publicationID
-        )
-        guard ownershipToken != nil else {
-          uncertainRegistrations.removeAll { $0 == target }
-          throw DesktopHostRegistrationSupersededError()
-        }
-      } else {
-        ownershipToken = try await coordinator.register(
-          identity: identity,
-          port: port,
-          publicationID: target.publicationID
-        )
+    if existingTarget != nil {
+      ownershipToken = try await coordinator.recover(
+        identity: identity,
+        publicationID: target.publicationID
+      )
+      guard ownershipToken != nil else {
+        uncertainRegistrations.removeAll { $0 == target }
+        try persistState()
+        throw DesktopHostRegistrationSupersededError()
       }
-    } catch {
-      if error is DesktopHostRegistrationResultUncertainError,
-        !uncertainRegistrations.contains(target)
-      {
-        uncertainRegistrations.append(target)
-      }
-      throw error
+    } else {
+      ownershipToken = try await coordinator.register(
+        identity: identity,
+        port: port,
+        publicationID: target.publicationID
+      )
     }
     uncertainRegistrations.removeAll { $0 == target }
     if let publishedRegistration, publishedRegistration.hostID != hostID,
@@ -113,11 +252,15 @@ final class DesktopHostRegistrationLifecycle {
     publishedRegistration = PublishedRegistration(
       identity: identity,
       hostID: hostID,
-      ownershipToken: ownershipToken
+      publicationID: target.publicationID,
+      ownershipToken: ownershipToken,
+      usesLegacyCleanup: ownershipToken == nil
     )
+    try persistState()
   }
 
   func removePublishedIdentities() async throws {
+    try ensureStateIsReadable()
     var firstError: Error?
     let uncertainRegistrations = uncertainRegistrations
     for target in uncertainRegistrations {
@@ -130,13 +273,16 @@ final class DesktopHostRegistrationLifecycle {
           let recovered = PublishedRegistration(
             identity: target.identity,
             hostID: target.hostID,
-            ownershipToken: ownershipToken
+            publicationID: target.publicationID,
+            ownershipToken: ownershipToken,
+            usesLegacyCleanup: false
           )
           if !pendingRemovals.contains(recovered) {
             pendingRemovals.append(recovered)
           }
         }
         self.uncertainRegistrations.removeAll { $0 == target }
+        try persistState()
       } catch {
         firstError = firstError ?? error
       }
@@ -147,21 +293,66 @@ final class DesktopHostRegistrationLifecycle {
         pendingRemovals.append(publishedRegistration)
       }
       self.publishedRegistration = nil
+      try persistState()
     }
 
     let removals = pendingRemovals
     for removal in removals {
+      var ownershipToken = removal.ownershipToken
+      if ownershipToken == nil, !removal.usesLegacyCleanup {
+        do {
+          guard
+            let recoveredToken = try await coordinator.recover(
+              identity: removal.identity,
+              publicationID: removal.publicationID
+            )
+          else {
+            pendingRemovals.removeAll { $0 == removal }
+            try persistState()
+            continue
+          }
+          ownershipToken = recoveredToken
+        } catch {
+          firstError = firstError ?? error
+          continue
+        }
+      }
       do {
         try await coordinator.unregister(
           identity: removal.identity,
-          ownershipToken: removal.ownershipToken
+          ownershipToken: ownershipToken
         )
         pendingRemovals.removeAll { $0 == removal }
+        try persistState()
       } catch {
         firstError = firstError ?? error
       }
     }
     if let firstError { throw firstError }
+  }
+
+  private func ensureStateIsReadable() throws {
+    if let stateLoadError { throw stateLoadError }
+  }
+
+  private func persistState() throws {
+    guard let stateStore else { return }
+    let state = PersistedState(
+      uncertainRegistrations: uncertainRegistrations,
+      publishedRegistration: publishedRegistration.map(PersistedPublishedRegistration.init),
+      pendingRemovals: pendingRemovals.map(PersistedPublishedRegistration.init)
+    )
+    let hasState =
+      !state.uncertainRegistrations.isEmpty || state.publishedRegistration != nil
+      || !state.pendingRemovals.isEmpty
+    do {
+      let data = hasState ? try JSONEncoder().encode(state) : nil
+      try stateStore.save(data)
+      lastPersistenceError = nil
+    } catch {
+      lastPersistenceError = error
+      throw error
+    }
   }
 }
 
@@ -275,9 +466,15 @@ final class PrivateMacShareController: ObservableObject {
     defaults: UserDefaults = .standard
   ) {
     self.desktopRegistration = desktopRegistration
+    let registrationStateStore = UserDefaultsDesktopHostRegistrationStateStore(defaults: defaults)
     desktopRegistrationLifecycle =
       registrationLifecycle
-      ?? desktopRegistration.map { DesktopHostRegistrationLifecycle(registration: $0) }
+      ?? desktopRegistration.map {
+        DesktopHostRegistrationLifecycle(
+          registration: $0,
+          stateStore: registrationStateStore
+        )
+      }
     self.defaults = defaults
     registryPhase = desktopRegistration == nil ? .notConfigured : .notPublished
     let savedDisplayID = defaults.object(forKey: Self.selectedDisplayDefaultsKey) as? Int
@@ -491,17 +688,19 @@ final class PrivateMacShareController: ObservableObject {
     phase = .idle
   }
 
-  func stopAndWaitForCleanup() async {
+  func stopAndWaitForCleanup() async -> Bool {
     await stop()
     let cleanupTask = registrationTask
     await cleanupTask?.value
-    guard let desktopRegistrationLifecycle else { return }
+    guard let desktopRegistrationLifecycle else { return true }
     do {
       try await desktopRegistrationLifecycle.removePublishedIdentities()
       registryPhase = .notPublished
+      return true
     } catch {
       registryPhase = .failed(error.localizedDescription)
       notice = error.localizedDescription
+      return desktopRegistrationLifecycle.hasDurableRecoveryState
     }
   }
 

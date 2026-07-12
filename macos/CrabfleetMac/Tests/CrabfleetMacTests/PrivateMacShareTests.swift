@@ -686,7 +686,7 @@ struct PrivateMacShareTests {
       defaults: defaults
     )
 
-    await controller.stopAndWaitForCleanup()
+    #expect(await controller.stopAndWaitForCleanup())
 
     #expect(controller.registryPhase == .notPublished)
     #expect(
@@ -753,6 +753,130 @@ struct PrivateMacShareTests {
     #expect(await waitUntilAsync { replies == [true] })
     #expect(controller.phase == .idle)
     #expect(controller.registryPhase == .notPublished)
+  }
+
+  @Test @MainActor
+  func applicationTerminationRetainsAmbiguousPublicationForRelaunchCleanup() async throws {
+    let identity = desktopIdentity(name: "durable-cleanup", address: "100.64.12.54")
+    let registration = RecoverableAmbiguousDesktopRegistration(recoverFailures: 1)
+    let suiteName = "CrabfleetMacTests.\(UUID().uuidString)"
+    let defaults = try #require(UserDefaults(suiteName: suiteName))
+    defer { defaults.removePersistentDomain(forName: suiteName) }
+    let stateStore = UserDefaultsDesktopHostRegistrationStateStore(defaults: defaults)
+    let lifecycle = DesktopHostRegistrationLifecycle(
+      registration: registration,
+      createPublicationID: { "durable-publication" },
+      stateStore: stateStore
+    )
+    await #expect(throws: DesktopHostRegistrationResultUncertainError.self) {
+      try await lifecycle.publish(identity: identity, port: 5_901)
+    }
+    let controller = PrivateMacShareController(
+      runner: StaticTailscaleRunner(output: statusJSON()),
+      desktopRegistration: registration,
+      registrationLifecycle: lifecycle,
+      defaults: defaults
+    )
+    var replies: [Bool] = []
+    let delegate = CrabfleetApplicationDelegate(
+      shareController: controller,
+      replyToTerminationRequest: { replies.append($0) }
+    )
+
+    #expect(delegate.applicationShouldTerminate(NSApplication.shared) == .terminateLater)
+    #expect(await waitUntilAsync { replies == [true] })
+    if case .failed = controller.registryPhase {
+      // Expected: cleanup failed, but its exact retry identity was persisted.
+    } else {
+      Issue.record("expected failed registry cleanup state")
+    }
+
+    let reloadedLifecycle = DesktopHostRegistrationLifecycle(
+      registration: registration,
+      stateStore: stateStore
+    )
+    try await reloadedLifecycle.removePublishedIdentities()
+
+    #expect(
+      await registration.events
+        == [
+          .register("durable-publication"),
+          .recover("durable-publication"),
+          .recover("durable-publication"),
+          .unregister("recovered:durable-publication"),
+        ]
+    )
+  }
+
+  @Test @MainActor
+  func persistedCleanupRecoversOwnershipWithoutStoringTheToken() async throws {
+    let identity = desktopIdentity(name: "persisted-cleanup", address: "100.64.12.56")
+    let registration = IdentityAwareAmbiguousDesktopRegistration(uncertainPublicationIDs: [])
+    let stateStore = ToggleDesktopRegistrationStateStore()
+    do {
+      let lifecycle = DesktopHostRegistrationLifecycle(
+        registration: registration,
+        createPublicationID: { "persisted-publication" },
+        stateStore: stateStore
+      )
+      try await lifecycle.publish(identity: identity, port: 5_901)
+    }
+
+    let persistedText = String(decoding: try #require(stateStore.data), as: UTF8.self)
+    #expect(!persistedText.contains("token:persisted-publication"))
+
+    let reloadedLifecycle = DesktopHostRegistrationLifecycle(
+      registration: registration,
+      stateStore: stateStore
+    )
+    try await reloadedLifecycle.removePublishedIdentities()
+
+    #expect(
+      await registration.events
+        == [
+          .register(identity.ipv4Address, 5_901, "persisted-publication"),
+          .recover(identity.ipv4Address, "persisted-publication"),
+          .unregister(identity.ipv4Address, "recovered:persisted-publication"),
+        ]
+    )
+  }
+
+  @Test @MainActor
+  func applicationTerminationIsCancelledWhenRecoveryStateCannotBeSaved() async throws {
+    let identity = desktopIdentity(name: "unsaved-cleanup", address: "100.64.12.55")
+    let registration = RecoverableAmbiguousDesktopRegistration()
+    let stateStore = ToggleDesktopRegistrationStateStore()
+    let lifecycle = DesktopHostRegistrationLifecycle(
+      registration: registration,
+      createPublicationID: { "unsaved-publication" },
+      stateStore: stateStore
+    )
+    await #expect(throws: DesktopHostRegistrationResultUncertainError.self) {
+      try await lifecycle.publish(identity: identity, port: 5_901)
+    }
+    stateStore.failsWrites = true
+    let defaults = try #require(
+      UserDefaults(suiteName: "CrabfleetMacTests.\(UUID().uuidString)")
+    )
+    let controller = PrivateMacShareController(
+      runner: StaticTailscaleRunner(output: statusJSON()),
+      desktopRegistration: registration,
+      registrationLifecycle: lifecycle,
+      defaults: defaults
+    )
+    var replies: [Bool] = []
+    let delegate = CrabfleetApplicationDelegate(
+      shareController: controller,
+      replyToTerminationRequest: { replies.append($0) }
+    )
+
+    #expect(delegate.applicationShouldTerminate(NSApplication.shared) == .terminateLater)
+    #expect(await waitUntilAsync { replies == [false] })
+    if case .failed = controller.registryPhase {
+      // Expected: the application remains alive because recovery was not persisted.
+    } else {
+      Issue.record("expected failed registry persistence state")
+    }
   }
 
   @Test
@@ -2048,6 +2172,62 @@ private actor AmbiguousDesktopRegistration: DesktopHostRegistering {
 
   func unregister(identity: TailnetIdentity, ownershipToken: String?) async throws {
     events.append(.unregister(identity.dnsName, ownershipToken))
+  }
+}
+
+private actor RecoverableAmbiguousDesktopRegistration: DesktopHostRegistering {
+  enum Event: Equatable {
+    case register(String)
+    case recover(String)
+    case unregister(String)
+  }
+
+  private var recoverFailures: Int
+  private(set) var events: [Event] = []
+
+  init(recoverFailures: Int = 0) {
+    self.recoverFailures = recoverFailures
+  }
+
+  func register(
+    identity: TailnetIdentity,
+    port: UInt16,
+    publicationID: String
+  ) async throws -> String? {
+    events.append(.register(publicationID))
+    throw DesktopHostRegistrationResultUncertainError(message: "response lost")
+  }
+
+  func recover(identity: TailnetIdentity, publicationID: String) async throws -> String? {
+    events.append(.recover(publicationID))
+    if recoverFailures > 0 {
+      recoverFailures -= 1
+      throw DesktopRegistrationTestError.failed
+    }
+    return "recovered:\(publicationID)"
+  }
+
+  func unregister(identity: TailnetIdentity, ownershipToken: String?) async throws {
+    events.append(.unregister(ownershipToken ?? ""))
+  }
+}
+
+@MainActor
+private final class ToggleDesktopRegistrationStateStore:
+  DesktopHostRegistrationStateStoring
+{
+  var failsWrites = false
+  private(set) var data: Data?
+
+  func load() throws -> Data? {
+    data
+  }
+
+  func save(_ data: Data?) throws {
+    if failsWrites {
+      throw DesktopRegistrationTestError.failed
+    }
+    self.data = data
   }
 }
 
