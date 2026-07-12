@@ -18,6 +18,7 @@ import {
   sandboxLookupIds,
   type SandboxCredentialPolicyOwnershipFence,
 } from "./sandbox-credential-policy-repository.ts";
+import { parseSandboxCredentialPolicyRollback } from "./sandbox-credential-policy-rollback.ts";
 import { sandboxLeaseInfo, sandboxLeasePrefix } from "./sandbox-lease.ts";
 import {
   sandboxCredentialPolicyRegistrationLookupIds,
@@ -301,6 +302,29 @@ export async function scanCredentialPolicyCleanupPage(
   }
 }
 
+async function sandboxCredentialPolicyRollbackIsSuperseded(
+  db: Kysely<Database>,
+  sessionId: string,
+  sandboxId: string,
+  lookupIds: readonly string[],
+  rollbackGeneration: string | null,
+): Promise<boolean> {
+  const rows = await db
+    .selectFrom("interactive_session_credential_policies")
+    .select("registration_generation")
+    .where("session_id", "=", sessionId)
+    .where("sandbox_id", "=", sandboxId)
+    .where("lookup_id", "in", [...new Set(lookupIds)])
+    .where("state", "=", "active")
+    .where("registration_claim", "is", null)
+    .execute();
+  return rows.some(
+    (row) =>
+      isCurrentCredentialPolicyGeneration(row.registration_generation) &&
+      row.registration_generation !== rollbackGeneration,
+  );
+}
+
 async function scanStagedCredentialPolicyRegistrations(
   env: RuntimeEnv,
   db: Kysely<Database>,
@@ -351,13 +375,14 @@ async function scanStagedCredentialPolicyRegistrations(
         row.session_id,
         row.sandbox_id,
       );
+      const currentLookupIds = sandboxLookupIds(env, row.sandbox_id);
       const registration: SandboxCredentialPolicyRegistration = {
         generation: row.registration_generation,
         claim: row.registration_claim,
         lookupIds: sandboxCredentialPolicyRegistrationLookupIds(
           row.lookup_ids_json,
           row.sandbox_id,
-          sandboxLookupIds(env, row.sandbox_id),
+          currentLookupIds,
           [...persistedLookupIds, ...rollbackLookupIds],
         ),
       };
@@ -400,6 +425,29 @@ async function scanStagedCredentialPolicyRegistrations(
       }
       if (row.rollback_policies_json !== null) {
         if (!restoreRollback) throw new Error("sandbox credential policy rollback is unavailable");
+        const rollbackGeneration =
+          parseSandboxCredentialPolicyRollback(
+            row.rollback_policies_json,
+            rollbackLookupIds,
+            row.session_id,
+          )[0]?.generation ?? null;
+        const rollbackSuperseded = await sandboxCredentialPolicyRollbackIsSuperseded(
+          db,
+          row.session_id,
+          row.sandbox_id,
+          [...persistedLookupIds, ...currentLookupIds, ...rollbackLookupIds],
+          rollbackGeneration,
+        );
+        if (rollbackSuperseded) {
+          await abandonSandboxCredentialPolicyRegistration(
+            env,
+            row.session_id,
+            row.sandbox_id,
+            recovery.registration,
+            "sandbox credential policy generation advanced before rollback",
+          );
+          continue;
+        }
         await restoreRollback({
           registration: {
             ...recovery.registration,
