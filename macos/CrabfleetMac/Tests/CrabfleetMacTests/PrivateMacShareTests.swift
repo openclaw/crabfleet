@@ -905,7 +905,7 @@ struct PrivateMacShareTests {
   }
 
   @Test
-  func desktopRegistrationTreatsMissingRecoveryRouteAsNoOwnership() async throws {
+  func desktopRegistrationTreatsMissingRecoveryRouteAsUncertain() async throws {
     let transport = DesktopRegistrationTransport { request in
       let responseURL = try #require(request.url)
       return (
@@ -929,12 +929,47 @@ struct PrivateMacShareTests {
       ))
     let identity = try TailnetIdentityPolicy.identity(from: statusDocument())
 
-    #expect(
+    await #expect(throws: DesktopHostRegistrationResultUncertainError.self) {
       try await registration.recover(
         identity: identity,
         publicationID: "publication-id"
-      ) == nil
+      )
+    }
+  }
+
+  @Test @MainActor
+  func legacyRecoveryRoutePreservesUncertainPublicationWithoutDeletingNewerPublisher()
+    async throws
+  {
+    let transport = LegacyDesktopServerTransport()
+    let registration = try #require(
+      CrabfleetDesktopRegistration(
+        environment: [
+          "CRABFLEET_API_URL": "https://fleet.example/api/fleet",
+          "CRABFLEET_SESSION_COOKIE": "crabbox_session=secret",
+        ],
+        transport: transport
+      ))
+    let lifecycle = DesktopHostRegistrationLifecycle(
+      registration: registration,
+      createPublicationID: { "legacy-publication" }
     )
+    let identity = try TailnetIdentityPolicy.identity(from: statusDocument())
+
+    await #expect(throws: DesktopHostRegistrationResultUncertainError.self) {
+      try await lifecycle.publish(identity: identity, port: 5_901)
+    }
+    await transport.publishNewerEndpoint()
+
+    await #expect(throws: DesktopHostRegistrationResultUncertainError.self) {
+      try await lifecycle.removePublishedIdentities()
+    }
+    await #expect(throws: DesktopHostRegistrationResultUncertainError.self) {
+      try await lifecycle.removePublishedIdentities()
+    }
+
+    #expect(await transport.activeEndpoint == "newer-publisher")
+    #expect(await transport.events == [.register, .recover, .recover])
   }
 
   @Test
@@ -2034,6 +2069,61 @@ private final class DesktopRegistrationTransport: HTTPDataTransport {
   }
 
   func close() {}
+}
+
+private actor LegacyDesktopServerTransport: HTTPDataTransport {
+  enum Event: Equatable {
+    case register
+    case recover
+    case unregister
+  }
+
+  private(set) var activeEndpoint: String?
+  private(set) var events: [Event] = []
+
+  func data(for request: URLRequest) async throws -> (Data, HTTPURLResponse) {
+    let responseURL = try #require(request.url)
+    switch request.httpMethod {
+    case "PUT":
+      events.append(.register)
+      activeEndpoint = "legacy-publisher"
+      throw URLError(.networkConnectionLost)
+    case "POST":
+      events.append(.recover)
+      return (
+        Data(),
+        try #require(
+          HTTPURLResponse(
+            url: responseURL,
+            statusCode: 404,
+            httpVersion: nil,
+            headerFields: nil
+          ))
+      )
+    case "DELETE":
+      events.append(.unregister)
+      activeEndpoint = nil
+      return (
+        Data(),
+        try #require(
+          HTTPURLResponse(
+            url: responseURL,
+            statusCode: 200,
+            httpVersion: nil,
+            headerFields: nil
+          ))
+      )
+    default:
+      Issue.record("unexpected legacy desktop request method")
+      throw URLError(.badURL)
+    }
+  }
+
+  func publishNewerEndpoint() {
+    activeEndpoint = "newer-publisher"
+  }
+
+  nonisolated func close() {}
 }
 
 private func waitUntilAsync(

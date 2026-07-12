@@ -203,7 +203,9 @@ struct CrabfleetDesktopRegistration: DesktopHostRegistering, @unchecked Sendable
     }
     if http.statusCode == 404 {
       try validate(response: http, for: request, acceptingNotFound: true)
-      return nil
+      throw DesktopHostRegistrationResultUncertainError(
+        message: "Desktop publication recovery is unavailable on this server."
+      )
     }
     do {
       try validate(response: http, for: request, acceptingNotFound: false)
