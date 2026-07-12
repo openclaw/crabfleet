@@ -48,6 +48,48 @@ test("runner acknowledges input only after the PTY write completes", async () =>
   });
 });
 
+test("runner serializes concurrent input writes and acknowledgements per socket", async () => {
+  const socket = relaySocket();
+  const writes: string[] = [];
+  let completeFirstWrite!: () => void;
+  const firstWrite = new Promise<void>((resolve) => {
+    completeFirstWrite = resolve;
+  });
+
+  const first = acceptGitHubActionsRunnerInput(
+    socket,
+    encodeGitHubActionsRelayInput("input-first", "first"),
+    async (payload) => {
+      writes.push(`${new TextDecoder().decode(payload)}:start`);
+      await firstWrite;
+      writes.push("first:end");
+    },
+  );
+  const second = acceptGitHubActionsRunnerInput(
+    socket,
+    encodeGitHubActionsRelayInput("input-second", "second"),
+    async (payload) => {
+      writes.push(new TextDecoder().decode(payload));
+    },
+  );
+
+  await Promise.resolve();
+  await Promise.resolve();
+  assert.deepEqual(writes, ["first:start"]);
+  assert.deepEqual(socket.sent, []);
+
+  completeFirstWrite();
+  assert.deepEqual(await Promise.all([first, second]), [true, true]);
+  assert.deepEqual(writes, ["first:start", "first:end", "second"]);
+  assert.deepEqual(
+    socket.sent.map((message) => parseGitHubActionsRelayInputAcknowledgement(message)),
+    [
+      { inputId: "input-first", accepted: true },
+      { inputId: "input-second", accepted: true },
+    ],
+  );
+});
+
 test("runner copies the relay generation into its acknowledgement", async () => {
   const socket = relaySocket();
 

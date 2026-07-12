@@ -323,6 +323,9 @@ export class TerminalHub {
                             inputId: acknowledgement.inputId,
                             accepted: false,
                             error: "terminal upstream send failed",
+                            ...(subscription.inputGenerations
+                              ? { generation: String(acknowledgement.runnerGeneration) }
+                              : {}),
                           },
                         );
                         break;

@@ -1261,6 +1261,68 @@ test("GitHub Actions send failure removes only its own acknowledgement waiter", 
   server.emit("close");
 });
 
+test("generation-fenced send failure completes its matching acknowledgement", async () => {
+  const client = socket();
+  const server = socket();
+  const upstream = socket();
+  const hub = new TerminalHub(
+    dependencies(client, server, upstream, {
+      async readSession() {
+        return githubActionsSession;
+      },
+      async openUpstream() {
+        return {
+          socket: upstream,
+          inputAcknowledgements: true,
+          inputGenerations: true,
+          outputAcknowledgements: false,
+          async markConnected() {},
+        };
+      },
+    }),
+  );
+  await hub.open(
+    new Request("https://fleet.example/api/terminal/ws", {
+      headers: { upgrade: "websocket" },
+    }),
+    user,
+  );
+  server.emit("message", {
+    data: encodeTerminalFrame({
+      type: TerminalMessageType.Subscribe,
+      sessionId: githubActionsSession.id,
+      payload: encodeSubscribePayload({ flags: 0, columns: 120, rows: 34 }),
+    }),
+  });
+  await flushQueues();
+  await flushQueues();
+  emitRelayEvent(upstream, "runner_connected", "generation-one");
+  await flushQueues();
+  await flushQueues();
+
+  upstream.send = () => {
+    throw new Error("runner disconnected");
+  };
+  server.emit("message", {
+    data: encodeTerminalFrame({
+      type: TerminalMessageType.Input,
+      sessionId: githubActionsSession.id,
+      payload: new TextEncoder().encode("input"),
+    }),
+  });
+  await waitForInputPayloads();
+  await flushQueues();
+
+  const rejected = frame(server.sent.at(-1)!);
+  assert.equal(rejected.type, TerminalMessageType.Event);
+  assert.deepEqual(decodeJsonPayload(rejected.payload), {
+    type: "input-rejected",
+    error: "terminal upstream send failed",
+  });
+  assert.deepEqual(upstream.closed, []);
+  server.emit("close");
+});
+
 test("GitHub Actions close rejects every pending input acknowledgement", async () => {
   const client = socket();
   const server = socket();
