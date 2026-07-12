@@ -308,7 +308,11 @@ struct PrivateMacShareTests {
     let identity = try TailnetIdentityPolicy.identity(from: statusDocument())
 
     let publish = Task {
-      _ = try await coordinator.register(identity: identity, port: 5_901)
+      _ = try await coordinator.register(
+        identity: identity,
+        port: 5_901,
+        publicationID: "publication-id"
+      )
     }
     #expect(await waitUntilAsync { await registration.hasStartedRegistration })
     publish.cancel()
@@ -441,7 +445,7 @@ struct PrivateMacShareTests {
   }
 
   @Test @MainActor
-  func ambiguousDesktopPublicationIsReacquiredBeforeCleanup() async throws {
+  func ambiguousDesktopPublicationIsRecoveredBeforeCleanup() async throws {
     let identity = desktopIdentity(name: "ambiguous-publish", address: "100.64.12.46")
     let registration = AmbiguousDesktopRegistration()
     let lifecycle = DesktopHostRegistrationLifecycle(registration: registration)
@@ -455,10 +459,43 @@ struct PrivateMacShareTests {
       await registration.events
         == [
           .register(identity.dnsName),
-          .register(identity.dnsName),
-          .unregister(identity.dnsName, "reacquired-token"),
+          .recover(identity.dnsName),
+          .unregister(identity.dnsName, "recovered-token"),
         ]
     )
+  }
+
+  @Test @MainActor
+  func ambiguousDesktopCleanupPreservesANewerPublisher() async throws {
+    let identity = desktopIdentity(name: "shared-host", address: "100.64.12.47")
+    let registration = TwoProcessDesktopRegistration(lostPublicationID: "publication-a")
+    let firstLifecycle = DesktopHostRegistrationLifecycle(
+      registration: registration,
+      createPublicationID: { "publication-a" }
+    )
+    let secondLifecycle = DesktopHostRegistrationLifecycle(
+      registration: registration,
+      createPublicationID: { "publication-b" }
+    )
+
+    await #expect(throws: DesktopHostRegistrationResultUncertainError.self) {
+      try await firstLifecycle.publish(identity: identity, port: 5_901)
+    }
+    try await secondLifecycle.publish(identity: identity, port: 5_901)
+    try await firstLifecycle.removePublishedIdentities()
+
+    #expect(await registration.activePublicationID == "publication-b")
+    #expect(
+      await registration.events
+        == [
+          .register("publication-a"),
+          .register("publication-b"),
+          .recover("publication-a"),
+        ]
+    )
+
+    try await secondLifecycle.removePublishedIdentities()
+    #expect(await registration.activePublicationID == nil)
   }
 
   @Test @MainActor
@@ -722,13 +759,21 @@ struct PrivateMacShareTests {
       userID: 42
     )
 
-    let request = try registration.registrationRequest(identity: identity, port: 5901)
+    let request = try registration.registrationRequest(
+      identity: identity,
+      port: 5901,
+      publicationID: "publication-id"
+    )
     #expect(request.url?.absoluteString == "https://fleet.example/api/desktop-hosts/workstation-1")
     #expect(request.httpMethod == "PUT")
     #expect(request.value(forHTTPHeaderField: "Cookie") == "crabbox_session=secret")
     #expect(
       request.value(forHTTPHeaderField: CrabfleetDesktopRegistration.ownershipModeHeader)
         == CrabfleetDesktopRegistration.tokenOwnershipMode
+    )
+    #expect(
+      request.value(forHTTPHeaderField: CrabfleetDesktopRegistration.publicationIDHeader)
+        == "publication-id"
     )
     let body = try #require(request.httpBody)
     let json = try #require(JSONSerialization.jsonObject(with: body) as? [String: Any])
@@ -776,7 +821,11 @@ struct PrivateMacShareTests {
     let identity = try TailnetIdentityPolicy.identity(from: statusDocument())
 
     #expect(
-      try await registration.register(identity: identity, port: 5_901)
+      try await registration.register(
+        identity: identity,
+        port: 5_901,
+        publicationID: "publication-id"
+      )
         == "server-ownership-token"
     )
   }
@@ -806,9 +855,86 @@ struct PrivateMacShareTests {
       ))
     let identity = try TailnetIdentityPolicy.identity(from: statusDocument())
 
-    #expect(try await registration.register(identity: identity, port: 5_901) == nil)
+    #expect(
+      try await registration.register(
+        identity: identity,
+        port: 5_901,
+        publicationID: "publication-id"
+      ) == nil
+    )
     let removal = try registration.removalRequest(identity: identity, ownershipToken: nil)
     #expect(removal.value(forHTTPHeaderField: "X-Crabfleet-Ownership-Token") == nil)
+  }
+
+  @Test
+  func desktopRegistrationRecoversOnlyTheMatchingPublication() async throws {
+    let transport = DesktopRegistrationTransport { request in
+      let responseURL = try #require(request.url)
+      #expect(request.httpMethod == "POST")
+      #expect(responseURL.query == "recover=1")
+      let body = try #require(request.httpBody)
+      let json = try #require(JSONSerialization.jsonObject(with: body) as? [String: Any])
+      #expect(json["publicationID"] as? String == "publication-id")
+      return (
+        Data(#"{"ownershipToken":"server-ownership-token"}"#.utf8),
+        try #require(
+          HTTPURLResponse(
+            url: responseURL,
+            statusCode: 200,
+            httpVersion: nil,
+            headerFields: nil
+          ))
+      )
+    }
+    let registration = try #require(
+      CrabfleetDesktopRegistration(
+        environment: [
+          "CRABFLEET_API_URL": "https://fleet.example/api/fleet",
+          "CRABFLEET_SESSION_COOKIE": "crabbox_session=secret",
+        ],
+        transport: transport
+      ))
+    let identity = try TailnetIdentityPolicy.identity(from: statusDocument())
+
+    #expect(
+      try await registration.recover(
+        identity: identity,
+        publicationID: "publication-id"
+      ) == "server-ownership-token"
+    )
+  }
+
+  @Test
+  func desktopRegistrationTreatsMissingRecoveryRouteAsNoOwnership() async throws {
+    let transport = DesktopRegistrationTransport { request in
+      let responseURL = try #require(request.url)
+      return (
+        Data(),
+        try #require(
+          HTTPURLResponse(
+            url: responseURL,
+            statusCode: 404,
+            httpVersion: nil,
+            headerFields: nil
+          ))
+      )
+    }
+    let registration = try #require(
+      CrabfleetDesktopRegistration(
+        environment: [
+          "CRABFLEET_API_URL": "https://fleet.example/api/fleet",
+          "CRABFLEET_SESSION_COOKIE": "crabbox_session=secret",
+        ],
+        transport: transport
+      ))
+    let identity = try TailnetIdentityPolicy.identity(from: statusDocument())
+
+    #expect(
+      try await registration.recover(
+        identity: identity,
+        publicationID: "publication-id"
+      ) == nil
+    )
   }
 
   @Test
@@ -837,7 +963,11 @@ struct PrivateMacShareTests {
     let identity = try TailnetIdentityPolicy.identity(from: statusDocument())
 
     await #expect(throws: DesktopHostRegistrationResultUncertainError.self) {
-      try await registration.register(identity: identity, port: 5_901)
+      try await registration.register(
+        identity: identity,
+        port: 5_901,
+        publicationID: "publication-id"
+      )
     }
   }
 
@@ -857,7 +987,11 @@ struct PrivateMacShareTests {
     let identity = try TailnetIdentityPolicy.identity(from: statusDocument())
 
     await #expect(throws: DesktopHostRegistrationResultUncertainError.self) {
-      try await registration.register(identity: identity, port: 5_901)
+      try await registration.register(
+        identity: identity,
+        port: 5_901,
+        publicationID: "publication-id"
+      )
     }
   }
 
@@ -887,7 +1021,11 @@ struct PrivateMacShareTests {
     let identity = try TailnetIdentityPolicy.identity(from: statusDocument())
 
     await #expect(throws: DesktopHostRegistrationError.redirectRejected) {
-      try await registration.register(identity: identity, port: 5_901)
+      try await registration.register(
+        identity: identity,
+        port: 5_901,
+        publicationID: "publication-id"
+      )
     }
   }
 
@@ -1609,13 +1747,21 @@ private actor SuspendedDesktopRegistration: DesktopHostRegistering {
     registrationContinuation != nil
   }
 
-  func register(identity: TailnetIdentity, port: UInt16) async throws -> String? {
+  func register(
+    identity: TailnetIdentity,
+    port: UInt16,
+    publicationID: String
+  ) async throws -> String? {
     events.append(.registerStarted)
     await withCheckedContinuation { continuation in
       registrationContinuation = continuation
     }
     events.append(.registerFinished)
     return "registration-token"
+  }
+
+  func recover(identity: TailnetIdentity, publicationID: String) async throws -> String? {
+    nil
   }
 
   func unregister(identity: TailnetIdentity, ownershipToken: String?) async throws {
@@ -1651,12 +1797,20 @@ private actor RecordingDesktopRegistration: DesktopHostRegistering {
     self.unregisterFailures = unregisterFailures
   }
 
-  func register(identity: TailnetIdentity, port: UInt16) async throws -> String? {
+  func register(
+    identity: TailnetIdentity,
+    port: UInt16,
+    publicationID: String
+  ) async throws -> String? {
     events.append(.register(identity.dnsName))
     if consumeFailure(for: identity.dnsName, from: &registerFailures) {
       throw DesktopRegistrationTestError.failed
     }
     return "token:\(identity.dnsName)"
+  }
+
+  func recover(identity: TailnetIdentity, publicationID: String) async throws -> String? {
+    nil
   }
 
   func unregister(identity: TailnetIdentity, ownershipToken: String?) async throws {
@@ -1679,23 +1833,72 @@ private actor RecordingDesktopRegistration: DesktopHostRegistering {
 private actor AmbiguousDesktopRegistration: DesktopHostRegistering {
   enum Event: Equatable {
     case register(String)
+    case recover(String)
     case unregister(String, String?)
   }
 
   private(set) var events: [Event] = []
-  private var registerCount = 0
-
-  func register(identity: TailnetIdentity, port: UInt16) async throws -> String? {
+  func register(
+    identity: TailnetIdentity,
+    port: UInt16,
+    publicationID: String
+  ) async throws -> String? {
     events.append(.register(identity.dnsName))
-    registerCount += 1
-    if registerCount == 1 {
-      throw DesktopHostRegistrationResultUncertainError(message: "response lost")
-    }
-    return "reacquired-token"
+    throw DesktopHostRegistrationResultUncertainError(message: "response lost")
+  }
+
+  func recover(identity: TailnetIdentity, publicationID: String) async throws -> String? {
+    events.append(.recover(identity.dnsName))
+    return "recovered-token"
   }
 
   func unregister(identity: TailnetIdentity, ownershipToken: String?) async throws {
     events.append(.unregister(identity.dnsName, ownershipToken))
+  }
+}
+
+private actor TwoProcessDesktopRegistration: DesktopHostRegistering {
+  enum Event: Equatable {
+    case register(String)
+    case recover(String)
+    case unregister(String)
+  }
+
+  private let lostPublicationID: String
+  private var activeOwnershipToken: String?
+  private(set) var activePublicationID: String?
+  private(set) var events: [Event] = []
+
+  init(lostPublicationID: String) {
+    self.lostPublicationID = lostPublicationID
+  }
+
+  func register(
+    identity: TailnetIdentity,
+    port: UInt16,
+    publicationID: String
+  ) async throws -> String? {
+    events.append(.register(publicationID))
+    let ownershipToken = "token:\(publicationID)"
+    activePublicationID = publicationID
+    activeOwnershipToken = ownershipToken
+    if publicationID == lostPublicationID {
+      throw DesktopHostRegistrationResultUncertainError(message: "response lost")
+    }
+    return ownershipToken
+  }
+
+  func recover(identity: TailnetIdentity, publicationID: String) async throws -> String? {
+    events.append(.recover(publicationID))
+    guard activePublicationID == publicationID else { return nil }
+    return activeOwnershipToken
+  }
+
+  func unregister(identity: TailnetIdentity, ownershipToken: String?) async throws {
+    guard ownershipToken == activeOwnershipToken else { return }
+    events.append(.unregister(ownershipToken ?? ""))
+    activePublicationID = nil
+    activeOwnershipToken = nil
   }
 }
 
@@ -1706,8 +1909,16 @@ private actor SuspendedDesktopCleanupRegistration: DesktopHostRegistering {
     unregistrationContinuation != nil
   }
 
-  func register(identity: TailnetIdentity, port: UInt16) async throws -> String? {
+  func register(
+    identity: TailnetIdentity,
+    port: UInt16,
+    publicationID: String
+  ) async throws -> String? {
     "slow-cleanup-token"
+  }
+
+  func recover(identity: TailnetIdentity, publicationID: String) async throws -> String? {
+    nil
   }
 
   func unregister(identity: TailnetIdentity, ownershipToken: String?) async throws {

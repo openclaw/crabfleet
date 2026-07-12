@@ -1,7 +1,12 @@
 import Foundation
 
 protocol DesktopHostRegistering: Sendable {
-  func register(identity: TailnetIdentity, port: UInt16) async throws -> String?
+  func register(
+    identity: TailnetIdentity,
+    port: UInt16,
+    publicationID: String
+  ) async throws -> String?
+  func recover(identity: TailnetIdentity, publicationID: String) async throws -> String?
   func unregister(identity: TailnetIdentity, ownershipToken: String?) async throws
 }
 
@@ -9,6 +14,12 @@ struct DesktopHostRegistrationResultUncertainError: LocalizedError, Equatable, S
   let message: String
 
   var errorDescription: String? { message }
+}
+
+struct DesktopHostRegistrationSupersededError: LocalizedError, Equatable, Sendable {
+  var errorDescription: String? {
+    "The previous desktop publication is no longer current."
+  }
 }
 
 actor DesktopHostRegistrationCoordinator {
@@ -19,10 +30,26 @@ actor DesktopHostRegistrationCoordinator {
     self.registration = registration
   }
 
-  func register(identity: TailnetIdentity, port: UInt16) async throws -> String? {
+  func register(
+    identity: TailnetIdentity,
+    port: UInt16,
+    publicationID: String
+  ) async throws -> String? {
     let registration = self.registration
     let operation = enqueue {
-      try await registration.register(identity: identity, port: port)
+      try await registration.register(
+        identity: identity,
+        port: port,
+        publicationID: publicationID
+      )
+    }
+    return try await operation.value
+  }
+
+  func recover(identity: TailnetIdentity, publicationID: String) async throws -> String? {
+    let registration = self.registration
+    let operation = enqueue {
+      try await registration.recover(identity: identity, publicationID: publicationID)
     }
     return try await operation.value
   }
@@ -80,10 +107,19 @@ struct CrabfleetDesktopRegistration: DesktopHostRegistering, @unchecked Sendable
     let port: UInt16
   }
 
+  private struct RecoveryBody: Encodable {
+    let publicationID: String
+  }
+
+  private struct RecoveryResponse: Decodable {
+    let ownershipToken: String?
+  }
+
   private let baseURL: URL
   private let sessionCookie: String
   private let transport: any HTTPDataTransport
   static let ownershipModeHeader = "X-Crabfleet-Ownership-Mode"
+  static let publicationIDHeader = "X-Crabfleet-Publication-ID"
   static let tokenOwnershipMode = "token-v1"
 
   init?(
@@ -111,8 +147,16 @@ struct CrabfleetDesktopRegistration: DesktopHostRegistering, @unchecked Sendable
     self.transport = transport
   }
 
-  func register(identity: TailnetIdentity, port: UInt16) async throws -> String? {
-    let request = try registrationRequest(identity: identity, port: port)
+  func register(
+    identity: TailnetIdentity,
+    port: UInt16,
+    publicationID: String
+  ) async throws -> String? {
+    let request = try registrationRequest(
+      identity: identity,
+      port: port,
+      publicationID: publicationID
+    )
     let data: Data
     let http: HTTPURLResponse
     do {
@@ -148,6 +192,44 @@ struct CrabfleetDesktopRegistration: DesktopHostRegistering, @unchecked Sendable
     return response.ownershipToken
   }
 
+  func recover(identity: TailnetIdentity, publicationID: String) async throws -> String? {
+    let request = try recoveryRequest(identity: identity, publicationID: publicationID)
+    let data: Data
+    let http: HTTPURLResponse
+    do {
+      (data, http) = try await transport.data(for: request)
+    } catch {
+      throw DesktopHostRegistrationResultUncertainError(message: error.localizedDescription)
+    }
+    if http.statusCode == 404 {
+      try validate(response: http, for: request, acceptingNotFound: true)
+      return nil
+    }
+    do {
+      try validate(response: http, for: request, acceptingNotFound: false)
+    } catch let error as DesktopHostRegistrationError {
+      if case .httpStatus(let status) = error, status >= 500 {
+        throw DesktopHostRegistrationResultUncertainError(
+          message: error.localizedDescription
+        )
+      }
+      throw error
+    }
+    guard let response = try? JSONDecoder().decode(RecoveryResponse.self, from: data) else {
+      throw DesktopHostRegistrationResultUncertainError(
+        message: DesktopHostRegistrationError.invalidResponse.localizedDescription
+      )
+    }
+    if let ownershipToken = response.ownershipToken,
+      !Self.isValidOwnershipToken(ownershipToken)
+    {
+      throw DesktopHostRegistrationResultUncertainError(
+        message: DesktopHostRegistrationError.invalidResponse.localizedDescription
+      )
+    }
+    return response.ownershipToken
+  }
+
   func unregister(identity: TailnetIdentity, ownershipToken: String?) async throws {
     let request = try removalRequest(identity: identity, ownershipToken: ownershipToken)
     let (_, http) = try await transport.data(for: request)
@@ -169,7 +251,14 @@ struct CrabfleetDesktopRegistration: DesktopHostRegistering, @unchecked Sendable
     }
   }
 
-  func registrationRequest(identity: TailnetIdentity, port: UInt16) throws -> URLRequest {
+  func registrationRequest(
+    identity: TailnetIdentity,
+    port: UInt16,
+    publicationID: String
+  ) throws -> URLRequest {
+    guard Self.isValidOwnershipToken(publicationID) else {
+      throw DesktopHostRegistrationError.invalidResponse
+    }
     let hostID = Self.hostID(identity: identity)
     let url =
       baseURL
@@ -183,12 +272,39 @@ struct CrabfleetDesktopRegistration: DesktopHostRegistering, @unchecked Sendable
     request.setValue("application/json", forHTTPHeaderField: "Accept")
     request.setValue(sessionCookie, forHTTPHeaderField: "Cookie")
     request.setValue(Self.tokenOwnershipMode, forHTTPHeaderField: Self.ownershipModeHeader)
+    request.setValue(publicationID, forHTTPHeaderField: Self.publicationIDHeader)
     request.httpBody = try JSONEncoder().encode(
       RegistrationBody(
         name: identity.hostName.isEmpty ? identity.dnsName : identity.hostName,
         address: identity.ipv4Address,
         port: port
       ))
+    return request
+  }
+
+  func recoveryRequest(identity: TailnetIdentity, publicationID: String) throws -> URLRequest {
+    guard Self.isValidOwnershipToken(publicationID) else {
+      throw DesktopHostRegistrationError.invalidResponse
+    }
+    var components = URLComponents(
+      url:
+        baseURL
+        .appending(path: "api")
+        .appending(path: "desktop-hosts")
+        .appending(path: Self.hostID(identity: identity)),
+      resolvingAgainstBaseURL: false
+    )
+    components?.queryItems = [URLQueryItem(name: "recover", value: "1")]
+    guard let url = components?.url else {
+      throw DesktopHostRegistrationError.invalidResponse
+    }
+    var request = URLRequest(url: url)
+    request.httpMethod = "POST"
+    request.timeoutInterval = 15
+    request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+    request.setValue("application/json", forHTTPHeaderField: "Accept")
+    request.setValue(sessionCookie, forHTTPHeaderField: "Cookie")
+    request.httpBody = try JSONEncoder().encode(RecoveryBody(publicationID: publicationID))
     return request
   }
 

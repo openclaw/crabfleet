@@ -41,6 +41,7 @@ final class DesktopHostRegistrationLifecycle {
   private struct RegistrationTarget: Equatable {
     let identity: TailnetIdentity
     let port: UInt16
+    let publicationID: String
   }
 
   private struct PublishedRegistration: Equatable {
@@ -49,19 +50,47 @@ final class DesktopHostRegistrationLifecycle {
   }
 
   private let coordinator: DesktopHostRegistrationCoordinator
+  private let createPublicationID: () -> String
   private var publishedRegistration: PublishedRegistration?
   private var uncertainRegistrations: [RegistrationTarget] = []
   private var pendingRemovals: [PublishedRegistration] = []
 
-  init(registration: any DesktopHostRegistering) {
+  init(
+    registration: any DesktopHostRegistering,
+    createPublicationID: @escaping () -> String = { UUID().uuidString }
+  ) {
     coordinator = DesktopHostRegistrationCoordinator(registration: registration)
+    self.createPublicationID = createPublicationID
   }
 
   func publish(identity: TailnetIdentity, port: UInt16) async throws {
-    let target = RegistrationTarget(identity: identity, port: port)
+    let target =
+      uncertainRegistrations.first {
+        $0.identity == identity && $0.port == port
+      }
+      ?? RegistrationTarget(
+        identity: identity,
+        port: port,
+        publicationID: createPublicationID()
+      )
     let ownershipToken: String?
     do {
-      ownershipToken = try await coordinator.register(identity: identity, port: port)
+      if uncertainRegistrations.contains(target) {
+        ownershipToken = try await coordinator.recover(
+          identity: identity,
+          publicationID: target.publicationID
+        )
+        guard ownershipToken != nil else {
+          uncertainRegistrations.removeAll { $0 == target }
+          throw DesktopHostRegistrationSupersededError()
+        }
+      } else {
+        ownershipToken = try await coordinator.register(
+          identity: identity,
+          port: port,
+          publicationID: target.publicationID
+        )
+      }
     } catch {
       if error is DesktopHostRegistrationResultUncertainError,
         !uncertainRegistrations.contains(target)
@@ -88,16 +117,18 @@ final class DesktopHostRegistrationLifecycle {
     let uncertainRegistrations = uncertainRegistrations
     for target in uncertainRegistrations {
       do {
-        let ownershipToken = try await coordinator.register(
+        let ownershipToken = try await coordinator.recover(
           identity: target.identity,
-          port: target.port
+          publicationID: target.publicationID
         )
-        let recovered = PublishedRegistration(
-          identity: target.identity,
-          ownershipToken: ownershipToken
-        )
-        if !pendingRemovals.contains(recovered) {
-          pendingRemovals.append(recovered)
+        if let ownershipToken {
+          let recovered = PublishedRegistration(
+            identity: target.identity,
+            ownershipToken: ownershipToken
+          )
+          if !pendingRemovals.contains(recovered) {
+            pendingRemovals.append(recovered)
+          }
         }
         self.uncertainRegistrations.removeAll { $0 == target }
       } catch {
@@ -239,7 +270,8 @@ final class PrivateMacShareController: ObservableObject {
   ) {
     self.desktopRegistration = desktopRegistration
     desktopRegistrationLifecycle =
-      registrationLifecycle ?? desktopRegistration.map(DesktopHostRegistrationLifecycle.init)
+      registrationLifecycle
+      ?? desktopRegistration.map { DesktopHostRegistrationLifecycle(registration: $0) }
     self.defaults = defaults
     registryPhase = desktopRegistration == nil ? .notConfigured : .notPublished
     let savedDisplayID = defaults.object(forKey: Self.selectedDisplayDefaultsKey) as? Int
