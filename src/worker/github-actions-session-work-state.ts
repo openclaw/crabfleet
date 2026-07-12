@@ -41,6 +41,7 @@ export type GitHubActionsWorkStateStore = {
   persist(
     id: string,
     values: GitHubActionsWorkStateUpdate,
+    expectedRevision: number,
     expectedTerminalStatus?: InteractiveSessionStatus,
   ): Promise<void>;
   appendEvent(id: string, message: string, now: number): Promise<void>;
@@ -111,6 +112,7 @@ export class GitHubActionsWorkStateService {
         updated_at: now,
         stopped_at: terminal ? now : null,
       },
+      session.updatedAt,
       terminal ? row.status : undefined,
     );
     if (changed) {

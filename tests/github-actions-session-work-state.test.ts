@@ -13,6 +13,7 @@ import { sessionRow } from "./helpers/session-row.ts";
 type WorkStateStoreState = {
   row: InteractiveSessionRow | null;
   update: GitHubActionsWorkStateUpdate | null;
+  expectedRevision: number | undefined;
   expectedTerminalStatus: InteractiveSessionRow["status"] | undefined;
   events: string[];
   operations: string[];
@@ -49,6 +50,7 @@ function workStateStore(values: Partial<InteractiveSessionRow> = {}): {
       ...values,
     }),
     update: null,
+    expectedRevision: undefined,
     expectedTerminalStatus: undefined,
     events: [],
     operations: [],
@@ -57,9 +59,10 @@ function workStateStore(values: Partial<InteractiveSessionRow> = {}): {
   const store: GitHubActionsWorkStateStore = {
     now: () => 500,
     readRow: async () => state.row,
-    persist: async (_id, update, expectedTerminalStatus) => {
+    persist: async (_id, update, expectedRevision, expectedTerminalStatus) => {
       state.operations.push("persist");
       state.update = update;
+      state.expectedRevision = expectedRevision;
       state.expectedTerminalStatus = expectedTerminalStatus;
       if (state.row) state.row = { ...state.row, ...update };
     },
@@ -108,6 +111,7 @@ test("active work-state updates project fields and clear stale completion", asyn
     stopped_at: null,
   });
   assert.deepEqual(state.events, ["running: codex_turn"]);
+  assert.equal(state.expectedRevision, workSession().updatedAt);
   assert.deepEqual(state.operations, ["persist", "event", "read"]);
 });
 
@@ -143,6 +147,7 @@ test("terminal work-state updates stop the session and disconnect the runner", a
   assert.equal(state.update?.completion_reason, "existing reason");
   assert.equal(state.update?.stopped_at, 500);
   assert.equal(state.expectedTerminalStatus, "ready");
+  assert.equal(state.expectedRevision, workSession().updatedAt);
   assert.deepEqual(state.events, ["failed: tests"]);
   assert.deepEqual(state.operations, ["persist", "event", "disconnect", "read"]);
 });
@@ -158,6 +163,26 @@ test("terminal work-state updates carry the status observed before persistence",
   });
 
   assert.equal(state.expectedTerminalStatus, "attached");
+});
+
+test("work-state updates retain the exact revision authenticated before a token rotation", async () => {
+  const authenticated = workSession({ updated_at: 400 });
+  const { store, state } = workStateStore({ updated_at: 401, work_state: "registered" });
+  store.persist = async (_id, _update, expectedRevision) => {
+    state.expectedRevision = expectedRevision;
+    if (state.row?.updated_at !== expectedRevision) {
+      throw new Error("GitHub Actions session changed; retry");
+    }
+  };
+
+  await assert.rejects(
+    new GitHubActionsWorkStateService(store).update(authenticated, {
+      state: "running",
+    }),
+    { message: "GitHub Actions session changed; retry" },
+  );
+
+  assert.equal(state.expectedRevision, 400);
 });
 
 test("terminal runner disconnect races remain best effort", async () => {

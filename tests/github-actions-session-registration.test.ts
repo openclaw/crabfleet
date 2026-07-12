@@ -364,7 +364,10 @@ test("registration adopts a concurrently inserted work key", async () => {
   assert.equal(result.session.id, "IS-concurrent");
   assert.equal(state.workKeyReads, 2);
   assert.equal(state.updates[0]?.id, "IS-concurrent");
-  assert.equal(state.updates[0]?.values.updated_at, 100);
+  assert.equal(
+    state.updates[0]?.values.updated_at,
+    Math.max(state.concurrentRow.updated_at + 1, 100),
+  );
   assert.equal(state.updates[0]?.expected.agent_token_hash, state.concurrentRow.agent_token_hash);
 });
 
@@ -428,10 +431,10 @@ test("concurrent registration adoption rotates exactly one usable token", async 
     state.rows.get(existing.id)?.agent_token_hash,
     `${fulfilled[0]?.value.agentToken}-hash`,
   );
-  assert.equal(state.rows.get(existing.id)?.updated_at, 100);
+  assert.equal(state.rows.get(existing.id)?.updated_at, 101);
 });
 
-test("registration repairs a future timestamp without blocking immediate writers", async () => {
+test("registration revisions advance monotonically when the stored clock is ahead", async () => {
   const existing = sessionRow({
     id: "IS-future-revision",
     runtime: "github_actions",
@@ -449,7 +452,7 @@ test("registration repairs a future timestamp without blocking immediate writers
     owner: "operator@example.test",
   });
 
-  assert.equal(state.rows.get(existing.id)?.updated_at, 100);
+  assert.equal(state.rows.get(existing.id)?.updated_at, 501);
 });
 
 test("registration rejects invalid input and work keys owned by another runtime", async () => {

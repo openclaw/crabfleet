@@ -17,7 +17,11 @@ export type GitHubActionsRunnerConnectionUpdate = {
 
 export type GitHubActionsRunnerConnectionStore = {
   now(): number;
-  persist(id: string, values: GitHubActionsRunnerConnectionUpdate): Promise<void>;
+  persist(
+    id: string,
+    values: GitHubActionsRunnerConnectionUpdate,
+    expectedRevision: number,
+  ): Promise<void>;
   appendEvent(id: string, message: string, now: number): Promise<void>;
 };
 
@@ -41,15 +45,19 @@ export class GitHubActionsRunnerConnectionService {
         : session.workPhase;
     const status =
       session.status === "attached" || session.status === "detached" ? session.status : "ready";
-    await this.store.persist(session.id, {
-      status,
-      work_state: state,
-      work_phase: phase,
-      last_heartbeat_at: now,
-      last_seen_at: now,
-      updated_at: now,
-      last_event: githubActionsRunnerConnectedEvent,
-    });
+    await this.store.persist(
+      session.id,
+      {
+        status,
+        work_state: state,
+        work_phase: phase,
+        last_heartbeat_at: now,
+        last_seen_at: now,
+        updated_at: now,
+        last_event: githubActionsRunnerConnectedEvent,
+      },
+      session.updatedAt,
+    );
     await this.store.appendEvent(session.id, githubActionsRunnerConnectedEvent, now);
   }
 }

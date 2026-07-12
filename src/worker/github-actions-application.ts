@@ -88,7 +88,11 @@ export class GitHubActionsApplication {
       nextSessionId: () => nextInteractiveSessionId(this.env),
       insertSession: (values) => repository.insertSession(values),
       readById: (id) => repository.readById(id),
-      updateSession: (id, values, expected) => repository.updateSession(id, values, expected),
+      updateSession: (id, values, expected) =>
+        repository.updateSession(id, values, {
+          kind: "registration",
+          registration: expected,
+        }),
       isConstraintError,
       disconnectRunner: (id) => this.disconnectRunner(id),
       appendEvent: (id, message, now) => this.appendMessageEvent(id, user, message, now),
@@ -108,8 +112,12 @@ export class GitHubActionsApplication {
     const store: GitHubActionsWorkStateStore = {
       now: () => Date.now(),
       readRow: (sessionId) => repository.readById(sessionId),
-      persist: (sessionId, values, expectedTerminalStatus) =>
-        repository.updateSession(sessionId, values, undefined, expectedTerminalStatus),
+      persist: (sessionId, values, expectedRevision, expectedTerminalStatus) =>
+        repository.updateSession(sessionId, values, {
+          kind: "authenticated",
+          revision: expectedRevision,
+          ...(expectedTerminalStatus ? { terminalStatus: expectedTerminalStatus } : {}),
+        }),
       appendEvent: (sessionId, message, now) =>
         this.appendMessageEvent(sessionId, user, message, now),
       disconnectRunner: (sessionId) => this.disconnectRunner(sessionId),
@@ -156,7 +164,11 @@ export class GitHubActionsApplication {
     const repository = this.repository();
     const store: GitHubActionsRunnerConnectionStore = {
       now: () => Date.now(),
-      persist: (sessionId, values) => repository.updateSession(sessionId, values),
+      persist: (sessionId, values, expectedRevision) =>
+        repository.updateSession(sessionId, values, {
+          kind: "authenticated",
+          revision: expectedRevision,
+        }),
       appendEvent: (sessionId, message, now) =>
         this.appendMessageEvent(sessionId, user, message, now),
     };

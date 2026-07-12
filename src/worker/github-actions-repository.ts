@@ -17,6 +17,17 @@ type GitHubActionsSessionUpdate =
   | GitHubActionsWorkStateUpdate
   | GitHubActionsRunnerConnectionUpdate;
 
+export type GitHubActionsSessionUpdateExpectation =
+  | {
+      kind: "registration";
+      registration: GitHubActionsSessionRegistrationExpectation;
+    }
+  | {
+      kind: "authenticated";
+      revision: number;
+      terminalStatus?: InteractiveSessionStatus;
+    };
+
 const terminalWorkStates = ["completed", "failed", "canceled", "blocked"];
 const terminalSessionStatuses = ["stopped", "expired", "failed"] as const;
 
@@ -54,8 +65,7 @@ export class GitHubActionsRepository {
   async updateSession(
     id: string,
     values: GitHubActionsSessionUpdate,
-    expectedRegistration?: GitHubActionsSessionRegistrationExpectation,
-    expectedTerminalStatus?: InteractiveSessionStatus,
+    expectation: GitHubActionsSessionUpdateExpectation,
   ): Promise<void> {
     let update = database(this.env)
       .updateTable("interactive_sessions")
@@ -64,9 +74,10 @@ export class GitHubActionsRepository {
       .where("runtime", "=", "github_actions");
 
     if (isRegistrationUpdate(values)) {
-      if (!expectedRegistration) {
+      if (expectation.kind !== "registration") {
         throw new Error("GitHub Actions registration update requires expected state");
       }
+      const expectedRegistration = expectation.registration;
       update = update
         .where("updated_at", "=", expectedRegistration.updated_at)
         .where("status", "=", expectedRegistration.status)
@@ -78,12 +89,12 @@ export class GitHubActionsRepository {
           ? update.where("agent_token_hash", "is", null)
           : update.where("agent_token_hash", "=", expectedRegistration.agent_token_hash);
     } else if (isWorkStateUpdate(values) && terminalWorkStates.includes(values.work_state)) {
-      if (!expectedTerminalStatus) {
+      if (expectation.kind !== "authenticated" || !expectation.terminalStatus) {
         throw new Error("terminal GitHub Actions update requires expected session status");
       }
       update = update
-        .where("updated_at", "<=", values.updated_at)
-        .where("status", "=", expectedTerminalStatus)
+        .where("updated_at", "=", expectation.revision)
+        .where("status", "=", expectation.terminalStatus)
         .where("status", "not in", terminalSessionStatuses)
         .where((expressions) =>
           expressions.or([
@@ -92,8 +103,11 @@ export class GitHubActionsRepository {
           ]),
         );
     } else {
+      if (expectation.kind !== "authenticated") {
+        throw new Error("GitHub Actions update requires authenticated revision");
+      }
       update = update
-        .where("updated_at", "<=", values.updated_at)
+        .where("updated_at", "=", expectation.revision)
         .where("work_state", "not in", terminalWorkStates)
         .where("status", "not in", terminalSessionStatuses);
     }

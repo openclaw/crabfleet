@@ -27,21 +27,25 @@ function session(values: Parameters<typeof sessionRow>[0] = {}) {
 function connectionStore(): {
   store: GitHubActionsRunnerConnectionStore;
   updates: GitHubActionsRunnerConnectionUpdate[];
+  expectedRevisions: number[];
   events: string[];
   operations: string[];
 } {
   const updates: GitHubActionsRunnerConnectionUpdate[] = [];
+  const expectedRevisions: number[] = [];
   const events: string[] = [];
   const operations: string[] = [];
   return {
     updates,
+    expectedRevisions,
     events,
     operations,
     store: {
       now: () => 700,
-      persist: async (_id, values) => {
+      persist: async (_id, values, expectedRevision) => {
         operations.push("persist");
         updates.push(values);
+        expectedRevisions.push(expectedRevision);
       },
       appendEvent: async (_id, message) => {
         operations.push("event");
@@ -52,7 +56,7 @@ function connectionStore(): {
 }
 
 test("waiting runners become active with durable connection evidence", async () => {
-  const { store, updates, events, operations } = connectionStore();
+  const { store, updates, expectedRevisions, events, operations } = connectionStore();
   await new GitHubActionsRunnerConnectionService(store).connect(
     session({ status: "provisioning" }),
   );
@@ -69,6 +73,7 @@ test("waiting runners become active with durable connection evidence", async () 
     },
   ]);
   assert.deepEqual(events, [githubActionsRunnerConnectedEvent]);
+  assert.deepEqual(expectedRevisions, [session({ status: "provisioning" }).updatedAt]);
   assert.deepEqual(operations, ["persist", "event"]);
 });
 
@@ -85,6 +90,14 @@ test("reconnecting runners preserve active status, state, and phase", async () =
   assert.equal(updates[0]?.status, "attached");
   assert.equal(updates[0]?.work_state, "running");
   assert.equal(updates[0]?.work_phase, "codex_turn");
+});
+
+test("runner connections retain the exact revision authenticated before a token rotation", async () => {
+  const { store, expectedRevisions } = connectionStore();
+
+  await new GitHubActionsRunnerConnectionService(store).connect(session({ updated_at: 400 }));
+
+  assert.deepEqual(expectedRevisions, [400]);
 });
 
 test("runner connections reject non-work sessions", async () => {
