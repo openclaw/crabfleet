@@ -200,8 +200,7 @@ final class MacRemoteInputController: RemoteInputForwarding, @unchecked Sendable
   private func schedulePendingReleaseRetry() {
     guard !pendingReleaseRetryScheduled else { return }
     pendingReleaseRetryScheduled = true
-    eventQueue.asyncAfter(deadline: .now() + pendingReleaseRetryDelay) { [weak self] in
-      guard let self else { return }
+    eventQueue.asyncAfter(deadline: .now() + pendingReleaseRetryDelay) { [self] in
       self.pendingReleaseRetryScheduled = false
       self.flushPendingRelease()
     }

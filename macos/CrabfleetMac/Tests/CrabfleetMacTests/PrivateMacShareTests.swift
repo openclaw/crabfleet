@@ -1097,6 +1097,47 @@ struct PrivateMacShareTests {
   }
 
   @Test
+  func pendingInputReleaseRetainsControllerThroughTeardown() async {
+    let trust = AccessibilityTrust(granted: true)
+    let events = RemoteInputEventRecorder()
+    var controller: MacRemoteInputController? = MacRemoteInputController(
+      descriptor: CapturedDisplayDescriptor(
+        displayID: 1,
+        displayBounds: CGRect(x: 0, y: 0, width: 100, height: 100),
+        frameWidth: 100,
+        frameHeight: 100,
+        sourcePixelWidth: 100,
+        sourcePixelHeight: 100
+      ),
+      accessibilityGranted: { trust.isGranted() },
+      pendingReleaseRetryDelay: .milliseconds(10),
+      keyEventPoster: { down, keysym in
+        events.append(.key(down: down, keysym: keysym))
+      }
+    )
+    weak var retainedController = controller
+
+    controller?.keyEvent(down: true, keysym: 0x61)
+    #expect(await waitUntilAsync {
+      events.contains(.key(down: true, keysym: 0x61))
+    })
+    let checksBeforeRevocation = trust.checkCount
+    trust.setGranted(false)
+    controller?.releaseAllInput()
+    #expect(await waitUntilAsync {
+      trust.checkCount > checksBeforeRevocation
+    })
+    controller = nil
+
+    #expect(retainedController != nil)
+    trust.setGranted(true)
+    #expect(await waitUntilAsync {
+      events.contains(.key(down: false, keysym: 0x61))
+    })
+    #expect(await waitUntilAsync { retainedController == nil })
+  }
+
+  @Test
   func decodesX11UnicodeKeysymsForMacInput() {
     #expect(MacRemoteInputController.unicodeScalar(for: 0x0100_03BB) == "λ")
     #expect(MacRemoteInputController.unicodeScalar(for: 0x0101_F980) == "🦀")
