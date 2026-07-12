@@ -101,7 +101,7 @@ struct AuditFindingsTests {
   }
 
   @Test
-  func rejectsUnsafeLegacyPixelFormatTransition() throws {
+  func rejectsUnsafeLegacyPixelFormatTransitionAfterNegotiationTimeout() throws {
     let connection = VNCConnection(
       settings: makeSettings(),
       framebufferAllocator: VNCFramebufferMallocAllocator()
@@ -115,10 +115,46 @@ struct AuditFindingsTests {
 
     connection.updateColorDepth(.depth8Bit)
 
+    #expect(connection.pendingPixelFormatTransition?.depth == 8)
+    #expect(connection.clientToServerMessageQueue.dequeue() == nil)
+
+    connection.expirePixelFormatFenceNegotiation()
+
     #expect(connection.state.pixelFormat?.depth == 24)
     #expect(connection.state.pixelFormat?.depth == connection.framebuffer?.sourcePixelFormat.depth)
     #expect(connection.clientToServerMessageQueue.dequeue() == nil)
     #expect(connection.pendingPixelFormatTransition == nil)
+  }
+
+  @Test
+  func preservesEarlyPixelFormatTransitionUntilFenceSupportArrives() throws {
+    let connection = VNCConnection(
+      settings: makeSettings(),
+      framebufferAllocator: VNCFramebufferMallocAllocator()
+    )
+    let framebuffer = try makeFramebuffer(width: 2, height: 2, depth: 24)
+    connection.framebuffer = framebuffer
+    connection.state.pixelFormat = framebuffer.sourcePixelFormat
+    connection.connectionState = .connected
+    connection._framebufferUpdatePolicy = .paused
+    connection.framebufferUpdateRequestOutstanding = true
+
+    connection.updateColorDepth(.depth8Bit)
+
+    #expect(connection.pendingPixelFormatTransition?.depth == 8)
+    #expect(connection.clientToServerMessageQueue.dequeue() == nil)
+
+    try connection.handleServerFence(
+      VNCProtocol.ServerFence(
+        messageType: VNCProtocol.ServerFence.messageType,
+        flags: [.request, .blockAfter, .syncNext],
+        payload: Data("support".utf8)
+      )
+    )
+
+    #expect(connection.pendingPixelFormatTransition?.depth == 8)
+    #expect(connection.clientToServerMessageQueue.dequeue() != nil)
+    #expect(connection.clientToServerMessageQueue.dequeue() != nil)
   }
 
   @Test

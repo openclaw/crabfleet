@@ -150,7 +150,10 @@ extension VNCConnection {
 					if supportedFenceFlags.contains(.blockAfter) {
 						fenceFlags.insert(.blockAfter)
 					}
-				} else if !state.areFencesSupported || !supportsFallbackBoundary {
+				} else if !state.areFencesSupported {
+					schedulePixelFormatFenceNegotiationTimeoutLocked()
+					return nil
+				} else if !supportsFallbackBoundary {
 					pendingPixelFormatTransition = nil
 					pixelFormatTransitionRequiresFence = false
 					return nil
@@ -178,6 +181,7 @@ extension VNCConnection {
 			}
 		}
 
+		cancelPixelFormatFenceNegotiationTimeoutLocked()
 		pendingPixelFormatTransition = nil
 		isPixelFormatTransitionInFlight = true
 		pixelFormatTransitionInFlight = pixelFormat
@@ -249,6 +253,7 @@ extension VNCConnection {
 
 	func probePixelFormatFenceSupport() {
 		framebufferRequestLock.lock()
+		cancelPixelFormatFenceNegotiationTimeoutLocked()
 		guard pixelFormatFenceCapabilityProbePayload == nil,
 			  let pixelFormat = state.pixelFormat else {
 			framebufferRequestLock.unlock()
@@ -267,6 +272,41 @@ extension VNCConnection {
 				pixelFormatMessage: VNCProtocol.SetPixelFormat(pixelFormat: pixelFormat)
 			)
 		)
+	}
+
+	private func schedulePixelFormatFenceNegotiationTimeoutLocked() {
+		guard pixelFormatFenceNegotiationTask == nil else { return }
+
+		pixelFormatFenceNegotiationTask = Task { [weak self] in
+			do {
+				try await Task.sleep(nanoseconds: 1_000_000_000)
+			} catch {
+				return
+			}
+			self?.expirePixelFormatFenceNegotiation()
+		}
+	}
+
+	private func cancelPixelFormatFenceNegotiationTimeoutLocked() {
+		pixelFormatFenceNegotiationTask?.cancel()
+		pixelFormatFenceNegotiationTask = nil
+	}
+
+	func expirePixelFormatFenceNegotiation() {
+		framebufferRequestLock.lock()
+		cancelPixelFormatFenceNegotiationTimeoutLocked()
+		guard !state.areFencesSupported,
+			  framebufferUpdateRequestOutstanding,
+			  pendingPixelFormatTransition != nil,
+			  !isPixelFormatTransitionInFlight else {
+			framebufferRequestLock.unlock()
+			return
+		}
+		pendingPixelFormatTransition = nil
+		pixelFormatTransitionRequiresFence = false
+		framebufferRequestLock.unlock()
+
+		logger.logDebug("Rejecting pixel format transition because Fence support was not negotiated")
 	}
 
 	func completePixelFormatFence(_ fence: VNCProtocol.ServerFence) throws {
@@ -586,6 +626,7 @@ extension VNCConnection {
 		pixelFormatTransitionFencePayload = nil
 		pixelFormatTransitionRequiredFenceFlags = []
 		pixelFormatFenceCapabilityProbePayload = nil
+		cancelPixelFormatFenceNegotiationTimeoutLocked()
 		framebufferRequestLock.unlock()
 	}
 
