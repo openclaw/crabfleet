@@ -25,6 +25,7 @@ const (
 
 	defaultInputConfirmationTimeout  = 5 * time.Second
 	defaultAttachmentShutdownTimeout = 250 * time.Millisecond
+	defaultOutputAckTimeout          = 5 * time.Second
 
 	messageHello           = 1
 	messageWelcome         = 2
@@ -50,6 +51,10 @@ const (
 	subscribeSnapshot               = 1 << 1
 	subscribeEvents                 = 1 << 2
 	subscribeOutputAcknowledgements = 1 << 3
+)
+
+var ErrInputDeliveryUnknown = errors.New(
+	"terminal input delivery outcome is unknown; the runner may still complete it",
 )
 
 type Options struct {
@@ -356,8 +361,18 @@ func (c *Client) waitForInputConfirmation(ctx context.Context, waiter chan error
 		return readerUnavailableError(c.readerError())
 	case <-ctx.Done():
 		c.clearInputWaiter(waiter)
-		_ = c.Close()
+		c.closeNow()
 		return ctx.Err()
+	}
+}
+
+func (c *Client) closeNow() {
+	if c.readCancel != nil {
+		c.readCancel()
+	}
+	_ = c.conn.CloseNow()
+	if c.cancel != nil {
+		c.cancel()
 	}
 }
 
@@ -493,11 +508,17 @@ func (c *Client) Attach(ctx context.Context, terminal io.ReadWriter, resizes <-c
 						errCh <- err
 						return
 					}
-					if err := c.write(ctx, frame{
+					ackCtx, ackCancel := context.WithTimeout(
+						context.Background(),
+						defaultOutputAckTimeout,
+					)
+					err := c.write(ackCtx, frame{
 						messageType: messageAck,
 						sessionID:   c.sessionID,
 						payload:     ackPayload(uint32(len(current.payload))),
-					}); err != nil {
+					})
+					ackCancel()
+					if err != nil {
 						errCh <- err
 						return
 					}
@@ -610,7 +631,6 @@ func (c *Client) handleFrame(ctx context.Context, current frame) error {
 		return err
 	case messageControlRevoked:
 		c.canInput.Store(false)
-		c.completeInput(frameError(current, "terminal input rejected"))
 		c.deliverAttachment(ctx, current)
 	case messageControlGranted:
 		c.canInput.Store(true)
@@ -627,6 +647,8 @@ func (c *Client) handleFrame(ctx context.Context, current frame) error {
 			c.completeInput(nil)
 		case "input-rejected":
 			c.completeInput(frameError(current, "terminal input rejected"))
+		case "input-delivery-unknown":
+			c.completeInput(inputDeliveryUnknownError(current))
 		case "closed":
 			c.canInput.Store(false)
 			c.markTerminalClosed(errors.New("terminal closed"))
@@ -914,6 +936,14 @@ func frameError(current frame, fallback string) error {
 		}
 	}
 	return errors.New(fallback)
+}
+
+func inputDeliveryUnknownError(current frame) error {
+	detail := frameError(current, ErrInputDeliveryUnknown.Error())
+	if detail.Error() == ErrInputDeliveryUnknown.Error() {
+		return ErrInputDeliveryUnknown
+	}
+	return fmt.Errorf("%w: %s", ErrInputDeliveryUnknown, detail)
 }
 
 func normalizeCloseError(err error) error {
