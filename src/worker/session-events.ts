@@ -290,6 +290,7 @@ function redactedStructuredEventText(value: string): string {
   const sensitiveName =
     "access[_-]?key[_-]?id|access[_-]?token|account[_-]?key|api[_-]?key|apikey|auth|authorization|client[_-]?secret|connection[_-]?string|cookie|credential|credentials|id[_-]?token|password|passwd|private[_-]?key|proxy[_-]?authorization|refresh[_-]?token|sas[_-]?token|secret|secret[_-]?access[_-]?key|secret[_-]?key|session[_-]?token|set[_-]?cookie|shared[_-]?access[_-]?key|shared[_-]?access[_-]?signature|sig|signature|storage[_-]?key|ticket|token|x[_-]?api[_-]?key";
   return value
+    .replace(/\b([a-z][a-z0-9+.-]*:\/\/)[^\s/:@]+:[^\s/@]+@/giu, "$1[credential]@")
     .replace(
       /-----BEGIN (?:RSA |DSA |EC |OPENSSH |PGP |ENCRYPTED )?PRIVATE KEY(?: BLOCK)?-----[\s\S]*?-----END (?:RSA |DSA |EC |OPENSSH |PGP |ENCRYPTED )?PRIVATE KEY(?: BLOCK)?-----/giu,
       "[credential]",

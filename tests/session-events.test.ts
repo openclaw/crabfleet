@@ -145,7 +145,7 @@ test("structured session events canonicalize additive payloads and replay idempo
     actor: "operator",
     eventKey: " run:1 ",
     type: " clawsweeper.action ",
-    message: ` updated pull request: authorization: Bearer credential-one\ncredentials=dummy\nSharedAccessKey=dummy\n${githubCredentialOne} `,
+    message: ` updated pull request: authorization: Bearer credential-one\ncredentials=dummy\nSharedAccessKey=dummy\nhttps://alice:s3cr3t@example.com/repo\n${githubCredentialOne} `,
     payload: {
       version: 2,
       target: { z: true, a: 1 },
@@ -161,6 +161,7 @@ test("structured session events canonicalize additive payloads and replay idempo
         githubToken: "dummy",
       },
       note: "request failed: authorization: Bearer credential-one",
+      remote: "https://alice:s3cr3t@example.com/repo",
       pemAssignment: `private_key=${privateKeyOne}`,
       storageKey: "dummy",
       tokenSamples: [
@@ -178,7 +179,7 @@ test("structured session events canonicalize additive payloads and replay idempo
     actor: "operator",
     eventKey: "run:1",
     type: "clawsweeper.action",
-    message: `updated pull request: authorization: Bearer credential-two\ncredentials=fake\nSharedAccessKey=fake\n${githubCredentialTwo}`,
+    message: `updated pull request: authorization: Bearer credential-two\ncredentials=fake\nSharedAccessKey=fake\nhttps://bob:p%40ssword@example.com/repo\n${githubCredentialTwo}`,
     payload: {
       additiveField: ["kept"],
       secretKey: "fake",
@@ -192,6 +193,7 @@ test("structured session events canonicalize additive payloads and replay idempo
         githubToken: "fake",
       },
       note: "request failed: authorization: Bearer credential-two",
+      remote: "https://bob:p%40ssword@example.com/repo",
       pemAssignment: `private_key=${privateKeyTwo}`,
       storageKey: "fake",
       tokenSamples: [
@@ -213,7 +215,8 @@ test("structured session events canonicalize additive payloads and replay idempo
     actor: "operator",
     eventKey: "run:1",
     type: "clawsweeper.action",
-    message: "updated pull request: [credential]\n[credential]\n[credential]\n[credential]",
+    message:
+      "updated pull request: [credential]\n[credential]\n[credential]\nhttps://[credential]@example.com/repo\n[credential]",
     payload: {
       accessKeyId: "[redacted]",
       accountKey: "[redacted]",
@@ -222,6 +225,7 @@ test("structured session events canonicalize additive payloads and replay idempo
       connectionString: "[redacted]",
       note: "request failed: [credential]",
       pemAssignment: "private_key=[credential]",
+      remote: "https://[credential]@example.com/repo",
       secretAccessKey: "[redacted]",
       secretKey: "[redacted]",
       sharedAccessKey: "[redacted]",
@@ -239,8 +243,8 @@ test("structured session events canonicalize additive payloads and replay idempo
     createdAt: 123,
   });
   assert.deepEqual(persistedPayloads, [
-    '{"accessKeyId":"[redacted]","accountKey":"[redacted]","additiveField":["kept"],"connectionString":"[redacted]","credentials":"[redacted]","note":"request failed: [credential]","pemAssignment":"private_key=[credential]","secretAccessKey":"[redacted]","secretKey":"[redacted]","sharedAccessKey":"[redacted]","storageKey":"[redacted]","target":{"a":1,"z":true},"tokenSamples":["[credential]","[credential]","[credential]","[credential]","[credential]"],"version":2}',
-    '{"accessKeyId":"[redacted]","accountKey":"[redacted]","additiveField":["kept"],"connectionString":"[redacted]","credentials":"[redacted]","note":"request failed: [credential]","pemAssignment":"private_key=[credential]","secretAccessKey":"[redacted]","secretKey":"[redacted]","sharedAccessKey":"[redacted]","storageKey":"[redacted]","target":{"a":1,"z":true},"tokenSamples":["[credential]","[credential]","[credential]","[credential]","[credential]"],"version":2}',
+    '{"accessKeyId":"[redacted]","accountKey":"[redacted]","additiveField":["kept"],"connectionString":"[redacted]","credentials":"[redacted]","note":"request failed: [credential]","pemAssignment":"private_key=[credential]","remote":"https://[credential]@example.com/repo","secretAccessKey":"[redacted]","secretKey":"[redacted]","sharedAccessKey":"[redacted]","storageKey":"[redacted]","target":{"a":1,"z":true},"tokenSamples":["[credential]","[credential]","[credential]","[credential]","[credential]"],"version":2}',
+    '{"accessKeyId":"[redacted]","accountKey":"[redacted]","additiveField":["kept"],"connectionString":"[redacted]","credentials":"[redacted]","note":"request failed: [credential]","pemAssignment":"private_key=[credential]","remote":"https://[credential]@example.com/repo","secretAccessKey":"[redacted]","secretKey":"[redacted]","sharedAccessKey":"[redacted]","storageKey":"[redacted]","target":{"a":1,"z":true},"tokenSamples":["[credential]","[credential]","[credential]","[credential]","[credential]"],"version":2}',
   ]);
   assert.deepEqual(invalidations, ["IS-1", "IS-1"]);
   assert.deepEqual(archives, ["IS-1", "IS-1"]);
