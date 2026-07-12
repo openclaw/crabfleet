@@ -287,8 +287,9 @@ if (!runnerPtyUrl) throw new Error("CRABFLEET_RUNNER_PTY_URL is required");
 
 const magic = new Uint8Array([0x43, 0x46, 0x52, 0x31]); // CFR1
 const inputIdDecoder = new TextDecoder();
-const inputDecoder = new TextDecoder("utf-8", { fatal: true });
 const encoder = new TextEncoder();
+let pendingInputs = [];
+let pendingInputBytes = 0;
 const framedRunnerPtyUrl = new URL(runnerPtyUrl);
 framedRunnerPtyUrl.searchParams.set("runnerProtocol", "cfr1-framed-io-v1");
 const terminal = new WebSocket(framedRunnerPtyUrl);
@@ -319,13 +320,38 @@ terminal.addEventListener("message", (event) => {
 function acceptInput(data) {
   const input = decodeInput(data);
   if (!input) return;
-  try {
-    const text = inputDecoder.decode(input.payload, { stream: true });
-    if (text) pty.write(text);
-    terminal.send(encodeAck(input.inputId, true));
-  } catch {
-    terminal.send(encodeAck(input.inputId, false));
+  pendingInputs.push(input);
+  pendingInputBytes += input.payload.byteLength;
+
+  const payload = new Uint8Array(pendingInputBytes);
+  let offset = 0;
+  for (const pending of pendingInputs) {
+    payload.set(pending.payload, offset);
+    offset += pending.payload.byteLength;
   }
+
+  try {
+    const text = decodeCompleteUtf8(payload);
+    if (text === null) return;
+    pty.write(text);
+    settlePendingInputs(true);
+  } catch {
+    settlePendingInputs(false);
+  }
+}
+
+function decodeCompleteUtf8(payload) {
+  const decoder = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true });
+  const text = decoder.decode(payload, { stream: true });
+  return encoder.encode(text).byteLength === payload.byteLength ? text : null;
+}
+
+function settlePendingInputs(accepted) {
+  for (const input of pendingInputs) {
+    terminal.send(encodeAck(input.inputId, accepted));
+  }
+  pendingInputs = [];
+  pendingInputBytes = 0;
 }
 
 function decodeInput(data) {
@@ -380,16 +406,17 @@ terminal.addEventListener("error", () => {
 Set `CRABFLEET_RUNNER_PTY_URL` to the `runnerPtyUrl` returned by registration.
 For a PTY API with an asynchronous write callback or promise, await that
 acceptance signal before sending `encodeAck(..., true)`. Do not acknowledge when
-the WebSocket merely queues the input frame. This Node adapter also requires each
-input frame to contain complete, valid UTF-8; invalid or split sequences receive
-a negative acknowledgement and must be resent on valid boundaries.
+the WebSocket merely queues the input frame. This Node adapter buffers a valid
+incomplete UTF-8 suffix together with every affected input ID. It writes and
+positively acknowledges those frames only after a later frame completes the
+sequence. Invalid UTF-8 rejects the buffered group without delivering any of it.
 
 The protocol query is consumed during connection setup and is not forwarded as
 terminal data. There is no capability message or mode transition after the
 socket opens. Each `CFR1` frame occupies one binary WebSocket message. Payloads
 are opaque bytes; adapters targeting string-only PTY APIs must either preserve
-decoder state across acknowledgements or reject frames that end inside a text
-encoding sequence, as the Node example does:
+bytes and correlation IDs until a complete character sequence can be delivered,
+as the Node example does:
 
 | Offset | Size     | Value                                                                          |
 | ------ | -------- | ------------------------------------------------------------------------------ |
