@@ -306,10 +306,6 @@ public final class VNCConnection: NSObjectOrAnyObject, @unchecked Sendable {
 		return uniqueEncs
 	}
 
-	func resetZRLECompressionState() throws {
-		try sharedZRLEZStream.reset()
-	}
-
 	// MARK: - Public Initializers
     public init(settings: Settings,
                 logger: VNCLogger,

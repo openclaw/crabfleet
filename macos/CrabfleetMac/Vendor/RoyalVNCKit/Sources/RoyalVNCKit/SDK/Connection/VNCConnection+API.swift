@@ -5,24 +5,28 @@ import Foundation
 #endif
 
 private struct PixelFormatTransitionMessage: VNCSendableMessage {
-	let fenceMessage: VNCProtocol.ClientFence?
+	let synchronizationFenceMessage: VNCProtocol.ClientFence?
 	let pixelFormatMessage: VNCProtocol.SetPixelFormat
 	let encodingsMessage: VNCProtocol.SetEncodings
-	let willSendPixelFormat: () throws -> Void
+	let completionFenceMessage: VNCProtocol.ClientFence?
 	let willSend: () -> Void
 	let didSend: () -> Void
 	let willSendFence: () -> Void
 	let didSendFence: () -> Void
 	let didFailFence: () -> Void
 
-	var messageType: UInt8 { fenceMessage?.messageType ?? pixelFormatMessage.messageType }
+	var messageType: UInt8 {
+		synchronizationFenceMessage?.messageType ?? pixelFormatMessage.messageType
+	}
 	var data: Data {
-		(fenceMessage?.data ?? Data()) + pixelFormatMessage.data + encodingsMessage.data
+		(synchronizationFenceMessage?.data ?? Data())
+			+ pixelFormatMessage.data
+			+ encodingsMessage.data
+			+ (completionFenceMessage?.data ?? Data())
 	}
 
 	func send(connection: NetworkConnectionWriting) async throws {
-		try willSendPixelFormat()
-		if fenceMessage == nil {
+		if synchronizationFenceMessage == nil {
 			willSend()
 		} else {
 			willSendFence()
@@ -30,12 +34,12 @@ private struct PixelFormatTransitionMessage: VNCSendableMessage {
 		do {
 			try await connection.write(data: data)
 		} catch {
-			if fenceMessage != nil {
+			if synchronizationFenceMessage != nil {
 				didFailFence()
 			}
 			throw error
 		}
-		if fenceMessage == nil {
+		if synchronizationFenceMessage == nil {
 			didSend()
 		} else {
 			didSendFence()
@@ -46,20 +50,19 @@ private struct PixelFormatTransitionMessage: VNCSendableMessage {
 private struct PixelFormatTransition {
 	let pixelFormat: VNCProtocol.PixelFormat
 	let fenceFlags: VNCProtocol.FenceFlags
-	let fencePayload: Data?
+	let synchronizationFencePayload: Data?
+	let completionFencePayload: Data?
 }
 
 private struct FenceCapabilityProbeMessage: VNCSendableMessage {
 	let fenceMessage: VNCProtocol.ClientFence
 	let pixelFormatMessage: VNCProtocol.SetPixelFormat
-	let willSendPixelFormat: () throws -> Void
 	let didSend: () -> Void
 
 	var messageType: UInt8 { fenceMessage.messageType }
 	var data: Data { fenceMessage.data + pixelFormatMessage.data }
 
 	func send(connection: NetworkConnectionWriting) async throws {
-		try willSendPixelFormat()
 		try await connection.write(data: data)
 		didSend()
 	}
@@ -182,23 +185,29 @@ extension VNCConnection {
 		pendingPixelFormatTransition = nil
 		isPixelFormatTransitionInFlight = true
 		pixelFormatTransitionInFlight = pixelFormat
-		let fencePayload: Data?
+		let synchronizationFencePayload: Data?
+		let completionFencePayload: Data?
 		if !fenceFlags.isEmpty {
 			pixelFormatTransitionFenceSequence &+= 1
 			var sequence = pixelFormatTransitionFenceSequence.bigEndian
-			fencePayload = withUnsafeBytes(of: &sequence) { Data($0) }
-			pixelFormatTransitionFencePayload = fencePayload
-			pixelFormatTransitionRequiredFenceFlags = [.blockBefore, .syncNext]
+			synchronizationFencePayload = withUnsafeBytes(of: &sequence) { Data($0) }
+			pixelFormatTransitionFenceSequence &+= 1
+			sequence = pixelFormatTransitionFenceSequence.bigEndian
+			completionFencePayload = withUnsafeBytes(of: &sequence) { Data($0) }
+			pixelFormatTransitionFencePayload = completionFencePayload
+			pixelFormatTransitionRequiredFenceFlags = [.blockBefore]
 			pixelFormatTransitionFenceWasSent = false
 		} else {
-			fencePayload = nil
+			synchronizationFencePayload = nil
+			completionFencePayload = nil
 			pixelFormatTransitionRequiredFenceFlags = []
 			pixelFormatTransitionFenceWasSent = false
 		}
 		return PixelFormatTransition(
 			pixelFormat: pixelFormat,
 			fenceFlags: fenceFlags,
-			fencePayload: fencePayload
+			synchronizationFencePayload: synchronizationFencePayload,
+			completionFencePayload: completionFencePayload
 		)
 	}
 
@@ -210,16 +219,17 @@ extension VNCConnection {
 			handleBreakingError(error)
 			return
 		}
-		let fenceMessage = transition.fencePayload.map {
+		let synchronizationFenceMessage = transition.synchronizationFencePayload.map {
 			VNCProtocol.ClientFence(flags: transition.fenceFlags, payload: $0)
 		}
+		let completionFenceMessage = transition.completionFencePayload.map {
+			VNCProtocol.ClientFence(flags: [.request, .blockBefore], payload: $0)
+		}
 		let message = PixelFormatTransitionMessage(
-			fenceMessage: fenceMessage,
+			synchronizationFenceMessage: synchronizationFenceMessage,
 			pixelFormatMessage: VNCProtocol.SetPixelFormat(pixelFormat: transition.pixelFormat),
 			encodingsMessage: VNCProtocol.SetEncodings(encodingTypes: encodingTypes),
-			willSendPixelFormat: { [weak self] in
-				try self?.resetZRLECompressionState()
-			},
+			completionFenceMessage: completionFenceMessage,
 			willSend: { [weak self] in
 				self?.beginPixelFormatTransition(transition.pixelFormat)
 			},
@@ -227,15 +237,15 @@ extension VNCConnection {
 				self?.completePixelFormatTransition()
 			},
 			willSendFence: { [weak self] in
-				guard let payload = transition.fencePayload else { return }
+				guard let payload = transition.completionFencePayload else { return }
 				self?.beginPixelFormatTransitionFenceWrite(payload: payload)
 			},
 			didSendFence: { [weak self] in
-				guard let payload = transition.fencePayload else { return }
+				guard let payload = transition.completionFencePayload else { return }
 				self?.schedulePixelFormatTransitionDeadline(payload: payload)
 			},
 			didFailFence: { [weak self] in
-				guard let payload = transition.fencePayload else { return }
+				guard let payload = transition.completionFencePayload else { return }
 				self?.cancelPixelFormatTransitionFenceWrite(payload: payload)
 			}
 		)
@@ -339,9 +349,6 @@ extension VNCConnection {
 					payload: payload
 				),
 				pixelFormatMessage: VNCProtocol.SetPixelFormat(pixelFormat: pixelFormat),
-				willSendPixelFormat: { [weak self] in
-					try self?.resetZRLECompressionState()
-				},
 				didSend: { [weak self] in
 					self?.didSendPixelFormatFenceCapabilityProbe(payload: payload)
 				}
