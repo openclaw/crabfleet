@@ -535,7 +535,7 @@ test("migration leaves live legacy registrations unstaged while old workers rene
   );
 });
 
-test("lookup identity migration backfills the exact staged legacy lookup set", () => {
+test("lookup identity migration preserves compatibility recovery for pre-0037 staging", () => {
   const sqlite = credentialPolicyDatabase({ applyMigrations: false });
   sqlite.exec(
     readFileSync(
@@ -555,6 +555,14 @@ test("lookup identity migration backfills the exact staged legacy lookup set", (
       "utf8",
     ),
   );
+  sqlite
+    .prepare(`
+      DELETE FROM interactive_session_credential_policies
+      WHERE session_id = 'IS-42'
+        AND sandbox_id = 'sandbox-1'
+        AND lookup_id = 'do-1'
+    `)
+    .run();
   sqlite
     .prepare(`
       INSERT INTO interactive_session_credential_policy_registrations (
@@ -603,7 +611,16 @@ test("lookup identity migration backfills the exact staged legacy lookup set", (
       WHERE session_id = 'IS-42' AND sandbox_id = 'sandbox-1'
     `)
     .get();
-  assert.deepEqual(JSON.parse(String(row?.lookup_ids_json)), ["do-1", "do-old", "sandbox-1"]);
+  const env = sqliteRuntimeEnv(sqlite);
+  assert.equal(row?.lookup_ids_json, null);
+  assert.deepEqual(
+    sandboxCredentialPolicyRegistrationLookupIds(
+      row?.lookup_ids_json as string | null,
+      "sandbox-1",
+      sandboxLookupIds(env, "sandbox-1"),
+    ),
+    ["sandbox-1", "do-1"],
+  );
   assert.equal(row?.repair_generation, null);
 });
 
