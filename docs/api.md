@@ -656,7 +656,8 @@ a different order. Reusing the key with different content returns `409`.
 Credential-shaped payload fields are recursively replaced with `[redacted]`,
 and embedded credential text is scrubbed from payload strings and `message`
 before persistence. After a session becomes terminal, only an exact replay of
-an already-persisted event is accepted; new terminal history is rejected.
+an already-persisted event is accepted without refreshing finalized archives;
+new terminal history is rejected.
 Structured events do not change work state, `lastEvent`, or the existing
 message-event behavior.
 

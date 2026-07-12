@@ -146,17 +146,21 @@ test("structured event batch interruption rolls back insert and terminal invalid
   assert.equal(archived, false);
 });
 
-test("structured event races deduplicate and invalidate only exact replays", async () => {
+test("structured event races deduplicate and keep terminal replays side-effect free", async () => {
   const database = eventDatabase();
   const env = runtimeEnv(database);
+  let archiveCalls = 0;
   const append = (input: ReturnType<typeof eventInput>) =>
-    appendStructuredInteractiveSessionEventRecord(env, input, async () => undefined);
+    appendStructuredInteractiveSessionEventRecord(env, input, async () => {
+      archiveCalls += 1;
+    });
   const results = await Promise.all([
     append(eventInput("updated pull request", 100)),
     append(eventInput("updated pull request", 200)),
   ]);
 
   assert.deepEqual(results.map((result) => result.duplicate).sort(), [false, true]);
+  assert.equal(archiveCalls, 2);
   assert.equal(
     database.prepare("SELECT count(*) AS count FROM interactive_session_events").get()?.count,
     1,
@@ -171,14 +175,14 @@ test("structured event races deduplicate and invalidate only exact replays", asy
   database.exec("UPDATE interactive_sessions SET status = 'stopped' WHERE id = 'IS-1'");
   const replay = await append(eventInput("updated pull request", 300));
   assert.equal(replay.duplicate, true);
+  assert.equal(archiveCalls, 2);
   assert.equal(
     database
       .prepare("SELECT terminal_finalize_pending FROM interactive_sessions WHERE id = 'IS-1'")
       .get()?.terminal_finalize_pending,
-    1,
+    0,
   );
 
-  database.exec("UPDATE interactive_sessions SET terminal_finalize_pending = 0 WHERE id = 'IS-1'");
   await assert.rejects(append(eventInput("changed content", 400)), (error) => {
     assert.equal(
       typeof error === "object" && error && "status" in error ? error.status : undefined,

@@ -252,7 +252,8 @@ does not update `workState`, `workPhase`, `lastHeartbeatAt`, or `lastEvent`.
 Credential-shaped payload fields are recursively replaced with `[redacted]`,
 and embedded credential text is scrubbed from payload strings and `message`
 before D1/R2 persistence. Once the session is terminal, the endpoint accepts
-only exact replays of already-persisted events and rejects new history.
+only side-effect-free exact replays of already-persisted events and rejects new
+history.
 
 ## Runner PTY
 
