@@ -35,12 +35,14 @@ private struct PixelFormatTransition {
 private struct FenceCapabilityProbeMessage: VNCSendableMessage {
 	let fenceMessage: VNCProtocol.ClientFence
 	let pixelFormatMessage: VNCProtocol.SetPixelFormat
+	let didSend: () -> Void
 
 	var messageType: UInt8 { fenceMessage.messageType }
 	var data: Data { fenceMessage.data + pixelFormatMessage.data }
 
 	func send(connection: NetworkConnectionWriting) async throws {
 		try await connection.write(data: data)
+		didSend()
 	}
 }
 
@@ -206,7 +208,6 @@ extension VNCConnection {
 		}
 		let payload = Data("royalvnc-pixel-format".utf8)
 		pixelFormatFenceCapabilityProbePayload = payload
-		schedulePixelFormatFenceNegotiationTimeoutLocked()
 		framebufferRequestLock.unlock()
 
 		enqueueClientToServerMessage(
@@ -215,9 +216,19 @@ extension VNCConnection {
 					flags: [.request, .blockBefore, .blockAfter, .syncNext],
 					payload: payload
 				),
-				pixelFormatMessage: VNCProtocol.SetPixelFormat(pixelFormat: pixelFormat)
+				pixelFormatMessage: VNCProtocol.SetPixelFormat(pixelFormat: pixelFormat),
+				didSend: { [weak self] in
+					self?.didSendPixelFormatFenceCapabilityProbe(payload: payload)
+				}
 			)
 		)
+	}
+
+	private func didSendPixelFormatFenceCapabilityProbe(payload: Data) {
+		framebufferRequestLock.lock()
+		defer { framebufferRequestLock.unlock() }
+		guard pixelFormatFenceCapabilityProbePayload == payload else { return }
+		schedulePixelFormatFenceNegotiationTimeoutLocked()
 	}
 
 	private func schedulePixelFormatFenceNegotiationTimeoutLocked() {
@@ -251,7 +262,11 @@ extension VNCConnection {
 			return
 		}
 		pixelFormatFenceCapabilityProbePayload = nil
-		if negotiationTimedOut {
+		let isWaitingForLegacyFramebufferBoundary =
+			negotiationTimedOut
+			&& !state.areContinuousUpdatesEnabled
+			&& framebufferUpdateRequestOutstanding
+		if negotiationTimedOut && !isWaitingForLegacyFramebufferBoundary {
 			pendingPixelFormatTransition = nil
 		}
 		let transition = probeTimedOut ? takePendingPixelFormatTransitionLocked() : nil

@@ -101,7 +101,7 @@ struct AuditFindingsTests {
   }
 
   @Test
-  func rejectsUnsafeLegacyPixelFormatTransitionAfterNegotiationTimeout() throws {
+  func retainsLegacyPixelFormatTransitionUntilSlowFramebufferUpdateCompletes() async throws {
     let connection = VNCConnection(
       settings: makeSettings(),
       framebufferAllocator: VNCFramebufferMallocAllocator()
@@ -117,13 +117,26 @@ struct AuditFindingsTests {
 
     #expect(connection.pendingPixelFormatTransition?.depth == 8)
     #expect(connection.clientToServerMessageQueue.dequeue() == nil)
+    #expect(connection.pixelFormatFenceNegotiationTask != nil)
 
-    connection.expirePixelFormatFenceNegotiation()
+    for _ in 0..<100 {
+      guard connection.pixelFormatFenceNegotiationTask != nil else { break }
+      try await Task.sleep(nanoseconds: 20_000_000)
+    }
 
     #expect(connection.state.pixelFormat?.depth == 24)
     #expect(connection.state.pixelFormat?.depth == connection.framebuffer?.sourcePixelFormat.depth)
     #expect(connection.clientToServerMessageQueue.dequeue() == nil)
+    #expect(connection.pixelFormatFenceNegotiationTask == nil)
+    #expect(connection.pendingPixelFormatTransition?.depth == 8)
+
+    connection.completeFramebufferUpdateRequest()
+
+    let transition = try #require(connection.clientToServerMessageQueue.dequeue())
+    try await transition.message.send(connection: AuditWritingConnection())
     #expect(connection.pendingPixelFormatTransition == nil)
+    #expect(connection.state.pixelFormat?.depth == 8)
+    #expect(connection.state.pixelFormat?.depth == connection.framebuffer?.sourcePixelFormat.depth)
   }
 
   @Test
@@ -155,6 +168,40 @@ struct AuditFindingsTests {
     #expect(connection.pendingPixelFormatTransition?.depth == 8)
     #expect(connection.clientToServerMessageQueue.dequeue() != nil)
     #expect(connection.clientToServerMessageQueue.dequeue() != nil)
+  }
+
+  @Test
+  func startsFenceCapabilityTimeoutAfterDelayedProbeSend() async throws {
+    let connection = VNCConnection(
+      settings: makeSettings(),
+      framebufferAllocator: VNCFramebufferMallocAllocator()
+    )
+    let framebuffer = try makeFramebuffer(width: 2, height: 2, depth: 24)
+    connection.framebuffer = framebuffer
+    connection.state.pixelFormat = framebuffer.sourcePixelFormat
+    connection.connectionState = .connected
+    connection._framebufferUpdatePolicy = .paused
+
+    try connection.handleServerFence(
+      VNCProtocol.ServerFence(
+        messageType: VNCProtocol.ServerFence.messageType,
+        flags: [.request, .blockBefore, .syncNext],
+        payload: Data("support".utf8)
+      )
+    )
+    _ = try #require(connection.clientToServerMessageQueue.dequeue())
+    let capabilityProbe = try #require(connection.clientToServerMessageQueue.dequeue())
+
+    #expect(connection.pixelFormatFenceCapabilityProbePayload != nil)
+    #expect(connection.pixelFormatFenceNegotiationTask == nil)
+
+    try await capabilityProbe.message.send(
+      connection: AuditWritingConnection(delayNanoseconds: 1_100_000_000)
+    )
+
+    #expect(connection.pixelFormatFenceCapabilityProbePayload != nil)
+    #expect(connection.pixelFormatFenceNegotiationTask != nil)
+    connection.expirePixelFormatFenceNegotiation()
   }
 
   @Test
@@ -493,13 +540,18 @@ private final class AuditBufferConnection: NetworkConnectionReading {
 
 private final class AuditWritingConnection: NetworkConnectionWriting {
   var data = Data()
+  private let delayNanoseconds: UInt64
   private let onWrite: () -> Void
 
-  init(onWrite: @escaping () -> Void = {}) {
+  init(delayNanoseconds: UInt64 = 0, onWrite: @escaping () -> Void = {}) {
+    self.delayNanoseconds = delayNanoseconds
     self.onWrite = onWrite
   }
 
   func write(data: Data) async throws {
+    if delayNanoseconds > 0 {
+      try await Task.sleep(nanoseconds: delayNanoseconds)
+    }
     onWrite()
     self.data.append(data)
   }
