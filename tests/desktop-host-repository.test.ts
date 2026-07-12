@@ -288,6 +288,12 @@ test("legacy desktop host writes and cleanup cannot mutate token-owned rows", as
       "utf8",
     ),
   );
+  sqlite.exec(
+    readFileSync(
+      new URL("../migrations/0041_desktop_host_ownership_errors.sql", import.meta.url),
+      "utf8",
+    ),
+  );
   sqlite.exec(`
     INSERT INTO desktop_hosts (
       owner_subject, id, owner, name, address, port, ownership_token, publication_id,
@@ -342,6 +348,7 @@ test("desktop host publication recovery matches only the current publication", a
     "0030_desktop_hosts.sql",
     "0033_desktop_host_ownership.sql",
     "0038_desktop_host_publication_identity.sql",
+    "0041_desktop_host_ownership_errors.sql",
   ]) {
     sqlite.exec(readFileSync(new URL(`../migrations/${migration}`, import.meta.url), "utf8"));
   }
@@ -376,6 +383,7 @@ test("same-publication retries remain recoverable after the publication migratio
     "0030_desktop_hosts.sql",
     "0033_desktop_host_ownership.sql",
     "0038_desktop_host_publication_identity.sql",
+    "0041_desktop_host_ownership_errors.sql",
   ]) {
     sqlite.exec(readFileSync(new URL(`../migrations/${migration}`, import.meta.url), "utf8"));
   }

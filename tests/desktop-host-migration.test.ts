@@ -22,6 +22,12 @@ test("desktop host migration creates an owner-scoped registry with bounded ports
       "utf8",
     ),
   );
+  database.exec(
+    readFileSync(
+      new URL("../migrations/0041_desktop_host_ownership_errors.sql", import.meta.url),
+      "utf8",
+    ),
+  );
 
   const insert = database.prepare(`
     INSERT INTO desktop_hosts
@@ -66,6 +72,7 @@ test("desktop host publication migration clears identities rotated by old worker
     "0030_desktop_hosts.sql",
     "0033_desktop_host_ownership.sql",
     "0038_desktop_host_publication_identity.sql",
+    "0041_desktop_host_ownership_errors.sql",
   ]) {
     database.exec(readFileSync(new URL(`../migrations/${migration}`, import.meta.url), "utf8"));
   }
@@ -104,6 +111,12 @@ test("desktop host ownership migration blocks old-worker mutations of token-owne
   database.exec(
     readFileSync(new URL("../migrations/0033_desktop_host_ownership.sql", import.meta.url), "utf8"),
   );
+  database.exec(
+    readFileSync(
+      new URL("../migrations/0041_desktop_host_ownership_errors.sql", import.meta.url),
+      "utf8",
+    ),
+  );
   database.exec(`
     INSERT INTO desktop_hosts (
       owner_subject, id, owner, name, address, port, ownership_token, created_at, updated_at
@@ -123,15 +136,19 @@ test("desktop host ownership migration blocks old-worker mutations of token-owne
       port = excluded.port,
       updated_at = excluded.updated_at
   `);
-  oldWorkerUpsert.run(
-    "github:1",
-    "owned",
-    "old-worker",
-    "Overwritten",
-    "100.64.1.99",
-    5902,
-    10,
-    20,
+  assert.throws(
+    () =>
+      oldWorkerUpsert.run(
+        "github:1",
+        "owned",
+        "old-worker",
+        "Overwritten",
+        "100.64.1.99",
+        5902,
+        10,
+        20,
+      ),
+    /token-owned desktop host update requires ownership token/,
   );
   oldWorkerUpsert.run(
     "github:1",
@@ -169,7 +186,11 @@ test("desktop host ownership migration blocks old-worker mutations of token-owne
     "Updated Legacy",
   );
 
-  database.exec("DELETE FROM desktop_hosts WHERE owner_subject = 'github:1' AND id = 'owned'");
+  assert.throws(
+    () =>
+      database.exec("DELETE FROM desktop_hosts WHERE owner_subject = 'github:1' AND id = 'owned'"),
+    /token-owned desktop host delete requires ownership token/,
+  );
   database.exec("DELETE FROM desktop_hosts WHERE owner_subject = 'github:1' AND id = 'legacy'");
   assert.equal(
     database.prepare("SELECT count(*) AS count FROM desktop_hosts WHERE id = 'owned'").get()?.count,
