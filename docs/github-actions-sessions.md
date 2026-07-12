@@ -299,6 +299,8 @@ let pendingInputs = [];
 let pendingInputBytes = 0;
 let pendingInputTimer;
 let inputQueue = Promise.resolve();
+let terminalClosed = false;
+let activeGeneration;
 const terminal = new WebSocket(runnerPtyUrl, "cfr1-framed-io-v2");
 terminal.binaryType = "arraybuffer";
 
@@ -320,7 +322,13 @@ subscribeSteeringExit(() => {
 terminal.addEventListener("message", (event) => {
   const input = admitInput(event.data);
   if (!input) return;
-  inputQueue = inputQueue.then(() => acceptInput(input));
+  inputQueue = inputQueue.then(() => {
+    if (!inputIsActive(input)) {
+      releaseInputs([input]);
+      return;
+    }
+    return acceptInput(input);
+  });
 });
 
 async function acceptInput(input) {
@@ -361,6 +369,14 @@ function admitInput(data) {
   }
   const input = framed ? decodeInput(data) : decodeRawInput(data);
   if (!input) return null;
+  if (framed) {
+    if (activeGeneration === undefined) {
+      activeGeneration = input.generation;
+    } else if (input.generation !== activeGeneration) {
+      sendAck(input, false);
+      return null;
+    }
+  }
   const nextBytes = admittedInputBytes + input.payload.byteLength;
   const nextFrames = admittedInputFrames + 1;
   if (nextBytes > maxAdmittedInputBytes || nextFrames > maxAdmittedInputFrames) {
@@ -374,6 +390,14 @@ function admitInput(data) {
   admittedInputBytes = nextBytes;
   admittedInputFrames = nextFrames;
   return input;
+}
+
+function inputIsActive(input) {
+  return (
+    !terminalClosed &&
+    terminal.readyState === WebSocket.OPEN &&
+    (!framed || input.generation === activeGeneration)
+  );
 }
 
 function decodeRawInput(data) {
@@ -499,13 +523,16 @@ function encodeUtf8Output(outputText) {
   return frame;
 }
 
-terminal.addEventListener("close", () => {
+function deactivateTerminal() {
+  if (terminalClosed) return;
+  terminalClosed = true;
+  activeGeneration = undefined;
+  rejectInputs(takePendingInputs(), 1001, "terminal closed");
   closeSteering();
-});
+}
 
-terminal.addEventListener("error", () => {
-  closeSteering();
-});
+terminal.addEventListener("close", deactivateTerminal);
+terminal.addEventListener("error", deactivateTerminal);
 ```
 
 Set `CRABFLEET_RUNNER_PTY_URL` to the `runnerPtyUrl` returned by registration.
@@ -525,7 +552,11 @@ pending, queued, or blocked in `deliverSteeringInput`, so a stalled steering
 call cannot retain an unbounded sequence of `MessageEvent` payloads. Framed
 overflow receives a negative acknowledgement; raw overflow closes the socket
 because legacy mode has no acknowledgement channel. An incomplete UTF-8 group
-expires after one second.
+expires after one second. The first framed input pins the relay-owned generation
+for that socket. Every admitted input rechecks both that generation and socket
+liveness before entering the restricted steering handler; close or error
+invalidates the generation and releases buffered or queued input instead of
+delivering it through a replacement runner.
 
 WebSocket subprotocol selection is fixed during the opening handshake. There is
 no capability message or mode transition after the socket opens. Older relays

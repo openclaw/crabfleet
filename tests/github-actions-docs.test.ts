@@ -26,11 +26,26 @@ test("the documented Node runner acknowledges only delivered UTF-8 input", async
   assert.equal(guide.match(/runnerProtocol/g)?.length, 1);
   assert.match(guide, /let pendingInputs = \[\]/);
   assert.match(guide, /let inputQueue = Promise\.resolve\(\)/);
+  assert.match(guide, /let terminalClosed = false;\s+let activeGeneration;/);
   assert.match(
     guide,
-    /const input = admitInput\(event\.data\);\s+if \(!input\) return;\s+inputQueue = inputQueue\.then\(\(\) => acceptInput\(input\)\)/,
+    /const input = admitInput\(event\.data\);\s+if \(!input\) return;\s+inputQueue = inputQueue\.then\(\(\) => \{\s+if \(!inputIsActive\(input\)\) \{\s+releaseInputs\(\[input\]\);\s+return;\s+\}\s+return acceptInput\(input\);\s+\}\)/,
   );
   assert.doesNotMatch(guide, /\.then\(\(\) => acceptInput\(event\.data\)\)/);
+  assert.match(
+    guide,
+    /if \(framed\) \{\s+if \(activeGeneration === undefined\) \{\s+activeGeneration = input\.generation;\s+\} else if \(input\.generation !== activeGeneration\) \{\s+sendAck\(input, false\);\s+return null;/,
+  );
+  assert.match(
+    guide,
+    /function inputIsActive\(input\) \{\s+return \(\s+!terminalClosed &&\s+terminal\.readyState === WebSocket\.OPEN &&\s+\(!framed \|\| input\.generation === activeGeneration\)/,
+  );
+  assert.match(
+    guide,
+    /function deactivateTerminal\(\) \{\s+if \(terminalClosed\) return;\s+terminalClosed = true;\s+activeGeneration = undefined;\s+rejectInputs\(takePendingInputs\(\), 1001, "terminal closed"\);\s+closeSteering\(\);/,
+  );
+  assert.match(guide, /terminal\.addEventListener\("close", deactivateTerminal\)/);
+  assert.match(guide, /terminal\.addEventListener\("error", deactivateTerminal\)/);
   assert.match(guide, /pendingInputs\.push\(input\)/);
   assert.match(guide, /text = decodeCompleteUtf8\(payload\)/);
   assert.match(guide, /if \(text === null\) \{\s+armPendingInputTimer\(\);\s+return;/);
@@ -83,13 +98,14 @@ test("the documented Node runner acknowledges only delivered UTF-8 input", async
 
   const messageHandler = guide.indexOf('terminal.addEventListener("message"');
   const admission = guide.indexOf("const input = admitInput(event.data);", messageHandler);
-  const serialization = guide.indexOf(
-    "inputQueue = inputQueue.then(() => acceptInput(input));",
-    messageHandler,
-  );
+  const serialization = guide.indexOf("inputQueue = inputQueue.then(() => {", messageHandler);
+  const activeCheck = guide.indexOf("if (!inputIsActive(input))", serialization);
+  const deliveryAdmission = guide.indexOf("return acceptInput(input);", activeCheck);
   assert.ok(messageHandler >= 0);
   assert.ok(admission > messageHandler);
   assert.ok(serialization > admission);
+  assert.ok(activeCheck > serialization);
+  assert.ok(deliveryAdmission > activeCheck);
 
   const timerArm = guide.indexOf("armPendingInputTimer();");
   const batchSnapshot = guide.indexOf("const inputs = takePendingInputs();");
