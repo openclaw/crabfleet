@@ -88,7 +88,7 @@ struct SystemTailscaleCommandRunner: TailscaleCommandRunning {
 }
 
 private final class TailscaleCommandExecution: @unchecked Sendable {
-  private static let stoppedProcessDrainTimeout: DispatchTimeInterval = .milliseconds(250)
+  private static let processDrainTimeout: DispatchTimeInterval = .milliseconds(250)
 
   private enum StopReason {
     case cancelled
@@ -104,6 +104,7 @@ private final class TailscaleCommandExecution: @unchecked Sendable {
   private let timeout: TimeInterval
   private let maximumOutputBytes: Int
   private var stopReason: StopReason?
+  private var captureShouldStop = false
   private var standardOutput = Data()
   private var standardError = Data()
 
@@ -182,15 +183,31 @@ private final class TailscaleCommandExecution: @unchecked Sendable {
     readGroup.enter()
     DispatchQueue.global(qos: .userInitiated).async { [self] in
       defer { readGroup.leave() }
+      let fileDescriptor = pipe.fileHandleForReading.fileDescriptor
       var data = Data()
-      while true {
-        let chunk = pipe.fileHandleForReading.readData(ofLength: 64 * 1_024)
-        if chunk.isEmpty { break }
-        guard chunk.count <= maximumOutputBytes - data.count else {
+      var buffer = [UInt8](repeating: 0, count: 64 * 1_024)
+      while !shouldStopCapture() {
+        var descriptor = pollfd(fd: fileDescriptor, events: Int16(POLLIN | POLLHUP), revents: 0)
+        let pollResult = Darwin.poll(&descriptor, 1, 50)
+        if pollResult == 0 { continue }
+        if pollResult < 0 {
+          if errno == EINTR { continue }
+          break
+        }
+
+        let bytesRead = buffer.withUnsafeMutableBytes {
+          Darwin.read(fileDescriptor, $0.baseAddress, $0.count)
+        }
+        if bytesRead == 0 { break }
+        if bytesRead < 0 {
+          if errno == EINTR || errno == EAGAIN { continue }
+          break
+        }
+        guard bytesRead <= maximumOutputBytes - data.count else {
           stop(.outputTooLarge)
           break
         }
-        data.append(chunk)
+        data.append(buffer, count: bytesRead)
       }
       setCaptured(data, isStandardOutput: isStandardOutput)
     }
@@ -221,6 +238,18 @@ private final class TailscaleCommandExecution: @unchecked Sendable {
     return stopReason
   }
 
+  private func shouldStopCapture() -> Bool {
+    lock.lock()
+    defer { lock.unlock() }
+    return captureShouldStop
+  }
+
+  private func stopCapture() {
+    lock.lock()
+    captureShouldStop = true
+    lock.unlock()
+  }
+
   private func stop(_ reason: StopReason) {
     lock.lock()
     if stopReason == nil { stopReason = reason }
@@ -239,16 +268,11 @@ private final class TailscaleCommandExecution: @unchecked Sendable {
   }
 
   private func finishCapture() {
-    guard currentStopReason() != nil else {
-      readGroup.wait()
+    guard readGroup.wait(timeout: .now() + Self.processDrainTimeout) == .timedOut else {
       return
     }
-    guard readGroup.wait(timeout: .now() + Self.stoppedProcessDrainTimeout) == .timedOut else {
-      return
-    }
-    try? outputPipe.fileHandleForReading.close()
-    try? errorPipe.fileHandleForReading.close()
-    _ = readGroup.wait(timeout: .now() + Self.stoppedProcessDrainTimeout)
+    stopCapture()
+    _ = readGroup.wait(timeout: .now() + Self.processDrainTimeout)
   }
 }
 

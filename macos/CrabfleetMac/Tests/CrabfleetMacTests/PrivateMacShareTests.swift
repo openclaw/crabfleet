@@ -138,6 +138,45 @@ struct PrivateMacShareTests {
     #expect(elapsed < .seconds(2))
   }
 
+  @Test
+  func successfulTailscaleCommandDoesNotWaitForDescendantPipeEOF() async throws {
+    let directory = FileManager.default.temporaryDirectory
+      .appendingPathComponent("CrabfleetMacTests.\(UUID().uuidString)")
+    try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let executable = directory.appendingPathComponent("tailscale")
+    let descendantPIDFile = directory.appendingPathComponent("descendant-pid")
+    try Data(
+      """
+      #!/bin/sh
+      (
+        trap '' HUP TERM
+        exec sleep 30
+      ) &
+      printf '%s' "$!" > '\(descendantPIDFile.path)'
+      printf 'status complete'
+      exit 0
+      """.utf8
+    ).write(to: executable)
+    try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: executable.path)
+
+    let runner = SystemTailscaleCommandRunner(executableURL: executable, timeout: 5)
+    let clock = ContinuousClock()
+    let startedAt = clock.now
+    let result = try await runner.run(arguments: ["status"])
+    let elapsed = startedAt.duration(to: clock.now)
+
+    let descendantPID = try #require(
+      Int32(String(contentsOf: descendantPIDFile, encoding: .utf8))
+    )
+    defer {
+      _ = Darwin.kill(descendantPID, SIGKILL)
+    }
+    #expect(result.standardOutput == "status complete")
+    #expect(Darwin.kill(descendantPID, 0) == 0)
+    #expect(elapsed < .seconds(2))
+  }
+
   @Test @MainActor
   func stopInvalidatesAnInFlightPrivateShareStart() async throws {
     let runner = SuspendedTailscaleRunner()
