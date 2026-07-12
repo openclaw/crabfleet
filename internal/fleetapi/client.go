@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"time"
 
 	"github.com/openclaw/crabfleet/internal/terminalws"
 )
@@ -18,6 +19,7 @@ type TerminalSize = terminalws.Size
 
 const maxResponseBytes = 4 * 1024 * 1024
 const maxErrorBytes = 512
+const terminalInputConfirmationTimeout = 15 * time.Second
 
 var ErrMissingAuth = errors.New("API mode requires SSH gateway token + fingerprint or agent token + session ID")
 
@@ -193,7 +195,9 @@ func (c *Client) Message(
 	if enter {
 		message += "\n"
 	}
-	return client.SendInputConfirmed(ctx, []byte(message))
+	confirmationContext, cancel := context.WithTimeout(ctx, terminalInputConfirmationTimeout)
+	defer cancel()
+	return client.SendInputConfirmed(confirmationContext, []byte(message))
 }
 
 func (c *Client) Attach(

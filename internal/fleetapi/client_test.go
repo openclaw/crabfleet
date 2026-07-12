@@ -6,6 +6,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestClientUsesSSHAuthentication(t *testing.T) {
@@ -63,6 +64,12 @@ func TestClientRejectsIncompleteAuthentication(t *testing.T) {
 	_, err := client.State(context.Background())
 	if err == nil || !strings.Contains(err.Error(), "requires SSH gateway token") {
 		t.Fatalf("error = %v", err)
+	}
+}
+
+func TestTerminalInputConfirmationTimeoutIsBounded(t *testing.T) {
+	if terminalInputConfirmationTimeout <= 0 || terminalInputConfirmationTimeout > 30*time.Second {
+		t.Fatalf("terminal input confirmation timeout = %s", terminalInputConfirmationTimeout)
 	}
 }
 
