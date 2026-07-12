@@ -37,10 +37,14 @@ test("multiplayer input tracks interleaved writers on the shared session line", 
     [encoder.encode("world")],
   );
 
-  assert.equal(
-    text(multiplayerTerminalInputPayloadsForMode(state, secondUser, encoder.encode("\r"), true)),
-    '\x15<sender name="User 1"/> hello world\r',
+  const attributed = multiplayerTerminalInputPayloadsForMode(
+    state,
+    secondUser,
+    encoder.encode("\r"),
+    true,
   );
+  assert.equal(attributed.length, 1);
+  assert.equal(text(attributed), '\x15<sender name="User 1"/> hello world\r');
 });
 
 test("multiplayer input attributes a final text fragment batched with enter", () => {
@@ -51,10 +55,26 @@ test("multiplayer input attributes a final text fragment batched with enter", ()
     [encoder.encode("hel")],
   );
 
-  assert.equal(
-    text(multiplayerTerminalInputPayloadsForMode(state, user, encoder.encode("lo\r"), true)),
-    '\x15<sender name="Admin 1"/> hello\r',
+  const attributed = multiplayerTerminalInputPayloadsForMode(
+    state,
+    user,
+    encoder.encode("lo\r"),
+    true,
   );
+  assert.equal(attributed.length, 1);
+  assert.equal(text(attributed), '\x15<sender name="Admin 1"/> hello\r');
+});
+
+test("multiplayer input emits a complete attributed command atomically", () => {
+  const attributed = multiplayerTerminalInputPayloadsForMode(
+    newTerminalInputState(),
+    user,
+    encoder.encode("hello\r"),
+    true,
+  );
+
+  assert.equal(attributed.length, 1);
+  assert.equal(text(attributed), '<sender name="Admin 1"/> hello\r');
 });
 
 test("multiplayer input does not attribute text while a control sequence is pending", () => {

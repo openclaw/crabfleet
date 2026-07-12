@@ -69,8 +69,7 @@ export function attributedTerminalInputPayloads(
 ): Uint8Array[] {
   const sender = terminalSenderTag(user);
   const attributed = `${sender} ${terminalSingleLineInput(submitted.text)}${submitted.eol}`;
-  const chunks = submitted.replaceCurrentLine ? ["\x15", ...attributed] : [...attributed];
-  return chunks.map((chunk) => encoder.encode(chunk));
+  return [encoder.encode(`${submitted.replaceCurrentLine ? "\x15" : ""}${attributed}`)];
 }
 
 function updateTerminalInputLine(state: TerminalInputState, text: string): void {
