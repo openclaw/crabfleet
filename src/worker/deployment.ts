@@ -76,7 +76,14 @@ function validateRuntimeProfileRoutes(
 ): void {
   const direct = env.CRABBOX_RUNTIME_ADAPTER_URL;
   const template = env.CRABBOX_RUNTIME_ADAPTER_URL_TEMPLATE;
-  if (!template || direct) return;
+  const hasDirect = typeof direct === "string" && direct.length > 0;
+  const hasTemplate = typeof template === "string" && template.length > 0;
+  if (hasDirect && hasTemplate) {
+    throw new TypeError(
+      "CRABBOX_RUNTIME_ADAPTER_URL and CRABBOX_RUNTIME_ADAPTER_URL_TEMPLATE are mutually exclusive",
+    );
+  }
+  if (!hasTemplate) return;
   const profileIDs =
     runtimeProfiles.length > 0 ? runtimeProfiles.map((profile) => profile.id) : [defaultProfile];
   const unroutable = profileIDs.find(
