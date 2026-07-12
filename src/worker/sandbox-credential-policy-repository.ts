@@ -586,6 +586,44 @@ export async function renewSandboxCredentialPolicyRegistration(
   return Number(renewed.numUpdatedRows ?? 0n) === 1 ? registrationExpiresAt : null;
 }
 
+export async function claimSandboxCredentialPolicyRegistrationRecovery(
+  env: RuntimeEnv,
+  sessionId: string,
+  sandboxId: string,
+  expiredRegistration: SandboxCredentialPolicyRegistration,
+  expiredRegistrationExpiresAt: number,
+  ownershipFence: SandboxCredentialPolicyOwnershipFence,
+): Promise<{
+  registration: SandboxCredentialPolicyRegistration;
+  registrationExpiresAt: number;
+} | null> {
+  const now = Date.now();
+  const registration = {
+    ...expiredRegistration,
+    claim: `registration:${crypto.randomUUID()}`,
+  };
+  const registrationExpiresAt = now + credentialPolicyRegistrationClaimMs;
+  const claimed = await database(env)
+    .updateTable("interactive_session_credential_policy_registrations")
+    .set({
+      registration_claim: registration.claim,
+      registration_claim_expires_at: registrationExpiresAt,
+      updated_at: now,
+    })
+    .where("session_id", "=", sessionId)
+    .where("sandbox_id", "=", sandboxId)
+    .where("state", "=", "registering")
+    .where("registration_generation", "=", expiredRegistration.generation)
+    .where("registration_claim", "=", expiredRegistration.claim)
+    .where("registration_claim_expires_at", "=", expiredRegistrationExpiresAt)
+    .where("registration_claim_expires_at", "<=", now)
+    .where(sandboxCredentialPolicyOwnerCondition(sessionId, sandboxId, ownershipFence, now))
+    .executeTakeFirst();
+  return Number(claimed.numUpdatedRows ?? 0n) === 1
+    ? { registration, registrationExpiresAt }
+    : null;
+}
+
 export async function recordSandboxCredentialPolicyRollback(
   env: RuntimeEnv,
   sessionId: string,

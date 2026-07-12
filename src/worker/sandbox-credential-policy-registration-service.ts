@@ -28,9 +28,34 @@ import type { SandboxRuntimeSession } from "./sandbox-runtime.ts";
 import { sandboxControlStub } from "./session-control-do.ts";
 import type {
   SandboxCredentialPolicy,
+  SandboxCredentialPolicyRegistration,
   StoredSandboxCredentialPolicy,
 } from "./session-control-policy.ts";
 import type { InteractiveSession } from "./session-model.ts";
+
+type RestoreSandboxCredentialPolicyRollback = typeof restoreSandboxCredentialPolicyRollback;
+
+export async function restoreSandboxCredentialPolicyRollbackIfOwned(
+  env: RuntimeEnv,
+  stub: Pick<DurableObjectStub, "fetch">,
+  sessionId: string,
+  sandboxId: string,
+  registration: SandboxCredentialPolicyRegistration,
+  rollbackJson: string,
+  ownershipFence: SandboxCredentialPolicyOwnershipFence,
+  restoreRollback: RestoreSandboxCredentialPolicyRollback = restoreSandboxCredentialPolicyRollback,
+): Promise<boolean> {
+  const registrationExpiresAt = await renewSandboxCredentialPolicyRegistration(
+    env,
+    sessionId,
+    sandboxId,
+    registration,
+    ownershipFence,
+  );
+  if (!registrationExpiresAt) return false;
+  await restoreRollback(stub, registration, registrationExpiresAt, rollbackJson, sessionId);
+  return true;
+}
 
 export async function registerSandboxCredentialPolicy(
   env: RuntimeEnv,
@@ -53,7 +78,6 @@ export async function registerSandboxCredentialPolicy(
     sandboxId,
     ownershipFence,
   );
-  let latestRegistrationExpiresAt = 0;
   let rollbackJson: string | null = null;
   let registrationWriteStarted = false;
   try {
@@ -121,7 +145,6 @@ export async function registerSandboxCredentialPolicy(
       if (!registrationExpiresAt) {
         throw new Error("sandbox credential policy registration claim was revoked");
       }
-      latestRegistrationExpiresAt = registrationExpiresAt;
       registrationWriteStarted = true;
       const response = await stub.fetch("https://crabfleet.internal/api/session-control/register", {
         method: "POST",
@@ -152,13 +175,18 @@ export async function registerSandboxCredentialPolicy(
     const message = clean(error instanceof Error ? error.message : String(error), 500);
     if (registrationWriteStarted && rollbackJson) {
       try {
-        await restoreSandboxCredentialPolicyRollback(
+        const restored = await restoreSandboxCredentialPolicyRollbackIfOwned(
+          env,
           stub,
-          registration,
-          latestRegistrationExpiresAt,
-          rollbackJson,
           session.id,
+          sandboxId,
+          registration,
+          rollbackJson,
+          ownershipFence,
         );
+        if (!restored) {
+          throw new Error("sandbox credential policy registration claim was revoked");
+        }
       } catch (rollbackError) {
         const rollbackMessage = clean(
           rollbackError instanceof Error ? rollbackError.message : String(rollbackError),

@@ -6,10 +6,12 @@ import {
   activeSandboxCredentialPolicyGeneration,
   abandonSandboxCredentialPolicyRegistration,
   beginSandboxCredentialPolicyRegistration,
+  claimSandboxCredentialPolicyRegistrationRecovery,
   currentSandboxCredentialPolicyGeneration,
   finishSandboxCredentialPolicyRegistration,
   recordSandboxCredentialPolicyRefs,
   recordSandboxCredentialPolicyRollback,
+  renewSandboxCredentialPolicyRegistration,
   sandboxCredentialPolicyRegistrationQueries,
   sandboxLookupIds,
   type SandboxCredentialPolicyOwnershipFence,
@@ -466,6 +468,104 @@ test("partial credential-policy rotation failure preserves the prior active gene
       registration_claim: null,
       rollback_policies_json: JSON.stringify(rollback),
       last_error: "simulated Durable Object registration failure",
+    },
+  );
+});
+
+test("stale foreground rollback cannot renew after recovery takes its claim", async () => {
+  const sqlite = credentialPolicyDatabase();
+  const env = sqliteRuntimeEnv(sqlite);
+  const staged = await beginSandboxCredentialPolicyRegistration(
+    env,
+    "IS-42",
+    "sandbox-1",
+    ownershipFence,
+  );
+  const expiredAt = 1;
+  sqlite
+    .prepare(`
+      UPDATE interactive_session_credential_policy_registrations
+      SET registration_claim_expires_at = ?
+      WHERE session_id = 'IS-42' AND sandbox_id = 'sandbox-1'
+    `)
+    .run(expiredAt);
+  const recovery = await claimSandboxCredentialPolicyRegistrationRecovery(
+    env,
+    "IS-42",
+    "sandbox-1",
+    staged,
+    expiredAt,
+    ownershipFence,
+  );
+  assert.ok(recovery);
+
+  const renewed = await renewSandboxCredentialPolicyRegistration(
+    env,
+    "IS-42",
+    "sandbox-1",
+    staged,
+    ownershipFence,
+  );
+
+  assert.equal(renewed, null);
+});
+
+test("expired registration recovery grants one fresh exclusive claim", async () => {
+  const sqlite = credentialPolicyDatabase();
+  const env = sqliteRuntimeEnv(sqlite);
+  const staged = await beginSandboxCredentialPolicyRegistration(
+    env,
+    "IS-42",
+    "sandbox-1",
+    ownershipFence,
+  );
+  const expiredAt = 1;
+  sqlite
+    .prepare(`
+      UPDATE interactive_session_credential_policy_registrations
+      SET registration_claim_expires_at = ?
+      WHERE session_id = 'IS-42' AND sandbox_id = 'sandbox-1'
+    `)
+    .run(expiredAt);
+
+  const claims = await Promise.all([
+    claimSandboxCredentialPolicyRegistrationRecovery(
+      env,
+      "IS-42",
+      "sandbox-1",
+      staged,
+      expiredAt,
+      ownershipFence,
+    ),
+    claimSandboxCredentialPolicyRegistrationRecovery(
+      env,
+      "IS-42",
+      "sandbox-1",
+      staged,
+      expiredAt,
+      ownershipFence,
+    ),
+  ]);
+  const winner = claims.find((claim) => claim !== null);
+
+  assert.equal(claims.filter((claim) => claim !== null).length, 1);
+  assert.ok(winner);
+  assert.notEqual(winner.registration.claim, staged.claim);
+  assert.ok(winner.registrationExpiresAt > expiredAt);
+  assert.deepEqual(
+    {
+      ...sqlite
+        .prepare(`
+          SELECT registration_generation, registration_claim, registration_claim_expires_at
+          FROM interactive_session_credential_policy_registrations
+          WHERE session_id = 'IS-42' AND sandbox_id = 'sandbox-1'
+        `)
+        .get(),
+    },
+    {
+      registration_generation: staged.generation,
+      registration_claim: winner.registration.claim,
+      registration_claim_expires_at: winner.registrationExpiresAt,
     },
   );
 });

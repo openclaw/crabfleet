@@ -123,7 +123,7 @@ test("credential-policy scan rejects incomplete, expired, and mismatched ownersh
   );
 });
 
-test("staged rollback reclaims current ownership before restoring policy", async () => {
+test("staged recovery takes a fresh exclusive claim before promotion or rollback", async () => {
   const source = await readFile(
     new URL("../src/worker/sandbox-credential-policy-scanner.ts", import.meta.url),
     "utf8",
@@ -136,10 +136,32 @@ test("staged rollback reclaims current ownership before restoring policy", async
     stagedRecovery.indexOf("if (!ownershipFence)") < stagedRecovery.indexOf("restoreRollback({"),
   );
   assert.ok(
-    stagedRecovery.indexOf("renewSandboxCredentialPolicyRegistration(") <
+    stagedRecovery.indexOf("claimSandboxCredentialPolicyRegistrationRecovery(") <
+      stagedRecovery.indexOf("policyExists("),
+  );
+  assert.ok(
+    stagedRecovery.indexOf("claimSandboxCredentialPolicyRegistrationRecovery(") <
       stagedRecovery.indexOf("restoreRollback({"),
   );
-  assert.match(stagedRecovery, /if \(!registrationExpiresAt\)/);
+  assert.doesNotMatch(stagedRecovery, /renewSandboxCredentialPolicyRegistration/);
+});
+
+test("foreground rollback rechecks its exact claim before restoring policy", async () => {
+  const source = await readFile(
+    new URL("../src/worker/sandbox-credential-policy-registration-service.ts", import.meta.url),
+    "utf8",
+  );
+  const start = source.indexOf(
+    "export async function restoreSandboxCredentialPolicyRollbackIfOwned",
+  );
+  const end = source.indexOf("export async function registerSandboxCredentialPolicy", start);
+  const rollbackRecovery = source.slice(start, end);
+
+  assert.ok(
+    rollbackRecovery.indexOf("renewSandboxCredentialPolicyRegistration(") <
+      rollbackRecovery.indexOf("restoreRollback("),
+  );
+  assert.match(rollbackRecovery, /if \(!registrationExpiresAt\) return false/);
 });
 
 test("credential-policy scan preserves live standalone and managed policies", () => {

@@ -10,9 +10,9 @@ import type { RuntimeEnv } from "./env.ts";
 import type { InteractiveSessionStatus } from "./models.ts";
 import {
   abandonSandboxCredentialPolicyRegistration,
+  claimSandboxCredentialPolicyRegistrationRecovery,
   finishSandboxCredentialPolicyRegistration,
   recordSandboxCredentialPolicyRefs,
-  renewSandboxCredentialPolicyRegistration,
   sandboxCredentialPolicyCleanupAuthorizedCondition,
   sandboxLookupIds,
   type SandboxCredentialPolicyOwnershipFence,
@@ -350,13 +350,22 @@ async function scanStagedCredentialPolicyRegistrations(
         );
         continue;
       }
+      const recovery = await claimSandboxCredentialPolicyRegistrationRecovery(
+        env,
+        row.session_id,
+        row.sandbox_id,
+        registration,
+        row.registration_claim_expires_at,
+        ownershipFence,
+      );
+      if (!recovery) continue;
       if (
         (await policyExists(env, row.sandbox_id, row.registration_generation)) &&
         (await finishSandboxCredentialPolicyRegistration(
           env,
           row.session_id,
           row.sandbox_id,
-          registration,
+          recovery.registration,
           ownershipFence,
         ))
       ) {
@@ -364,26 +373,9 @@ async function scanStagedCredentialPolicyRegistrations(
       }
       if (row.rollback_policies_json !== null) {
         if (!restoreRollback) throw new Error("sandbox credential policy rollback is unavailable");
-        const registrationExpiresAt = await renewSandboxCredentialPolicyRegistration(
-          env,
-          row.session_id,
-          row.sandbox_id,
-          registration,
-          ownershipFence,
-        );
-        if (!registrationExpiresAt) {
-          await abandonSandboxCredentialPolicyRegistration(
-            env,
-            row.session_id,
-            row.sandbox_id,
-            registration,
-            "sandbox credential policy owner changed before rollback",
-          );
-          continue;
-        }
         await restoreRollback({
-          registration,
-          registrationExpiresAt,
+          registration: recovery.registration,
+          registrationExpiresAt: recovery.registrationExpiresAt,
           rollbackJson: row.rollback_policies_json,
           sessionId: row.session_id,
         });
@@ -392,7 +384,7 @@ async function scanStagedCredentialPolicyRegistrations(
         env,
         row.session_id,
         row.sandbox_id,
-        registration,
+        recovery.registration,
         "sandbox credential policy registration did not complete",
       );
     } catch (error) {
