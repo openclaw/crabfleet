@@ -304,11 +304,7 @@ test("structured event redaction spans private-key arrays and underscore secret 
     message: secret,
     payload: {
       version: 1,
-      output: [
-        privateKeyBegin,
-        "ZmFrZS1rZXktbWF0ZXJpYWw=",
-        privateKeyEnd,
-      ],
+      output: [privateKeyBegin, "ZmFrZS1rZXktbWF0ZXJpYWw=", privateKeyEnd],
       commandOutput: `failed with ${secret}`,
     },
     now: 123,
