@@ -363,8 +363,12 @@ export class TerminalHub {
       });
       return;
     }
-    if (subscriptions.has(id)) {
-      sendTerminalJson(client, TerminalMessageType.Event, id, { type: "subscribed" });
+    const existingSubscription = subscriptions.get(id);
+    if (existingSubscription) {
+      sendTerminalJson(client, TerminalMessageType.Event, id, {
+        type: "subscribed",
+        canInput: existingSubscription.canInputGranted,
+      });
       return;
     }
 
@@ -689,7 +693,8 @@ function reportTerminalInputCompletion(
     if (socket.readyState !== WebSocket.OPEN) return;
     const rejection = results.find((result) => !result.accepted);
     if (rejection) {
-      sendTerminalJson(socket, TerminalMessageType.Error, sessionId, {
+      sendTerminalJson(socket, TerminalMessageType.Event, sessionId, {
+        type: "input-rejected",
         error: rejection.error ?? "terminal input was not accepted",
       });
       return;

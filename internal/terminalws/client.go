@@ -79,15 +79,27 @@ type Client struct {
 	sessionID                    string
 	supportsInputAcknowledgement bool
 	cancel                       context.CancelFunc
+	readCancel                   context.CancelFunc
 	canInput                     atomic.Bool
 	lastSize                     atomic.Uint64
 	writeMu                      sync.Mutex
+	confirmMu                    sync.Mutex
+	stateMu                      sync.Mutex
+	inputWaiter                  chan error
+	attachment                   *terminalAttachment
+	readerDone                   chan struct{}
+	readerErr                    error
 }
 
 type frame struct {
 	messageType byte
 	sessionID   string
 	payload     []byte
+}
+
+type terminalAttachment struct {
+	frames chan frame
+	done   chan struct{}
 }
 
 type eventPayload struct {
@@ -222,6 +234,7 @@ func Dial(ctx context.Context, endpoint string, sessionID string, options Option
 				if setupTimer != nil {
 					setupTimer.Stop()
 				}
+				client.startReader()
 				return client, nil
 			}
 			if event.Type == "closed" {
@@ -232,6 +245,9 @@ func Dial(ctx context.Context, endpoint string, sessionID string, options Option
 }
 
 func (c *Client) Close() error {
+	if c.readCancel != nil {
+		c.readCancel()
+	}
 	err := c.conn.Close(websocket.StatusNormalClosure, "")
 	if c.cancel != nil {
 		c.cancel()
@@ -260,43 +276,26 @@ func (c *Client) SendInputConfirmed(ctx context.Context, payload []byte) error {
 	if !c.supportsInputAcknowledgement {
 		return c.SendInput(ctx, payload)
 	}
-	if err := c.SendInput(ctx, payload); err != nil {
+	c.confirmMu.Lock()
+	defer c.confirmMu.Unlock()
+
+	waiter := make(chan error, 1)
+	if err := c.registerInputWaiter(waiter); err != nil {
 		return err
 	}
-	for {
-		current, err := c.read(ctx)
-		if err != nil {
-			return err
-		}
-		if current.sessionID != "" && current.sessionID != c.sessionID {
-			continue
-		}
-		switch current.messageType {
-		case messageOutput:
-			if err := c.write(ctx, frame{
-				messageType: messageAck,
-				sessionID:   c.sessionID,
-				payload:     ackPayload(uint32(len(current.payload))),
-			}); err != nil {
-				return err
-			}
-		case messageError, messageControlRevoked:
-			c.canInput.Store(false)
-			return frameError(current, "terminal input rejected")
-		case messageControlGranted:
-			c.canInput.Store(true)
-		case messageEvent:
-			var event eventPayload
-			if err := json.Unmarshal(current.payload, &event); err != nil {
-				return fmt.Errorf("decode terminal event: %w", err)
-			}
-			switch event.Type {
-			case "input-accepted":
-				return nil
-			case "closed":
-				return errors.New("terminal closed before accepting input")
-			}
-		}
+	if err := c.SendInput(ctx, payload); err != nil {
+		c.clearInputWaiter(waiter)
+		return err
+	}
+	select {
+	case err := <-waiter:
+		return err
+	case <-c.readerDone:
+		c.clearInputWaiter(waiter)
+		return c.readerError()
+	case <-ctx.Done():
+		c.clearInputWaiter(waiter)
+		return ctx.Err()
 	}
 }
 
@@ -318,6 +317,12 @@ func (c *Client) Resize(ctx context.Context, size Size) error {
 func (c *Client) Attach(ctx context.Context, terminal io.ReadWriter, resizes <-chan Size) error {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
+
+	attachment, err := c.registerAttachment()
+	if err != nil {
+		return err
+	}
+	defer c.clearAttachment(attachment)
 
 	var wg sync.WaitGroup
 	canceler, cancelableRead := terminal.(readCanceler)
@@ -374,56 +379,53 @@ func (c *Client) Attach(ctx context.Context, terminal io.ReadWriter, resizes <-c
 	go func() {
 		defer wg.Done()
 		for {
-			current, err := c.read(ctx)
-			if err != nil {
-				errCh <- err
+			select {
+			case <-ctx.Done():
 				return
-			}
-			if current.sessionID != "" && current.sessionID != c.sessionID {
-				continue
-			}
-			switch current.messageType {
-			case messageOutput:
-				if _, err := terminal.Write(current.payload); err != nil {
-					errCh <- err
-					return
-				}
-				if err := c.write(ctx, frame{
-					messageType: messageAck,
-					sessionID:   c.sessionID,
-					payload:     ackPayload(uint32(len(current.payload))),
-				}); err != nil {
-					errCh <- err
-					return
-				}
-			case messageError:
-				errCh <- frameError(current, "terminal connection failed")
+			case <-c.readerDone:
+				errCh <- c.readerError()
 				return
-			case messageControlRevoked:
-				c.canInput.Store(false)
-			case messageControlGranted:
-				c.canInput.Store(true)
-				if size := c.rememberedSize(); size.Cols > 0 && size.Rows > 0 {
+			case current := <-attachment.frames:
+				switch current.messageType {
+				case messageOutput:
+					if _, err := terminal.Write(current.payload); err != nil {
+						errCh <- err
+						return
+					}
 					if err := c.write(ctx, frame{
-						messageType: messageResize,
+						messageType: messageAck,
 						sessionID:   c.sessionID,
-						payload:     resizePayload(size),
+						payload:     ackPayload(uint32(len(current.payload))),
 					}); err != nil {
 						errCh <- err
 						return
 					}
-				}
-			case messageEvent:
-				var event eventPayload
-				if json.Unmarshal(current.payload, &event) == nil && event.Type == "closed" {
-					errCh <- nil
+				case messageError:
+					errCh <- frameError(current, "terminal connection failed")
 					return
+				case messageControlGranted:
+					if size := c.rememberedSize(); size.Cols > 0 && size.Rows > 0 {
+						if err := c.write(ctx, frame{
+							messageType: messageResize,
+							sessionID:   c.sessionID,
+							payload:     resizePayload(size),
+						}); err != nil {
+							errCh <- err
+							return
+						}
+					}
+				case messageEvent:
+					var event eventPayload
+					if json.Unmarshal(current.payload, &event) == nil && event.Type == "closed" {
+						errCh <- nil
+						return
+					}
 				}
 			}
 		}
 	}()
 
-	err := <-errCh
+	err = <-errCh
 	cancelRead()
 	if cancelableRead {
 		wg.Wait()
@@ -444,6 +446,177 @@ func (c *Client) write(ctx context.Context, current frame) error {
 	c.writeMu.Lock()
 	defer c.writeMu.Unlock()
 	return c.conn.Write(ctx, websocket.MessageBinary, encodeFrame(current))
+}
+
+func (c *Client) startReader() {
+	ctx, cancel := context.WithCancel(context.Background())
+	c.readCancel = cancel
+	c.readerDone = make(chan struct{})
+	go c.readLoop(ctx)
+}
+
+func (c *Client) readLoop(ctx context.Context) {
+	for {
+		current, err := c.read(ctx)
+		if err != nil {
+			c.finishReader(err)
+			return
+		}
+		if err := c.handleFrame(ctx, current); err != nil {
+			c.finishReader(err)
+			return
+		}
+	}
+}
+
+func (c *Client) handleFrame(ctx context.Context, current frame) error {
+	if current.sessionID != "" && current.sessionID != c.sessionID {
+		return nil
+	}
+	switch current.messageType {
+	case messageOutput:
+		if c.deliverAttachment(ctx, current) {
+			return nil
+		}
+		return c.write(ctx, frame{
+			messageType: messageAck,
+			sessionID:   c.sessionID,
+			payload:     ackPayload(uint32(len(current.payload))),
+		})
+	case messageError:
+		err := frameError(current, "terminal connection failed")
+		c.canInput.Store(false)
+		c.completeInput(err)
+		return err
+	case messageControlRevoked:
+		c.canInput.Store(false)
+		c.completeInput(frameError(current, "terminal input rejected"))
+		c.deliverAttachment(ctx, current)
+	case messageControlGranted:
+		c.canInput.Store(true)
+		c.deliverAttachment(ctx, current)
+	case messageEvent:
+		var event eventPayload
+		if err := json.Unmarshal(current.payload, &event); err != nil {
+			return fmt.Errorf("decode terminal event: %w", err)
+		}
+		switch event.Type {
+		case "subscribed":
+			c.canInput.Store(event.CanInput)
+		case "input-accepted":
+			c.completeInput(nil)
+		case "input-rejected":
+			c.completeInput(frameError(current, "terminal input rejected"))
+		case "closed":
+			c.completeInput(errors.New("terminal closed before accepting input"))
+			c.deliverAttachment(ctx, current)
+		default:
+			c.deliverAttachment(ctx, current)
+		}
+	default:
+		c.deliverAttachment(ctx, current)
+	}
+	return nil
+}
+
+func (c *Client) registerInputWaiter(waiter chan error) error {
+	c.stateMu.Lock()
+	defer c.stateMu.Unlock()
+	select {
+	case <-c.readerDone:
+		return readerUnavailableError(c.readerErr)
+	default:
+	}
+	c.inputWaiter = waiter
+	return nil
+}
+
+func (c *Client) clearInputWaiter(waiter chan error) {
+	c.stateMu.Lock()
+	defer c.stateMu.Unlock()
+	if c.inputWaiter == waiter {
+		c.inputWaiter = nil
+	}
+}
+
+func (c *Client) completeInput(err error) {
+	c.stateMu.Lock()
+	waiter := c.inputWaiter
+	c.inputWaiter = nil
+	c.stateMu.Unlock()
+	if waiter != nil {
+		waiter <- err
+	}
+}
+
+func (c *Client) registerAttachment() (*terminalAttachment, error) {
+	attachment := &terminalAttachment{
+		frames: make(chan frame, 16),
+		done:   make(chan struct{}),
+	}
+	c.stateMu.Lock()
+	defer c.stateMu.Unlock()
+	select {
+	case <-c.readerDone:
+		return nil, readerUnavailableError(c.readerErr)
+	default:
+	}
+	if c.attachment != nil {
+		return nil, errors.New("terminal client is already attached")
+	}
+	c.attachment = attachment
+	return attachment, nil
+}
+
+func (c *Client) clearAttachment(attachment *terminalAttachment) {
+	c.stateMu.Lock()
+	if c.attachment == attachment {
+		c.attachment = nil
+		close(attachment.done)
+	}
+	c.stateMu.Unlock()
+}
+
+func (c *Client) deliverAttachment(ctx context.Context, current frame) bool {
+	c.stateMu.Lock()
+	attachment := c.attachment
+	c.stateMu.Unlock()
+	if attachment == nil {
+		return false
+	}
+	select {
+	case attachment.frames <- current:
+		return true
+	case <-attachment.done:
+		return false
+	case <-ctx.Done():
+		return false
+	}
+}
+
+func (c *Client) finishReader(err error) {
+	c.stateMu.Lock()
+	c.readerErr = normalizeCloseError(err)
+	waiter := c.inputWaiter
+	c.inputWaiter = nil
+	close(c.readerDone)
+	c.stateMu.Unlock()
+	if waiter != nil {
+		waiter <- readerUnavailableError(c.readerErr)
+	}
+}
+
+func (c *Client) readerError() error {
+	c.stateMu.Lock()
+	defer c.stateMu.Unlock()
+	return c.readerErr
+}
+
+func readerUnavailableError(err error) error {
+	if err != nil {
+		return err
+	}
+	return errors.New("terminal connection closed")
 }
 
 func (c *Client) read(ctx context.Context) (frame, error) {

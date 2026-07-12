@@ -334,6 +334,221 @@ func TestSendInputConfirmedReturnsControlRevocation(t *testing.T) {
 	}
 }
 
+func TestSendInputConfirmedRejectionDoesNotRevokeControl(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := websocket.Accept(w, r, nil)
+		if err != nil {
+			t.Error(err)
+			return
+		}
+		defer conn.Close(websocket.StatusNormalClosure, "")
+		for range 2 {
+			if _, _, err := conn.Read(r.Context()); err != nil {
+				t.Error(err)
+				return
+			}
+		}
+		welcome, _ := json.Marshal(welcomePayload{InputAcknowledgements: true})
+		if err := conn.Write(r.Context(), websocket.MessageBinary, encodeFrame(frame{
+			messageType: messageWelcome,
+			payload:     welcome,
+		})); err != nil {
+			t.Error(err)
+			return
+		}
+		subscribed, _ := json.Marshal(eventPayload{Type: "subscribed", CanInput: true})
+		if err := conn.Write(r.Context(), websocket.MessageBinary, encodeFrame(frame{
+			messageType: messageEvent,
+			sessionID:   "IS-request-scoped",
+			payload:     subscribed,
+		})); err != nil {
+			t.Error(err)
+			return
+		}
+
+		for index := range 2 {
+			_, payload, err := conn.Read(r.Context())
+			if err != nil {
+				t.Error(err)
+				return
+			}
+			current, err := decodeFrame(payload)
+			if err != nil {
+				t.Error(err)
+				return
+			}
+			if current.messageType != messageInput {
+				t.Errorf("message type = %d", current.messageType)
+				return
+			}
+			event := eventPayload{Type: "input-accepted"}
+			if index == 0 {
+				event = eventPayload{
+					Type:  "input-rejected",
+					Error: "runner rejected terminal input",
+				}
+			}
+			encoded, _ := json.Marshal(event)
+			if err := conn.Write(r.Context(), websocket.MessageBinary, encodeFrame(frame{
+				messageType: messageEvent,
+				sessionID:   "IS-request-scoped",
+				payload:     encoded,
+			})); err != nil {
+				t.Error(err)
+				return
+			}
+		}
+	}))
+	defer server.Close()
+
+	endpoint, err := Endpoint(server.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	client, err := Dial(context.Background(), endpoint, "IS-request-scoped", Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+
+	err = client.SendInputConfirmed(context.Background(), []byte("rejected\n"))
+	if err == nil || !strings.Contains(err.Error(), "runner rejected terminal input") {
+		t.Fatalf("error = %v", err)
+	}
+	if !client.canInput.Load() {
+		t.Fatal("request-scoped rejection revoked terminal control")
+	}
+	if err := client.SendInputConfirmed(context.Background(), []byte("accepted\n")); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestSendInputConfirmedSharesOneReaderWithAttach(t *testing.T) {
+	firstInput := make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := websocket.Accept(w, r, nil)
+		if err != nil {
+			t.Error(err)
+			return
+		}
+		defer conn.Close(websocket.StatusNormalClosure, "")
+		for range 2 {
+			if _, _, err := conn.Read(r.Context()); err != nil {
+				t.Error(err)
+				return
+			}
+		}
+		welcome, _ := json.Marshal(welcomePayload{InputAcknowledgements: true})
+		if err := conn.Write(r.Context(), websocket.MessageBinary, encodeFrame(frame{
+			messageType: messageWelcome,
+			payload:     welcome,
+		})); err != nil {
+			t.Error(err)
+			return
+		}
+		subscribed, _ := json.Marshal(eventPayload{Type: "subscribed", CanInput: true})
+		if err := conn.Write(r.Context(), websocket.MessageBinary, encodeFrame(frame{
+			messageType: messageEvent,
+			sessionID:   "IS-concurrent",
+			payload:     subscribed,
+		})); err != nil {
+			t.Error(err)
+			return
+		}
+
+		accepted, _ := json.Marshal(eventPayload{Type: "input-accepted"})
+		for index := range 2 {
+			_, payload, err := conn.Read(r.Context())
+			if err != nil {
+				t.Error(err)
+				return
+			}
+			current, err := decodeFrame(payload)
+			if err != nil {
+				t.Error(err)
+				return
+			}
+			if current.messageType != messageInput {
+				t.Errorf("message type = %d", current.messageType)
+				return
+			}
+			if index == 0 {
+				close(firstInput)
+				if err := conn.Write(r.Context(), websocket.MessageBinary, encodeFrame(frame{
+					messageType: messageOutput,
+					sessionID:   "IS-concurrent",
+					payload:     []byte("attached\n"),
+				})); err != nil {
+					t.Error(err)
+					return
+				}
+				_, acknowledgement, err := conn.Read(r.Context())
+				if err != nil {
+					t.Error(err)
+					return
+				}
+				ack, err := decodeFrame(acknowledgement)
+				if err != nil || ack.messageType != messageAck {
+					t.Errorf("output acknowledgement = %#v, %v", ack, err)
+					return
+				}
+			}
+			if err := conn.Write(r.Context(), websocket.MessageBinary, encodeFrame(frame{
+				messageType: messageEvent,
+				sessionID:   "IS-concurrent",
+				payload:     accepted,
+			})); err != nil {
+				t.Error(err)
+				return
+			}
+		}
+		closed, _ := json.Marshal(eventPayload{Type: "closed"})
+		_ = conn.Write(r.Context(), websocket.MessageBinary, encodeFrame(frame{
+			messageType: messageEvent,
+			sessionID:   "IS-concurrent",
+			payload:     closed,
+		}))
+	}))
+	defer server.Close()
+
+	endpoint, err := Endpoint(server.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	client, err := Dial(context.Background(), endpoint, "IS-concurrent", Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+
+	terminal := newBlockingTerminal()
+	attachDone := make(chan error, 1)
+	go func() {
+		attachDone <- client.Attach(context.Background(), terminal, nil)
+	}()
+	<-terminal.started
+
+	sendDone := make(chan error, 2)
+	go func() {
+		sendDone <- client.SendInputConfirmed(context.Background(), []byte("first\n"))
+	}()
+	<-firstInput
+	go func() {
+		sendDone <- client.SendInputConfirmed(context.Background(), []byte("second\n"))
+	}()
+	for range 2 {
+		if err := <-sendDone; err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := <-attachDone; err != nil {
+		t.Fatal(err)
+	}
+	if terminal.String() != "attached\n" {
+		t.Fatalf("output = %q", terminal.String())
+	}
+}
+
 func TestSendInputConfirmedReturnsImmediatelyForEmptyInput(t *testing.T) {
 	client := &Client{supportsInputAcknowledgement: true}
 	if err := client.SendInputConfirmed(context.Background(), nil); err != nil {
@@ -826,16 +1041,24 @@ func (rw *readWriter) CancelRead() error {
 }
 
 type blockingTerminal struct {
-	closed chan struct{}
-	once   sync.Once
+	closed    chan struct{}
+	once      sync.Once
+	started   chan struct{}
+	startOnce sync.Once
 	bytes.Buffer
 }
 
 func newBlockingTerminal() *blockingTerminal {
-	return &blockingTerminal{closed: make(chan struct{})}
+	return &blockingTerminal{
+		closed:  make(chan struct{}),
+		started: make(chan struct{}),
+	}
 }
 
 func (terminal *blockingTerminal) Read(_ []byte) (int, error) {
+	terminal.startOnce.Do(func() {
+		close(terminal.started)
+	})
 	<-terminal.closed
 	return 0, io.ErrClosedPipe
 }

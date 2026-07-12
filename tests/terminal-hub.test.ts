@@ -389,6 +389,51 @@ test("terminal hub routes multiplex frames and explicit output acknowledgements"
   server.emit("close");
 });
 
+test("duplicate subscriptions preserve the current input capability", async () => {
+  const client = socket();
+  const server = socket();
+  const upstream = socket();
+  let upstreamOpens = 0;
+  const hub = new TerminalHub(
+    dependencies(client, server, upstream, {
+      inputGrant: () => async () => false,
+      async openUpstream() {
+        upstreamOpens += 1;
+        return {
+          socket: upstream,
+          outputAcknowledgements: true,
+          async markConnected() {},
+        };
+      },
+    }),
+  );
+  await hub.open(
+    new Request("https://fleet.example/api/terminal/ws", {
+      headers: { upgrade: "websocket" },
+    }),
+    user,
+  );
+  const subscribe = encodeTerminalFrame({
+    type: TerminalMessageType.Subscribe,
+    sessionId: session.id,
+    payload: encodeSubscribePayload({ flags: 0, columns: 120, rows: 34 }),
+  });
+
+  server.emit("message", { data: subscribe });
+  await flushQueues();
+  await flushQueues();
+  server.emit("message", { data: subscribe });
+  await flushQueues();
+  await flushQueues();
+
+  assert.equal(upstreamOpens, 1);
+  assert.deepEqual(decodeJsonPayload(frame(server.sent.at(-1)!).payload), {
+    type: "subscribed",
+    canInput: false,
+  });
+  server.emit("close");
+});
+
 test("terminal hub publishes live controller downgrades and promotions", async () => {
   const client = socket();
   const server = socket();
@@ -563,7 +608,7 @@ test("GitHub Actions input waits for the correlated runner acknowledgement", asy
   server.emit("close");
 });
 
-test("GitHub Actions relay rejection becomes a terminal input error", async () => {
+test("GitHub Actions relay rejection is request-scoped", async () => {
   const client = socket();
   const server = socket();
   const upstream = socket();
@@ -613,9 +658,28 @@ test("GitHub Actions relay rejection becomes a terminal input error", async () =
     false,
   );
   const rejected = messages.at(-1)!;
-  assert.equal(rejected.type, TerminalMessageType.Error);
+  assert.equal(rejected.type, TerminalMessageType.Event);
   assert.deepEqual(decodeJsonPayload(rejected.payload), {
+    type: "input-rejected",
     error: "GitHub Actions runner did not accept terminal input",
+  });
+  assert.equal(upstream.closed.length, 0);
+
+  server.emit("message", {
+    data: encodeTerminalFrame({
+      type: TerminalMessageType.Input,
+      sessionId: githubActionsSession.id,
+      payload: new TextEncoder().encode("retry"),
+    }),
+  });
+  await flushQueues();
+  const retry = relayInput(upstream.sent.at(-1)!);
+  emitRelayAcknowledgement(upstream, retry.inputId, true);
+  await flushQueues();
+  await flushQueues();
+
+  assert.deepEqual(decodeJsonPayload(frame(server.sent.at(-1)!).payload), {
+    type: "input-accepted",
   });
   server.emit("close");
 });
@@ -883,8 +947,9 @@ test("GitHub Actions send failure removes only its own acknowledgement waiter", 
   await flushQueues();
 
   const rejected = frame(server.sent.at(-1)!);
-  assert.equal(rejected.type, TerminalMessageType.Error);
+  assert.equal(rejected.type, TerminalMessageType.Event);
   assert.deepEqual(decodeJsonPayload(rejected.payload), {
+    type: "input-rejected",
     error: "terminal upstream send failed",
   });
   server.emit("close");
@@ -943,7 +1008,9 @@ test("GitHub Actions close rejects every pending input acknowledgement", async (
   assert.equal(
     messages.some(
       (message) =>
-        message.type === TerminalMessageType.Error &&
+        message.type === TerminalMessageType.Event &&
+        (decodeJsonPayload(message.payload) as { type?: string; error?: string }).type ===
+          "input-rejected" &&
         (decodeJsonPayload(message.payload) as { error?: string }).error ===
           "terminal upstream closed before accepting input",
     ),
