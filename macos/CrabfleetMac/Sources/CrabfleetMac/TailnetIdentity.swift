@@ -137,11 +137,12 @@ private final class TailscaleCommandExecution: @unchecked Sendable {
     }
 
     if currentStopReason() != nil { terminate() }
-    let deadline = Date().addingTimeInterval(timeout)
+    let clock = ContinuousClock()
+    let deadline = clock.now.advanced(by: .seconds(timeout))
     while process.isRunning {
       if currentStopReason() != nil {
         terminate()
-      } else if Date() >= deadline {
+      } else if clock.now >= deadline {
         stop(.timedOut)
       }
       Thread.sleep(forTimeInterval: 0.01)
