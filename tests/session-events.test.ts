@@ -128,12 +128,24 @@ test("structured session events canonicalize additive payloads and replay idempo
   const providerCredentialTwo = `sk-${"y".repeat(24)}`;
   const cloudCredentialOne = `AKIA${"X".repeat(16)}`;
   const cloudCredentialTwo = `ASIA${"Y".repeat(16)}`;
+  const gitLabCredentialOne = `glpat-${"x".repeat(24)}`;
+  const gitLabCredentialTwo = `glpat-${"y".repeat(24)}`;
+  const privateKeyOne = [
+    "-----BEGIN PRIVATE",
+    "KEY-----\nZmFrZS1rZXktb25l\n-----END PRIVATE",
+    "KEY-----",
+  ].join(" ");
+  const privateKeyTwo = [
+    "-----BEGIN PRIVATE",
+    "KEY-----\nZmFrZS1rZXktdHdv\n-----END PRIVATE",
+    "KEY-----",
+  ].join(" ");
   const first = await service.append({
     sessionId: "IS-1",
     actor: "operator",
     eventKey: " run:1 ",
     type: " clawsweeper.action ",
-    message: ` updated pull request: authorization: Bearer credential-one\n${githubCredentialOne} `,
+    message: ` updated pull request: authorization: Bearer credential-one\ncredentials=dummy\nSharedAccessKey=dummy\n${githubCredentialOne} `,
     payload: {
       version: 2,
       target: { z: true, a: 1 },
@@ -143,13 +155,20 @@ test("structured session events canonicalize additive payloads and replay idempo
       accessKeyId: "dummy",
       accountKey: "dummy",
       connectionString: "dummy",
+      sharedAccessKey: "dummy",
       credentials: {
         authorization: "Bearer credential-one",
         githubToken: "dummy",
       },
       note: "request failed: authorization: Bearer credential-one",
       storageKey: "dummy",
-      tokenSamples: [githubCredentialOne, providerCredentialOne, cloudCredentialOne],
+      tokenSamples: [
+        githubCredentialOne,
+        gitLabCredentialOne,
+        providerCredentialOne,
+        cloudCredentialOne,
+        privateKeyOne,
+      ],
     },
     now: 123,
   });
@@ -158,7 +177,7 @@ test("structured session events canonicalize additive payloads and replay idempo
     actor: "operator",
     eventKey: "run:1",
     type: "clawsweeper.action",
-    message: `updated pull request: authorization: Bearer credential-two\n${githubCredentialTwo}`,
+    message: `updated pull request: authorization: Bearer credential-two\ncredentials=fake\nSharedAccessKey=fake\n${githubCredentialTwo}`,
     payload: {
       additiveField: ["kept"],
       secretKey: "fake",
@@ -166,13 +185,20 @@ test("structured session events canonicalize additive payloads and replay idempo
       accessKeyId: "fake",
       accountKey: "fake",
       connectionString: "fake",
+      sharedAccessKey: "fake",
       credentials: {
         authorization: "Bearer credential-two",
         githubToken: "fake",
       },
       note: "request failed: authorization: Bearer credential-two",
       storageKey: "fake",
-      tokenSamples: [githubCredentialTwo, providerCredentialTwo, cloudCredentialTwo],
+      tokenSamples: [
+        githubCredentialTwo,
+        gitLabCredentialTwo,
+        providerCredentialTwo,
+        cloudCredentialTwo,
+        privateKeyTwo,
+      ],
       target: { a: 1, z: true },
       version: 2,
     },
@@ -185,7 +211,7 @@ test("structured session events canonicalize additive payloads and replay idempo
     actor: "operator",
     eventKey: "run:1",
     type: "clawsweeper.action",
-    message: "updated pull request: [credential]\n[credential]",
+    message: "updated pull request: [credential]\n[credential]\n[credential]\n[credential]",
     payload: {
       accessKeyId: "[redacted]",
       accountKey: "[redacted]",
@@ -195,16 +221,23 @@ test("structured session events canonicalize additive payloads and replay idempo
       note: "request failed: [credential]",
       secretAccessKey: "[redacted]",
       secretKey: "[redacted]",
+      sharedAccessKey: "[redacted]",
       storageKey: "[redacted]",
       target: { a: 1, z: true },
-      tokenSamples: ["[credential]", "[credential]", "[credential]"],
+      tokenSamples: [
+        "[credential]",
+        "[credential]",
+        "[credential]",
+        "[credential]",
+        "[credential]",
+      ],
       version: 2,
     },
     createdAt: 123,
   });
   assert.deepEqual(persistedPayloads, [
-    '{"accessKeyId":"[redacted]","accountKey":"[redacted]","additiveField":["kept"],"connectionString":"[redacted]","credentials":"[redacted]","note":"request failed: [credential]","secretAccessKey":"[redacted]","secretKey":"[redacted]","storageKey":"[redacted]","target":{"a":1,"z":true},"tokenSamples":["[credential]","[credential]","[credential]"],"version":2}',
-    '{"accessKeyId":"[redacted]","accountKey":"[redacted]","additiveField":["kept"],"connectionString":"[redacted]","credentials":"[redacted]","note":"request failed: [credential]","secretAccessKey":"[redacted]","secretKey":"[redacted]","storageKey":"[redacted]","target":{"a":1,"z":true},"tokenSamples":["[credential]","[credential]","[credential]"],"version":2}',
+    '{"accessKeyId":"[redacted]","accountKey":"[redacted]","additiveField":["kept"],"connectionString":"[redacted]","credentials":"[redacted]","note":"request failed: [credential]","secretAccessKey":"[redacted]","secretKey":"[redacted]","sharedAccessKey":"[redacted]","storageKey":"[redacted]","target":{"a":1,"z":true},"tokenSamples":["[credential]","[credential]","[credential]","[credential]","[credential]"],"version":2}',
+    '{"accessKeyId":"[redacted]","accountKey":"[redacted]","additiveField":["kept"],"connectionString":"[redacted]","credentials":"[redacted]","note":"request failed: [credential]","secretAccessKey":"[redacted]","secretKey":"[redacted]","sharedAccessKey":"[redacted]","storageKey":"[redacted]","target":{"a":1,"z":true},"tokenSamples":["[credential]","[credential]","[credential]","[credential]","[credential]"],"version":2}',
   ]);
   assert.deepEqual(invalidations, ["IS-1", "IS-1"]);
   assert.deepEqual(archives, ["IS-1", "IS-1"]);

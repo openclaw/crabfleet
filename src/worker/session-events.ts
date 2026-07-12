@@ -120,8 +120,8 @@ export async function appendStructuredInteractiveSessionEventRecord(
   try {
     return await new InteractiveSessionEventLedgerService({
       async persist(event) {
-        // Terminal ledgers are immutable. The exact row check keeps retries
-        // idempotent without letting a retained agent token add new history.
+        // Terminal ledgers are immutable. Missing-key gating keeps retries
+        // idempotent without firing INSERT side effects for existing rows.
         const insert = sql<InteractiveSessionEventRow>`
           INSERT INTO interactive_session_events (
             session_id,
@@ -146,14 +146,11 @@ export async function appendStructuredInteractiveSessionEventRecord(
             WHERE id = ${event.sessionId}
               AND status NOT IN ('stopping', 'stopped', 'expired', 'failed')
           )
-          OR EXISTS (
+          AND NOT EXISTS (
             SELECT 1
             FROM interactive_session_events
             WHERE session_id = ${event.sessionId}
               AND event_key = ${event.eventKey}
-              AND event_type = ${event.type}
-              AND message = ${event.message}
-              AND payload_json = ${event.payloadJson}
           )
           ON CONFLICT DO NOTHING
           RETURNING *
@@ -265,7 +262,7 @@ function structuredPayloadJson(value: unknown): string {
 }
 
 const sensitivePayloadField =
-  /^(?:access_?key_?id|account_?key|api_?key|apikey|auth|authorization|client_?secret|connection_?string|cookie|credential|credentials|id_?token|password|passwd|private_?key|proxy_?authorization|refresh_?token|sas_?token|secret|secret_?access_?key|secret_?key|session_?token|set_?cookie|shared_?access_?signature|sig|signature|signed_?url|storage_?key|ticket|token|x_?api_?key|.+(?:_access_?key_?id|_account_?key|_api_?key|_connection_?string|_credential|_credentials|_password|_private_?key|_secret|_secret_?access_?key|_secret_?key|_signature|_storage_?key|_ticket|_token))$/i;
+  /^(?:access_?key_?id|account_?key|api_?key|apikey|auth|authorization|client_?secret|connection_?string|cookie|credential|credentials|id_?token|password|passwd|private_?key|proxy_?authorization|refresh_?token|sas_?token|secret|secret_?access_?key|secret_?key|session_?token|set_?cookie|shared_?access_?key|shared_?access_?signature|sig|signature|signed_?url|storage_?key|ticket|token|x_?api_?key|.+(?:_access_?key_?id|_account_?key|_api_?key|_connection_?string|_credential|_credentials|_password|_private_?key|_secret|_secret_?access_?key|_secret_?key|_shared_?access_?key|_signature|_storage_?key|_ticket|_token))$/i;
 
 function redactStructuredPayload(
   value: InteractiveSessionEventPayload,
@@ -291,7 +288,7 @@ function redactStructuredPayloadValue(
 
 function redactedStructuredEventText(value: string): string {
   const sensitiveName =
-    "access[_-]?key[_-]?id|access[_-]?token|account[_-]?key|api[_-]?key|apikey|auth|authorization|client[_-]?secret|connection[_-]?string|cookie|credential|id[_-]?token|password|passwd|private[_-]?key|proxy[_-]?authorization|refresh[_-]?token|sas[_-]?token|secret|secret[_-]?access[_-]?key|secret[_-]?key|session[_-]?token|set[_-]?cookie|shared[_-]?access[_-]?signature|sig|signature|storage[_-]?key|ticket|token|x[_-]?api[_-]?key";
+    "access[_-]?key[_-]?id|access[_-]?token|account[_-]?key|api[_-]?key|apikey|auth|authorization|client[_-]?secret|connection[_-]?string|cookie|credential|credentials|id[_-]?token|password|passwd|private[_-]?key|proxy[_-]?authorization|refresh[_-]?token|sas[_-]?token|secret|secret[_-]?access[_-]?key|secret[_-]?key|session[_-]?token|set[_-]?cookie|shared[_-]?access[_-]?key|shared[_-]?access[_-]?signature|sig|signature|storage[_-]?key|ticket|token|x[_-]?api[_-]?key";
   return value
     .replace(
       /\b(?:authorization|proxy-authorization|x-api-key|api-key)\s*:\s*[^\r\n]+/giu,
@@ -307,10 +304,15 @@ function redactedStructuredEventText(value: string): string {
       "[credential]",
     )
     .replace(
+      /-----BEGIN (?:RSA |DSA |EC |OPENSSH |PGP |ENCRYPTED )?PRIVATE KEY(?: BLOCK)?-----[\s\S]*?-----END (?:RSA |DSA |EC |OPENSSH |PGP |ENCRYPTED )?PRIVATE KEY(?: BLOCK)?-----/giu,
+      "[credential]",
+    )
+    .replace(
       /-----BEGIN (?:RSA |DSA |EC |OPENSSH |PGP |ENCRYPTED )?PRIVATE KEY(?: BLOCK)?-----/giu,
       "[credential]",
     )
     .replace(/\b(?:github_pat_|gh[pousr]_)[A-Za-z0-9_]{20,}\b/gu, "[credential]")
+    .replace(/\bglpat-[A-Za-z0-9_-]{20,}\b/gu, "[credential]")
     .replace(/\b(?:sk|rk|pk|org|proj)-[A-Za-z0-9_-]{20,}\b/gu, "[credential]")
     .replace(/\bxox[baprs]-[A-Za-z0-9-]{20,}\b/gu, "[credential]")
     .replace(/\bnpm_[A-Za-z0-9]{20,}\b/gu, "[credential]")

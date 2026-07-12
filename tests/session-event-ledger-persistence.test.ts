@@ -165,6 +165,10 @@ test("structured event races deduplicate and keep terminal replays side-effect f
     database.prepare("SELECT count(*) AS count FROM interactive_session_events").get()?.count,
     1,
   );
+  const sequenceBeforeReplay = database
+    .prepare("SELECT seq FROM sqlite_sequence WHERE name = 'interactive_session_events'")
+    .get()?.seq;
+  assert.equal(sequenceBeforeReplay, 1);
   assert.equal(
     database
       .prepare("SELECT terminal_finalize_pending FROM interactive_sessions WHERE id = 'IS-1'")
@@ -176,6 +180,12 @@ test("structured event races deduplicate and keep terminal replays side-effect f
   const replay = await append(eventInput("updated pull request", 300));
   assert.equal(replay.duplicate, true);
   assert.equal(archiveCalls, 2);
+  assert.equal(
+    database
+      .prepare("SELECT seq FROM sqlite_sequence WHERE name = 'interactive_session_events'")
+      .get()?.seq,
+    sequenceBeforeReplay,
+  );
   assert.equal(
     database
       .prepare("SELECT terminal_finalize_pending FROM interactive_sessions WHERE id = 'IS-1'")
