@@ -1718,6 +1718,75 @@ test("relay generations bind interleaved replacement input before lifecycle proc
   server.emit("close");
 });
 
+test("viewer carries its initial runner generation through authorization setup", async () => {
+  const client = socket();
+  const server = socket();
+  const upstream = socket();
+  let releaseView!: (allowed: boolean) => void;
+  const viewAllowed = new Promise<boolean>((resolve) => {
+    releaseView = resolve;
+  });
+  const hub = new TerminalHub(
+    dependencies(client, server, upstream, {
+      viewGrant: () => () => viewAllowed,
+      async openUpstream() {
+        return {
+          socket: upstream,
+          inputAcknowledgements: true,
+          inputGenerations: true,
+          initialRunnerGeneration: "generation-initial",
+          outputAcknowledgements: false,
+          async markConnected() {},
+        };
+      },
+    }),
+  );
+  await hub.open(
+    new Request("https://fleet.example/api/terminal/ws", {
+      headers: { upgrade: "websocket" },
+    }),
+    user,
+  );
+  server.emit("message", {
+    data: encodeTerminalFrame({
+      type: TerminalMessageType.Subscribe,
+      sessionId: githubActionsSession.id,
+      payload: encodeSubscribePayload({ flags: 0, columns: 120, rows: 34 }),
+    }),
+  });
+  await flushQueues();
+  emitRelayEvent(upstream, "runner_connected", "generation-initial");
+  releaseView(true);
+  await flushQueues();
+  await flushQueues();
+
+  server.emit("message", {
+    data: encodeTerminalFrame({
+      type: TerminalMessageType.Input,
+      sessionId: githubActionsSession.id,
+      payload: new TextEncoder().encode("first input"),
+    }),
+  });
+  await waitForInputPayloads();
+
+  const input = relayInput(upstream.sent.at(-1)!);
+  assert.equal(input.generation, "generation-initial");
+  emitRelayAcknowledgement(upstream, input.inputId, true, "generation-initial");
+  await flushQueues();
+  await flushQueues();
+
+  const completions = server.sent
+    .map((payload) => frame(payload))
+    .filter((message) => message.type === TerminalMessageType.Event)
+    .map((message) => decodeJsonPayload(message.payload) as { type?: string })
+    .filter((message) => message.type === "input-accepted" || message.type === "input-rejected");
+  assert.deepEqual(
+    completions.map((message) => message.type),
+    ["input-accepted"],
+  );
+  server.emit("close");
+});
+
 test("terminal hub immediately acknowledges upstream output when the client opts out", async () => {
   const client = socket();
   const server = socket();

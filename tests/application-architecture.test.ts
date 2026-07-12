@@ -91,6 +91,11 @@ test("GitHub Actions viewer protocol is requested and attached before relay acce
   assert.notEqual(attach, -1);
   assert.ok(accept > attach);
   assert.match(relay, /\[githubActionsViewerProtocolHeader\]: protocol/);
+  assert.match(relay, /\[githubActionsViewerGenerationHeader\]: initialRunnerGeneration/);
+  assert.match(
+    terminal,
+    /initialRunnerGeneration: gitHubActionsViewerResponseGeneration\(upstreamResponse\)/,
+  );
 });
 
 test("worker entrypoint retains only routing and platform composition", async () => {

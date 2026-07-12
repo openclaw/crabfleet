@@ -15,6 +15,7 @@ import {
   githubActionsLegacyRelayGeneration,
   githubActionsRelayRole,
   githubActionsRunnerProtocolQuery,
+  githubActionsViewerGenerationHeader,
   githubActionsViewerProtocolHeader,
   githubActionsViewerProtocolQuery,
   notifyGitHubActionsViewers,
@@ -249,6 +250,7 @@ export class SessionControlDO extends DurableObject<RuntimeEnv> {
     const pair = new WebSocketPair();
     const client = pair[0];
     const server = pair[1];
+    let initialRunnerGeneration: string | undefined;
     if (role === "runner") {
       const generation = createGitHubActionsRelayGeneration();
       replaceGitHubActionsRunner(this.ctx.getWebSockets("github-actions-runner"));
@@ -266,18 +268,24 @@ export class SessionControlDO extends DurableObject<RuntimeEnv> {
         .getWebSockets("github-actions-runner")
         .find((socket) => socket.readyState === WebSocket.OPEN);
       if (!runner) {
+        if (gitHubActionsRelayUsesGenerations(server)) {
+          initialRunnerGeneration = "none";
+        }
         notifyGitHubActionsViewers([server], "runner_waiting");
       } else if (gitHubActionsRelayUsesGenerations(server)) {
-        notifyGitHubActionsViewers(
-          [server],
-          "runner_connected",
-          gitHubActionsRelayGeneration(runner) ?? githubActionsLegacyRelayGeneration,
-        );
+        initialRunnerGeneration =
+          gitHubActionsRelayGeneration(runner) ?? githubActionsLegacyRelayGeneration;
+        notifyGitHubActionsViewers([server], "runner_connected", initialRunnerGeneration);
       }
     }
     const responseInit: ResponseInit = { status: 101, webSocket: client };
     if (role === "viewer" && protocol) {
-      responseInit.headers = { [githubActionsViewerProtocolHeader]: protocol };
+      responseInit.headers = {
+        [githubActionsViewerProtocolHeader]: protocol,
+        ...(initialRunnerGeneration
+          ? { [githubActionsViewerGenerationHeader]: initialRunnerGeneration }
+          : {}),
+      };
     }
     return new Response(null, responseInit);
   }

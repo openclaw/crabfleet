@@ -18,8 +18,10 @@ import {
   githubActionsRelayRole,
   githubActionsRunnerProtocolQuery,
   githubActionsRuntimeLabel,
+  githubActionsViewerGenerationHeader,
   githubActionsViewerProtocolHeader,
   githubActionsViewerProtocolQuery,
+  gitHubActionsViewerResponseGeneration,
   gitHubActionsViewerResponseUsesFramedProtocol,
   gitHubActionsViewerResponseUsesGenerations,
   gitHubActionsRunnerUsesFramedProtocol,
@@ -121,6 +123,7 @@ test("runner URL works without custom WebSocket headers", () => {
   );
   assert.equal(githubActionsViewerProtocolQuery, "viewerProtocol");
   assert.equal(githubActionsViewerProtocolHeader, "x-crabfleet-viewer-protocol");
+  assert.equal(githubActionsViewerGenerationHeader, "x-crabfleet-runner-generation");
   assert.equal(
     gitHubActionsViewerResponseUsesFramedProtocol(
       new Response(null, {
@@ -134,11 +137,21 @@ test("runner URL works without custom WebSocket headers", () => {
   assert.equal(gitHubActionsViewerResponseUsesFramedProtocol(new Response()), false);
   const generatedResponse = new Response(null, {
     headers: {
+      [githubActionsViewerGenerationHeader]: "generation-one",
       [githubActionsViewerProtocolHeader]: githubActionsGenerationFencedCapability,
     },
   });
   assert.equal(gitHubActionsViewerResponseUsesFramedProtocol(generatedResponse), true);
   assert.equal(gitHubActionsViewerResponseUsesGenerations(generatedResponse), true);
+  assert.equal(gitHubActionsViewerResponseGeneration(generatedResponse), "generation-one");
+  assert.equal(
+    gitHubActionsViewerResponseGeneration(
+      new Response(null, {
+        headers: { [githubActionsViewerGenerationHeader]: "invalid generation" },
+      }),
+    ),
+    null,
+  );
 });
 
 test("work states preserve running phases and map terminal outcomes", () => {

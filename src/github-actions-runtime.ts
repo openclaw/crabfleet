@@ -36,6 +36,7 @@ export const githubActionsGenerationFencedCapability = "cfr1-framed-io-v2";
 export const githubActionsRunnerProtocolQuery = "runnerProtocol";
 export const githubActionsViewerProtocolQuery = "viewerProtocol";
 export const githubActionsViewerProtocolHeader = "x-crabfleet-viewer-protocol";
+export const githubActionsViewerGenerationHeader = "x-crabfleet-runner-generation";
 export type GitHubActionsRelayProtocol =
   | typeof githubActionsFramedRunnerCapability
   | typeof githubActionsGenerationFencedCapability;
@@ -135,6 +136,11 @@ export function gitHubActionsViewerResponseUsesGenerations(response: Response): 
     response.headers.get(githubActionsViewerProtocolHeader) ===
     githubActionsGenerationFencedCapability
   );
+}
+
+export function gitHubActionsViewerResponseGeneration(response: Response): string | null {
+  const generation = response.headers.get(githubActionsViewerGenerationHeader);
+  return isGitHubActionsRelayGeneration(generation) ? generation : null;
 }
 
 export function parseGitHubActionsWorkState(value: unknown): GitHubActionsWorkState | null {

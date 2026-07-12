@@ -8,6 +8,7 @@ import {
 } from "../terminal-multiplayer.ts";
 import {
   buildGitHubActionsViewerRelayUrl,
+  gitHubActionsViewerResponseGeneration,
   gitHubActionsViewerResponseUsesFramedProtocol,
   gitHubActionsViewerResponseUsesGenerations,
   githubActionsRuntime,
@@ -143,6 +144,7 @@ export class InteractiveTerminalService {
         socket: upstream,
         inputAcknowledgements: gitHubActionsViewerResponseUsesFramedProtocol(upstreamResponse),
         inputGenerations: gitHubActionsViewerResponseUsesGenerations(upstreamResponse),
+        initialRunnerGeneration: gitHubActionsViewerResponseGeneration(upstreamResponse),
         outputAcknowledgements: false,
         markConnected: () =>
           markInteractiveTerminalConnected(

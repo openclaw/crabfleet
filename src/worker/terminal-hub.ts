@@ -47,6 +47,7 @@ export type TerminalUpstream = {
   markConnected: () => Promise<void>;
   inputAcknowledgements?: boolean;
   inputGenerations?: boolean;
+  initialRunnerGeneration?: string | null;
   outputAcknowledgements: boolean;
 };
 
@@ -531,7 +532,9 @@ export class TerminalHub {
         inputQueueRejectionScheduled: false,
         inputGenerations: upstreamConnection.inputGenerations ?? false,
         pendingInputAcknowledgements: new Map(),
-        runnerGeneration: upstreamConnection.inputGenerations ? "none" : 0,
+        runnerGeneration: upstreamConnection.inputGenerations
+          ? (upstreamConnection.initialRunnerGeneration ?? "none")
+          : 0,
         outputAcknowledgements: outputAcknowledgements && upstreamConnection.outputAcknowledgements,
         outputAcknowledgementBytes: 0,
       };
