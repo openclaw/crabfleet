@@ -38,6 +38,10 @@ export function appNavigationLocationState(locationLike = location) {
   };
 }
 
+export function shouldDisposeTerminalsForNavigation(state) {
+  return !state.focusedSessionId && !state.drawers.sessions;
+}
+
 export function useAppNavigation({ initialSessionLink, sessionItemByIdRef }) {
   const [appView, setAppViewState] = useState(initialAppView);
   const [drawers, setDrawers] = useState(initialSessionLink.route ? { sessions: true } : {});
@@ -65,7 +69,7 @@ export function useAppNavigation({ initialSessionLink, sessionItemByIdRef }) {
       setSharedSessionId(next.sharedSessionId);
       setSharedToken(next.sharedToken);
       if (next.focusedSessionId) warmGhosttyModule();
-      else disposeAllTerminals();
+      else if (shouldDisposeTerminalsForNavigation(next)) disposeAllTerminals();
     };
     window.addEventListener("popstate", onPopState);
     return () => window.removeEventListener("popstate", onPopState);

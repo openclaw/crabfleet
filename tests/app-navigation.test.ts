@@ -5,6 +5,7 @@ import {
   appNavigationLocationState,
   normalizedAppView,
   sessionOpenTarget,
+  shouldDisposeTerminalsForNavigation,
   topOpenDrawer,
 } from "../src/app/app-navigation.js";
 
@@ -55,31 +56,36 @@ test("session navigation derives focus and durable route targets", () => {
 });
 
 test("browser history locations reconcile view, drawers, and session focus", () => {
-  assert.deepEqual(
-    appNavigationLocationState({
-      pathname: "/sessions/IS-2",
-      search: "?token=shared",
-    }),
-    {
-      appView: "fleet",
-      drawers: { sessions: true },
-      focusedSessionId: "IS-2",
-      sharedSessionId: "IS-2",
-      sharedToken: "shared",
-    },
-  );
-  assert.deepEqual(appNavigationLocationState({ pathname: "/sessions", search: "" }), {
+  const focusedSession = appNavigationLocationState({
+    pathname: "/sessions/IS-2",
+    search: "?token=shared",
+  });
+  assert.deepEqual(focusedSession, {
+    appView: "fleet",
+    drawers: { sessions: true },
+    focusedSessionId: "IS-2",
+    sharedSessionId: "IS-2",
+    sharedToken: "shared",
+  });
+  assert.equal(shouldDisposeTerminalsForNavigation(focusedSession), false);
+
+  const sessionGrid = appNavigationLocationState({ pathname: "/sessions", search: "" });
+  assert.deepEqual(sessionGrid, {
     appView: "fleet",
     drawers: { sessions: true },
     focusedSessionId: null,
     sharedSessionId: null,
     sharedToken: null,
   });
-  assert.deepEqual(appNavigationLocationState({ pathname: "/app/board", search: "" }), {
+  assert.equal(shouldDisposeTerminalsForNavigation(sessionGrid), false);
+
+  const board = appNavigationLocationState({ pathname: "/app/board", search: "" });
+  assert.deepEqual(board, {
     appView: "board",
     drawers: {},
     focusedSessionId: null,
     sharedSessionId: null,
     sharedToken: null,
   });
+  assert.equal(shouldDisposeTerminalsForNavigation(board), true);
 });
