@@ -7,9 +7,9 @@ import {
 } from "../credential-policy-fence.ts";
 import type { FleetSandboxPolicySummary } from "../fleet-state.ts";
 import {
-  forwardGitHubActionsRelayMessage,
   githubActionsRelayRole,
   notifyGitHubActionsViewers,
+  relayGitHubActionsWebSocketMessage,
   replaceGitHubActionsRunner,
 } from "../github-actions-runtime.ts";
 import type { RuntimeEnv } from "./env.ts";
@@ -200,8 +200,9 @@ export class SessionControlDO extends DurableObject<RuntimeEnv> {
       socket.close(1008, "unknown relay peer");
       return;
     }
-    forwardGitHubActionsRelayMessage(
+    relayGitHubActionsWebSocketMessage(
       role,
+      socket,
       message,
       this.ctx.getWebSockets("github-actions-runner"),
       this.ctx.getWebSockets("github-actions-viewer"),

@@ -13,6 +13,11 @@ import {
   normalizeWebSocketMessageData,
   sendOutputAcknowledgement,
 } from "@openclaw/libterminal/worker";
+import {
+  githubActionsRuntime,
+  parseGitHubActionsRelayInputAcknowledgement,
+  type GitHubActionsRelayInputAcknowledgement,
+} from "../github-actions-runtime.ts";
 import { redactedAdapterMessage } from "../runtime-adapter.ts";
 import { badRequest, unauthorized } from "./http.ts";
 import type { User } from "./models.ts";
@@ -20,6 +25,12 @@ import type { InteractiveSession } from "./session-model.ts";
 
 const encoder = new TextEncoder();
 const terminalFrameLimits = { maxFrameBytes: 16 * 1024 * 1024 };
+const terminalInputAcknowledgementTimeoutMs = 5_000;
+
+type PendingTerminalInputAcknowledgement = {
+  resolve(result: GitHubActionsRelayInputAcknowledgement): void;
+  timeout: ReturnType<typeof setTimeout>;
+};
 
 export type TerminalUpstream = {
   socket: WebSocket;
@@ -37,6 +48,8 @@ export type TerminalHubSubscription = {
   viewCheck: ReturnType<typeof setInterval> | null;
   cols: number;
   rows: number;
+  inputAcknowledgements: boolean;
+  pendingInputAcknowledgement: PendingTerminalInputAcknowledgement | null;
   outputAcknowledgements: boolean;
   outputAcknowledgementBytes: number;
 };
@@ -237,13 +250,26 @@ export class TerminalHub {
                 });
                 return;
               }
+              const acknowledgement = subscription.inputAcknowledgements
+                ? beginTerminalInputAcknowledgement(subscription)
+                : null;
               try {
                 subscription.upstream.send(input);
               } catch {
+                cancelTerminalInputAcknowledgement(subscription);
                 sendTerminalJson(server, TerminalMessageType.Error, frame.sessionId, {
                   error: "terminal upstream send failed",
                 });
                 return;
+              }
+              if (acknowledgement) {
+                const result = await acknowledgement;
+                if (!result.accepted) {
+                  sendTerminalJson(server, TerminalMessageType.Error, frame.sessionId, {
+                    error: result.error ?? "terminal input was not accepted",
+                  });
+                  return;
+                }
               }
             }
             sendTerminalJson(server, TerminalMessageType.Event, frame.sessionId, {
@@ -421,6 +447,8 @@ export class TerminalHub {
         viewCheck,
         cols,
         rows,
+        inputAcknowledgements: session.runtime === githubActionsRuntime,
+        pendingInputAcknowledgement: null,
         outputAcknowledgements: outputAcknowledgements && upstreamConnection.outputAcknowledgements,
         outputAcknowledgementBytes: 0,
       };
@@ -464,6 +492,11 @@ export class TerminalHub {
             const data = await normalizeWebSocketMessageData(raw);
             if (client.readyState !== WebSocket.OPEN || !viewGranted) return;
             if (typeof data === "string") {
+              const inputAcknowledgement = parseGitHubActionsRelayInputAcknowledgement(data);
+              if (inputAcknowledgement) {
+                completeTerminalInputAcknowledgement(activeSubscription, inputAcknowledgement);
+                return;
+              }
               const parsed = parseTerminalControlMessage(data);
               if (parsed) {
                 sendTerminalJson(client, TerminalMessageType.Event, id, parsed);
@@ -488,6 +521,10 @@ export class TerminalHub {
           });
       });
       upstream.addEventListener("close", (event) => {
+        completeTerminalInputAcknowledgement(activeSubscription, {
+          accepted: false,
+          error: "terminal upstream closed before accepting input",
+        });
         const closeReason = consumeCloseReason();
         const safeUpstreamReason = event.reason
           ? redactedAdapterMessage(
@@ -512,6 +549,10 @@ export class TerminalHub {
         }
       });
       upstream.addEventListener("error", () => {
+        completeTerminalInputAcknowledgement(activeSubscription, {
+          accepted: false,
+          error: "terminal upstream failed before accepting input",
+        });
         const closeReason = closingReason;
         if (subscriptions.delete(id)) this.dependencies.releaseInputState(id);
         if (viewCheck !== null) clearInterval(viewCheck);
@@ -538,6 +579,50 @@ export class TerminalHub {
       });
     }
   }
+}
+
+function beginTerminalInputAcknowledgement(
+  subscription: TerminalHubSubscription,
+): Promise<GitHubActionsRelayInputAcknowledgement> {
+  cancelTerminalInputAcknowledgement(subscription);
+  return new Promise((resolve) => {
+    const pending: PendingTerminalInputAcknowledgement = {
+      resolve,
+      timeout: setTimeout(() => {
+        if (
+          !completeTerminalInputAcknowledgement(subscription, {
+            accepted: false,
+            error: "terminal input delivery was not acknowledged",
+          })
+        ) {
+          return;
+        }
+        if (subscription.upstream.readyState === WebSocket.OPEN) {
+          subscription.upstream.close(1011, "input acknowledgement timed out");
+        }
+      }, terminalInputAcknowledgementTimeoutMs),
+    };
+    subscription.pendingInputAcknowledgement = pending;
+  });
+}
+
+function completeTerminalInputAcknowledgement(
+  subscription: TerminalHubSubscription,
+  result: GitHubActionsRelayInputAcknowledgement,
+): boolean {
+  const pending = subscription.pendingInputAcknowledgement;
+  if (!pending) return false;
+  subscription.pendingInputAcknowledgement = null;
+  clearTimeout(pending.timeout);
+  pending.resolve(result);
+  return true;
+}
+
+function cancelTerminalInputAcknowledgement(subscription: TerminalHubSubscription): void {
+  const pending = subscription.pendingInputAcknowledgement;
+  if (!pending) return;
+  subscription.pendingInputAcknowledgement = null;
+  clearTimeout(pending.timeout);
 }
 
 function updateTerminalInputCapability(

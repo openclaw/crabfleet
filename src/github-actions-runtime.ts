@@ -16,6 +16,11 @@ export type GitHubActionsRelaySocket = {
   close(code?: number, reason?: string): void;
 };
 
+export type GitHubActionsRelayInputAcknowledgement = {
+  accepted: boolean;
+  error?: string;
+};
+
 export const githubActionsCapabilities = {
   terminal: true,
   takeover: true,
@@ -42,6 +47,8 @@ const terminalWorkStates = new Set<GitHubActionsWorkState>([
 ]);
 
 const webSocketOpen = 1;
+const relayInputAcknowledgementType = "github_actions_input_ack";
+const relayInputRejectedError = "GitHub Actions runner did not accept terminal input";
 
 export function githubActionsRuntimeLabel(runtime: unknown): string {
   return runtime === githubActionsRuntime ? "GitHub Actions" : "";
@@ -118,10 +125,70 @@ export function forwardGitHubActionsRelayMessage(
   let forwarded = 0;
   for (const socket of targets) {
     if (socket.readyState !== webSocketOpen) continue;
-    socket.send(message);
-    forwarded += 1;
+    try {
+      socket.send(message);
+      forwarded += 1;
+    } catch {
+      // The caller uses the forwarded count to reject undelivered viewer input.
+    }
   }
   return forwarded;
+}
+
+export function relayGitHubActionsWebSocketMessage(
+  sender: GitHubActionsRelayRole,
+  senderSocket: GitHubActionsRelaySocket,
+  message: string | ArrayBuffer,
+  runners: readonly GitHubActionsRelaySocket[],
+  viewers: readonly GitHubActionsRelaySocket[],
+): number {
+  const viewerInput = sender === "viewer" && !isGitHubActionsViewerControlMessage(message);
+  const forwarded = forwardGitHubActionsRelayMessage(sender, message, runners, viewers);
+  if (viewerInput) {
+    sendGitHubActionsRelayInputAcknowledgement(senderSocket, forwarded === 1);
+  }
+  return forwarded;
+}
+
+export function sendGitHubActionsRelayInputAcknowledgement(
+  viewer: GitHubActionsRelaySocket,
+  accepted: boolean,
+): boolean {
+  if (viewer.readyState !== webSocketOpen) return false;
+  try {
+    viewer.send(
+      JSON.stringify({
+        type: relayInputAcknowledgementType,
+        accepted,
+        ...(accepted ? {} : { error: relayInputRejectedError }),
+      }),
+    );
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+export function parseGitHubActionsRelayInputAcknowledgement(
+  message: string | ArrayBuffer,
+): GitHubActionsRelayInputAcknowledgement | null {
+  if (typeof message !== "string") return null;
+  try {
+    const parsed = JSON.parse(message) as Record<string, unknown>;
+    if (parsed.type !== relayInputAcknowledgementType || typeof parsed.accepted !== "boolean") {
+      return null;
+    }
+    if (parsed.accepted) return { accepted: true };
+    return {
+      accepted: false,
+      error:
+        typeof parsed.error === "string" && parsed.error.trim()
+          ? parsed.error.trim()
+          : relayInputRejectedError,
+    };
+  } catch {
+    return null;
+  }
 }
 
 export function isGitHubActionsViewerControlMessage(message: string | ArrayBuffer): boolean {

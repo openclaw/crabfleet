@@ -10,6 +10,7 @@ import {
   encodeSubscribePayload,
   encodeTerminalFrame,
 } from "@openclaw/libterminal/protocol";
+import { sendGitHubActionsRelayInputAcknowledgement } from "../src/github-actions-runtime.ts";
 import type { User } from "../src/worker/models.ts";
 import { containerCapabilities, interactiveSession } from "../src/worker/session-model.ts";
 import { TerminalHub, type TerminalHubDependencies } from "../src/worker/terminal-hub.ts";
@@ -80,6 +81,16 @@ const session = interactiveSession(
     adapter: "runtime-v1",
     adapter_workspace_id: "workspace-1",
     capabilities_json: JSON.stringify(containerCapabilities),
+    status: "ready",
+  }),
+);
+
+const githubActionsSession = interactiveSession(
+  sessionRow({
+    adapter: null,
+    adapter_workspace_id: null,
+    capabilities_json: JSON.stringify(containerCapabilities),
+    runtime: "github_actions",
     status: "ready",
   }),
 );
@@ -467,6 +478,136 @@ test("terminal hub never acknowledges input after its upstream closes", async ()
   );
   assert.deepEqual(decodeJsonPayload(messages.at(-1)!.payload), {
     error: "terminal upstream is not open",
+  });
+  server.emit("close");
+});
+
+test("GitHub Actions input waits for relay delivery before acknowledgement", async () => {
+  const client = socket();
+  const server = socket();
+  const upstream = socket();
+  const hub = new TerminalHub(
+    dependencies(client, server, upstream, {
+      async readSession() {
+        return githubActionsSession;
+      },
+    }),
+  );
+  await hub.open(
+    new Request("https://fleet.example/api/terminal/ws", {
+      headers: { upgrade: "websocket" },
+    }),
+    user,
+  );
+  server.emit("message", {
+    data: encodeTerminalFrame({
+      type: TerminalMessageType.Subscribe,
+      sessionId: githubActionsSession.id,
+      payload: encodeSubscribePayload({ flags: 0, columns: 120, rows: 34 }),
+    }),
+  });
+  await flushQueues();
+  await flushQueues();
+
+  server.emit("message", {
+    data: encodeTerminalFrame({
+      type: TerminalMessageType.Input,
+      sessionId: githubActionsSession.id,
+      payload: new TextEncoder().encode("steer\r"),
+    }),
+  });
+  await flushQueues();
+
+  assert.equal(new TextDecoder().decode(upstream.sent.at(-1) as Uint8Array), "steer\r");
+  assert.equal(
+    server.sent.some(
+      (payload) =>
+        frame(payload).type === TerminalMessageType.Event &&
+        (decodeJsonPayload(frame(payload).payload) as { type?: string }).type === "input-accepted",
+    ),
+    false,
+  );
+
+  sendGitHubActionsRelayInputAcknowledgement(
+    {
+      readyState: WebSocket.OPEN,
+      send(message) {
+        upstream.emit("message", { data: message });
+      },
+      close() {},
+    },
+    true,
+  );
+  await flushQueues();
+  await flushQueues();
+
+  const accepted = frame(server.sent.at(-1)!);
+  assert.equal(accepted.type, TerminalMessageType.Event);
+  assert.deepEqual(decodeJsonPayload(accepted.payload), { type: "input-accepted" });
+  server.emit("close");
+});
+
+test("GitHub Actions relay rejection becomes a terminal input error", async () => {
+  const client = socket();
+  const server = socket();
+  const upstream = socket();
+  const hub = new TerminalHub(
+    dependencies(client, server, upstream, {
+      async readSession() {
+        return githubActionsSession;
+      },
+    }),
+  );
+  await hub.open(
+    new Request("https://fleet.example/api/terminal/ws", {
+      headers: { upgrade: "websocket" },
+    }),
+    user,
+  );
+  server.emit("message", {
+    data: encodeTerminalFrame({
+      type: TerminalMessageType.Subscribe,
+      sessionId: githubActionsSession.id,
+      payload: encodeSubscribePayload({ flags: 0, columns: 120, rows: 34 }),
+    }),
+  });
+  await flushQueues();
+  await flushQueues();
+  server.emit("message", {
+    data: encodeTerminalFrame({
+      type: TerminalMessageType.Input,
+      sessionId: githubActionsSession.id,
+      payload: new TextEncoder().encode("dropped"),
+    }),
+  });
+  await flushQueues();
+
+  sendGitHubActionsRelayInputAcknowledgement(
+    {
+      readyState: WebSocket.OPEN,
+      send(message) {
+        upstream.emit("message", { data: message });
+      },
+      close() {},
+    },
+    false,
+  );
+  await flushQueues();
+  await flushQueues();
+
+  const messages = server.sent.map((payload) => frame(payload));
+  assert.equal(
+    messages.some(
+      (message) =>
+        message.type === TerminalMessageType.Event &&
+        (decodeJsonPayload(message.payload) as { type?: string }).type === "input-accepted",
+    ),
+    false,
+  );
+  const rejected = messages.at(-1)!;
+  assert.equal(rejected.type, TerminalMessageType.Error);
+  assert.deepEqual(decodeJsonPayload(rejected.payload), {
+    error: "GitHub Actions runner did not accept terminal input",
   });
   server.emit("close");
 });

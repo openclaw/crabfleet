@@ -10,8 +10,11 @@ import {
   isGitHubActionsViewerControlMessage,
   isTerminalGitHubActionsWorkState,
   notifyGitHubActionsViewers,
+  parseGitHubActionsRelayInputAcknowledgement,
   parseGitHubActionsWorkState,
+  relayGitHubActionsWebSocketMessage,
   replaceGitHubActionsRunner,
+  sendGitHubActionsRelayInputAcknowledgement,
   type GitHubActionsRelaySocket,
 } from "../src/github-actions-runtime.ts";
 
@@ -109,17 +112,80 @@ test("relay sends viewer input to the first open runner", () => {
   assert.deepEqual(laterRunner.sent, []);
 });
 
+test("relay reports runner delivery failures instead of claiming forwarded input", () => {
+  const runner = relaySocket();
+  runner.send = () => {
+    throw new Error("runner disconnected");
+  };
+
+  assert.equal(forwardGitHubActionsRelayMessage("viewer", "input", [runner], []), 0);
+});
+
+test("relay input acknowledgements distinguish accepted and rejected delivery", () => {
+  const viewer = relaySocket();
+
+  assert.equal(sendGitHubActionsRelayInputAcknowledgement(viewer, true), true);
+  assert.deepEqual(parseGitHubActionsRelayInputAcknowledgement(viewer.sent[0]!), {
+    accepted: true,
+  });
+
+  assert.equal(sendGitHubActionsRelayInputAcknowledgement(viewer, false), true);
+  assert.deepEqual(parseGitHubActionsRelayInputAcknowledgement(viewer.sent[1]!), {
+    accepted: false,
+    error: "GitHub Actions runner did not accept terminal input",
+  });
+  assert.equal(parseGitHubActionsRelayInputAcknowledgement('{"type":"runner_waiting"}'), null);
+  assert.equal(sendGitHubActionsRelayInputAcknowledgement(relaySocket(3), false), false);
+});
+
+test("viewer relay acknowledges only input delivered to an open runner", () => {
+  const runner = relaySocket();
+  const viewer = relaySocket();
+
+  assert.equal(relayGitHubActionsWebSocketMessage("viewer", viewer, "input", [runner], []), 1);
+  assert.deepEqual(runner.sent, ["input"]);
+  assert.deepEqual(parseGitHubActionsRelayInputAcknowledgement(viewer.sent[0]!), {
+    accepted: true,
+  });
+
+  const waitingViewer = relaySocket();
+  assert.equal(relayGitHubActionsWebSocketMessage("viewer", waitingViewer, "input", [], []), 0);
+  assert.deepEqual(parseGitHubActionsRelayInputAcknowledgement(waitingViewer.sent[0]!), {
+    accepted: false,
+    error: "GitHub Actions runner did not accept terminal input",
+  });
+
+  const failedRunner = relaySocket();
+  failedRunner.send = () => {
+    throw new Error("runner disconnected");
+  };
+  const failedViewer = relaySocket();
+  assert.equal(
+    relayGitHubActionsWebSocketMessage("viewer", failedViewer, "input", [failedRunner], []),
+    0,
+  );
+  assert.deepEqual(parseGitHubActionsRelayInputAcknowledgement(failedViewer.sent[0]!), {
+    accepted: false,
+    error: "GitHub Actions runner did not accept terminal input",
+  });
+});
+
 test("relay consumes viewer resize controls without corrupting raw runner input", () => {
   const runner = relaySocket();
+  const viewer = relaySocket();
   const resize = JSON.stringify({ type: "resize", cols: 120, rows: 40 });
   const typedJson = new TextEncoder().encode(resize).buffer;
 
   assert.equal(isGitHubActionsViewerControlMessage(resize), true);
   assert.equal(isGitHubActionsViewerControlMessage(typedJson), false);
-  assert.equal(forwardGitHubActionsRelayMessage("viewer", resize, [runner], []), 0);
+  assert.equal(relayGitHubActionsWebSocketMessage("viewer", viewer, resize, [runner], []), 0);
   assert.deepEqual(runner.sent, []);
-  assert.equal(forwardGitHubActionsRelayMessage("viewer", typedJson, [runner], []), 1);
+  assert.deepEqual(viewer.sent, []);
+  assert.equal(relayGitHubActionsWebSocketMessage("viewer", viewer, typedJson, [runner], []), 1);
   assert.deepEqual(runner.sent, [typedJson]);
+  assert.deepEqual(parseGitHubActionsRelayInputAcknowledgement(viewer.sent[0]!), {
+    accepted: true,
+  });
 });
 
 test("relay tags and runner lifecycle notifications stay explicit", () => {
