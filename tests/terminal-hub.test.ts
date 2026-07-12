@@ -804,6 +804,71 @@ test("GitHub Actions input acknowledgements correlate overlapping payloads out o
   server.emit("close");
 });
 
+test("GitHub Actions serializes completion events for overlapping client inputs", async () => {
+  const client = socket();
+  const server = socket();
+  const upstream = socket();
+  const hub = new TerminalHub(
+    dependencies(client, server, upstream, {
+      async readSession() {
+        return githubActionsSession;
+      },
+    }),
+  );
+  await hub.open(
+    new Request("https://fleet.example/api/terminal/ws", {
+      headers: { upgrade: "websocket" },
+    }),
+    user,
+  );
+  server.emit("message", {
+    data: encodeTerminalFrame({
+      type: TerminalMessageType.Subscribe,
+      sessionId: githubActionsSession.id,
+      payload: encodeSubscribePayload({ flags: 0, columns: 120, rows: 34 }),
+    }),
+  });
+  await flushQueues();
+  await flushQueues();
+
+  for (const text of ["first", "second"]) {
+    server.emit("message", {
+      data: encodeTerminalFrame({
+        type: TerminalMessageType.Input,
+        sessionId: githubActionsSession.id,
+        payload: new TextEncoder().encode(text),
+      }),
+    });
+  }
+  await flushQueues();
+  await flushQueues();
+
+  assert.equal(upstream.sent.length, 1);
+  const first = relayInput(upstream.sent[0]!);
+  assert.equal(first.text, "first");
+  emitRelayAcknowledgement(upstream, first.inputId, false);
+  await flushQueues();
+  await flushQueues();
+
+  assert.equal(upstream.sent.length, 2);
+  const second = relayInput(upstream.sent[1]!);
+  assert.equal(second.text, "second");
+  emitRelayAcknowledgement(upstream, second.inputId, true);
+  await flushQueues();
+  await flushQueues();
+
+  const completions = server.sent
+    .map((payload) => frame(payload))
+    .filter((message) => message.type === TerminalMessageType.Event)
+    .map((message) => decodeJsonPayload(message.payload) as { type?: string })
+    .filter((message) => message.type === "input-accepted" || message.type === "input-rejected");
+  assert.deepEqual(
+    completions.map((message) => message.type),
+    ["input-rejected", "input-accepted"],
+  );
+  server.emit("close");
+});
+
 test("GitHub Actions framed output preserves control-shaped terminal bytes", async () => {
   const client = socket();
   const server = socket();

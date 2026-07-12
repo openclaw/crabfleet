@@ -56,6 +56,7 @@ export type TerminalHubSubscription = {
   cols: number;
   rows: number;
   inputAcknowledgements: boolean;
+  inputQueue: Promise<void>;
   pendingInputAcknowledgements: Map<string, PendingTerminalInputAcknowledgement>;
   outputAcknowledgements: boolean;
   outputAcknowledgementBytes: number;
@@ -234,62 +235,69 @@ export class TerminalHub {
             return;
           }
           if (frame.type === TerminalMessageType.Input || frame.type === TerminalMessageType.Key) {
-            const canInput = await subscription.canInput();
-            updateTerminalInputCapability(server, subscription, canInput);
-            if (!canInput) {
-              return;
-            }
-            if (subscription.upstream.readyState !== WebSocket.OPEN) {
-              sendTerminalJson(server, TerminalMessageType.Error, frame.sessionId, {
-                error: "terminal upstream is not open",
-              });
-              return;
-            }
-            const inputs = await this.dependencies.inputPayloads(subscription, user, frame.payload);
-            const acknowledgements: PendingTerminalInputAcknowledgement[] = [];
-            for (const [index, input] of inputs.entries()) {
-              if (index > 0) await sleep(index === inputs.length - 1 ? 80 : 2);
-              if (
-                subscriptions.get(frame.sessionId) !== subscription ||
-                subscription.upstream.readyState !== WebSocket.OPEN
-              ) {
-                sendTerminalJson(server, TerminalMessageType.Error, frame.sessionId, {
-                  error: "terminal upstream is not open",
-                });
-                return;
-              }
-              const inputId = subscription.inputAcknowledgements
-                ? createGitHubActionsRelayInputId()
-                : null;
-              const acknowledgement = inputId
-                ? beginTerminalInputAcknowledgement(subscription, inputId)
-                : null;
-              if (acknowledgement) acknowledgements.push(acknowledgement);
-              try {
-                subscription.upstream.send(
-                  inputId ? encodeGitHubActionsRelayInput(inputId, input) : input,
-                );
-              } catch {
-                if (acknowledgement) {
-                  completeTerminalInputAcknowledgement(subscription, acknowledgement.inputId, {
-                    inputId: acknowledgement.inputId,
-                    accepted: false,
-                    error: "terminal upstream send failed",
-                  });
-                  break;
-                } else {
+            subscription.inputQueue = subscription.inputQueue
+              .catch(() => undefined)
+              .then(async () => {
+                const canInput = await subscription.canInput();
+                updateTerminalInputCapability(server, subscription, canInput);
+                if (!canInput) {
+                  return;
+                }
+                if (subscription.upstream.readyState !== WebSocket.OPEN) {
                   sendTerminalJson(server, TerminalMessageType.Error, frame.sessionId, {
-                    error: "terminal upstream send failed",
+                    error: "terminal upstream is not open",
                   });
                   return;
                 }
-              }
-            }
-            reportTerminalInputCompletion(
-              server,
-              frame.sessionId,
-              acknowledgements.map((acknowledgement) => acknowledgement.promise),
-            );
+                const inputs = await this.dependencies.inputPayloads(
+                  subscription,
+                  user,
+                  frame.payload,
+                );
+                const acknowledgements: PendingTerminalInputAcknowledgement[] = [];
+                for (const [index, input] of inputs.entries()) {
+                  if (index > 0) await sleep(index === inputs.length - 1 ? 80 : 2);
+                  if (
+                    subscriptions.get(frame.sessionId) !== subscription ||
+                    subscription.upstream.readyState !== WebSocket.OPEN
+                  ) {
+                    sendTerminalJson(server, TerminalMessageType.Error, frame.sessionId, {
+                      error: "terminal upstream is not open",
+                    });
+                    return;
+                  }
+                  const inputId = subscription.inputAcknowledgements
+                    ? createGitHubActionsRelayInputId()
+                    : null;
+                  const acknowledgement = inputId
+                    ? beginTerminalInputAcknowledgement(subscription, inputId)
+                    : null;
+                  if (acknowledgement) acknowledgements.push(acknowledgement);
+                  try {
+                    subscription.upstream.send(
+                      inputId ? encodeGitHubActionsRelayInput(inputId, input) : input,
+                    );
+                  } catch {
+                    if (acknowledgement) {
+                      completeTerminalInputAcknowledgement(subscription, acknowledgement.inputId, {
+                        inputId: acknowledgement.inputId,
+                        accepted: false,
+                        error: "terminal upstream send failed",
+                      });
+                      break;
+                    }
+                    sendTerminalJson(server, TerminalMessageType.Error, frame.sessionId, {
+                      error: "terminal upstream send failed",
+                    });
+                    return;
+                  }
+                }
+                await reportTerminalInputCompletion(
+                  server,
+                  frame.sessionId,
+                  acknowledgements.map((acknowledgement) => acknowledgement.promise),
+                );
+              });
             return;
           }
           if (frame.type === TerminalMessageType.Resize) {
@@ -468,6 +476,7 @@ export class TerminalHub {
         rows,
         inputAcknowledgements:
           upstreamConnection.inputAcknowledgements ?? session.runtime === githubActionsRuntime,
+        inputQueue: Promise.resolve(),
         pendingInputAcknowledgements: new Map(),
         outputAcknowledgements: outputAcknowledgements && upstreamConnection.outputAcknowledgements,
         outputAcknowledgementBytes: 0,
@@ -680,30 +689,29 @@ function completeAllTerminalInputAcknowledgements(
   return pending.length;
 }
 
-function reportTerminalInputCompletion(
+async function reportTerminalInputCompletion(
   socket: WebSocket,
   sessionId: string,
   acknowledgements: Promise<GitHubActionsRelayInputAcknowledgement>[],
-): void {
+): Promise<void> {
   if (acknowledgements.length === 0) {
     sendTerminalJson(socket, TerminalMessageType.Event, sessionId, {
       type: "input-accepted",
     });
     return;
   }
-  void Promise.all(acknowledgements).then((results) => {
-    if (socket.readyState !== WebSocket.OPEN) return;
-    const rejection = results.find((result) => !result.accepted);
-    if (rejection) {
-      sendTerminalJson(socket, TerminalMessageType.Event, sessionId, {
-        type: "input-rejected",
-        error: rejection.error ?? "terminal input was not accepted",
-      });
-      return;
-    }
+  const results = await Promise.all(acknowledgements);
+  if (socket.readyState !== WebSocket.OPEN) return;
+  const rejection = results.find((result) => !result.accepted);
+  if (rejection) {
     sendTerminalJson(socket, TerminalMessageType.Event, sessionId, {
-      type: "input-accepted",
+      type: "input-rejected",
+      error: rejection.error ?? "terminal input was not accepted",
     });
+    return;
+  }
+  sendTerminalJson(socket, TerminalMessageType.Event, sessionId, {
+    type: "input-accepted",
   });
 }
 
