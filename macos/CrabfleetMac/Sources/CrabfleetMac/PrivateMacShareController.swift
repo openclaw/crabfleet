@@ -69,7 +69,7 @@ final class DesktopHostRegistrationLifecycle {
     let hostID = CrabfleetDesktopRegistration.hostID(identity: identity)
     let target =
       uncertainRegistrations.first {
-        $0.hostID == hostID && $0.port == port
+        $0.hostID == hostID && $0.identity == identity && $0.port == port
       }
       ?? RegistrationTarget(
         identity: identity,

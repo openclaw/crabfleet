@@ -466,6 +466,106 @@ struct PrivateMacShareTests {
   }
 
   @Test @MainActor
+  func ambiguousDesktopPublicationRetryRecoversOnlyTheExactIdentity() async throws {
+    let identity = desktopIdentity(name: "retry-publish", address: "100.64.12.50")
+    let registration = IdentityAwareAmbiguousDesktopRegistration(
+      uncertainPublicationIDs: ["publication-a"]
+    )
+    let lifecycle = DesktopHostRegistrationLifecycle(
+      registration: registration,
+      createPublicationID: { "publication-a" }
+    )
+
+    await #expect(throws: DesktopHostRegistrationResultUncertainError.self) {
+      try await lifecycle.publish(identity: identity, port: 5_901)
+    }
+    try await lifecycle.publish(identity: identity, port: 5_901)
+    try await lifecycle.removePublishedIdentities()
+
+    #expect(
+      await registration.events
+        == [
+          .register(identity.ipv4Address, 5_901, "publication-a"),
+          .recover(identity.ipv4Address, "publication-a"),
+          .unregister(identity.ipv4Address, "recovered:publication-a"),
+        ]
+    )
+  }
+
+  @Test @MainActor
+  func addressRotationRepublishesInsteadOfRecoveringAnUncertainDesktop() async throws {
+    let first = desktopIdentity(name: "rotating-host", address: "100.64.12.51")
+    let second = TailnetIdentity(
+      tailnetName: first.tailnetName,
+      loginName: first.loginName,
+      dnsName: first.dnsName,
+      hostName: first.hostName,
+      ipv4Address: "100.64.12.52",
+      userID: first.userID
+    )
+    #expect(first != second)
+    #expect(
+      CrabfleetDesktopRegistration.hostID(identity: first)
+        == CrabfleetDesktopRegistration.hostID(identity: second)
+    )
+    let registration = IdentityAwareAmbiguousDesktopRegistration(
+      uncertainPublicationIDs: ["publication-a"]
+    )
+    var publicationIDs = ["publication-a", "publication-b"]
+    let lifecycle = DesktopHostRegistrationLifecycle(
+      registration: registration,
+      createPublicationID: { publicationIDs.removeFirst() }
+    )
+
+    await #expect(throws: DesktopHostRegistrationResultUncertainError.self) {
+      try await lifecycle.publish(identity: first, port: 5_901)
+    }
+    try await lifecycle.publish(identity: second, port: 5_901)
+    try await lifecycle.removePublishedIdentities()
+
+    #expect(
+      await registration.events
+        == [
+          .register(first.ipv4Address, 5_901, "publication-a"),
+          .register(second.ipv4Address, 5_901, "publication-b"),
+          .recover(first.ipv4Address, "publication-a"),
+          .unregister(first.ipv4Address, "recovered:publication-a"),
+          .unregister(second.ipv4Address, "token:publication-b"),
+        ]
+    )
+  }
+
+  @Test @MainActor
+  func portRotationRepublishesInsteadOfRecoveringAnUncertainDesktop() async throws {
+    let identity = desktopIdentity(name: "rotating-port", address: "100.64.12.53")
+    let registration = IdentityAwareAmbiguousDesktopRegistration(
+      uncertainPublicationIDs: ["publication-a"]
+    )
+    var publicationIDs = ["publication-a", "publication-b"]
+    let lifecycle = DesktopHostRegistrationLifecycle(
+      registration: registration,
+      createPublicationID: { publicationIDs.removeFirst() }
+    )
+
+    await #expect(throws: DesktopHostRegistrationResultUncertainError.self) {
+      try await lifecycle.publish(identity: identity, port: 5_901)
+    }
+    try await lifecycle.publish(identity: identity, port: 5_902)
+    try await lifecycle.removePublishedIdentities()
+
+    #expect(
+      await registration.events
+        == [
+          .register(identity.ipv4Address, 5_901, "publication-a"),
+          .register(identity.ipv4Address, 5_902, "publication-b"),
+          .recover(identity.ipv4Address, "publication-a"),
+          .unregister(identity.ipv4Address, "recovered:publication-a"),
+          .unregister(identity.ipv4Address, "token:publication-b"),
+        ]
+    )
+  }
+
+  @Test @MainActor
   func ambiguousDesktopCleanupPreservesANewerPublisher() async throws {
     let identity = desktopIdentity(name: "shared-host", address: "100.64.12.47")
     let registration = TwoProcessDesktopRegistration(lostPublicationID: "publication-a")
@@ -1948,6 +2048,42 @@ private actor AmbiguousDesktopRegistration: DesktopHostRegistering {
 
   func unregister(identity: TailnetIdentity, ownershipToken: String?) async throws {
     events.append(.unregister(identity.dnsName, ownershipToken))
+  }
+}
+
+private actor IdentityAwareAmbiguousDesktopRegistration: DesktopHostRegistering {
+  enum Event: Equatable {
+    case register(String, UInt16, String)
+    case recover(String, String)
+    case unregister(String, String?)
+  }
+
+  private let uncertainPublicationIDs: Set<String>
+  private(set) var events: [Event] = []
+
+  init(uncertainPublicationIDs: Set<String>) {
+    self.uncertainPublicationIDs = uncertainPublicationIDs
+  }
+
+  func register(
+    identity: TailnetIdentity,
+    port: UInt16,
+    publicationID: String
+  ) async throws -> String? {
+    events.append(.register(identity.ipv4Address, port, publicationID))
+    if uncertainPublicationIDs.contains(publicationID) {
+      throw DesktopHostRegistrationResultUncertainError(message: "response lost")
+    }
+    return "token:\(publicationID)"
+  }
+
+  func recover(identity: TailnetIdentity, publicationID: String) async throws -> String? {
+    events.append(.recover(identity.ipv4Address, publicationID))
+    return "recovered:\(publicationID)"
+  }
+
+  func unregister(identity: TailnetIdentity, ownershipToken: String?) async throws {
+    events.append(.unregister(identity.ipv4Address, ownershipToken))
   }
 }
 
