@@ -11,13 +11,18 @@ protocol TailscaleCommandRunning: Sendable {
 
 struct SystemTailscaleCommandRunner: TailscaleCommandRunning {
   private static let maximumOutputBytes = 4 * 1_024 * 1_024
+  private static let defaultTimeout: TimeInterval = 15
   static let executableCandidates = [
     "/Applications/Tailscale.app/Contents/MacOS/Tailscale",
   ]
 
   let executableURL: URL
+  let timeout: TimeInterval
 
-  init(fileManager: FileManager = .default) throws {
+  init(
+    fileManager: FileManager = .default,
+    timeout: TimeInterval = Self.defaultTimeout
+  ) throws {
     guard
       let path = Self.executableCandidates.first(where: {
         Self.isTrustedExecutable(atPath: $0, fileManager: fileManager)
@@ -26,89 +31,40 @@ struct SystemTailscaleCommandRunner: TailscaleCommandRunning {
       throw PrivateMacShareError.tailscaleNotInstalled
     }
     executableURL = URL(fileURLWithPath: path)
+    self.timeout = timeout
   }
 
-  init(executableURL: URL) {
+  init(executableURL: URL, timeout: TimeInterval = Self.defaultTimeout) {
     self.executableURL = executableURL
+    self.timeout = timeout
   }
 
   func run(arguments: [String]) async throws -> TailscaleCommandResult {
-    try await withCheckedThrowingContinuation { continuation in
-      DispatchQueue.global(qos: .userInitiated).async {
-        let process = Process()
-        let outputPipe = Pipe()
-        let errorPipe = Pipe()
-        let readGroup = DispatchGroup()
-        let capture = CommandCapture()
-
-        process.executableURL = executableURL
-        process.arguments = arguments
-        process.standardOutput = outputPipe
-        process.standardError = errorPipe
-        process.qualityOfService = .userInitiated
-
-        process.environment = Self.commandEnvironment(
-          from: ProcessInfo.processInfo.environment
-        )
-
-        readGroup.enter()
+    let execution = TailscaleCommandExecution(
+      executableURL: executableURL,
+      arguments: arguments,
+      environment: Self.commandEnvironment(from: ProcessInfo.processInfo.environment),
+      timeout: timeout,
+      maximumOutputBytes: Self.maximumOutputBytes
+    )
+    return try await withTaskCancellationHandler {
+      let result = try await withCheckedThrowingContinuation { continuation in
         DispatchQueue.global(qos: .userInitiated).async {
-          capture.setStandardOutput(outputPipe.fileHandleForReading.readDataToEndOfFile())
-          readGroup.leave()
-        }
-
-        readGroup.enter()
-        DispatchQueue.global(qos: .userInitiated).async {
-          capture.setStandardError(errorPipe.fileHandleForReading.readDataToEndOfFile())
-          readGroup.leave()
-        }
-
-        do {
-          try process.run()
-          process.waitUntilExit()
-          readGroup.wait()
-
-          let (outputData, errorData) = capture.values()
-          guard
-            outputData.count <= Self.maximumOutputBytes,
-            errorData.count <= Self.maximumOutputBytes
-          else {
-            continuation.resume(throwing: PrivateMacShareError.commandOutputTooLarge)
-            return
-          }
-
-          let result = TailscaleCommandResult(
-            standardOutput: String(decoding: outputData, as: UTF8.self),
-            standardError: String(decoding: errorData, as: UTF8.self)
-          )
-          guard process.terminationStatus == 0 else {
-            let message = result.standardError.trimmingCharacters(in: .whitespacesAndNewlines)
-            continuation.resume(
-              throwing: PrivateMacShareError.commandFailed(
-                status: process.terminationStatus,
-                message: String(message.prefix(500))
-              ))
-            return
-          }
-          continuation.resume(returning: result)
-        } catch {
-          outputPipe.fileHandleForWriting.closeFile()
-          errorPipe.fileHandleForWriting.closeFile()
-          readGroup.wait()
-          continuation.resume(throwing: error)
+          continuation.resume(with: Result { try execution.run() })
         }
       }
+      try Task.checkCancellation()
+      return result
+    } onCancel: {
+      execution.cancel()
     }
   }
 
   static func commandEnvironment(from source: [String: String]) -> [String: String] {
-    var environment = source
-    for key in environment.keys
-    where key.hasPrefix("TS_") || key.hasPrefix("TAILSCALE_") {
-      environment.removeValue(forKey: key)
-    }
-    environment["TAILSCALE_BE_CLI"] = "1"
-    return environment
+    SubprocessEnvironment.minimal(
+      from: source,
+      overrides: ["TAILSCALE_BE_CLI": "1"]
+    )
   }
 
   static func isTrustedExecutable(
@@ -131,27 +87,152 @@ struct SystemTailscaleCommandRunner: TailscaleCommandRunning {
   }
 }
 
-private final class CommandCapture: @unchecked Sendable {
+private final class TailscaleCommandExecution: @unchecked Sendable {
+  private enum StopReason {
+    case cancelled
+    case outputTooLarge
+    case timedOut
+  }
+
   private let lock = NSLock()
+  private let process = Process()
+  private let outputPipe = Pipe()
+  private let errorPipe = Pipe()
+  private let readGroup = DispatchGroup()
+  private let timeout: TimeInterval
+  private let maximumOutputBytes: Int
+  private var stopReason: StopReason?
   private var standardOutput = Data()
   private var standardError = Data()
 
-  func setStandardOutput(_ data: Data) {
+  init(
+    executableURL: URL,
+    arguments: [String],
+    environment: [String: String],
+    timeout: TimeInterval,
+    maximumOutputBytes: Int
+  ) {
+    self.timeout = max(0.1, timeout)
+    self.maximumOutputBytes = maximumOutputBytes
+    process.executableURL = executableURL
+    process.arguments = arguments
+    process.environment = environment
+    process.standardOutput = outputPipe
+    process.standardError = errorPipe
+    process.qualityOfService = .userInitiated
+  }
+
+  func run() throws -> TailscaleCommandResult {
+    if currentStopReason() != nil { throw CancellationError() }
+    startCapture(pipe: outputPipe, isStandardOutput: true)
+    startCapture(pipe: errorPipe, isStandardOutput: false)
+
+    do {
+      try process.run()
+    } catch {
+      outputPipe.fileHandleForWriting.closeFile()
+      errorPipe.fileHandleForWriting.closeFile()
+      readGroup.wait()
+      throw error
+    }
+
+    if currentStopReason() != nil { terminate() }
+    let deadline = Date().addingTimeInterval(timeout)
+    while process.isRunning {
+      if currentStopReason() != nil {
+        terminate()
+      } else if Date() >= deadline {
+        stop(.timedOut)
+      }
+      Thread.sleep(forTimeInterval: 0.01)
+    }
+    process.waitUntilExit()
+    readGroup.wait()
+
+    switch currentStopReason() {
+    case .cancelled:
+      throw CancellationError()
+    case .outputTooLarge:
+      throw PrivateMacShareError.commandOutputTooLarge
+    case .timedOut:
+      throw PrivateMacShareError.commandTimedOut
+    case nil:
+      break
+    }
+
+    let result = values()
+    guard process.terminationStatus == 0 else {
+      let message = result.standardError.trimmingCharacters(in: .whitespacesAndNewlines)
+      throw PrivateMacShareError.commandFailed(
+        status: process.terminationStatus,
+        message: String(message.prefix(500))
+      )
+    }
+    return result
+  }
+
+  func cancel() {
+    stop(.cancelled)
+  }
+
+  private func startCapture(pipe: Pipe, isStandardOutput: Bool) {
+    readGroup.enter()
+    DispatchQueue.global(qos: .userInitiated).async { [self] in
+      defer { readGroup.leave() }
+      var data = Data()
+      while true {
+        let chunk = pipe.fileHandleForReading.readData(ofLength: 64 * 1_024)
+        if chunk.isEmpty { break }
+        guard chunk.count <= maximumOutputBytes - data.count else {
+          stop(.outputTooLarge)
+          break
+        }
+        data.append(chunk)
+      }
+      setCaptured(data, isStandardOutput: isStandardOutput)
+    }
+  }
+
+  private func setCaptured(_ data: Data, isStandardOutput: Bool) {
     lock.lock()
-    standardOutput = data
+    if isStandardOutput {
+      standardOutput = data
+    } else {
+      standardError = data
+    }
     lock.unlock()
   }
 
-  func setStandardError(_ data: Data) {
-    lock.lock()
-    standardError = data
-    lock.unlock()
-  }
-
-  func values() -> (Data, Data) {
+  private func values() -> TailscaleCommandResult {
     lock.lock()
     defer { lock.unlock() }
-    return (standardOutput, standardError)
+    return TailscaleCommandResult(
+      standardOutput: String(decoding: standardOutput, as: UTF8.self),
+      standardError: String(decoding: standardError, as: UTF8.self)
+    )
+  }
+
+  private func currentStopReason() -> StopReason? {
+    lock.lock()
+    defer { lock.unlock() }
+    return stopReason
+  }
+
+  private func stop(_ reason: StopReason) {
+    lock.lock()
+    if stopReason == nil { stopReason = reason }
+    lock.unlock()
+    terminate()
+  }
+
+  private func terminate() {
+    guard process.isRunning else { return }
+    process.terminate()
+    let pid = process.processIdentifier
+    DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 0.5) { [process] in
+      guard process.isRunning else { return }
+      _ = Darwin.kill(pid, SIGKILL)
+    }
   }
 }
 
@@ -317,7 +398,10 @@ struct TailnetPeerAuthorizer: TailnetPeerAuthorizing, Sendable {
   let expectedIdentity: TailnetIdentity
 
   func authorize(remoteAddress: String) async -> Bool {
-    guard TailnetIdentityPolicy.isTailscaleIPv4(remoteAddress) else { return false }
+    guard
+      TailnetIdentityPolicy.isTailscaleIPv4(remoteAddress),
+      remoteAddress != expectedIdentity.ipv4Address
+    else { return false }
     do {
       let result = try await runner.run(arguments: ["whois", "--json", remoteAddress])
       let document = try JSONDecoder().decode(
@@ -347,6 +431,7 @@ enum PrivateMacShareError: LocalizedError, Equatable {
   case accessibilityDenied
   case commandFailed(status: Int32, message: String)
   case commandOutputTooLarge
+  case commandTimedOut
   case captureUnavailable
   case listenerFailed(String)
   case protocolError(String)
@@ -375,6 +460,8 @@ enum PrivateMacShareError: LocalizedError, Equatable {
         : "Tailscale exited with status \(status): \(message)"
     case .commandOutputTooLarge:
       "Tailscale returned more status data than Crabfleet will accept."
+    case .commandTimedOut:
+      "Tailscale did not respond before the command deadline."
     case .captureUnavailable:
       "Crabfleet could not capture the main display."
     case .listenerFailed(let message):

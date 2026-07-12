@@ -1,5 +1,6 @@
 import AppKit
 import Foundation
+import Network
 import Testing
 
 @testable import CrabfleetMac
@@ -22,12 +23,16 @@ struct PrivateMacShareTests {
 
     let environment = SystemTailscaleCommandRunner.commandEnvironment(
       from: [
-        "PATH": "/usr/bin:/bin",
+        "HOME": "/Users/tester",
+        "PATH": "/tmp/untrusted",
+        "SECRET_TOKEN": "do-not-forward",
         "TS_DEBUG": "unsafe",
         "TAILSCALE_SOCKET": "/tmp/unsafe.sock",
       ]
     )
-    #expect(environment["PATH"] == "/usr/bin:/bin")
+    #expect(environment["HOME"] == "/Users/tester")
+    #expect(environment["PATH"] == SubprocessEnvironment.safePath)
+    #expect(environment["SECRET_TOKEN"] == nil)
     #expect(environment["TS_DEBUG"] == nil)
     #expect(environment["TAILSCALE_SOCKET"] == nil)
     #expect(environment["TAILSCALE_BE_CLI"] == "1")
@@ -53,6 +58,85 @@ struct PrivateMacShareTests {
           .posixPermissions: NSNumber(value: 0o775),
         ]
       ))
+  }
+
+  @Test
+  func tailscaleCommandTimesOutAndRespondsToCancellation() async throws {
+    let directory = FileManager.default.temporaryDirectory
+      .appendingPathComponent("CrabfleetMacTests.\(UUID().uuidString)")
+    try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let executable = directory.appendingPathComponent("tailscale")
+    let pidFile = directory.appendingPathComponent("pid")
+    try Data(
+      """
+      #!/bin/sh
+      printf '%s' "$$" > '\(pidFile.path)'
+      exec sleep 30
+      """.utf8
+    ).write(to: executable)
+    try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: executable.path)
+
+    let timedRunner = SystemTailscaleCommandRunner(executableURL: executable, timeout: 0.1)
+    await #expect(throws: PrivateMacShareError.commandTimedOut) {
+      _ = try await timedRunner.run(arguments: ["status"])
+    }
+
+    try? FileManager.default.removeItem(at: pidFile)
+    let cancellableRunner = SystemTailscaleCommandRunner(executableURL: executable, timeout: 30)
+    let task = Task {
+      try await cancellableRunner.run(arguments: ["status"])
+    }
+    let launched = await waitUntilAsync {
+      FileManager.default.fileExists(atPath: pidFile.path)
+    }
+    #expect(launched)
+    let cancelledPID = try #require(Int(String(contentsOf: pidFile, encoding: .utf8)))
+    task.cancel()
+    await #expect(throws: CancellationError.self) {
+      try await task.value
+    }
+    #expect(await waitUntilAsync { Darwin.kill(Int32(cancelledPID), 0) != 0 })
+  }
+
+  @Test @MainActor
+  func stopInvalidatesAnInFlightPrivateShareStart() async throws {
+    let runner = SuspendedTailscaleRunner()
+    let defaults = try #require(
+      UserDefaults(suiteName: "CrabfleetMacTests.\(UUID().uuidString)")
+    )
+    let controller = PrivateMacShareController(
+      runner: runner,
+      desktopRegistration: nil,
+      defaults: defaults
+    )
+    let startTask = Task { await controller.start() }
+    let started = await waitUntilAsync { await runner.hasStarted }
+    #expect(started)
+
+    await controller.stop()
+    await runner.resume(
+      .success(.init(standardOutput: statusJSON(), standardError: ""))
+    )
+    await startTask.value
+
+    #expect(controller.phase == .idle)
+    #expect(controller.identity == nil)
+  }
+
+  @Test @MainActor
+  func applicationDelegateOwnsTheShareControllerUsedByTheApp() throws {
+    let defaults = try #require(
+      UserDefaults(suiteName: "CrabfleetMacTests.\(UUID().uuidString)")
+    )
+    let controller = PrivateMacShareController(
+      runner: StaticTailscaleRunner(output: statusJSON()),
+      desktopRegistration: nil,
+      defaults: defaults
+    )
+    let delegate = CrabfleetApplicationDelegate(shareController: controller)
+
+    #expect(delegate.shareController === controller)
   }
 
   @Test
@@ -201,6 +285,42 @@ struct PrivateMacShareTests {
     #expect(json["name"] as? String == "Workstation")
     #expect(json["address"] as? String == "100.64.12.34")
     #expect(json["port"] as? Int == 5901)
+
+    let removal = registration.removalRequest(identity: identity)
+    #expect(removal.url == request.url)
+    #expect(removal.httpMethod == "DELETE")
+    #expect(removal.value(forHTTPHeaderField: "Cookie") == "crabbox_session=secret")
+    #expect(removal.httpBody == nil)
+  }
+
+  @Test
+  func desktopRegistrationRejectsRedirectedResponses() async throws {
+    let redirectedURL = try #require(URL(string: "https://login.example.test/desktop-host"))
+    let transport = DesktopRegistrationTransport { _ in
+      (
+        Data(),
+        try #require(
+          HTTPURLResponse(
+            url: redirectedURL,
+            statusCode: 200,
+            httpVersion: nil,
+            headerFields: nil
+          ))
+      )
+    }
+    let registration = try #require(
+      CrabfleetDesktopRegistration(
+        environment: [
+          "CRABFLEET_API_URL": "https://fleet.example/api/fleet",
+          "CRABFLEET_SESSION_COOKIE": "crabbox_session=secret",
+        ],
+        transport: transport
+      ))
+    let identity = try TailnetIdentityPolicy.identity(from: statusDocument())
+
+    await #expect(throws: DesktopHostRegistrationError.redirectRejected) {
+      try await registration.register(identity: identity, port: 5_901)
+    }
   }
 
   @Test
@@ -290,6 +410,62 @@ struct PrivateMacShareTests {
     #expect(!(await otherAddress.authorize(remoteAddress: "100.100.10.20")))
     #expect(!(await unauthorizedNode.authorize(remoteAddress: "100.100.10.20")))
     #expect(!(await accepted.authorize(remoteAddress: "192.168.1.4")))
+    #expect(!(await accepted.authorize(remoteAddress: identity.ipv4Address)))
+  }
+
+  @Test @MainActor
+  func expiresIncompleteRFBHandshakeAndReleasesInput() async throws {
+    let identity = TailnetIdentity(
+      tailnetName: "example.com",
+      loginName: "tester@example.com",
+      dnsName: "workstation.example.ts.net.",
+      hostName: "Workstation",
+      ipv4Address: "127.0.0.1",
+      userID: 42
+    )
+    let capture = MacScreenCapture()
+    let input = RemoteInputRecorder()
+    let events = RFBEventRecorder()
+    let port: UInt16 = 5_923
+    let server = TailnetRFBServer(
+      identity: identity,
+      runner: StaticTailscaleRunner(output: ""),
+      capture: capture,
+      descriptor: .init(
+        displayID: 0,
+        displayBounds: CGRect(x: 0, y: 0, width: 64, height: 64),
+        frameWidth: 64,
+        frameHeight: 64,
+        sourcePixelWidth: 64,
+        sourcePixelHeight: 64
+      ),
+      input: input,
+      peerAuthorizer: LoopbackPeerAuthorizer(),
+      port: port,
+      handshakeTimeout: .milliseconds(100),
+      eventHandler: { events.append($0) }
+    )
+    try server.start()
+    defer { server.stop() }
+    try await Task.sleep(for: .milliseconds(100))
+
+    let connection = NWConnection(
+      host: "127.0.0.1",
+      port: try #require(NWEndpoint.Port(rawValue: port)),
+      using: .tcp
+    )
+    connection.start(queue: .global(qos: .userInitiated))
+    defer { connection.cancel() }
+
+    try await waitFor {
+      events.values.contains {
+        if case .sessionFailed(let message) = $0 {
+          return message.contains("handshake timed out")
+        }
+        return false
+      }
+    }
+    #expect(input.releaseCount == 1)
   }
 
   @Test
@@ -583,6 +759,21 @@ struct PrivateMacShareTests {
     )
     return bitmap.representation(using: .jpeg, properties: [.compressionFactor: 0.8])
   }
+
+  @Test
+  func buildScriptRecreatesTheAppBundleBeforeAssembly() throws {
+    let testFile = URL(fileURLWithPath: #filePath)
+    let script =
+      testFile
+      .deletingLastPathComponent()
+      .deletingLastPathComponent()
+      .deletingLastPathComponent()
+      .appendingPathComponent("scripts/build-app.sh")
+    let contents = try String(contentsOf: script, encoding: .utf8)
+    let removal = try #require(contents.range(of: "rm -rf \"$app_dir\""))
+    let assembly = try #require(contents.range(of: "mkdir -p \"$macos_dir\" \"$resources_dir\""))
+    #expect(removal.lowerBound < assembly.lowerBound)
+  }
 }
 
 private struct StaticTailscaleRunner: TailscaleCommandRunning {
@@ -602,4 +793,85 @@ private struct LoopbackPeerAuthorizer: TailnetPeerAuthorizing {
   func authorize(remoteAddress: String) async -> Bool {
     remoteAddress == "127.0.0.1"
   }
+}
+
+private actor SuspendedTailscaleRunner: TailscaleCommandRunning {
+  private var continuation: CheckedContinuation<TailscaleCommandResult, Error>?
+  private(set) var hasStarted = false
+
+  func run(arguments: [String]) async throws -> TailscaleCommandResult {
+    hasStarted = true
+    return try await withCheckedThrowingContinuation { continuation in
+      self.continuation = continuation
+    }
+  }
+
+  func resume(_ result: Result<TailscaleCommandResult, Error>) {
+    continuation?.resume(with: result)
+    continuation = nil
+  }
+}
+
+private final class RemoteInputRecorder: RemoteInputForwarding, @unchecked Sendable {
+  private let lock = NSLock()
+  private var releases = 0
+
+  var releaseCount: Int {
+    lock.lock()
+    defer { lock.unlock() }
+    return releases
+  }
+
+  func keyEvent(down: Bool, keysym: UInt32) {}
+  func pointerEvent(buttonMask: UInt8, x: UInt16, y: UInt16) {}
+
+  func releaseAllInput() {
+    lock.lock()
+    releases += 1
+    lock.unlock()
+  }
+}
+
+private final class RFBEventRecorder: @unchecked Sendable {
+  private let lock = NSLock()
+  private var storage: [TailnetRFBServerEvent] = []
+
+  var values: [TailnetRFBServerEvent] {
+    lock.lock()
+    defer { lock.unlock() }
+    return storage
+  }
+
+  func append(_ event: TailnetRFBServerEvent) {
+    lock.lock()
+    storage.append(event)
+    lock.unlock()
+  }
+}
+
+private final class DesktopRegistrationTransport: HTTPDataTransport {
+  private let handler: (URLRequest) throws -> (Data, HTTPURLResponse)
+
+  init(handler: @escaping (URLRequest) throws -> (Data, HTTPURLResponse)) {
+    self.handler = handler
+  }
+
+  func data(for request: URLRequest) async throws -> (Data, HTTPURLResponse) {
+    try handler(request)
+  }
+
+  func close() {}
+}
+
+private func waitUntilAsync(
+  timeout: Duration = .seconds(2),
+  condition: @escaping () async -> Bool
+) async -> Bool {
+  let clock = ContinuousClock()
+  let deadline = clock.now.advanced(by: timeout)
+  while clock.now < deadline {
+    if await condition() { return true }
+    try? await Task.sleep(for: .milliseconds(10))
+  }
+  return await condition()
 }

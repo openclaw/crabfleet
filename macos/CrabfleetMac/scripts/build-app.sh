@@ -35,6 +35,7 @@ contents_dir="$app_dir/Contents"
 macos_dir="$contents_dir/MacOS"
 resources_dir="$contents_dir/Resources"
 
+rm -rf "$app_dir"
 mkdir -p "$macos_dir" "$resources_dir"
 install -m 755 "$build_dir/CrabfleetMac" "$macos_dir/CrabfleetMac"
 install -m 755 "$build_dir/libRoyalVNCKit.dylib" "$macos_dir/libRoyalVNCKit.dylib"

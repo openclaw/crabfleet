@@ -16,6 +16,7 @@ enum PrivateMacSharePermissionPolicy {
 final class PrivateMacShareController: ObservableObject {
   enum RegistryPhase: Equatable {
     case notConfigured
+    case notPublished
     case registering
     case registered
     case failed(String)
@@ -23,6 +24,7 @@ final class PrivateMacShareController: ObservableObject {
     var detail: String {
       switch self {
       case .notConfigured: "Not configured"
+      case .notPublished: "Not published"
       case .registering: "Registering"
       case .registered: "Published"
       case .failed(let message): message
@@ -103,7 +105,9 @@ final class PrivateMacShareController: ObservableObject {
   private var capture: MacScreenCapture?
   private var server: TailnetRFBServer?
   private var clipboardBridge: HostClipboardBridge?
-  private var serverGeneration: UUID?
+  private var activeIdentity: TailnetIdentity?
+  private var lifecycleGeneration: UInt64 = 0
+  private var serverGeneration: UInt64?
   private var registrationTask: Task<Void, Never>?
 
   init(
@@ -113,7 +117,7 @@ final class PrivateMacShareController: ObservableObject {
   ) {
     self.desktopRegistration = desktopRegistration
     self.defaults = defaults
-    registryPhase = desktopRegistration == nil ? .notConfigured : .registering
+    registryPhase = desktopRegistration == nil ? .notConfigured : .notPublished
     let savedDisplayID = defaults.object(forKey: Self.selectedDisplayDefaultsKey) as? Int
     selectedDisplayID = savedDisplayID.map(CGDirectDisplayID.init) ?? CGMainDisplayID()
     clipboardSyncEnabled =
@@ -139,7 +143,7 @@ final class PrivateMacShareController: ObservableObject {
   }
 
   var canStart: Bool {
-    phase == .idle
+    phase == .idle && !isRefreshing
       && PrivateMacSharePermissionPolicy.canStart(
         identityAvailable: identity != nil,
         screenRecordingGranted: screenRecordingGranted
@@ -150,7 +154,12 @@ final class PrivateMacShareController: ObservableObject {
     guard !isRefreshing, phase != .starting, phase != .stopping else { return }
     isRefreshing = true
     notice = nil
-    await loadIdentity()
+    do {
+      identity = try await fetchIdentity()
+    } catch {
+      identity = nil
+      notice = error.localizedDescription
+    }
     refreshPermissions()
     await refreshDisplays()
     launchAtLoginEnabled = SMAppService.mainApp.status == .enabled
@@ -207,13 +216,24 @@ final class PrivateMacShareController: ObservableObject {
   }
 
   func start() async {
-    guard phase == .idle else { return }
+    guard phase == .idle, !isRefreshing else { return }
+    let generation = beginLifecycleTransition()
     phase = .starting
     notice = nil
     connectedPeer = nil
     streamStats = nil
     registryPhase = desktopRegistration == nil ? .notConfigured : .registering
-    await loadIdentity()
+    do {
+      let loadedIdentity = try await fetchIdentity()
+      guard isCurrent(generation), phase == .starting else { return }
+      identity = loadedIdentity
+    } catch {
+      guard isCurrent(generation), phase == .starting else { return }
+      identity = nil
+      phase = .failed
+      notice = error.localizedDescription
+      return
+    }
     refreshPermissions()
 
     guard let identity else {
@@ -223,6 +243,7 @@ final class PrivateMacShareController: ObservableObject {
     }
     guard screenRecordingGranted else {
       phase = .idle
+      registryPhase = desktopRegistration == nil ? .notConfigured : .notPublished
       notice = PrivateMacShareError.screenRecordingDenied.localizedDescription
       return
     }
@@ -237,9 +258,12 @@ final class PrivateMacShareController: ObservableObject {
     let capture = MacScreenCapture()
     do {
       let descriptor = try await capture.start(displayID: selectedDisplayID)
+      guard isCurrent(generation), phase == .starting else {
+        await capture.stop()
+        return
+      }
       let input = MacRemoteInputController(descriptor: descriptor)
       let bridge = clipboardSyncEnabled ? HostClipboardBridge() : nil
-      let generation = UUID()
       serverGeneration = generation
       let server = TailnetRFBServer(
         identity: identity,
@@ -258,7 +282,12 @@ final class PrivateMacShareController: ObservableObject {
       self.capture = capture
       self.server = server
       self.clipboardBridge = bridge
+      activeIdentity = identity
     } catch {
+      guard isCurrent(generation) else {
+        await capture.stop()
+        return
+      }
       serverGeneration = nil
       await capture.stop()
       phase = .failed
@@ -268,11 +297,13 @@ final class PrivateMacShareController: ObservableObject {
 
   func stop() async {
     guard phase.isRunning || phase == .failed else { return }
+    let generation = beginLifecycleTransition()
     phase = .stopping
     connectedPeer = nil
     streamStats = nil
+    let registrationTask = self.registrationTask
+    self.registrationTask = nil
     registrationTask?.cancel()
-    registrationTask = nil
     serverGeneration = nil
     server?.stop()
     server = nil
@@ -281,7 +312,23 @@ final class PrivateMacShareController: ObservableObject {
     let capture = capture
     self.capture = nil
     await capture?.stop()
-    phase = .idle
+    await registrationTask?.value
+    var removedRegistryEntry = true
+    if let desktopRegistration, let activeIdentity {
+      do {
+        try await desktopRegistration.unregister(identity: activeIdentity)
+        registryPhase = .notPublished
+      } catch {
+        removedRegistryEntry = false
+        registryPhase = .failed(error.localizedDescription)
+        notice = error.localizedDescription
+      }
+    } else {
+      registryPhase = desktopRegistration == nil ? .notConfigured : .notPublished
+    }
+    if removedRegistryEntry { self.activeIdentity = nil }
+    guard isCurrent(generation) else { return }
+    phase = removedRegistryEntry ? .idle : .failed
   }
 
   func openPrivacySettings(_ pane: PrivacyPane) {
@@ -305,25 +352,16 @@ final class PrivateMacShareController: ObservableObject {
     case accessibility
   }
 
-  private func loadIdentity() async {
+  private func fetchIdentity() async throws -> TailnetIdentity {
     guard let runner else {
-      identity = nil
-      notice =
-        (runnerInitializationError ?? PrivateMacShareError.tailscaleNotInstalled)
-        .localizedDescription
-      return
+      throw runnerInitializationError ?? PrivateMacShareError.tailscaleNotInstalled
     }
-    do {
-      let result = try await runner.run(arguments: ["status", "--json"])
-      let document = try JSONDecoder().decode(
-        TailscaleStatusDocument.self,
-        from: Data(result.standardOutput.utf8)
-      )
-      identity = try TailnetIdentityPolicy.identity(from: document)
-    } catch {
-      identity = nil
-      notice = error.localizedDescription
-    }
+    let result = try await runner.run(arguments: ["status", "--json"])
+    let document = try JSONDecoder().decode(
+      TailscaleStatusDocument.self,
+      from: Data(result.standardOutput.utf8)
+    )
+    return try TailnetIdentityPolicy.identity(from: document)
   }
 
   private func refreshPermissions() {
@@ -344,7 +382,7 @@ final class PrivateMacShareController: ObservableObject {
     }
   }
 
-  private func handle(_ event: TailnetRFBServerEvent, generation: UUID) {
+  private func handle(_ event: TailnetRFBServerEvent, generation: UInt64) {
     guard serverGeneration == generation else { return }
     switch event {
     case .listening:
@@ -390,10 +428,10 @@ final class PrivateMacShareController: ObservableObject {
     }
   }
 
-  private func registerDesktopHost(generation: UUID) {
+  private func registerDesktopHost(generation: UInt64) {
     registrationTask?.cancel()
-    guard let desktopRegistration, let identity else {
-      registryPhase = .notConfigured
+    guard let desktopRegistration, let identity = activeIdentity else {
+      registryPhase = desktopRegistration == nil ? .notConfigured : .notPublished
       return
     }
     registryPhase = .registering
@@ -409,5 +447,15 @@ final class PrivateMacShareController: ObservableObject {
         self?.registryPhase = .failed(error.localizedDescription)
       }
     }
+  }
+
+  @discardableResult
+  private func beginLifecycleTransition() -> UInt64 {
+    lifecycleGeneration &+= 1
+    return lifecycleGeneration
+  }
+
+  private func isCurrent(_ generation: UInt64) -> Bool {
+    lifecycleGeneration == generation
   }
 }

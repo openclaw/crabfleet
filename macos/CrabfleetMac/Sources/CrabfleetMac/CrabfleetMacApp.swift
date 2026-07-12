@@ -47,18 +47,26 @@ enum VNCConnectionLaunchMode {
 
 @MainActor
 final class CrabfleetApplicationDelegate: NSObject, NSApplicationDelegate {
-  private var shareController: PrivateMacShareController?
+  let shareController: PrivateMacShareController
   private var autoShareTask: Task<Void, Never>?
+
+  override init() {
+    shareController = PrivateMacShareController()
+    super.init()
+  }
+
+  init(shareController: PrivateMacShareController) {
+    self.shareController = shareController
+    super.init()
+  }
 
   func applicationDidFinishLaunching(_ notification: Notification) {
     guard PrivateMacShareLaunchMode.isRequested() else { return }
     NSApp.activate(ignoringOtherApps: true)
-    let controller = PrivateMacShareController()
-    shareController = controller
     autoShareTask = Task { [weak self] in
       guard let self else { return }
       try? await Task.sleep(for: .milliseconds(500))
-      await self.startPrivateShare(controller)
+      await self.startPrivateShare(shareController)
     }
   }
 
@@ -119,6 +127,7 @@ struct CrabfleetMacApp: App {
         fleetStore: fleetStore,
         connectionLibrary: connectionLibrary,
         sessionPool: sessionPool,
+        privateShare: appDelegate.shareController,
         launchConnection: launchConnection
       )
     }
@@ -142,6 +151,7 @@ private struct CrabfleetAppRoot: View {
   @ObservedObject var fleetStore: FleetStore
   @ObservedObject var connectionLibrary: ConnectionLibrary
   @ObservedObject var sessionPool: VNCSessionPool
+  @ObservedObject var privateShare: PrivateMacShareController
   let launchConnection: VNCAddress?
 
   @Environment(\.scenePhase) private var scenePhase
@@ -151,11 +161,13 @@ private struct CrabfleetAppRoot: View {
     fleetStore: FleetStore,
     connectionLibrary: ConnectionLibrary,
     sessionPool: VNCSessionPool,
+    privateShare: PrivateMacShareController,
     launchConnection: VNCAddress?
   ) {
     self.fleetStore = fleetStore
     self.connectionLibrary = connectionLibrary
     self.sessionPool = sessionPool
+    self.privateShare = privateShare
     self.launchConnection = launchConnection
     _localOnly = State(
       initialValue: ProcessInfo.processInfo.environment["CRABFLEET_LOCAL_ONLY"] == "1"
@@ -170,6 +182,7 @@ private struct CrabfleetAppRoot: View {
           store: fleetStore,
           connections: connectionLibrary,
           sessions: sessionPool,
+          privateShare: privateShare,
           launchConnection: launchConnection,
           deploymentLabel: fleetStore.isConnected ? fleetStore.deploymentLabel : "Local VNC",
           accountLabel: fleetStore.isConnected ? fleetStore.accountLabel : NSUserName(),

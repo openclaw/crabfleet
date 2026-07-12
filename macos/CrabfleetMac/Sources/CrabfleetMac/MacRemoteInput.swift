@@ -118,19 +118,23 @@ final class MacRemoteInputController: RemoteInputForwarding, @unchecked Sendable
 
   func releaseAllInput() {
     eventQueue.async { [self] in
-      guard Self.isAccessibilityGranted else { return }
-      for keysym in pressedKeysyms {
-        postKeyEvent(down: false, keysym: keysym)
+      let canPostEvents = Self.isAccessibilityGranted
+      if canPostEvents {
+        for keysym in pressedKeysyms {
+          postKeyEvent(down: false, keysym: keysym)
+        }
       }
       pressedKeysyms.removeAll()
 
-      for button in Self.mouseButtons where previousButtonMask & button.mask != 0 {
-        CGEvent(
-          mouseEventSource: eventSource(),
-          mouseType: button.upType,
-          mouseCursorPosition: previousPointerLocation,
-          mouseButton: button.button
-        )?.post(tap: .cghidEventTap)
+      if canPostEvents {
+        for button in Self.mouseButtons where previousButtonMask & button.mask != 0 {
+          CGEvent(
+            mouseEventSource: eventSource(),
+            mouseType: button.upType,
+            mouseCursorPosition: previousPointerLocation,
+            mouseButton: button.button
+          )?.post(tap: .cghidEventTap)
+        }
       }
       previousButtonMask = 0
     }

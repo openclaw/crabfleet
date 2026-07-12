@@ -31,6 +31,7 @@ final class TailnetRFBServer: @unchecked Sendable {
   private let clipboard: (any HostClipboardSyncing)?
   private let peerAuthorizer: (any TailnetPeerAuthorizing)?
   private let port: UInt16
+  private let handshakeTimeout: Duration
   private let queue = DispatchQueue(label: "org.openclaw.crabfleet.rfb-listener")
   private let lock = NSLock()
   private let eventHandler: EventHandler
@@ -47,6 +48,7 @@ final class TailnetRFBServer: @unchecked Sendable {
     clipboard: (any HostClipboardSyncing)? = nil,
     peerAuthorizer: (any TailnetPeerAuthorizing)? = nil,
     port: UInt16,
+    handshakeTimeout: Duration = .seconds(10),
     eventHandler: @escaping EventHandler
   ) {
     self.identity = identity
@@ -57,6 +59,7 @@ final class TailnetRFBServer: @unchecked Sendable {
     self.clipboard = clipboard
     self.peerAuthorizer = peerAuthorizer
     self.port = port
+    self.handshakeTimeout = handshakeTimeout
     self.eventHandler = eventHandler
   }
 
@@ -134,6 +137,7 @@ final class TailnetRFBServer: @unchecked Sendable {
       clipboard: clipboard,
       requiredLocalAddress: identity.ipv4Address,
       desktopName: "Crabfleet — \(identity.hostName)",
+      handshakeTimeout: handshakeTimeout,
       viewOnly: false,
       didAuthorize: { [weak capture] in capture?.setConsumerActive(true) },
       eventHandler: eventHandler,
@@ -173,6 +177,7 @@ private final class RFBHostSession: @unchecked Sendable {
   private let clipboard: (any HostClipboardSyncing)?
   private let requiredLocalAddress: String
   private let desktopName: String
+  private let handshakeTimeout: Duration
   private let didAuthorize: @Sendable () -> Void
   private let queue = DispatchQueue(label: "org.openclaw.crabfleet.rfb-session")
   private let eventHandler: TailnetRFBServer.EventHandler
@@ -180,6 +185,8 @@ private final class RFBHostSession: @unchecked Sendable {
   private let lock = NSLock()
   private var started = false
   private var finished = false
+  private var handshakeFinished = false
+  private var handshakeTimedOut = false
   private var task: Task<Void, Never>?
   private var pushIO: RFBConnectionIO?
 
@@ -213,6 +220,7 @@ private final class RFBHostSession: @unchecked Sendable {
     clipboard: (any HostClipboardSyncing)?,
     requiredLocalAddress: String,
     desktopName: String,
+    handshakeTimeout: Duration,
     viewOnly: Bool,
     didAuthorize: @escaping @Sendable () -> Void,
     eventHandler: @escaping TailnetRFBServer.EventHandler,
@@ -226,6 +234,7 @@ private final class RFBHostSession: @unchecked Sendable {
     self.clipboard = clipboard
     self.requiredLocalAddress = requiredLocalAddress
     self.desktopName = desktopName
+    self.handshakeTimeout = handshakeTimeout
     self.viewOnly = viewOnly
     self.didAuthorize = didAuthorize
     self.eventHandler = eventHandler
@@ -310,7 +319,7 @@ private final class RFBHostSession: @unchecked Sendable {
     didAuthorize()
 
     let io = RFBConnectionIO(connection: connection)
-    try await handshake(io: io)
+    try await handshakeBeforeDeadline(io: io)
     withLock { pushIO = io }
     attachClipboard()
     eventHandler(.connected(remoteAddress))
@@ -349,6 +358,45 @@ private final class RFBHostSession: @unchecked Sendable {
         height: currentHeight,
         name: desktopName
       ))
+  }
+
+  private func handshakeBeforeDeadline(io: RFBConnectionIO) async throws {
+    let deadlineTask = Task { [weak self, handshakeTimeout] in
+      do {
+        try await Task.sleep(for: handshakeTimeout)
+      } catch {
+        return
+      }
+      self?.expireHandshake()
+    }
+    do {
+      try await handshake(io: io)
+      deadlineTask.cancel()
+      let timedOut = withLock { () -> Bool in
+        handshakeFinished = true
+        return handshakeTimedOut
+      }
+      guard !timedOut else {
+        throw PrivateMacShareError.protocolError("RFB handshake timed out")
+      }
+    } catch {
+      deadlineTask.cancel()
+      if withLock({ handshakeTimedOut }) {
+        throw PrivateMacShareError.protocolError("RFB handshake timed out")
+      }
+      throw error
+    }
+  }
+
+  private func expireHandshake() {
+    let shouldCancel = withLock { () -> Bool in
+      guard !finished, !handshakeFinished else { return false }
+      handshakeTimedOut = true
+      return true
+    }
+    if shouldCancel {
+      finish(event: .sessionFailed("RFB handshake timed out"))
+    }
   }
 
   private func messageLoop(io: RFBConnectionIO) async throws {
@@ -599,7 +647,7 @@ private final class RFBHostSession: @unchecked Sendable {
       case .notify:
         payload = VNCExtendedClipboard.frame(
           messageType: 3,
-          body: VNCExtendedClipboard.encodeNotify(hasText: true)
+          body: VNCExtendedClipboard.encodeNotify(hasText: !text.isEmpty)
         )
       case .legacy:
         payload = RFBWire.legacyServerCutText(text: text)
@@ -1005,6 +1053,7 @@ private final class RFBHostSession: @unchecked Sendable {
     finishPixelMailbox()
     let encoder = replaceVideoEncoder(with: nil)
     encoder?.invalidate()
+    input.releaseAllInput()
     clipboard?.detach()
     connection.cancel()
     guard encoder != nil else {

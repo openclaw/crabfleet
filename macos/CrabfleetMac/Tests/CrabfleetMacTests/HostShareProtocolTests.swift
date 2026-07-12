@@ -15,20 +15,21 @@ struct HostShareWireTests {
     )
 
     #expect(
-      update == Data([
-        0, 0,  // FramebufferUpdate + padding
-        0, 1,  // one rectangle
-        0, 1,  // x = reason (client-requested)
-        0, 0,  // y = status (no error)
-        0x05, 0x00,  // width 1280
-        0x02, 0xD0,  // height 720
-        0xFF, 0xFF, 0xFE, 0xCC,  // ExtendedDesktopSize (-308)
-        1, 0, 0, 0,  // one screen + padding
-        0, 0, 0, 1,  // screen id
-        0, 0, 0, 0,  // position
-        0x05, 0x00, 0x02, 0xD0,  // screen size
-        0, 0, 0, 0,  // flags
-      ])
+      update
+        == Data([
+          0, 0,  // FramebufferUpdate + padding
+          0, 1,  // one rectangle
+          0, 1,  // x = reason (client-requested)
+          0, 0,  // y = status (no error)
+          0x05, 0x00,  // width 1280
+          0x02, 0xD0,  // height 720
+          0xFF, 0xFF, 0xFE, 0xCC,  // ExtendedDesktopSize (-308)
+          1, 0, 0, 0,  // one screen + padding
+          0, 0, 0, 1,  // screen id
+          0, 0, 0, 0,  // position
+          0x05, 0x00, 0x02, 0xD0,  // screen size
+          0, 0, 0, 0,  // flags
+        ])
     )
   }
 
@@ -143,6 +144,38 @@ struct HostClipboardBridgeTests {
     pasteboard.setString("newer host copy", forType: .string)
     try await waitUntil { recorder.values == ["newer host copy"] }
 
+    bridge.detach()
+  }
+
+  @Test
+  func forwardsClipboardClearsAndLocallyReusedClientValues() async throws {
+    let pasteboard = NSPasteboard(name: .init("CrabfleetMacTests.\(UUID().uuidString)"))
+    pasteboard.clearContents()
+    pasteboard.setString("initial", forType: .string)
+
+    let recorder = PushRecorder()
+    let bridge = HostClipboardBridge(pasteboard: pasteboard, pollingInterval: 0.01)
+    bridge.attach { recorder.append($0) }
+    try await Task.sleep(for: .milliseconds(30))
+
+    bridge.receiveClientText("reused")
+    try await waitUntil { pasteboard.string(forType: .string) == "reused" }
+    bridge.poll()
+    #expect(recorder.values.isEmpty)
+
+    pasteboard.clearContents()
+    pasteboard.setString("other", forType: .string)
+    bridge.poll()
+    #expect(recorder.values == ["other"])
+
+    pasteboard.clearContents()
+    bridge.poll()
+    #expect(recorder.values == ["other", ""])
+
+    pasteboard.clearContents()
+    pasteboard.setString("reused", forType: .string)
+    bridge.poll()
+    #expect(recorder.values == ["other", "", "reused"])
     bridge.detach()
   }
 

@@ -27,7 +27,6 @@ final class HostClipboardBridge: HostClipboardSyncing, @unchecked Sendable {
   private var lastObservedChangeCount: Int?
   private var suppressedChangeCount: Int?
   private var lastKnownText: String?
-  private var lastAppliedClientText: String?
 
   init(
     pasteboard: NSPasteboard = .general,
@@ -67,7 +66,6 @@ final class HostClipboardBridge: HostClipboardSyncing, @unchecked Sendable {
   func detach() {
     withLock {
       pusher = nil
-      lastAppliedClientText = nil
       suppressedChangeCount = nil
     }
     DispatchQueue.main.async { [weak self] in
@@ -81,16 +79,12 @@ final class HostClipboardBridge: HostClipboardSyncing, @unchecked Sendable {
     DispatchQueue.main.async { [weak self] in
       guard let self else { return }
       let alreadyCurrent = self.withLock { self.lastKnownText == text }
-      if alreadyCurrent {
-        self.withLock { self.lastAppliedClientText = text }
-        return
-      }
+      if alreadyCurrent { return }
       self.pasteboard.clearContents()
       guard self.pasteboard.setString(text, forType: .string) else { return }
       self.withLock {
         self.suppressedChangeCount = self.pasteboard.changeCount
         self.lastObservedChangeCount = self.pasteboard.changeCount
-        self.lastAppliedClientText = text
         self.lastKnownText = text
       }
     }
@@ -119,13 +113,11 @@ final class HostClipboardBridge: HostClipboardSyncing, @unchecked Sendable {
         suppressedChangeCount = nil
         return
       }
-      guard let text, !text.isEmpty,
-        text != lastAppliedClientText,
-        text.utf8.count <= RFBWire.maximumClipboardBytes
-      else {
+      let outboundText = text ?? ""
+      guard outboundText.utf8.count <= RFBWire.maximumClipboardBytes else {
         return
       }
-      textToPush = text
+      textToPush = outboundText
       pushHandler = pusher
     }
     if let textToPush, let pushHandler {

@@ -647,8 +647,10 @@ final class NativeAPIClient: NativeAPIClientProtocol {
     guard url.user == nil, url.password == nil, url.query == nil, url.fragment == nil else {
       return false
     }
-    if url.scheme == "https" { return true }
-    return url.scheme == "http" && ["localhost", "127.0.0.1", "::1"].contains(url.host ?? "")
+    let scheme = url.scheme?.lowercased()
+    let host = url.host ?? ""
+    if scheme == "https" { return !host.isEmpty }
+    return scheme == "http" && ["localhost", "127.0.0.1", "::1"].contains(host)
   }
 
   private func validOpaqueNativeVNCValue(_ value: String, maximumBytes: Int) -> Bool {

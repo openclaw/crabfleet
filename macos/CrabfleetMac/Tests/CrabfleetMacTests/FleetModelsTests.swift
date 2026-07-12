@@ -17,6 +17,23 @@ private func nativeVNCGrant(leaseID: String = "cbx_native123") -> NativeVNCGrant
 
 struct FleetModelsTests {
   @Test
+  func crabboxReceivesOnlyItsMinimalSubprocessEnvironment() {
+    let environment = CrabboxVNCBridge.commandEnvironment(
+      from: [
+        "HOME": "/Users/tester",
+        "PATH": "/tmp/untrusted",
+        "SSH_AUTH_SOCK": "/tmp/agent.sock",
+        "CRABFLEET_SESSION_COOKIE": "secret",
+      ]
+    )
+
+    #expect(environment["HOME"] == "/Users/tester")
+    #expect(environment["PATH"] == SubprocessEnvironment.safePath)
+    #expect(environment["SSH_AUTH_SOCK"] == "/tmp/agent.sock")
+    #expect(environment["CRABFLEET_SESSION_COOKIE"] == nil)
+  }
+
+  @Test
   func sizesRemoteDesktopToEvenViewportPixelsWithinPerformanceCap() {
     #expect(
       VNCViewportSize.fitting(CGSize(width: 1_361, height: 701))
@@ -156,6 +173,20 @@ struct FleetModelsTests {
         executableURL: executable,
         timeout: 2
       )
+    }
+  }
+
+  @Test
+  func rejectsHTTPSNativeGrantWithoutAHost() async {
+    let grant = NativeVNCGrant(
+      brokerURL: URL(string: "https:///native-vnc")!,
+      leaseID: "cbx_native123",
+      ticket: nativeVNCTicket,
+      expiresAt: Date().addingTimeInterval(60)
+    )
+
+    await #expect(throws: CrabboxVNCBridgeError.invalidHandoff) {
+      _ = try await CrabboxVNCBridge.start(grant: grant)
     }
   }
 

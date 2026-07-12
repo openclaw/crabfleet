@@ -2,9 +2,10 @@ import Foundation
 
 protocol DesktopHostRegistering: Sendable {
   func register(identity: TailnetIdentity, port: UInt16) async throws
+  func unregister(identity: TailnetIdentity) async throws
 }
 
-struct CrabfleetDesktopRegistration: DesktopHostRegistering, Sendable {
+struct CrabfleetDesktopRegistration: DesktopHostRegistering, @unchecked Sendable {
   private struct RegistrationBody: Encodable {
     let name: String
     let address: String
@@ -13,11 +14,11 @@ struct CrabfleetDesktopRegistration: DesktopHostRegistering, Sendable {
 
   private let baseURL: URL
   private let sessionCookie: String
-  private let session: URLSession
+  private let transport: any HTTPDataTransport
 
   init?(
     environment: [String: String] = ProcessInfo.processInfo.environment,
-    session: URLSession = .shared
+    transport: any HTTPDataTransport = RejectingRedirectURLSessionTransport()
   ) {
     guard
       let rawURL = environment["CRABFLEET_API_URL"],
@@ -37,17 +38,33 @@ struct CrabfleetDesktopRegistration: DesktopHostRegistering, Sendable {
     guard normalizedURL.path.isEmpty || normalizedURL.path == "/" else { return nil }
     self.baseURL = normalizedURL
     self.sessionCookie = cookie
-    self.session = session
+    self.transport = transport
   }
 
   func register(identity: TailnetIdentity, port: UInt16) async throws {
     let request = try registrationRequest(identity: identity, port: port)
-    let (_, response) = try await session.data(for: request)
-    guard let http = response as? HTTPURLResponse else {
-      throw DesktopHostRegistrationError.invalidResponse
+    let (_, http) = try await transport.data(for: request)
+    try validate(response: http, for: request, acceptingNotFound: false)
+  }
+
+  func unregister(identity: TailnetIdentity) async throws {
+    let request = removalRequest(identity: identity)
+    let (_, http) = try await transport.data(for: request)
+    try validate(response: http, for: request, acceptingNotFound: true)
+  }
+
+  private func validate(
+    response: HTTPURLResponse,
+    for request: URLRequest,
+    acceptingNotFound: Bool
+  ) throws {
+    guard response.url == request.url else {
+      throw DesktopHostRegistrationError.redirectRejected
     }
-    guard (200..<300).contains(http.statusCode) else {
-      throw DesktopHostRegistrationError.httpStatus(http.statusCode)
+    guard (200..<300).contains(response.statusCode)
+      || (acceptingNotFound && response.statusCode == 404)
+    else {
+      throw DesktopHostRegistrationError.httpStatus(response.statusCode)
     }
   }
 
@@ -70,6 +87,20 @@ struct CrabfleetDesktopRegistration: DesktopHostRegistering, Sendable {
         address: identity.ipv4Address,
         port: port
       ))
+    return request
+  }
+
+  func removalRequest(identity: TailnetIdentity) -> URLRequest {
+    let url =
+      baseURL
+      .appending(path: "api")
+      .appending(path: "desktop-hosts")
+      .appending(path: Self.hostID(identity: identity))
+    var request = URLRequest(url: url)
+    request.httpMethod = "DELETE"
+    request.timeoutInterval = 15
+    request.setValue("application/json", forHTTPHeaderField: "Accept")
+    request.setValue(sessionCookie, forHTTPHeaderField: "Cookie")
     return request
   }
 
@@ -97,14 +128,17 @@ struct CrabfleetDesktopRegistration: DesktopHostRegistering, Sendable {
   }
 }
 
-enum DesktopHostRegistrationError: LocalizedError {
+enum DesktopHostRegistrationError: LocalizedError, Equatable {
   case invalidResponse
+  case redirectRejected
   case httpStatus(Int)
 
   var errorDescription: String? {
     switch self {
     case .invalidResponse:
       "Crabfleet returned an invalid registration response."
+    case .redirectRejected:
+      "Crabfleet redirected the desktop registration request."
     case .httpStatus(let status):
       "Crabfleet registration returned HTTP \(status)."
     }

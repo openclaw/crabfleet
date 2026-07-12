@@ -498,7 +498,12 @@ final class FleetStore: ObservableObject {
       throw CancellationError()
     }
     do {
-      return (try await operation(token), token)
+      let value = try await operation(token)
+      try Task.checkCancellation()
+      guard isCurrent(generation), client === api, connectedOrigin == origin else {
+        throw CancellationError()
+      }
+      return (value, token)
     } catch NativeAPIError.unauthorized {
       try Task.checkCancellation()
       guard isCurrent(generation), client === api, connectedOrigin == origin else {
@@ -518,7 +523,12 @@ final class FleetStore: ObservableObject {
           credential = .init(origin: origin, token: refreshed)
           adopted = true
         }
-        return (try await operation(refreshed), refreshed)
+        let value = try await operation(refreshed)
+        try Task.checkCancellation()
+        guard isCurrent(generation), client === api, connectedOrigin == origin else {
+          throw CancellationError()
+        }
+        return (value, refreshed)
       } catch {
         if !adopted,
           preserveRotatedCredentialOnTransientFailure,

@@ -5,13 +5,12 @@ struct FleetRootView: View {
   @ObservedObject var store: FleetStore
   @ObservedObject var connections: ConnectionLibrary
   @ObservedObject var sessions: VNCSessionPool
+  @ObservedObject var privateShare: PrivateMacShareController
   let launchConnection: VNCAddress?
   let deploymentLabel: String
   let accountLabel: String
   let disconnectLabel: String
   let disconnectDeployment: () -> Void
-  @StateObject private var privateShare = PrivateMacShareController()
-
   @Namespace private var desktopTransition
   @Environment(\.accessibilityReduceMotion) private var reduceMotion
 

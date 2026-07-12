@@ -123,6 +123,26 @@ struct NativeConnectionTests {
     #expect(grant.leaseID == "cbx_native123")
     #expect(grant.ticket == "native_vnc_0123456789abcdef0123456789abcdef")
 
+    let missingHostTransport = RecordingHTTPTransport { request in
+      let body = Data(
+        """
+        {
+          "grant": {
+            "brokerUrl": "https:///native-vnc",
+            "leaseId": "cbx_native123",
+            "ticket": "native_vnc_0123456789abcdef0123456789abcdef",
+            "expiresAt": "\(expiryFormatter.string(from: expiresAt))"
+          }
+        }
+        """.utf8
+      )
+      return (body, httpResponse(url: request.url!, status: 200))
+    }
+    await #expect(throws: NativeAPIError.invalidResponse) {
+      try await NativeAPIClient(origin: origin, transport: missingHostTransport)
+        .nativeVNCGrant(sessionID: "IS-257", accessToken: "access-token")
+    }
+
     await #expect(throws: NativeAPIError.invalidResponse) {
       try await NativeAPIClient(origin: origin, transport: transport)
         .nativeVNCGrant(sessionID: "IS-0", accessToken: "access-token")
@@ -691,6 +711,44 @@ struct NativeConnectionTests {
     #expect(store.leases.map(\.id) == ["IS-live"])
     #expect(api.sessionTokens == ["saved-token"])
     #expect(api.fleetTokens == ["saved-token"])
+  }
+
+  @Test
+  func disconnectDiscardsAnInFlightNativeVNCGrant() async throws {
+    let origin = try DeploymentOrigin("https://fleet.example.test")
+    let origins = MemoryOriginStore(value: origin.displayValue)
+    let tokens = MemoryTokenStore(values: [origin.displayValue: "saved-token"])
+    let api = StubNativeAPIClient(origin: origin)
+    api.sessionResult = .success(testSession())
+    api.fleetResult = .success(testFleet())
+    var grantStarted = false
+    var grantContinuation: CheckedContinuation<NativeVNCGrant, Error>?
+    api.nativeVNCGrantHandler = { _, _ in
+      grantStarted = true
+      return try await withCheckedThrowingContinuation { continuation in
+        grantContinuation = continuation
+      }
+    }
+    let store = FleetStore(
+      environment: [:],
+      originStore: origins,
+      tokenStore: tokens,
+      clientFactory: { _ in api },
+      openURL: { _ in false }
+    )
+    await store.restore()
+
+    let grantTask = Task {
+      try await store.nativeVNCGrant(sessionID: "IS-257")
+    }
+    try await waitUntil { grantStarted }
+    store.disconnect()
+    let continuation = try #require(grantContinuation)
+    continuation.resume(returning: testNativeVNCGrant())
+
+    await #expect(throws: CancellationError.self) {
+      try await grantTask.value
+    }
   }
 
   @Test
@@ -1725,6 +1783,7 @@ private final class StubNativeAPIClient: NativeAPIClientProtocol {
   var fleetResult: Result<NativeAPIFleet, Error> = .failure(NativeAPIError.invalidResponse)
   var nativeVNCGrantResult: Result<NativeVNCGrant, Error> = .failure(
     NativeAPIError.invalidResponse)
+  var nativeVNCGrantHandler: ((String, String) async throws -> NativeVNCGrant)?
   var fleetHandler: (() async throws -> NativeAPIFleet)?
   var sessionTokens: [String] = []
   var fleetTokens: [String] = []
@@ -1773,7 +1832,10 @@ private final class StubNativeAPIClient: NativeAPIClientProtocol {
   }
 
   func nativeVNCGrant(sessionID: String, accessToken: String) async throws -> NativeVNCGrant {
-    try nativeVNCGrantResult.get()
+    if let nativeVNCGrantHandler {
+      return try await nativeVNCGrantHandler(sessionID, accessToken)
+    }
+    return try nativeVNCGrantResult.get()
   }
 
   func refreshCredential(accessToken: String) async throws -> String? {
@@ -1887,6 +1949,15 @@ private func testSession() -> NativeAPISession {
       productUrl: nil,
       sshHost: nil
     )
+  )
+}
+
+private func testNativeVNCGrant() -> NativeVNCGrant {
+  .init(
+    brokerURL: URL(string: "https://crabbox.example.test")!,
+    leaseID: "cbx_native123",
+    ticket: "native_vnc_0123456789abcdef0123456789abcdef",
+    expiresAt: Date().addingTimeInterval(60)
   )
 }
 
