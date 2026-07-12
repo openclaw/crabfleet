@@ -11,6 +11,7 @@ import {
   forbidden,
   json,
   notFound,
+  readBoundedJson,
   readJson,
   redirect,
   serviceUnavailable,
@@ -78,6 +79,37 @@ test("JSON parsing and status errors retain stable messages and status codes", a
   ] as const) {
     assert.equal(error.status, status);
     assert.equal(error.message, message);
+  }
+});
+
+test("bounded JSON parsing rejects declared and streamed bodies before unbounded parsing", async () => {
+  const limit = 16;
+  assert.deepEqual(
+    await readBoundedJson<{ value: number }>(
+      new Request("https://fleet.example", { method: "POST", body: '{"value":42}' }),
+      limit,
+    ),
+    { value: 42 },
+  );
+
+  for (const request of [
+    new Request("https://fleet.example", {
+      method: "POST",
+      headers: { "content-length": "17" },
+      body: "{}",
+    }),
+    new Request("https://fleet.example", {
+      method: "POST",
+      body: JSON.stringify({ value: "oversized" }),
+    }),
+  ]) {
+    await assert.rejects(readBoundedJson(request, limit), (error: unknown) => {
+      assert.equal(
+        typeof error === "object" && error && "status" in error ? error.status : undefined,
+        413,
+      );
+      return true;
+    });
   }
 });
 
