@@ -100,6 +100,7 @@ final class PrivateMacShareController: ObservableObject {
 
   private let runner: (any TailscaleCommandRunning)?
   private let desktopRegistration: (any DesktopHostRegistering)?
+  private let desktopRegistrationCoordinator: DesktopHostRegistrationCoordinator?
   private let runnerInitializationError: Error?
   private let defaults: UserDefaults
   private var capture: MacScreenCapture?
@@ -109,6 +110,7 @@ final class PrivateMacShareController: ObservableObject {
   private var lifecycleGeneration: UInt64 = 0
   private var serverGeneration: UInt64?
   private var registrationTask: Task<Void, Never>?
+  private var refreshWaiters: [CheckedContinuation<Void, Never>] = []
 
   init(
     runner: (any TailscaleCommandRunning)? = nil,
@@ -116,6 +118,9 @@ final class PrivateMacShareController: ObservableObject {
     defaults: UserDefaults = .standard
   ) {
     self.desktopRegistration = desktopRegistration
+    desktopRegistrationCoordinator = desktopRegistration.map {
+      DesktopHostRegistrationCoordinator(registration: $0)
+    }
     self.defaults = defaults
     registryPhase = desktopRegistration == nil ? .notConfigured : .notPublished
     let savedDisplayID = defaults.object(forKey: Self.selectedDisplayDefaultsKey) as? Int
@@ -151,8 +156,13 @@ final class PrivateMacShareController: ObservableObject {
   }
 
   func refresh() async {
-    guard !isRefreshing, phase != .starting, phase != .stopping else { return }
+    if isRefreshing {
+      await waitForRefreshCompletion()
+      return
+    }
+    guard phase != .starting, phase != .stopping else { return }
     isRefreshing = true
+    defer { finishRefresh() }
     notice = nil
     do {
       identity = try await fetchIdentity()
@@ -163,7 +173,6 @@ final class PrivateMacShareController: ObservableObject {
     refreshPermissions()
     await refreshDisplays()
     launchAtLoginEnabled = SMAppService.mainApp.status == .enabled
-    isRefreshing = false
   }
 
   /// Registers or removes the login item and remembers to auto-start the
@@ -216,7 +225,9 @@ final class PrivateMacShareController: ObservableObject {
   }
 
   func start() async {
-    guard phase == .idle, !isRefreshing else { return }
+    guard phase == .idle else { return }
+    await waitForRefreshCompletion()
+    guard phase == .idle, !Task.isCancelled else { return }
     let generation = beginLifecycleTransition()
     phase = .starting
     notice = nil
@@ -303,7 +314,6 @@ final class PrivateMacShareController: ObservableObject {
     streamStats = nil
     let registrationTask = self.registrationTask
     self.registrationTask = nil
-    registrationTask?.cancel()
     serverGeneration = nil
     server?.stop()
     server = nil
@@ -314,9 +324,9 @@ final class PrivateMacShareController: ObservableObject {
     await capture?.stop()
     await registrationTask?.value
     var removedRegistryEntry = true
-    if let desktopRegistration, let activeIdentity {
+    if let desktopRegistrationCoordinator, let activeIdentity {
       do {
-        try await desktopRegistration.unregister(identity: activeIdentity)
+        try await desktopRegistrationCoordinator.unregister(identity: activeIdentity)
         registryPhase = .notPublished
       } catch {
         removedRegistryEntry = false
@@ -382,6 +392,22 @@ final class PrivateMacShareController: ObservableObject {
     }
   }
 
+  private func waitForRefreshCompletion() async {
+    guard isRefreshing else { return }
+    await withCheckedContinuation { continuation in
+      refreshWaiters.append(continuation)
+    }
+  }
+
+  private func finishRefresh() {
+    isRefreshing = false
+    let waiters = refreshWaiters
+    refreshWaiters.removeAll()
+    for waiter in waiters {
+      waiter.resume()
+    }
+  }
+
   private func handle(_ event: TailnetRFBServerEvent, generation: UInt64) {
     guard serverGeneration == generation else { return }
     switch event {
@@ -429,15 +455,15 @@ final class PrivateMacShareController: ObservableObject {
   }
 
   private func registerDesktopHost(generation: UInt64) {
-    registrationTask?.cancel()
-    guard let desktopRegistration, let identity = activeIdentity else {
+    guard registrationTask == nil else { return }
+    guard let desktopRegistrationCoordinator, let identity = activeIdentity else {
       registryPhase = desktopRegistration == nil ? .notConfigured : .notPublished
       return
     }
     registryPhase = .registering
     registrationTask = Task { [weak self] in
       do {
-        try await desktopRegistration.register(identity: identity, port: Self.port)
+        try await desktopRegistrationCoordinator.register(identity: identity, port: Self.port)
         guard !Task.isCancelled, self?.serverGeneration == generation else { return }
         self?.registryPhase = .registered
       } catch is CancellationError {

@@ -5,6 +5,45 @@ protocol DesktopHostRegistering: Sendable {
   func unregister(identity: TailnetIdentity) async throws
 }
 
+actor DesktopHostRegistrationCoordinator {
+  private let registration: any DesktopHostRegistering
+  private var pendingOperation: Task<Void, Never>?
+
+  init(registration: any DesktopHostRegistering) {
+    self.registration = registration
+  }
+
+  func register(identity: TailnetIdentity, port: UInt16) async throws {
+    let registration = self.registration
+    let operation = enqueue {
+      try await registration.register(identity: identity, port: port)
+    }
+    try await operation.value
+  }
+
+  func unregister(identity: TailnetIdentity) async throws {
+    let registration = self.registration
+    let operation = enqueue {
+      try await registration.unregister(identity: identity)
+    }
+    try await operation.value
+  }
+
+  private func enqueue(
+    _ operation: @escaping @Sendable () async throws -> Void
+  ) -> Task<Void, Error> {
+    let previous = pendingOperation
+    let task = Task {
+      await previous?.value
+      try await operation()
+    }
+    pendingOperation = Task {
+      _ = try? await task.value
+    }
+    return task
+  }
+}
+
 struct CrabfleetDesktopRegistration: DesktopHostRegistering, @unchecked Sendable {
   private struct RegistrationBody: Encodable {
     let name: String

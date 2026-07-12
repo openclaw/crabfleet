@@ -125,6 +125,72 @@ struct PrivateMacShareTests {
   }
 
   @Test @MainActor
+  func startWaitsForAnInFlightRefresh() async throws {
+    let runner = SequencedTailscaleRunner()
+    let defaults = try #require(
+      UserDefaults(suiteName: "CrabfleetMacTests.\(UUID().uuidString)")
+    )
+    let controller = PrivateMacShareController(
+      runner: runner,
+      desktopRegistration: nil,
+      defaults: defaults
+    )
+
+    let refreshTask = Task { await controller.refresh() }
+    #expect(await waitUntilAsync { await runner.callCount == 1 })
+    #expect(controller.isRefreshing)
+
+    let startState = AsyncInvocationState()
+    let startTask = Task {
+      await startState.markStarted()
+      await controller.start()
+      await startState.markFinished()
+    }
+    #expect(await waitUntilAsync { await startState.started })
+    try await Task.sleep(for: .milliseconds(20))
+    #expect(!(await startState.finished))
+
+    await runner.resumeNext(
+      .success(.init(standardOutput: statusJSON(), standardError: ""))
+    )
+    await refreshTask.value
+    #expect(await waitUntilAsync { await runner.callCount == 2 })
+    await runner.resumeNext(.failure(PrivateMacShareError.tailscaleOffline))
+    await startTask.value
+
+    #expect(controller.phase == .failed)
+    #expect(await runner.callCount == 2)
+  }
+
+  @Test
+  func desktopRemovalWaitsForACommittedRegistrationAfterCancellation() async throws {
+    let registration = SuspendedDesktopRegistration()
+    let coordinator = DesktopHostRegistrationCoordinator(registration: registration)
+    let identity = try TailnetIdentityPolicy.identity(from: statusDocument())
+
+    let publish = Task {
+      try await coordinator.register(identity: identity, port: 5_901)
+    }
+    #expect(await waitUntilAsync { await registration.hasStartedRegistration })
+    publish.cancel()
+
+    let remove = Task {
+      try await coordinator.unregister(identity: identity)
+    }
+    try await Task.sleep(for: .milliseconds(20))
+    #expect(await registration.events == [.registerStarted])
+
+    await registration.finishRegistration()
+    try await publish.value
+    try await remove.value
+
+    #expect(
+      await registration.events
+        == [.registerStarted, .registerFinished, .unregisterStarted]
+    )
+  }
+
+  @Test @MainActor
   func applicationDelegateOwnsTheShareControllerUsedByTheApp() throws {
     let defaults = try #require(
       UserDefaults(suiteName: "CrabfleetMacTests.\(UUID().uuidString)")
@@ -809,6 +875,68 @@ private actor SuspendedTailscaleRunner: TailscaleCommandRunning {
   func resume(_ result: Result<TailscaleCommandResult, Error>) {
     continuation?.resume(with: result)
     continuation = nil
+  }
+}
+
+private actor SequencedTailscaleRunner: TailscaleCommandRunning {
+  private var continuations: [CheckedContinuation<TailscaleCommandResult, Error>] = []
+  private(set) var callCount = 0
+
+  func run(arguments: [String]) async throws -> TailscaleCommandResult {
+    callCount += 1
+    return try await withCheckedThrowingContinuation { continuation in
+      continuations.append(continuation)
+    }
+  }
+
+  func resumeNext(_ result: Result<TailscaleCommandResult, Error>) {
+    guard !continuations.isEmpty else { return }
+    continuations.removeFirst().resume(with: result)
+  }
+}
+
+private actor AsyncInvocationState {
+  private(set) var started = false
+  private(set) var finished = false
+
+  func markStarted() {
+    started = true
+  }
+
+  func markFinished() {
+    finished = true
+  }
+}
+
+private actor SuspendedDesktopRegistration: DesktopHostRegistering {
+  enum Event: Equatable {
+    case registerStarted
+    case registerFinished
+    case unregisterStarted
+  }
+
+  private var registrationContinuation: CheckedContinuation<Void, Never>?
+  private(set) var events: [Event] = []
+
+  var hasStartedRegistration: Bool {
+    registrationContinuation != nil
+  }
+
+  func register(identity: TailnetIdentity, port: UInt16) async throws {
+    events.append(.registerStarted)
+    await withCheckedContinuation { continuation in
+      registrationContinuation = continuation
+    }
+    events.append(.registerFinished)
+  }
+
+  func unregister(identity: TailnetIdentity) async throws {
+    events.append(.unregisterStarted)
+  }
+
+  func finishRegistration() {
+    registrationContinuation?.resume()
+    registrationContinuation = nil
   }
 }
 
