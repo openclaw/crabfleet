@@ -117,7 +117,7 @@ export class GitHubActionsApplication {
   }
 
   async appendStructuredEvent(request: Request, id: string) {
-    const { user } = await this.authenticate(request, id, { allowTerminalEvent: true });
+    const { user } = await this.authenticate(request, id, { allowTerminalEventReplay: true });
     const input = await readBoundedJson<unknown>(request, structuredEventRequestMaxBytes);
     if (!input || typeof input !== "object" || Array.isArray(input)) {
       throw badRequest("event body must be a JSON object");

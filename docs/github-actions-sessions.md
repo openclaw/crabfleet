@@ -249,6 +249,9 @@ returns the original event with `duplicate: true`; changed content under the
 same key returns `409`. This lets retried workflow steps publish once without a
 separate read-before-write race. The endpoint only appends the event ledger: it
 does not update `workState`, `workPhase`, `lastHeartbeatAt`, or `lastEvent`.
+Credential-shaped payload fields are recursively replaced with `[redacted]`
+before D1/R2 persistence. Once the session is terminal, the endpoint accepts
+only exact replays of already-persisted events and rejects new history.
 
 ## Runner PTY
 

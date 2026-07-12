@@ -18,7 +18,7 @@ export type AgentSessionAuthenticationStore = {
 
 export type AgentSessionAuthenticationOptions = {
   allowQueryToken?: boolean;
-  allowTerminalEvent?: boolean;
+  allowTerminalEventReplay?: boolean;
 };
 
 export class AgentSessionAuthenticator {
@@ -47,12 +47,13 @@ export class AgentSessionAuthenticator {
     if (!credential?.tokenHash || credential.tokenHash !== (await this.store.hashToken(token))) {
       throw unauthorized();
     }
-    const terminalEventAllowed =
-      options.allowTerminalEvent &&
+    const terminalEventReplayAllowed =
+      options.allowTerminalEventReplay &&
       (credential.session.status === "stopped" || credential.session.status === "failed");
     if (
       credential.session.status === "stopping" ||
-      (deadInteractiveSessionStatuses.includes(credential.session.status) && !terminalEventAllowed)
+      (deadInteractiveSessionStatuses.includes(credential.session.status) &&
+        !terminalEventReplayAllowed)
     ) {
       throw forbidden("agent session is not active");
     }

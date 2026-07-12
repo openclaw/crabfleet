@@ -2,7 +2,7 @@ import { sql } from "kysely";
 
 import { database, executeBatch } from "./database.ts";
 import type { RuntimeEnv } from "./env.ts";
-import { badRequest, conflict, payloadTooLarge } from "./http.ts";
+import { badRequest, conflict, forbidden, payloadTooLarge } from "./http.ts";
 import { deadInteractiveSessionStatuses } from "./models.ts";
 import { archiveInteractiveSessionLogs } from "./session-log-archive.ts";
 import {
@@ -118,19 +118,44 @@ export async function appendStructuredInteractiveSessionEventRecord(
   try {
     return await new InteractiveSessionEventLedgerService({
       async persistAndInvalidate(event) {
-        const insert = db
-          .insertInto("interactive_session_events")
-          .values({
-            session_id: event.sessionId,
-            actor: event.actor,
-            event_key: event.eventKey,
-            event_type: event.type,
-            message: event.message,
-            payload_json: event.payloadJson,
-            created_at: event.now,
-          })
-          .onConflict((constraint) => constraint.doNothing())
-          .returningAll();
+        // Terminal ledgers are immutable. The exact row check keeps retries
+        // idempotent without letting a retained agent token add new history.
+        const insert = sql<InteractiveSessionEventRow>`
+          INSERT INTO interactive_session_events (
+            session_id,
+            actor,
+            event_key,
+            event_type,
+            message,
+            payload_json,
+            created_at
+          )
+          SELECT
+            ${event.sessionId},
+            ${event.actor},
+            ${event.eventKey},
+            ${event.type},
+            ${event.message},
+            ${event.payloadJson},
+            ${event.now}
+          WHERE EXISTS (
+            SELECT 1
+            FROM interactive_sessions
+            WHERE id = ${event.sessionId}
+              AND status NOT IN ('stopping', 'stopped', 'expired', 'failed')
+          )
+          OR EXISTS (
+            SELECT 1
+            FROM interactive_session_events
+            WHERE session_id = ${event.sessionId}
+              AND event_key = ${event.eventKey}
+              AND event_type = ${event.type}
+              AND message = ${event.message}
+              AND payload_json = ${event.payloadJson}
+          )
+          ON CONFLICT DO NOTHING
+          RETURNING *
+        `;
         const invalidate = db
           .updateTable("interactive_sessions")
           .set({ terminal_finalize_pending: 1 })
@@ -147,12 +172,12 @@ export async function appendStructuredInteractiveSessionEventRecord(
                 AND payload_json = ${event.payloadJson}
             )`,
           );
-        const results = await env.DB.batch<InteractiveSessionEventRow>(
-          [insert, invalidate].map((query) => {
-            const compiled = query.compile();
-            return env.DB.prepare(compiled.sql).bind(...compiled.parameters);
-          }),
-        );
+        const compiledInsert = insert.compile(db);
+        const compiledInvalidate = invalidate.compile();
+        const results = await env.DB.batch<InteractiveSessionEventRow>([
+          env.DB.prepare(compiledInsert.sql).bind(...compiledInsert.parameters),
+          env.DB.prepare(compiledInvalidate.sql).bind(...compiledInvalidate.parameters),
+        ]);
         const inserted = results[0]?.results?.[0];
         const row =
           inserted ??
@@ -162,7 +187,21 @@ export async function appendStructuredInteractiveSessionEventRecord(
             .where("session_id", "=", event.sessionId)
             .where("event_key", "=", event.eventKey)
             .executeTakeFirst());
-        if (!row) throw new Error("structured session event was not persisted");
+        if (!row) {
+          const session = await db
+            .selectFrom("interactive_sessions")
+            .select("status")
+            .where("id", "=", event.sessionId)
+            .executeTakeFirst();
+          if (
+            session &&
+            (session.status === "stopping" ||
+              deadInteractiveSessionStatuses.includes(session.status))
+          ) {
+            throw forbidden("terminal sessions accept only exact event replays");
+          }
+          throw new Error("structured session event was not persisted");
+        }
         return { row, inserted: Boolean(inserted) };
       },
       archive,
@@ -222,7 +261,9 @@ function structuredPayloadJson(value: unknown): string {
   ) {
     throw badRequest("payload.version must be a positive integer");
   }
-  const payload = canonicalJsonValue(record, new Set(), 0, { members: 0 });
+  const payload = redactStructuredPayload(
+    canonicalJsonValue(record, new Set(), 0, { members: 0 }) as InteractiveSessionEventPayload,
+  );
   const payloadJson = JSON.stringify(payload);
   if (encoder.encode(payloadJson).byteLength > structuredEventPayloadMaxBytes) {
     throw payloadTooLarge(
@@ -230,6 +271,58 @@ function structuredPayloadJson(value: unknown): string {
     );
   }
   return payloadJson;
+}
+
+const sensitivePayloadField =
+  /^(?:api_?key|apikey|auth|authorization|client_?secret|cookie|credential|credentials|id_?token|password|passwd|private_?key|proxy_?authorization|refresh_?token|secret|session_?token|set_?cookie|sig|signature|signed_?url|ticket|token|x_?api_?key|.+(?:_api_?key|_credential|_credentials|_password|_private_?key|_secret|_signature|_ticket|_token))$/i;
+
+function redactStructuredPayload(
+  value: InteractiveSessionEventPayload,
+): InteractiveSessionEventPayload {
+  return Object.fromEntries(
+    Object.entries(value).map(([key, nested]) => [
+      key,
+      sensitivePayloadField.test(normalizedPayloadField(key))
+        ? "[redacted]"
+        : redactStructuredPayloadValue(nested),
+    ]),
+  );
+}
+
+function redactStructuredPayloadValue(
+  value: InteractiveSessionEventPayloadValue,
+): InteractiveSessionEventPayloadValue {
+  if (Array.isArray(value)) return value.map(redactStructuredPayloadValue);
+  if (typeof value === "string") return redactedStructuredEventText(value);
+  if (!value || typeof value !== "object") return value;
+  return redactStructuredPayload(value);
+}
+
+function redactedStructuredEventText(value: string): string {
+  const sensitiveName =
+    "access[_-]?token|api[_-]?key|apikey|auth|authorization|client[_-]?secret|cookie|credential|id[_-]?token|password|passwd|private[_-]?key|proxy[_-]?authorization|refresh[_-]?token|secret|session[_-]?token|set[_-]?cookie|sig|signature|ticket|token|x[_-]?api[_-]?key";
+  return value
+    .replace(
+      /\b(?:authorization|proxy-authorization|x-api-key|api-key)\s*:\s*[^\r\n]+/giu,
+      "[credential]",
+    )
+    .replace(/\b(?:bearer|basic)\s+[^\s,;}\x5d]+/giu, "[credential]")
+    .replace(/\b(?:cookie|set-cookie)\s*:\s*[^\r\n]+/giu, "[credential]")
+    .replace(
+      new RegExp(
+        `(?:\\\\?["']?)(?:${sensitiveName})(?:\\\\?["']?)\\s*[:=]\\s*(?!\\[credential\\])(?:\\\\?["'](?:\\\\.|[^"'\\\\])*\\\\?["']|[^\\s,;}&}\\x5d]+)`,
+        "giu",
+      ),
+      "[credential]",
+    );
+}
+
+function normalizedPayloadField(value: string): string {
+  return value
+    .replace(/([a-z0-9])([A-Z])/g, "$1_$2")
+    .replace(/[^A-Za-z0-9]+/g, "_")
+    .replace(/^_+|_+$/g, "")
+    .toLowerCase();
 }
 
 function canonicalJsonValue(

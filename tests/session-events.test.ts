@@ -132,6 +132,11 @@ test("structured session events canonicalize additive payloads and replay idempo
       version: 2,
       target: { z: true, a: 1 },
       additiveField: ["kept"],
+      credentials: {
+        authorization: "Bearer credential-one",
+        githubToken: "dummy",
+      },
+      note: "request failed: authorization: Bearer credential-one",
     },
     now: 123,
   });
@@ -143,6 +148,11 @@ test("structured session events canonicalize additive payloads and replay idempo
     message: "updated pull request",
     payload: {
       additiveField: ["kept"],
+      credentials: {
+        authorization: "Bearer credential-two",
+        githubToken: "fake",
+      },
+      note: "request failed: authorization: Bearer credential-two",
       target: { a: 1, z: true },
       version: 2,
     },
@@ -158,14 +168,16 @@ test("structured session events canonicalize additive payloads and replay idempo
     message: "updated pull request",
     payload: {
       additiveField: ["kept"],
+      credentials: "[redacted]",
+      note: "request failed: [credential]",
       target: { a: 1, z: true },
       version: 2,
     },
     createdAt: 123,
   });
   assert.deepEqual(persistedPayloads, [
-    '{"additiveField":["kept"],"target":{"a":1,"z":true},"version":2}',
-    '{"additiveField":["kept"],"target":{"a":1,"z":true},"version":2}',
+    '{"additiveField":["kept"],"credentials":"[redacted]","note":"request failed: [credential]","target":{"a":1,"z":true},"version":2}',
+    '{"additiveField":["kept"],"credentials":"[redacted]","note":"request failed: [credential]","target":{"a":1,"z":true},"version":2}',
   ]);
   assert.deepEqual(invalidations, ["IS-1", "IS-1"]);
   assert.deepEqual(archives, ["IS-1", "IS-1"]);

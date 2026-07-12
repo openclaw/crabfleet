@@ -159,7 +159,7 @@ test("terminal event authentication permits only stopped and failed sessions", a
   for (const status of ["stopped", "failed"] as const) {
     await assert.doesNotReject(() =>
       authenticator({ status }).require(request, "IS-agent", {
-        allowTerminalEvent: true,
+        allowTerminalEventReplay: true,
       }),
     );
   }
@@ -167,7 +167,7 @@ test("terminal event authentication permits only stopped and failed sessions", a
     await assert.rejects(
       () =>
         authenticator({ status }).require(request, "IS-agent", {
-          allowTerminalEvent: true,
+          allowTerminalEventReplay: true,
         }),
       { message: "agent session is not active" },
     );
