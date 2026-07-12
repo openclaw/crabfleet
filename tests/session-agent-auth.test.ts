@@ -147,3 +147,29 @@ test("agent authentication rejects missing, invalid, and inactive credentials", 
     message: "agent session is not active",
   });
 });
+
+test("terminal event authentication permits only stopped and failed sessions", async () => {
+  const request = new Request("https://fleet.example/api/agent/state", {
+    headers: {
+      authorization: "Bearer agent-token",
+      "x-crabfleet-session-id": "IS-agent",
+    },
+  });
+
+  for (const status of ["stopped", "failed"] as const) {
+    await assert.doesNotReject(() =>
+      authenticator({ status }).require(request, "IS-agent", {
+        allowTerminalEvent: true,
+      }),
+    );
+  }
+  for (const status of ["stopping", "expired"] as const) {
+    await assert.rejects(
+      () =>
+        authenticator({ status }).require(request, "IS-agent", {
+          allowTerminalEvent: true,
+        }),
+      { message: "agent session is not active" },
+    );
+  }
+});

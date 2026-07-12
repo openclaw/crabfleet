@@ -29,7 +29,7 @@ function eventRequest(sessionId: string, token: string): Request {
   });
 }
 
-async function authEnvironment() {
+async function authEnvironment(targetStatus: "ready" | "stopped" | "failed" = "ready") {
   const rows = new Map([
     [
       "IS-source",
@@ -47,6 +47,7 @@ async function authEnvironment() {
         runtime: "github_actions",
         work_key: "target",
         agent_token_hash: await sha256("target-token"),
+        status: targetStatus,
       }),
     ],
   ]);
@@ -148,6 +149,30 @@ test("agent event endpoint rejects a wrong-session token before persistence", as
   );
   assert.deepEqual(subject.credentialReads, ["IS-target"]);
   assert.equal(subject.mutationCount(), 0);
+});
+
+test("agent event endpoint retains exact-token authentication after terminal work state", async () => {
+  for (const status of ["stopped", "failed"] as const) {
+    const subject = await authEnvironment(status);
+    const application = new GitHubActionsApplication(subject.env, {
+      audit: async () => undefined,
+    });
+    const request = new Request(
+      "https://fleet.example/api/agent/interactive-sessions/IS-target/events",
+      {
+        method: "POST",
+        headers: {
+          authorization: "Bearer target-token",
+          "content-type": "application/json",
+        },
+        body: "[]",
+      },
+    );
+
+    await assert.rejects(application.appendStructuredEvent(request, "IS-target"), hasStatus(400));
+    assert.deepEqual(subject.credentialReads, ["IS-target"]);
+    assert.equal(subject.mutationCount(), 0);
+  }
 });
 
 test("authenticated event ingress rejects oversized chunked bodies before persistence", async () => {
