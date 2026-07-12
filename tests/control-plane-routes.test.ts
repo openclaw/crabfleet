@@ -10,6 +10,7 @@ import {
   desktopHostOwnershipModeHeader,
   desktopHostTokenOwnershipMode,
 } from "../src/worker/desktop-host-service.ts";
+import { conflict } from "../src/worker/http.ts";
 
 const viewer: User = {
   subject: "github:1",
@@ -252,6 +253,44 @@ test("desktop host routes register and remove only the authenticated user's host
     "desktop-host:register:viewer:legacy-studio:Legacy Studio:legacy:none",
     "desktop-host:remove:viewer:legacy-studio:legacy",
   ]);
+});
+
+test("desktop host routes expose legacy ownership conflicts", async () => {
+  for (const method of ["PUT", "DELETE"]) {
+    const calls: string[] = [];
+    await assert.rejects(
+      dispatch(
+        request(
+          method,
+          "/api/desktop-hosts/token-owned",
+          method === "PUT"
+            ? {
+                name: "Legacy Studio",
+                address: "100.64.1.3",
+                port: 5901,
+              }
+            : undefined,
+        ),
+        viewer,
+        calls,
+        method === "PUT"
+          ? {
+              async registerDesktopHost() {
+                throw conflict("desktop host is owned by a token-aware registration");
+              },
+            }
+          : {
+              async removeDesktopHost() {
+                throw conflict("desktop host is owned by a token-aware registration");
+              },
+            },
+      ),
+      (error) => {
+        assert.equal(status(error), 409);
+        return true;
+      },
+    );
+  }
 });
 
 test("desktop host recovery rejects malformed encoded ids with a client error", async () => {

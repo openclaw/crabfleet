@@ -1,7 +1,6 @@
-import { sql } from "kysely";
-
 import { database, executeBatch } from "./database.ts";
 import type { RuntimeEnv } from "./env.ts";
+import { conflict } from "./http.ts";
 
 export type DesktopHostRow = {
   ownerSubject: string;
@@ -87,31 +86,19 @@ export class DesktopHostRepository implements DesktopHostStore {
               publication_write_token: host.ownershipToken,
               updated_at: host.updatedAt,
             })
-          : update.doUpdateSet({
-              owner: sql<string>`CASE
-                WHEN desktop_hosts.ownership_token = '' THEN excluded.owner
-                ELSE desktop_hosts.owner
-              END`,
-              name: sql<string>`CASE
-                WHEN desktop_hosts.ownership_token = '' THEN excluded.name
-                ELSE desktop_hosts.name
-              END`,
-              address: sql<string>`CASE
-                WHEN desktop_hosts.ownership_token = '' THEN excluded.address
-                ELSE desktop_hosts.address
-              END`,
-              port: sql<number>`CASE
-                WHEN desktop_hosts.ownership_token = '' THEN excluded.port
-                ELSE desktop_hosts.port
-              END`,
-              updated_at: sql<number>`CASE
-                WHEN desktop_hosts.ownership_token = '' THEN excluded.updated_at
-                ELSE desktop_hosts.updated_at
-              END`,
-            });
+          : update
+              .doUpdateSet({
+                owner: host.owner,
+                name: host.name,
+                address: host.address,
+                port: host.port,
+                updated_at: host.updatedAt,
+              })
+              .where("desktop_hosts.ownership_token", "=", "");
       })
       .returningAll()
-      .executeTakeFirstOrThrow();
+      .executeTakeFirst();
+    if (!row) throw desktopHostOwnershipConflict();
     return {
       ownerSubject: row.owner_subject,
       id: row.id,
@@ -145,12 +132,20 @@ export class DesktopHostRepository implements DesktopHostStore {
   async remove(ownerSubject: string, id: string, ownershipToken: string | null): Promise<void> {
     const db = database(this.env);
     if (!ownershipToken) {
-      await db
+      const deleted = await db
         .deleteFrom("desktop_hosts")
         .where("owner_subject", "=", ownerSubject)
         .where("id", "=", id)
         .where("ownership_token", "=", "")
-        .execute();
+        .executeTakeFirst();
+      if ((deleted.numDeletedRows ?? 0n) > 0n) return;
+      const existing = await db
+        .selectFrom("desktop_hosts")
+        .select("ownership_token")
+        .where("owner_subject", "=", ownerSubject)
+        .where("id", "=", id)
+        .executeTakeFirst();
+      if (existing?.ownership_token) throw desktopHostOwnershipConflict();
       return;
     }
     const deleteMarker = `delete-authorized:${crypto.randomUUID()}`;
@@ -170,4 +165,8 @@ export class DesktopHostRepository implements DesktopHostStore {
         .where("ownership_token", "=", deleteMarker),
     ]);
   }
+}
+
+function desktopHostOwnershipConflict(): ReturnType<typeof conflict> {
+  return conflict("desktop host is owned by a token-aware registration");
 }

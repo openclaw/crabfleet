@@ -217,7 +217,7 @@ test("desktop host upsert returns the row written by the same atomic statement",
   assert.equal(row.ownershipToken, "token-a");
 });
 
-test("legacy desktop host upserts preserve token ownership", async () => {
+test("legacy desktop host upserts reject token ownership", async () => {
   let statement = "";
   const stored = {
     owner_subject: "github:1",
@@ -239,7 +239,7 @@ test("legacy desktop host upserts preserve token ownership", async () => {
           bind() {
             return {
               async all() {
-                return { results: [stored], meta: { changes: 1 } };
+                return { results: [], meta: { changes: 0 } };
               },
             };
           },
@@ -248,30 +248,27 @@ test("legacy desktop host upserts preserve token ownership", async () => {
     } as unknown as D1Database,
   } as RuntimeEnv;
 
-  const row = await new DesktopHostRepository(env).upsert({
-    ownerSubject: stored.owner_subject,
-    id: stored.id,
-    owner: stored.owner,
-    name: stored.name,
-    address: stored.address,
-    port: stored.port,
-    ownershipToken: "",
-    publicationID: "",
-    createdAt: stored.created_at,
-    updatedAt: stored.updated_at,
-  });
+  await assert.rejects(
+    new DesktopHostRepository(env).upsert({
+      ownerSubject: stored.owner_subject,
+      id: stored.id,
+      owner: stored.owner,
+      name: stored.name,
+      address: stored.address,
+      port: stored.port,
+      ownershipToken: "",
+      publicationID: "",
+      createdAt: stored.created_at,
+      updatedAt: stored.updated_at,
+    }),
+    (error) => {
+      assert.equal(status(error), 409);
+      return true;
+    },
+  );
 
   const updateClause = statement.split(/do update set/i)[1] ?? "";
-  for (const column of ["owner", "name", "address", "port", "updated_at"]) {
-    assert.match(
-      updateClause,
-      new RegExp(
-        `"${column}" = CASE\\s+WHEN desktop_hosts\\.ownership_token = '' THEN excluded\\.${column}\\s+ELSE desktop_hosts\\.${column}\\s+END`,
-        "i",
-      ),
-    );
-  }
-  assert.equal(row.ownershipToken, "current-token");
+  assert.match(updateClause, /where "desktop_hosts"\."ownership_token" = \?/i);
 });
 
 test("legacy desktop host writes and cleanup cannot mutate token-owned rows", async () => {
@@ -305,32 +302,28 @@ test("legacy desktop host writes and cleanup cannot mutate token-owned rows", as
   `);
   const repository = new DesktopHostRepository(sqliteRuntimeEnv(sqlite));
 
-  const preserved = await repository.upsert({
-    ownerSubject: "github:1",
-    id: "studio",
-    owner: "legacy-worker",
-    name: "Overwritten Studio",
-    address: "100.64.1.99",
-    port: 5902,
-    ownershipToken: "",
-    publicationID: "",
-    createdAt: 10,
-    updatedAt: 20,
+  await assert.rejects(
+    repository.upsert({
+      ownerSubject: "github:1",
+      id: "studio",
+      owner: "legacy-worker",
+      name: "Overwritten Studio",
+      address: "100.64.1.99",
+      port: 5902,
+      ownershipToken: "",
+      publicationID: "",
+      createdAt: 10,
+      updatedAt: 20,
+    }),
+    (error) => {
+      assert.equal(status(error), 409);
+      return true;
+    },
+  );
+  await assert.rejects(repository.remove("github:1", "studio", null), (error) => {
+    assert.equal(status(error), 409);
+    return true;
   });
-  assert.deepEqual(preserved, {
-    ownerSubject: "github:1",
-    id: "studio",
-    owner: "alice",
-    name: "Token Studio",
-    address: "100.64.1.2",
-    port: 5901,
-    ownershipToken: "current-token",
-    publicationID: "current-publication",
-    createdAt: 1,
-    updatedAt: 2,
-  });
-
-  await repository.remove("github:1", "studio", null);
   await repository.remove("github:1", "studio", "stale-token");
   assert.equal(
     sqlite.prepare("SELECT ownership_token FROM desktop_hosts WHERE id = 'studio'").get()
@@ -339,6 +332,45 @@ test("legacy desktop host writes and cleanup cannot mutate token-owned rows", as
   );
 
   await repository.remove("github:1", "studio", "current-token");
+  assert.equal(sqlite.prepare("SELECT count(*) AS count FROM desktop_hosts").get()?.count, 0);
+});
+
+test("legacy desktop host writes and cleanup preserve legacy rows", async () => {
+  const sqlite = new DatabaseSync(":memory:");
+  for (const migration of [
+    "0030_desktop_hosts.sql",
+    "0033_desktop_host_ownership.sql",
+    "0038_desktop_host_publication_identity.sql",
+    "0041_desktop_host_ownership_errors.sql",
+  ]) {
+    sqlite.exec(readFileSync(new URL(`../migrations/${migration}`, import.meta.url), "utf8"));
+  }
+  const repository = new DesktopHostRepository(sqliteRuntimeEnv(sqlite));
+  const host = {
+    ownerSubject: "github:1",
+    id: "studio",
+    owner: "alice",
+    name: "Legacy Studio",
+    address: "100.64.1.2",
+    port: 5901,
+    ownershipToken: "",
+    publicationID: "",
+    createdAt: 1,
+    updatedAt: 2,
+  };
+
+  await repository.upsert(host);
+  assert.equal(
+    (
+      await repository.upsert({
+        ...host,
+        name: "Updated Legacy Studio",
+        updatedAt: 3,
+      })
+    ).name,
+    "Updated Legacy Studio",
+  );
+  await repository.remove(host.ownerSubject, host.id, null);
   assert.equal(sqlite.prepare("SELECT count(*) AS count FROM desktop_hosts").get()?.count, 0);
 });
 
@@ -441,3 +473,9 @@ test("same-publication retries remain recoverable after the publication migratio
     null,
   );
 });
+
+function status(error: unknown): number | undefined {
+  return typeof error === "object" && error !== null && "status" in error
+    ? Number(error.status)
+    : undefined;
+}
