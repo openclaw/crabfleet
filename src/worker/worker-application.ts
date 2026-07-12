@@ -163,7 +163,8 @@ export class WorkerApplication {
       readState: (request, user) => this.readState(request, user, context),
       readFleet: (user) => this.readFleetState(user, undefined, context),
       registerDesktopHost: (user, id, input) => this.desktopHosts().register(user, id, input),
-      removeDesktopHost: (user, id) => this.desktopHosts().remove(user, id),
+      removeDesktopHost: (user, id, ownershipToken) =>
+        this.desktopHosts().remove(user, id, ownershipToken),
       searchGitHubRefs: (number) => this.githubReferenceService().search(number),
       createCard: async (request, user) =>
         this.cardLifecycleService().create(await readJson<CardCreateInput>(request), user),

@@ -9,8 +9,13 @@ test("desktop host migration creates an owner-scoped registry with bounded ports
     new URL("../migrations/0030_desktop_hosts.sql", import.meta.url),
     "utf8",
   );
+  const ownershipMigration = readFileSync(
+    new URL("../migrations/0033_desktop_host_ownership.sql", import.meta.url),
+    "utf8",
+  );
   database.exec(migration);
   database.exec(migration);
+  database.exec(ownershipMigration);
 
   const insert = database.prepare(`
     INSERT INTO desktop_hosts
@@ -24,6 +29,12 @@ test("desktop host migration creates an owner-scoped registry with bounded ports
     database.prepare("SELECT count(*) AS count FROM desktop_hosts WHERE id = 'studio'").get()
       ?.count,
     2,
+  );
+  assert.equal(
+    database
+      .prepare("SELECT ownership_token FROM desktop_hosts WHERE owner_subject = 'github:1'")
+      .get()?.ownership_token,
+    "",
   );
   assert.throws(
     () => insert.run("github:3", "bad", "bad", "Bad", "100.64.1.4", 0, 1, 1),

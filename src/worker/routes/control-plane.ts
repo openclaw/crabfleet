@@ -5,15 +5,23 @@ import type {
   AdminRepoInput,
   AdminWorkflowInput,
 } from "../admin-service.ts";
-import type { DesktopHost, DesktopHostInput } from "../desktop-host-service.ts";
-import { json, notFound, readJson } from "../http.ts";
+import {
+  desktopHostOwnershipHeader,
+  type DesktopHostInput,
+  type DesktopHostRegistration,
+} from "../desktop-host-service.ts";
+import { badRequest, json, notFound, readJson } from "../http.ts";
 import type { User } from "../models.ts";
 
 export type ControlPlaneRouteDependencies = {
   readState(request: Request, user: User): Promise<unknown>;
   readFleet(user: User): Promise<unknown>;
-  registerDesktopHost(user: User, id: string, input: DesktopHostInput): Promise<DesktopHost>;
-  removeDesktopHost(user: User, id: string): Promise<void>;
+  registerDesktopHost(
+    user: User,
+    id: string,
+    input: DesktopHostInput,
+  ): Promise<DesktopHostRegistration>;
+  removeDesktopHost(user: User, id: string, ownershipToken: string): Promise<void>;
   searchGitHubRefs(number: unknown): Promise<unknown>;
   createCard(request: Request, user: User): Promise<unknown>;
   readCardRuns(user: User, cardId: string): Promise<unknown[] | null>;
@@ -44,16 +52,18 @@ export async function handleControlPlaneRoute(
   const desktopHostMatch = url.pathname.match(/^\/api\/desktop-hosts\/([^/]+)$/);
   if (request.method === "PUT" && desktopHostMatch) {
     requireRole(user, "viewer");
-    const host = await dependencies.registerDesktopHost(
+    const registration = await dependencies.registerDesktopHost(
       user,
       decoded(desktopHostMatch[1]),
       await readJson<DesktopHostInput>(request),
     );
-    return json({ host });
+    return json(registration);
   }
   if (request.method === "DELETE" && desktopHostMatch) {
     requireRole(user, "viewer");
-    await dependencies.removeDesktopHost(user, decoded(desktopHostMatch[1]));
+    const ownershipToken = request.headers.get(desktopHostOwnershipHeader);
+    if (!ownershipToken) throw badRequest("desktop host ownership token is required");
+    await dependencies.removeDesktopHost(user, decoded(desktopHostMatch[1]), ownershipToken);
     return json({ ok: true });
   }
   if (request.method === "GET" && url.pathname === "/api/github/refs") {

@@ -8,6 +8,7 @@ export type DesktopHostRow = {
   name: string;
   address: string;
   port: number;
+  ownershipToken: string;
   createdAt: number;
   updatedAt: number;
 };
@@ -17,7 +18,7 @@ export type DesktopHostWrite = DesktopHostRow;
 export interface DesktopHostStore {
   list(ownerSubject: string): Promise<DesktopHostRow[]>;
   upsert(host: DesktopHostWrite): Promise<DesktopHostRow>;
-  remove(ownerSubject: string, id: string): Promise<void>;
+  remove(ownerSubject: string, id: string, ownershipToken: string): Promise<void>;
 }
 
 export class DesktopHostRepository implements DesktopHostStore {
@@ -42,6 +43,7 @@ export class DesktopHostRepository implements DesktopHostStore {
       name: row.name,
       address: row.address,
       port: row.port,
+      ownershipToken: row.ownership_token,
       createdAt: row.created_at,
       updatedAt: row.updated_at,
     }));
@@ -57,6 +59,7 @@ export class DesktopHostRepository implements DesktopHostStore {
         name: host.name,
         address: host.address,
         port: host.port,
+        ownership_token: host.ownershipToken,
         created_at: host.createdAt,
         updated_at: host.updatedAt,
       })
@@ -66,6 +69,7 @@ export class DesktopHostRepository implements DesktopHostStore {
           name: host.name,
           address: host.address,
           port: host.port,
+          ownership_token: host.ownershipToken,
           updated_at: host.updatedAt,
         }),
       )
@@ -83,16 +87,18 @@ export class DesktopHostRepository implements DesktopHostStore {
       name: row.name,
       address: row.address,
       port: row.port,
+      ownershipToken: row.ownership_token,
       createdAt: row.created_at,
       updatedAt: row.updated_at,
     };
   }
 
-  async remove(ownerSubject: string, id: string): Promise<void> {
+  async remove(ownerSubject: string, id: string, ownershipToken: string): Promise<void> {
     await database(this.env)
       .deleteFrom("desktop_hosts")
       .where("owner_subject", "=", ownerSubject)
       .where("id", "=", id)
+      .where("ownership_token", "=", ownershipToken)
       .execute();
   }
 }

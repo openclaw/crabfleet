@@ -36,20 +36,29 @@ class MemoryDesktopHostStore implements DesktopHostStore {
     return stored;
   }
 
-  async remove(ownerSubject: string, id: string): Promise<void> {
-    this.rows.delete(`${ownerSubject}:${id}`);
+  async remove(ownerSubject: string, id: string, ownershipToken: string): Promise<void> {
+    const key = `${ownerSubject}:${id}`;
+    if (this.rows.get(key)?.ownershipToken === ownershipToken) {
+      this.rows.delete(key);
+    }
   }
 }
 
 test("desktop hosts are canonicalized and isolated to their stable owner", async () => {
   const store = new MemoryDesktopHostStore();
   let now = 42;
-  const service = new DesktopHostService(store, () => now);
-  const host = await service.register(alice, " Studio.ONE ", {
+  const tokens = ["ownership-1", "ownership-2"];
+  const service = new DesktopHostService(
+    store,
+    () => now,
+    () => tokens.shift() ?? "unexpected-token",
+  );
+  const registration = await service.register(alice, " Studio.ONE ", {
     name: " Peter's Mac Studio ",
     address: "100.68.201.40",
     port: 5901,
   });
+  const host = registration.host;
 
   assert.deepEqual(host, {
     id: "studio.one",
@@ -60,22 +69,48 @@ test("desktop hosts are canonicalized and isolated to their stable owner", async
     createdAt: 42,
     updatedAt: 42,
   });
+  assert.equal(registration.ownershipToken, "ownership-1");
   assert.deepEqual(await service.list(alice), [host]);
   assert.deepEqual(await service.list(bob), []);
 
   now = 84;
-  const updated = await service.register(alice, host.id, {
+  const updatedRegistration = await service.register(alice, host.id, {
     name: "Renamed Studio",
     address: host.address,
     port: host.port,
   });
+  const updated = updatedRegistration.host;
   assert.equal(updated.createdAt, 42);
   assert.equal(updated.updatedAt, 84);
   assert.equal(updated.name, "Renamed Studio");
+  assert.equal(updatedRegistration.ownershipToken, "ownership-2");
 
-  await service.remove(bob, host.id);
+  await service.remove(bob, host.id, updatedRegistration.ownershipToken);
   assert.deepEqual(await service.list(alice), [updated]);
-  await service.remove(alice, host.id);
+  await service.remove(alice, host.id, updatedRegistration.ownershipToken);
+  assert.deepEqual(await service.list(alice), []);
+});
+
+test("stale desktop host cleanup cannot remove a newer registration", async () => {
+  const store = new MemoryDesktopHostStore();
+  const tokens = ["old-process-token", "new-process-token"];
+  const service = new DesktopHostService(
+    store,
+    () => 42,
+    () => tokens.shift() ?? "unexpected-token",
+  );
+  const input = { name: "Studio", address: "100.64.1.2", port: 5901 };
+
+  const oldRegistration = await service.register(alice, "studio", input);
+  const newRegistration = await service.register(alice, "studio", {
+    ...input,
+    name: "New Studio Process",
+  });
+
+  await service.remove(alice, "studio", oldRegistration.ownershipToken);
+  assert.deepEqual(await service.list(alice), [newRegistration.host]);
+
+  await service.remove(alice, "studio", newRegistration.ownershipToken);
   assert.deepEqual(await service.list(alice), []);
 });
 
@@ -98,4 +133,6 @@ test("desktop hosts accept only bounded metadata and Tailscale IPv4 endpoints", 
   }
   await assert.rejects(service.register(alice, "studio", { ...valid, name: "bad\nname" }), /name/);
   await assert.rejects(service.register(alice, "studio", { ...valid, port: 0 }), /port/);
+  await assert.rejects(service.remove(alice, "studio", null), /ownership token/);
+  await assert.rejects(service.remove(alice, "studio", "bad token"), /ownership token/);
 });

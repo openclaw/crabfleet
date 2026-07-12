@@ -44,17 +44,20 @@ function dependencies(calls: string[]): ControlPlaneRouteDependencies {
     async registerDesktopHost(user, id, input) {
       calls.push(`desktop-host:register:${user.login}:${id}:${input.name}`);
       return {
-        id,
-        owner: user.login ?? user.subject,
-        name: String(input.name),
-        address: String(input.address),
-        port: Number(input.port),
-        createdAt: 1,
-        updatedAt: 1,
+        host: {
+          id,
+          owner: user.login ?? user.subject,
+          name: String(input.name),
+          address: String(input.address),
+          port: Number(input.port),
+          createdAt: 1,
+          updatedAt: 1,
+        },
+        ownershipToken: "ownership-token",
       };
     },
-    async removeDesktopHost(user, id) {
-      calls.push(`desktop-host:remove:${user.login}:${id}`);
+    async removeDesktopHost(user, id, ownershipToken) {
+      calls.push(`desktop-host:remove:${user.login}:${id}:${ownershipToken}`);
     },
     async searchGitHubRefs(number) {
       calls.push(`github-refs:${number}`);
@@ -170,18 +173,30 @@ test("desktop host routes register and remove only the authenticated user's host
       createdAt: 1,
       updatedAt: 1,
     },
+    ownershipToken: "ownership-token",
   });
 
   const removed = await dispatch(
-    request("DELETE", "/api/desktop-hosts/mac%2Dstudio"),
+    new Request("https://fleet.example/api/desktop-hosts/mac%2Dstudio", {
+      method: "DELETE",
+      headers: { "x-crabfleet-ownership-token": "ownership-token" },
+    }),
     viewer,
     calls,
   );
   assert.equal(removed?.status, 200);
   assert.deepEqual(calls, [
     "desktop-host:register:viewer:mac-studio:Mac Studio",
-    "desktop-host:remove:viewer:mac-studio",
+    "desktop-host:remove:viewer:mac-studio:ownership-token",
   ]);
+
+  await assert.rejects(
+    dispatch(request("DELETE", "/api/desktop-hosts/mac%2Dstudio"), viewer, []),
+    (error) => {
+      assert.equal(status(error), 400);
+      return true;
+    },
+  );
 });
 
 test("card actions derive viewer or maintainer authorization from the action", async () => {

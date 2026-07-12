@@ -19,13 +19,26 @@ export type DesktopHost = {
   updatedAt: number;
 };
 
+export type DesktopHostRegistration = {
+  host: DesktopHost;
+  ownershipToken: string;
+};
+
+export const desktopHostOwnershipHeader = "x-crabfleet-ownership-token";
+
 export class DesktopHostService {
   private readonly store: DesktopHostStore;
   private readonly now: () => number;
+  private readonly createOwnershipToken: () => string;
 
-  constructor(store: DesktopHostStore, now: () => number = Date.now) {
+  constructor(
+    store: DesktopHostStore,
+    now: () => number = Date.now,
+    createOwnershipToken: () => string = randomOwnershipToken,
+  ) {
     this.store = store;
     this.now = now;
+    this.createOwnershipToken = createOwnershipToken;
   }
 
   async list(user: User): Promise<DesktopHost[]> {
@@ -33,12 +46,17 @@ export class DesktopHostService {
     return rows.map(presentDesktopHost);
   }
 
-  async register(user: User, rawID: string, input: DesktopHostInput): Promise<DesktopHost> {
+  async register(
+    user: User,
+    rawID: string,
+    input: DesktopHostInput,
+  ): Promise<DesktopHostRegistration> {
     const id = desktopHostID(rawID);
     const name = boundedText(input.name, "name", 100);
     const address = tailscaleIPv4(input.address);
     const port = desktopHostPort(input.port);
     const now = this.now();
+    const ownershipToken = this.createOwnershipToken();
     const host: DesktopHostRow = {
       ownerSubject: tenantSubject(user),
       id,
@@ -46,15 +64,27 @@ export class DesktopHostService {
       name,
       address,
       port,
+      ownershipToken,
       createdAt: now,
       updatedAt: now,
     };
-    return presentDesktopHost(await this.store.upsert(host));
+    return {
+      host: presentDesktopHost(await this.store.upsert(host)),
+      ownershipToken,
+    };
   }
 
-  async remove(user: User, rawID: string): Promise<void> {
-    await this.store.remove(tenantSubject(user), desktopHostID(rawID));
+  async remove(user: User, rawID: string, rawOwnershipToken: unknown): Promise<void> {
+    await this.store.remove(
+      tenantSubject(user),
+      desktopHostID(rawID),
+      desktopHostOwnershipToken(rawOwnershipToken),
+    );
   }
+}
+
+function randomOwnershipToken(): string {
+  return crypto.randomUUID() + crypto.randomUUID();
 }
 
 function presentDesktopHost(row: DesktopHostRow): DesktopHost {
@@ -118,6 +148,21 @@ function tailscaleIPv4(value: unknown): string {
 function desktopHostPort(value: unknown): number {
   if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 1 || value > 65_535) {
     throw badRequest("port must be an integer from 1 to 65535");
+  }
+  return value;
+}
+
+function desktopHostOwnershipToken(value: unknown): string {
+  if (
+    typeof value !== "string" ||
+    value.length === 0 ||
+    new TextEncoder().encode(value).byteLength > 200 ||
+    [...value].some((character) => {
+      const codePoint = character.codePointAt(0) ?? 0;
+      return codePoint <= 0x20 || codePoint === 0x7f;
+    })
+  ) {
+    throw badRequest("desktop host ownership token is required");
   }
   return value;
 }
