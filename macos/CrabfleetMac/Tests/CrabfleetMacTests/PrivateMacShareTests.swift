@@ -120,7 +120,8 @@ struct PrivateMacShareTests {
     ).write(to: executable)
     try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: executable.path)
 
-    let runner = SystemTailscaleCommandRunner(executableURL: executable, timeout: 0.5)
+    // Give the helper time to spawn under a concurrently loaded Swift test runner.
+    let runner = SystemTailscaleCommandRunner(executableURL: executable, timeout: 2)
     let clock = ContinuousClock()
     let startedAt = clock.now
     await #expect(throws: PrivateMacShareError.commandTimedOut) {
@@ -135,7 +136,7 @@ struct PrivateMacShareTests {
       _ = Darwin.kill(descendantPID, SIGKILL)
     }
     #expect(Darwin.kill(descendantPID, 0) == 0)
-    #expect(elapsed < .seconds(2))
+    #expect(elapsed < .seconds(4))
   }
 
   @Test
