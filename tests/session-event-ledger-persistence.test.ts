@@ -4,6 +4,7 @@ import test from "node:test";
 
 import { appendStructuredInteractiveSessionEventRecord } from "../src/worker/session-events.ts";
 import type { RuntimeEnv } from "../src/worker/env.ts";
+import { shouldArchiveInteractiveSessionLogs } from "../src/worker/session-log-archive.ts";
 
 type SqliteStatement = {
   all(...parameters: unknown[]): Record<string, unknown>[];
@@ -236,6 +237,7 @@ test("legacy credential-bearing replays repair D1 and refresh terminal archives"
     .run(rawMessage, rawPayload);
   database.exec("UPDATE interactive_sessions SET status = 'stopped' WHERE id = 'IS-1'");
   let archiveCalls = 0;
+  let forceArchive = false;
 
   const replay = await appendStructuredInteractiveSessionEventRecord(
     runtimeEnv(database),
@@ -248,8 +250,9 @@ test("legacy credential-bearing replays repair D1 and refresh terminal archives"
       payload: { version: 1, output: rawMessage },
       now: 200,
     },
-    async () => {
+    async (_sessionId, _now, options) => {
       archiveCalls += 1;
+      forceArchive = options?.force === true;
       throw new Error("simulated archive outage");
     },
   );
@@ -258,6 +261,7 @@ test("legacy credential-bearing replays repair D1 and refresh terminal archives"
   assert.equal(replay.event.message, "[credential]");
   assert.deepEqual(replay.event.payload, { output: "[credential]", version: 1 });
   assert.equal(archiveCalls, 1);
+  assert.equal(forceArchive, true);
   assert.equal(
     database
       .prepare("SELECT terminal_finalize_pending FROM interactive_sessions WHERE id = 'IS-1'")
@@ -278,5 +282,58 @@ test("legacy credential-bearing replays repair D1 and refresh terminal archives"
       message: "[credential]",
       payload_json: '{"output":"[credential]","version":1}',
     },
+  );
+});
+
+test("active legacy repairs bypass fresh same-count archive cadence", async () => {
+  const database = eventDatabase();
+  const rawMessage = "authorization: Bearer legacy-active-value";
+  database
+    .prepare(`
+      INSERT INTO interactive_session_events
+        (session_id, actor, event_key, event_type, message, payload_json, created_at)
+      VALUES ('IS-1', 'operator', 'run:active-legacy', 'clawsweeper.action', ?,
+        '{"version":1}', 100)
+    `)
+    .run(rawMessage);
+  let archiveReplaced = false;
+
+  const replay = await appendStructuredInteractiveSessionEventRecord(
+    runtimeEnv(database),
+    {
+      sessionId: "IS-1",
+      actor: "operator",
+      eventKey: "run:active-legacy",
+      type: "clawsweeper.action",
+      message: rawMessage,
+      payload: { version: 1 },
+      now: 200,
+    },
+    async (_sessionId, now, options) => {
+      archiveReplaced = shouldArchiveInteractiveSessionLogs(
+        {
+          session_id: "IS-1",
+          event_count: 1,
+          session_updated_at: 100,
+          events_key: "events",
+          transcript_key: "transcript",
+          summary_key: "summary",
+          archived_at: 190,
+          updated_at: 190,
+        },
+        1,
+        now,
+        options?.force,
+      );
+    },
+  );
+
+  assert.equal(replay.duplicate, true);
+  assert.equal(archiveReplaced, true);
+  assert.equal(
+    database
+      .prepare("SELECT terminal_finalize_pending FROM interactive_sessions WHERE id = 'IS-1'")
+      .get()?.terminal_finalize_pending,
+    0,
   );
 });

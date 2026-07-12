@@ -32,7 +32,11 @@ export type AppendInteractiveSessionEventInput = {
   now: number;
 };
 
-export type InteractiveSessionEventArchive = (sessionId: string, now: number) => Promise<void>;
+export type InteractiveSessionEventArchive = (
+  sessionId: string,
+  now: number,
+  options?: { force?: boolean },
+) => Promise<void>;
 
 export type AppendStructuredInteractiveSessionEventInput = {
   sessionId: string;
@@ -55,10 +59,13 @@ type PersistedStructuredInteractiveSessionEvent = {
 };
 
 export type InteractiveSessionEventLedgerStore = {
-  persist(
-    event: PersistedStructuredInteractiveSessionEvent,
-  ): Promise<{ row: InteractiveSessionEventRow; inserted: boolean; refreshArchive: boolean }>;
-  archive(sessionId: string, now: number): Promise<void>;
+  persist(event: PersistedStructuredInteractiveSessionEvent): Promise<{
+    row: InteractiveSessionEventRow;
+    inserted: boolean;
+    refreshArchive: boolean;
+    forceArchive?: boolean;
+  }>;
+  archive(sessionId: string, now: number, options?: { force?: boolean }): Promise<void>;
 };
 
 export type AppendStructuredInteractiveSessionEventResult = {
@@ -83,7 +90,9 @@ export class InteractiveSessionEventLedgerService {
       throw conflict("event key already belongs to a different session event");
     }
     if (persisted.refreshArchive) {
-      await this.store.archive(event.sessionId, event.now).catch(() => undefined);
+      await this.store
+        .archive(event.sessionId, event.now, persisted.forceArchive ? { force: true } : undefined)
+        .catch(() => undefined);
     }
     return {
       event: interactiveSessionEvent(row),
@@ -114,8 +123,8 @@ export async function appendInteractiveSessionEventRecord(
 export async function appendStructuredInteractiveSessionEventRecord(
   env: RuntimeEnv,
   input: AppendStructuredInteractiveSessionEventInput,
-  archive: InteractiveSessionEventArchive = (sessionId, now) =>
-    archiveInteractiveSessionLogs(env, sessionId, now),
+  archive: InteractiveSessionEventArchive = (sessionId, now, options) =>
+    archiveInteractiveSessionLogs(env, sessionId, now, options),
 ): Promise<AppendStructuredInteractiveSessionEventResult> {
   const db = database(env);
   try {
@@ -226,6 +235,7 @@ export async function appendStructuredInteractiveSessionEventRecord(
           row,
           inserted: Boolean(inserted),
           refreshArchive: !terminal || repairsLegacyCredentials,
+          forceArchive: repairsLegacyCredentials,
         };
       },
       archive,
