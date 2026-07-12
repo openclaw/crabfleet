@@ -288,8 +288,12 @@ if (!runnerPtyUrl) throw new Error("CRABFLEET_RUNNER_PTY_URL is required");
 const magic = new Uint8Array([0x43, 0x46, 0x52, 0x31]); // CFR1
 const inputIdDecoder = new TextDecoder();
 const encoder = new TextEncoder();
+const maxPendingInputBytes = 16 * 1024;
+const maxPendingInputFrames = 32;
+const maxPendingInputAgeMs = 1_000;
 let pendingInputs = [];
 let pendingInputBytes = 0;
+let pendingInputTimer;
 const framedRunnerPtyUrl = new URL(runnerPtyUrl);
 framedRunnerPtyUrl.searchParams.set("runnerProtocol", "cfr1-framed-io-v1");
 const terminal = new WebSocket(framedRunnerPtyUrl);
@@ -305,8 +309,8 @@ const pty = spawn(process.env.SHELL || "/bin/bash", [], {
   env: process.env,
 });
 
-pty.onData((output) => {
-  terminal.send(encodeOutput(output));
+pty.onData((outputText) => {
+  terminal.send(encodeUtf8Output(outputText));
 });
 
 pty.onExit(() => {
@@ -322,6 +326,13 @@ function acceptInput(data) {
   if (!input) return;
   pendingInputs.push(input);
   pendingInputBytes += input.payload.byteLength;
+  if (pendingInputs.length === 1) {
+    pendingInputTimer = setTimeout(() => settlePendingInputs(false), maxPendingInputAgeMs);
+  }
+  if (pendingInputBytes > maxPendingInputBytes || pendingInputs.length > maxPendingInputFrames) {
+    settlePendingInputs(false);
+    return;
+  }
 
   const payload = new Uint8Array(pendingInputBytes);
   let offset = 0;
@@ -347,6 +358,8 @@ function decodeCompleteUtf8(payload) {
 }
 
 function settlePendingInputs(accepted) {
+  if (pendingInputTimer) clearTimeout(pendingInputTimer);
+  pendingInputTimer = undefined;
   for (const input of pendingInputs) {
     terminal.send(encodeAck(input.inputId, accepted));
   }
@@ -384,8 +397,8 @@ function encodeAck(inputId, accepted) {
   return frame;
 }
 
-function encodeOutput(output) {
-  const payload = encoder.encode(output);
+function encodeUtf8Output(outputText) {
+  const payload = encoder.encode(outputText);
   const frame = new Uint8Array(6 + payload.byteLength);
   frame.set(magic);
   frame[4] = 0x04;
@@ -410,13 +423,17 @@ the WebSocket merely queues the input frame. This Node adapter buffers a valid
 incomplete UTF-8 suffix together with every affected input ID. It writes and
 positively acknowledges those frames only after a later frame completes the
 sequence. Invalid UTF-8 rejects the buffered group without delivering any of it.
+The adapter also rejects the whole pending group when it exceeds 16 KiB, 32
+frames, or one second, bounding memory, copy work, and acknowledgement latency.
 
 The protocol query is consumed during connection setup and is not forwarded as
 terminal data. There is no capability message or mode transition after the
-socket opens. Each `CFR1` frame occupies one binary WebSocket message. Payloads
-are opaque bytes; adapters targeting string-only PTY APIs must either preserve
-bytes and correlation IDs until a complete character sequence can be delivered,
-as the Node example does:
+socket opens. Each `CFR1` frame occupies one binary WebSocket message. At the
+wire level, input and output payloads are opaque terminal bytes. The example is
+deliberately a UTF-8 text adapter because `@lydell/node-pty` exposes input and
+output as JavaScript strings: it rejects input that is not complete valid UTF-8
+and encodes each output string as UTF-8. Deployments that require lossless
+arbitrary PTY bytes must use a byte-oriented PTY adapter instead of this example.
 
 | Offset | Size     | Value                                                                          |
 | ------ | -------- | ------------------------------------------------------------------------------ |
@@ -443,12 +460,17 @@ Properties:
   send raw output.
 - Framed runners add the exact protocol query before connecting, receive framed
   input immediately, and wrap every output payload in a `0x04` frame.
+- Framed viewers add `viewerProtocol=cfr1-framed-io-v1` before connecting. They
+  receive `CFR1` output, lifecycle, and acknowledgement frames regardless of the
+  runner's mode.
+- Legacy viewers omit that query. They receive raw terminal output plus JSON
+  lifecycle and input-acknowledgement messages for compatibility.
 - Negotiated input produces `input-accepted` only after the correlated runner
   acknowledgement. Legacy input reports acceptance after relay delivery.
-- Runner lifecycle events are typed binary frames even while no runner is
-  connected.
-- The relay frames legacy output internally, so raw bytes beginning with
-  `CFR1` cannot collide with acknowledgements or lifecycle events.
+- Framed viewer lifecycle events remain typed binary frames while no runner is
+  connected. Legacy viewers receive the JSON fallback.
+- When runner and viewer modes differ, the relay wraps or unwraps terminal
+  output at the viewer boundary.
 
 The relay does not interpret Codex JSON-RPC. The runner-side integration decides
 how accepted terminal input maps to model steering.
@@ -493,7 +515,7 @@ ClawSweeper integration, the runner:
 1. Accepts the framed bytes into its input handler and acknowledges that input
    ID.
 2. Collects printable input until Enter.
-3. Echoes `[steer] <instruction>` to the terminal as raw output.
+3. Echoes `[steer] <instruction>` to the terminal as UTF-8 terminal output.
 4. Calls Codex `turn/steer` with the active thread and expected turn ID.
 5. Reports rejection or no-active-turn conditions in the terminal.
 
