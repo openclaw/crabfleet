@@ -427,7 +427,11 @@ func (c *Client) Attach(ctx context.Context, terminal io.ReadWriter, resizes <-c
 		}
 	}()
 
-	err = <-errCh
+	select {
+	case err = <-errCh:
+	case <-ctx.Done():
+		err = ctx.Err()
+	}
 	cancelRead()
 	if cancelableRead {
 		wg.Wait()
@@ -480,7 +484,7 @@ func (c *Client) handleFrame(ctx context.Context, current frame) error {
 	}
 	switch current.messageType {
 	case messageOutput:
-		c.deliverOrQueueOutput(ctx, current)
+		return c.deliverOrQueueOutput(ctx, current)
 	case messageError:
 		err := frameError(current, "terminal connection failed")
 		c.canInput.Store(false)
@@ -584,29 +588,37 @@ func (c *Client) clearAttachment(attachment *terminalAttachment) {
 	c.stateMu.Unlock()
 }
 
-func (c *Client) deliverOrQueueOutput(ctx context.Context, current frame) {
+func (c *Client) deliverOrQueueOutput(ctx context.Context, current frame) error {
 	for {
 		c.stateMu.Lock()
 		attachment := c.attachment
 		ready := c.attachmentReady
+		discardOutput := c.inputWaiter != nil
 		c.stateMu.Unlock()
 		if attachment == nil {
+			if discardOutput {
+				return c.write(ctx, frame{
+					messageType: messageAck,
+					sessionID:   c.sessionID,
+					payload:     ackPayload(uint32(len(current.payload))),
+				})
+			}
 			if ready == nil {
-				return
+				return nil
 			}
 			select {
 			case <-ready:
 				continue
 			case <-ctx.Done():
-				return
+				return ctx.Err()
 			}
 		}
 		select {
 		case attachment.frames <- current:
-			return
+			return nil
 		case <-attachment.done:
 		case <-ctx.Done():
-			return
+			return ctx.Err()
 		}
 	}
 }

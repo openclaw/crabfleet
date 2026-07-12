@@ -417,6 +417,90 @@ func TestSendInputConfirmedReturnsControlRevocation(t *testing.T) {
 	}
 }
 
+func TestSendInputConfirmedAcknowledgesOutputWithoutAttachment(t *testing.T) {
+	acknowledged := make(chan uint32, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := websocket.Accept(w, r, nil)
+		if err != nil {
+			t.Error(err)
+			return
+		}
+		defer conn.Close(websocket.StatusNormalClosure, "")
+		for range 2 {
+			if _, _, err := conn.Read(r.Context()); err != nil {
+				t.Error(err)
+				return
+			}
+		}
+		welcome, _ := json.Marshal(welcomePayload{InputAcknowledgements: true})
+		if err := conn.Write(r.Context(), websocket.MessageBinary, encodeFrame(frame{
+			messageType: messageWelcome,
+			payload:     welcome,
+		})); err != nil {
+			t.Error(err)
+			return
+		}
+		subscribed, _ := json.Marshal(eventPayload{Type: "subscribed", CanInput: true})
+		if err := conn.Write(r.Context(), websocket.MessageBinary, encodeFrame(frame{
+			messageType: messageEvent,
+			sessionID:   "IS-message",
+			payload:     subscribed,
+		})); err != nil {
+			t.Error(err)
+			return
+		}
+		if _, _, err := conn.Read(r.Context()); err != nil {
+			t.Error(err)
+			return
+		}
+		if err := conn.Write(r.Context(), websocket.MessageBinary, encodeFrame(frame{
+			messageType: messageOutput,
+			sessionID:   "IS-message",
+			payload:     []byte("prompt\n"),
+		})); err != nil {
+			t.Error(err)
+			return
+		}
+		_, payload, err := conn.Read(r.Context())
+		if err != nil {
+			t.Error(err)
+			return
+		}
+		ack, err := decodeFrame(payload)
+		if err != nil || ack.messageType != messageAck {
+			t.Errorf("output acknowledgement = %#v, %v", ack, err)
+			return
+		}
+		acknowledged <- binary.LittleEndian.Uint32(ack.payload)
+		accepted, _ := json.Marshal(eventPayload{Type: "input-accepted"})
+		_ = conn.Write(r.Context(), websocket.MessageBinary, encodeFrame(frame{
+			messageType: messageEvent,
+			sessionID:   "IS-message",
+			payload:     accepted,
+		}))
+	}))
+	defer server.Close()
+
+	endpoint, err := Endpoint(server.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	client, err := Dial(context.Background(), endpoint, "IS-message", Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if err := client.SendInputConfirmed(ctx, []byte("echo ready\n")); err != nil {
+		t.Fatal(err)
+	}
+	if bytes := <-acknowledged; bytes != uint32(len("prompt\n")) {
+		t.Fatalf("acknowledged = %d", bytes)
+	}
+}
+
 func TestSendInputConfirmedRejectionDoesNotRevokeControl(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		conn, err := websocket.Accept(w, r, nil)
@@ -914,6 +998,62 @@ func TestAttachClosesCloseableTerminalAfterRemoteClosure(t *testing.T) {
 	}
 }
 
+func TestAttachReturnsWhenContextCancelsAnUncancelableRead(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := websocket.Accept(w, r, nil)
+		if err != nil {
+			t.Error(err)
+			return
+		}
+		defer conn.Close(websocket.StatusNormalClosure, "")
+		for range 2 {
+			if _, _, err := conn.Read(r.Context()); err != nil {
+				t.Error(err)
+				return
+			}
+		}
+		subscribed, _ := json.Marshal(eventPayload{Type: "subscribed", CanInput: true})
+		if err := conn.Write(r.Context(), websocket.MessageBinary, encodeFrame(frame{
+			messageType: messageEvent,
+			sessionID:   "IS-cancel",
+			payload:     subscribed,
+		})); err != nil {
+			t.Error(err)
+			return
+		}
+		<-r.Context().Done()
+	}))
+	defer server.Close()
+
+	endpoint, err := Endpoint(server.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	client, err := Dial(context.Background(), endpoint, "IS-cancel", Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+
+	terminal := newUncancelableTerminal()
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		done <- client.Attach(ctx, terminal, nil)
+	}()
+	<-terminal.started
+	cancel()
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("error = %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Attach did not return after context cancellation")
+	}
+	close(terminal.release)
+}
+
 func TestClientSubscribesReadOnlyAndSuppressesInput(t *testing.T) {
 	acknowledged := make(chan uint32, 1)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -1192,6 +1332,28 @@ type blockingTerminal struct {
 	started   chan struct{}
 	startOnce sync.Once
 	bytes.Buffer
+}
+
+type uncancelableTerminal struct {
+	started   chan struct{}
+	startOnce sync.Once
+	release   chan struct{}
+	bytes.Buffer
+}
+
+func newUncancelableTerminal() *uncancelableTerminal {
+	return &uncancelableTerminal{
+		started: make(chan struct{}),
+		release: make(chan struct{}),
+	}
+}
+
+func (terminal *uncancelableTerminal) Read(_ []byte) (int, error) {
+	terminal.startOnce.Do(func() {
+		close(terminal.started)
+	})
+	<-terminal.release
+	return 0, io.EOF
 }
 
 func newBlockingTerminal() *blockingTerminal {
