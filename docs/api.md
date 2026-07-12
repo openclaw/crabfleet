@@ -608,8 +608,12 @@ Opening the returned URL unchanged selects legacy raw input and output. Adding
 the exact `runnerProtocol=cfr1-framed-io-v1` query selects framed input, output,
 acknowledgements, and relay control traffic. The application propagates only
 that exact value to `SessionControlDO`, which stores the mode on the server
-socket before accepting it. The relay wraps legacy output before forwarding it
-to viewers, so arbitrary raw PTY bytes cannot be consumed as control traffic.
+socket before accepting it. Viewer framing is negotiated independently: framed
+viewers receive `CFR1` output and control frames, while unnegotiated viewers
+retain raw output and legacy JSON notices during rolling upgrades. The relay
+therefore wraps legacy runner output only for framed viewers, and unwraps framed
+runner output for raw viewers. Arbitrary raw PTY bytes cannot be consumed as
+control traffic by framed viewers.
 
 Each `CFR1` frame occupies one binary WebSocket message and starts with:
 
