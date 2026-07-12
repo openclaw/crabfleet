@@ -759,7 +759,8 @@ export class TerminalHub {
       upstream.addEventListener("close", (event) => {
         completeAllTerminalInputAcknowledgements(activeSubscription, {
           accepted: false,
-          error: "terminal upstream closed before accepting input",
+          deliveryUnknown: true,
+          error: "terminal input delivery outcome is unknown; the runner may still complete it",
         });
         const closeReason = consumeCloseReason();
         const safeUpstreamReason = event.reason
@@ -787,7 +788,8 @@ export class TerminalHub {
       upstream.addEventListener("error", () => {
         completeAllTerminalInputAcknowledgements(activeSubscription, {
           accepted: false,
-          error: "terminal upstream failed before accepting input",
+          deliveryUnknown: true,
+          error: "terminal input delivery outcome is unknown; the runner may still complete it",
         });
         const closeReason = closingReason;
         if (subscriptions.delete(id)) this.dependencies.releaseInputState(id);
