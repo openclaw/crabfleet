@@ -72,10 +72,10 @@ test("desktop host publication migration clears identities rotated by old worker
   database.exec(`
     INSERT INTO desktop_hosts (
       owner_subject, id, owner, name, address, port, ownership_token, publication_id,
-      created_at, updated_at
+      publication_write_token, created_at, updated_at
     ) VALUES (
       'github:1', 'studio', 'alice', 'Studio', '100.64.1.2', 5901,
-      'token-a', 'publication-a', 1, 2
+      'token-a', 'publication-a', 'token-a', 1, 2
     );
     UPDATE desktop_hosts
     SET ownership_token = 'token-b'
@@ -85,10 +85,14 @@ test("desktop host publication migration clears identities rotated by old worker
   assert.deepEqual(
     {
       ...database
-        .prepare("SELECT ownership_token, publication_id FROM desktop_hosts WHERE id = 'studio'")
+        .prepare(`
+          SELECT ownership_token, publication_id, publication_write_token
+          FROM desktop_hosts
+          WHERE id = 'studio'
+        `)
         .get(),
     },
-    { ownership_token: "token-b", publication_id: "" },
+    { ownership_token: "token-b", publication_id: "", publication_write_token: "" },
   );
 });
 

@@ -71,6 +71,7 @@ export type DesktopHostTable = {
   port: number;
   ownership_token: string;
   publication_id: string;
+  publication_write_token: Generated<string>;
   created_at: number;
   updated_at: number;
 };

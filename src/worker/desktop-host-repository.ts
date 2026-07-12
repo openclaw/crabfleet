@@ -70,6 +70,7 @@ export class DesktopHostRepository implements DesktopHostStore {
         port: host.port,
         ownership_token: host.ownershipToken,
         publication_id: host.publicationID,
+        publication_write_token: host.ownershipToken,
         created_at: host.createdAt,
         updated_at: host.updatedAt,
       })
@@ -83,6 +84,7 @@ export class DesktopHostRepository implements DesktopHostStore {
               port: host.port,
               ownership_token: host.ownershipToken,
               publication_id: host.publicationID,
+              publication_write_token: host.ownershipToken,
               updated_at: host.updatedAt,
             })
           : update.doUpdateSet({

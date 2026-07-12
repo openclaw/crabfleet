@@ -369,3 +369,67 @@ test("desktop host publication recovery matches only the current publication", a
     "token-b",
   );
 });
+
+test("same-publication retries remain recoverable after the publication migration", async () => {
+  const sqlite = new DatabaseSync(":memory:");
+  for (const migration of [
+    "0030_desktop_hosts.sql",
+    "0033_desktop_host_ownership.sql",
+    "0038_desktop_host_publication_identity.sql",
+  ]) {
+    sqlite.exec(readFileSync(new URL(`../migrations/${migration}`, import.meta.url), "utf8"));
+  }
+  const repository = new DesktopHostRepository(sqliteRuntimeEnv(sqlite));
+  const host = {
+    ownerSubject: "github:1",
+    id: "studio",
+    owner: "alice",
+    name: "Studio",
+    address: "100.64.1.2",
+    port: 5901,
+    publicationID: "publication-a",
+    createdAt: 1,
+  };
+
+  await repository.upsert({
+    ...host,
+    ownershipToken: "token-a",
+    updatedAt: 2,
+  });
+  await repository.upsert({
+    ...host,
+    ownershipToken: "token-b",
+    updatedAt: 3,
+  });
+
+  assert.deepEqual(
+    {
+      ...sqlite
+        .prepare(`
+          SELECT ownership_token, publication_id, publication_write_token
+          FROM desktop_hosts
+          WHERE owner_subject = 'github:1' AND id = 'studio'
+        `)
+        .get(),
+    },
+    {
+      ownership_token: "token-b",
+      publication_id: "publication-a",
+      publication_write_token: "token-b",
+    },
+  );
+  assert.equal(
+    await repository.ownershipTokenForPublication("github:1", "studio", "publication-a"),
+    "token-b",
+  );
+
+  sqlite.exec(`
+    UPDATE desktop_hosts
+    SET ownership_token = 'token-c'
+    WHERE owner_subject = 'github:1' AND id = 'studio'
+  `);
+  assert.equal(
+    await repository.ownershipTokenForPublication("github:1", "studio", "publication-a"),
+    null,
+  );
+});
