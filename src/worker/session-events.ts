@@ -192,7 +192,7 @@ export async function appendStructuredInteractiveSessionEventRecord(
           sameStructuredEvent(redactedRow, event) &&
           (row.message !== redactedRow.message || row.payload_json !== redactedRow.payload_json);
         if (repairsLegacyCredentials) {
-          const repaired = await db
+          const repair = db
             .updateTable("interactive_session_events")
             .set({
               message: redactedRow.message,
@@ -201,8 +201,14 @@ export async function appendStructuredInteractiveSessionEventRecord(
             .where("id", "=", row.id)
             .where("message", "=", row.message)
             .where("payload_json", "=", row.payload_json)
-            .returningAll()
-            .executeTakeFirst();
+            .returningAll();
+          const compiledRepair = repair.compile();
+          const pending = terminalFinalizationPendingQuery(db, event.sessionId).compile(db);
+          const repairResults = await env.DB.batch<InteractiveSessionEventRow>([
+            env.DB.prepare(compiledRepair.sql).bind(...compiledRepair.parameters),
+            env.DB.prepare(pending.sql).bind(...pending.parameters),
+          ]);
+          const repaired = repairResults[0]?.results?.[0];
           row =
             repaired ??
             (await db

@@ -250,6 +250,7 @@ test("legacy credential-bearing replays repair D1 and refresh terminal archives"
     },
     async () => {
       archiveCalls += 1;
+      throw new Error("simulated archive outage");
     },
   );
 
@@ -257,6 +258,12 @@ test("legacy credential-bearing replays repair D1 and refresh terminal archives"
   assert.equal(replay.event.message, "[credential]");
   assert.deepEqual(replay.event.payload, { output: "[credential]", version: 1 });
   assert.equal(archiveCalls, 1);
+  assert.equal(
+    database
+      .prepare("SELECT terminal_finalize_pending FROM interactive_sessions WHERE id = 'IS-1'")
+      .get()?.terminal_finalize_pending,
+    1,
+  );
   assert.deepEqual(
     {
       ...database
