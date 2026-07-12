@@ -477,13 +477,18 @@ final class PrivateMacShareController: ObservableObject {
   }
 
   private func removeDesktopHost(after pendingRegistration: Task<Void, Never>?) {
+    guard let pendingRegistration else {
+      registrationTask = nil
+      registryPhase = desktopRegistration == nil ? .notConfigured : .notPublished
+      return
+    }
     guard let desktopRegistrationCoordinator, let activeIdentity else {
       registrationTask = nil
       registryPhase = desktopRegistration == nil ? .notConfigured : .notPublished
       return
     }
     registrationTask = Task { [weak self] in
-      await pendingRegistration?.value
+      await pendingRegistration.value
       do {
         try await desktopRegistrationCoordinator.unregister(identity: activeIdentity)
         self?.registryPhase = .notPublished
