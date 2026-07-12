@@ -36,9 +36,9 @@ class MemoryDesktopHostStore implements DesktopHostStore {
     return stored;
   }
 
-  async remove(ownerSubject: string, id: string, ownershipToken: string): Promise<void> {
+  async remove(ownerSubject: string, id: string, ownershipToken: string | null): Promise<void> {
     const key = `${ownerSubject}:${id}`;
-    if (this.rows.get(key)?.ownershipToken === ownershipToken) {
+    if (this.rows.get(key)?.ownershipToken === (ownershipToken ?? "")) {
       this.rows.delete(key);
     }
   }
@@ -114,6 +114,37 @@ test("stale desktop host cleanup cannot remove a newer registration", async () =
   assert.deepEqual(await service.list(alice), []);
 });
 
+test("tokenless cleanup removes only migrated legacy desktop hosts", async () => {
+  const store = new MemoryDesktopHostStore();
+  const service = new DesktopHostService(
+    store,
+    () => 42,
+    () => "new-process-token",
+  );
+  const legacy: DesktopHostRow = {
+    ownerSubject: alice.subject,
+    id: "legacy-studio",
+    owner: "alice",
+    name: "Legacy Studio",
+    address: "100.64.1.2",
+    port: 5901,
+    ownershipToken: "",
+    createdAt: 1,
+    updatedAt: 1,
+  };
+  store.rows.set(`${alice.subject}:${legacy.id}`, legacy);
+  const registration = await service.register(alice, "new-studio", {
+    name: "New Studio",
+    address: "100.64.1.3",
+    port: 5901,
+  });
+
+  await service.remove(alice, legacy.id, null);
+  await service.remove(alice, registration.host.id, null);
+
+  assert.deepEqual(await service.list(alice), [registration.host]);
+});
+
 test("desktop hosts accept only bounded metadata and Tailscale IPv4 endpoints", async () => {
   const service = new DesktopHostService(new MemoryDesktopHostStore());
   const valid = { name: "Studio", address: "100.127.255.254", port: 65_535 };
@@ -133,6 +164,6 @@ test("desktop hosts accept only bounded metadata and Tailscale IPv4 endpoints", 
   }
   await assert.rejects(service.register(alice, "studio", { ...valid, name: "bad\nname" }), /name/);
   await assert.rejects(service.register(alice, "studio", { ...valid, port: 0 }), /port/);
-  await assert.rejects(service.remove(alice, "studio", null), /ownership token/);
+  await assert.rejects(service.remove(alice, "studio", ""), /ownership token/);
   await assert.rejects(service.remove(alice, "studio", "bad token"), /ownership token/);
 });

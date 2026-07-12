@@ -152,7 +152,8 @@ function desktopHostPort(value: unknown): number {
   return value;
 }
 
-function desktopHostOwnershipToken(value: unknown): string {
+function desktopHostOwnershipToken(value: unknown): string | null {
+  if (value === null || value === undefined) return null;
   if (
     typeof value !== "string" ||
     value.length === 0 ||

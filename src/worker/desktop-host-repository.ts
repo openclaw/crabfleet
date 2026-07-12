@@ -18,7 +18,7 @@ export type DesktopHostWrite = DesktopHostRow;
 export interface DesktopHostStore {
   list(ownerSubject: string): Promise<DesktopHostRow[]>;
   upsert(host: DesktopHostWrite): Promise<DesktopHostRow>;
-  remove(ownerSubject: string, id: string, ownershipToken: string): Promise<void>;
+  remove(ownerSubject: string, id: string, ownershipToken: string | null): Promise<void>;
 }
 
 export class DesktopHostRepository implements DesktopHostStore {
@@ -93,12 +93,12 @@ export class DesktopHostRepository implements DesktopHostStore {
     };
   }
 
-  async remove(ownerSubject: string, id: string, ownershipToken: string): Promise<void> {
+  async remove(ownerSubject: string, id: string, ownershipToken: string | null): Promise<void> {
     await database(this.env)
       .deleteFrom("desktop_hosts")
       .where("owner_subject", "=", ownerSubject)
       .where("id", "=", id)
-      .where("ownership_token", "=", ownershipToken)
+      .where("ownership_token", "=", ownershipToken ?? "")
       .execute();
   }
 }

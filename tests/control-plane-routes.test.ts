@@ -57,7 +57,7 @@ function dependencies(calls: string[]): ControlPlaneRouteDependencies {
       };
     },
     async removeDesktopHost(user, id, ownershipToken) {
-      calls.push(`desktop-host:remove:${user.login}:${id}:${ownershipToken}`);
+      calls.push(`desktop-host:remove:${user.login}:${id}:${ownershipToken ?? "legacy"}`);
     },
     async searchGitHubRefs(number) {
       calls.push(`github-refs:${number}`);
@@ -190,13 +190,14 @@ test("desktop host routes register and remove only the authenticated user's host
     "desktop-host:remove:viewer:mac-studio:ownership-token",
   ]);
 
-  await assert.rejects(
-    dispatch(request("DELETE", "/api/desktop-hosts/mac%2Dstudio"), viewer, []),
-    (error) => {
-      assert.equal(status(error), 400);
-      return true;
-    },
+  const legacyCalls: string[] = [];
+  const legacyRemoved = await dispatch(
+    request("DELETE", "/api/desktop-hosts/legacy%2Dstudio"),
+    viewer,
+    legacyCalls,
   );
+  assert.equal(legacyRemoved?.status, 200);
+  assert.deepEqual(legacyCalls, ["desktop-host:remove:viewer:legacy-studio:legacy"]);
 });
 
 test("card actions derive viewer or maintainer authorization from the action", async () => {

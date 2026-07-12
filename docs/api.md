@@ -1119,7 +1119,11 @@ address, port, and timestamp while preserving its creation time.
 ### DELETE /api/desktop-hosts/:id
 
 Removes one registered desktop owned by the signed-in viewer. The route cannot
-remove another user's record with the same ID.
+remove another user's record with the same ID. Registrations created by current
+clients require the exact `X-Crabfleet-Ownership-Token` returned by `PUT`.
+Older clients may omit the header only to remove a migrated legacy registration
+whose stored ownership token is empty; omission never removes a tokenized
+registration.
 
 ## Static Routes
 

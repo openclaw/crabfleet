@@ -74,4 +74,9 @@ test("desktop host repository scopes reads, upserts, and deletes by owner subjec
   assert.match(executions[3]?.sql ?? "", /^delete from "desktop_hosts"/i);
   assert.match(executions[3]?.sql ?? "", /"ownership_token" = \?/i);
   assert.deepEqual(executions[3]?.parameters, ["github:1", "studio", "ownership-token"]);
+
+  await repository.remove("github:1", "legacy-studio", null);
+  assert.match(executions[4]?.sql ?? "", /^delete from "desktop_hosts"/i);
+  assert.match(executions[4]?.sql ?? "", /"ownership_token" = \?/i);
+  assert.deepEqual(executions[4]?.parameters, ["github:1", "legacy-studio", ""]);
 });

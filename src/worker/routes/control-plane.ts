@@ -10,7 +10,7 @@ import {
   type DesktopHostInput,
   type DesktopHostRegistration,
 } from "../desktop-host-service.ts";
-import { badRequest, json, notFound, readJson } from "../http.ts";
+import { json, notFound, readJson } from "../http.ts";
 import type { User } from "../models.ts";
 
 export type ControlPlaneRouteDependencies = {
@@ -21,7 +21,7 @@ export type ControlPlaneRouteDependencies = {
     id: string,
     input: DesktopHostInput,
   ): Promise<DesktopHostRegistration>;
-  removeDesktopHost(user: User, id: string, ownershipToken: string): Promise<void>;
+  removeDesktopHost(user: User, id: string, ownershipToken: string | null): Promise<void>;
   searchGitHubRefs(number: unknown): Promise<unknown>;
   createCard(request: Request, user: User): Promise<unknown>;
   readCardRuns(user: User, cardId: string): Promise<unknown[] | null>;
@@ -62,7 +62,6 @@ export async function handleControlPlaneRoute(
   if (request.method === "DELETE" && desktopHostMatch) {
     requireRole(user, "viewer");
     const ownershipToken = request.headers.get(desktopHostOwnershipHeader);
-    if (!ownershipToken) throw badRequest("desktop host ownership token is required");
     await dependencies.removeDesktopHost(user, decoded(desktopHostMatch[1]), ownershipToken);
     return json({ ok: true });
   }
