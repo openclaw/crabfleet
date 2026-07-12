@@ -387,6 +387,30 @@ export class CardRepository implements CardLifecycleStore {
       }),
     );
     if ((results[0]?.meta.changes ?? 0) === 0) {
+      const duplicateAttempt = await db
+        .selectFrom("run_attempts")
+        .select("id")
+        .where((expressions) =>
+          expressions.or([
+            expressions("id", "=", input.runId),
+            expressions.and([
+              expressions("card_id", "=", input.card.id),
+              expressions("attempt", "=", input.attempt),
+            ]),
+          ]),
+        )
+        .executeTakeFirst();
+      if (duplicateAttempt) return "active";
+
+      const activeCardRun = await db
+        .selectFrom("cards")
+        .innerJoin("run_attempts", "run_attempts.id", "cards.active_run_id")
+        .select("cards.id")
+        .where("cards.id", "=", input.card.id)
+        .where("run_attempts.status", "in", activeRunStatuses)
+        .executeTakeFirst();
+      if (activeCardRun) return "active";
+
       const activeCount = await db
         .selectFrom("cards")
         .select(sql<number>`count(*)`.as("count"))

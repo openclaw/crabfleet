@@ -161,3 +161,50 @@ test("card run claims batch the card transition with the run-attempt insert", as
   assert.ok(batches[0]?.[0]?.parameters.includes("CY-101-R1"));
   assert.ok(batches[0]?.[1]?.parameters.includes("CY-101-R1"));
 });
+
+test("duplicate card run claims report active before global capacity", async () => {
+  const queries: string[] = [];
+  const env = {
+    DB: {
+      prepare(sql: string) {
+        queries.push(sql);
+        return {
+          bind() {
+            return {
+              async all() {
+                if (/from "run_attempts"/i.test(sql)) {
+                  return { results: [{ id: "CY-101-R1" }], meta: { changes: 0 } };
+                }
+                return { results: [{ count: 2 }], meta: { changes: 0 } };
+              },
+              async run() {
+                return { meta: { changes: 0 } };
+              },
+            };
+          },
+        };
+      },
+      async batch() {
+        return [{ meta: { changes: 0 } }, { meta: { changes: 0 } }];
+      },
+    } as unknown as D1Database,
+  } as RuntimeEnv;
+  const input = {
+    card: { id: "CY-101" },
+    runId: "CY-101-R1",
+    attempt: 1,
+    cap: 2,
+    descriptor: {
+      runtime: "container",
+      reason: "repo default",
+      capabilities: containerCapabilities,
+    },
+    now: 500,
+  } as CardRunClaimInput;
+
+  assert.equal(await new CardRepository(env).claimRun(input), "active");
+  const diagnosticQueries = queries.filter((query) => /^\s*select/i.test(query));
+  assert.equal(diagnosticQueries.length, 1);
+  assert.match(diagnosticQueries[0] ?? "", /from "run_attempts"/i);
+  assert.doesNotMatch(diagnosticQueries[0] ?? "", /count\(\*\)/i);
+});
