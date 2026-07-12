@@ -5,6 +5,7 @@ import { sha256 } from "../src/worker/crypto.ts";
 import type { RuntimeEnv } from "../src/worker/env.ts";
 import {
   GitHubActionsApplication,
+  gitHubActionsRelayRunnerUrl,
   structuredEventRequestMaxBytes,
 } from "../src/worker/github-actions-application.ts";
 import { terminalAgentEventGraceMs } from "../src/worker/session-agent-auth.ts";
@@ -141,6 +142,23 @@ test("GitHub Actions application rejects an event token issued to another sessio
   );
   assert.deepEqual(subject.credentialReads, ["IS-target"]);
   assert.equal(subject.mutationCount(), 0);
+});
+
+test("GitHub Actions application propagates only the exact runner protocol opt-in", () => {
+  const base =
+    "https://fleet.example/api/agent/interactive-sessions/IS-target/runner-pty?agentToken=secret";
+  assert.equal(
+    gitHubActionsRelayRunnerUrl(new Request(base)),
+    "https://crabfleet.internal/api/session-control/github-actions/runner",
+  );
+  assert.equal(
+    gitHubActionsRelayRunnerUrl(new Request(`${base}&runnerProtocol=cfr1-framed-io-v1`)),
+    "https://crabfleet.internal/api/session-control/github-actions/runner?runnerProtocol=cfr1-framed-io-v1",
+  );
+  assert.equal(
+    gitHubActionsRelayRunnerUrl(new Request(`${base}&runnerProtocol=cfr1-framed-io-v2`)),
+    "https://crabfleet.internal/api/session-control/github-actions/runner",
+  );
 });
 
 test("agent event endpoint rejects a wrong-session token before persistence", async () => {

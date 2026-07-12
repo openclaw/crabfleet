@@ -1,15 +1,18 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
+  attachGitHubActionsRunnerProtocol,
   buildGitHubActionsRunnerPtyUrl,
   encodeGitHubActionsRelayInput,
   encodeGitHubActionsRelayInputAcknowledgement,
   encodeGitHubActionsRelayOutput,
-  encodeGitHubActionsRunnerCapabilities,
   gitHubActionsSessionStatus,
   githubActionsCapabilities,
+  githubActionsFramedRunnerCapability,
   githubActionsRelayRole,
+  githubActionsRunnerProtocolQuery,
   githubActionsRuntimeLabel,
+  gitHubActionsRunnerUsesFramedProtocol,
   isGitHubActionsViewerControlMessage,
   isTerminalGitHubActionsWorkState,
   notifyGitHubActionsViewers,
@@ -17,6 +20,7 @@ import {
   parseGitHubActionsRelayInput,
   parseGitHubActionsRelayInputAcknowledgement,
   parseGitHubActionsRelayOutput,
+  parseGitHubActionsRunnerProtocol,
   parseGitHubActionsWorkState,
   relayGitHubActionsWebSocketMessage,
   replaceGitHubActionsRunner,
@@ -68,6 +72,13 @@ test("runner URL works without custom WebSocket headers", () => {
     buildGitHubActionsRunnerPtyUrl("https://crabfleet.openclaw.ai", "IS-123", "token with spaces"),
     "wss://crabfleet.openclaw.ai/api/agent/interactive-sessions/IS-123/runner-pty?agentToken=token+with+spaces",
   );
+  assert.equal(parseGitHubActionsRunnerProtocol(null), null);
+  assert.equal(parseGitHubActionsRunnerProtocol("cfr1-framed-io-v2"), null);
+  assert.equal(
+    parseGitHubActionsRunnerProtocol(githubActionsFramedRunnerCapability),
+    githubActionsFramedRunnerCapability,
+  );
+  assert.equal(githubActionsRunnerProtocolQuery, "runnerProtocol");
 });
 
 test("work states preserve running phases and map terminal outcomes", () => {
@@ -111,6 +122,24 @@ test("relay replaces the current runner and frames legacy raw runner output", ()
     new TextDecoder().decode(parseGitHubActionsRelayOutput(viewerTwo.sent[0]!)!),
     "output",
   );
+
+  const oldCapabilityMessage =
+    '{"type":"crabfleet_runner_capabilities","capabilities":["cfr1-framed-io-v1"]}';
+  assert.equal(
+    relayGitHubActionsWebSocketMessage(
+      "runner",
+      runner,
+      oldCapabilityMessage,
+      [runner],
+      [viewerOne],
+    ),
+    1,
+  );
+  assert.equal(
+    new TextDecoder().decode(parseGitHubActionsRelayOutput(viewerOne.sent[1]!)!),
+    oldCapabilityMessage,
+  );
+  assert.equal(gitHubActionsRunnerUsesFramedProtocol(runner), false);
 });
 
 test("legacy runners receive raw input and the relay acknowledges delivery", () => {
@@ -126,24 +155,15 @@ test("legacy runners receive raw input and the relay acknowledges delivery", () 
   });
 });
 
-test("negotiated runners receive framed input without an early acknowledgement", () => {
+test("connection-time opt-in frames the first input without a pending handshake", () => {
   const closedRunner = relaySocket(3);
   const openRunner = relaySocket();
   const laterRunner = relaySocket();
   const viewer = relaySocket();
   const input = encodeGitHubActionsRelayInput("input-one", "steer");
 
-  assert.equal(
-    relayGitHubActionsWebSocketMessage(
-      "runner",
-      openRunner,
-      encodeGitHubActionsRunnerCapabilities(),
-      [openRunner],
-      [],
-    ),
-    0,
-  );
-  openRunner.sent.length = 0;
+  attachGitHubActionsRunnerProtocol(openRunner, githubActionsFramedRunnerCapability);
+  assert.equal(gitHubActionsRunnerUsesFramedProtocol(openRunner), true);
   assert.equal(
     relayGitHubActionsWebSocketMessage(
       "viewer",
@@ -196,14 +216,7 @@ test("runner acknowledgements retain correlation and fan out to viewers", () => 
     inputId: "input-two",
     accepted: true,
   });
-  relayGitHubActionsWebSocketMessage(
-    "runner",
-    runner,
-    encodeGitHubActionsRunnerCapabilities(),
-    [runner],
-    [],
-  );
-  runner.sent.length = 0;
+  attachGitHubActionsRunnerProtocol(runner, githubActionsFramedRunnerCapability);
 
   assert.equal(
     relayGitHubActionsWebSocketMessage(
@@ -230,17 +243,7 @@ test("negotiated runners frame output so control-shaped terminal bytes stay outp
     accepted: true,
   });
 
-  assert.equal(
-    relayGitHubActionsWebSocketMessage(
-      "runner",
-      runner,
-      encodeGitHubActionsRunnerCapabilities(),
-      [runner],
-      [viewer],
-    ),
-    0,
-  );
-  assert.equal(typeof runner.sent[0], "string");
+  attachGitHubActionsRunnerProtocol(runner, githubActionsFramedRunnerCapability);
   const output = encodeGitHubActionsRelayOutput(controlShapedOutput);
   assert.equal(relayGitHubActionsWebSocketMessage("runner", runner, output, [runner], [viewer]), 1);
   assert.deepEqual(

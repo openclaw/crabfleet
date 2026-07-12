@@ -30,6 +30,8 @@ export type GitHubActionsRelayInput = {
 };
 
 export const githubActionsFramedRunnerCapability = "cfr1-framed-io-v1";
+export const githubActionsRunnerProtocolQuery = "runnerProtocol";
+export type GitHubActionsRunnerProtocol = typeof githubActionsFramedRunnerCapability;
 
 export const githubActionsCapabilities = {
   terminal: true,
@@ -79,10 +81,9 @@ const relayEvents = new Map<number, keyof typeof relayEventCodes>(
 );
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
-const runnerCapabilitiesMessageType = "crabfleet_runner_capabilities";
 
 type GitHubActionsRunnerAttachment = {
-  protocol?: typeof githubActionsFramedRunnerCapability;
+  protocol?: GitHubActionsRunnerProtocol;
 };
 
 export function githubActionsRuntimeLabel(runtime: unknown): string {
@@ -207,22 +208,6 @@ export function relayGitHubActionsWebSocketMessage(
     }
   }
 
-  const capabilities = parseGitHubActionsRunnerCapabilities(message);
-  if (capabilities) {
-    if (capabilities.includes(githubActionsFramedRunnerCapability)) {
-      senderSocket.serializeAttachment?.({
-        protocol: githubActionsFramedRunnerCapability,
-      } satisfies GitHubActionsRunnerAttachment);
-      sendGitHubActionsRunnerCapabilitiesAccepted(senderSocket, [
-        githubActionsFramedRunnerCapability,
-      ]);
-    } else {
-      senderSocket.serializeAttachment?.({} satisfies GitHubActionsRunnerAttachment);
-      sendGitHubActionsRunnerCapabilitiesAccepted(senderSocket, []);
-    }
-    return 0;
-  }
-
   if (gitHubActionsRunnerUsesFramedProtocol(senderSocket)) {
     if (
       !parseGitHubActionsRelayInputAcknowledgement(message) &&
@@ -311,45 +296,19 @@ export function parseGitHubActionsRelayInput(
   };
 }
 
-export function encodeGitHubActionsRunnerCapabilities(): string {
-  return JSON.stringify({
-    type: runnerCapabilitiesMessageType,
-    capabilities: [githubActionsFramedRunnerCapability],
-  });
+export function parseGitHubActionsRunnerProtocol(
+  value: string | null,
+): GitHubActionsRunnerProtocol | null {
+  return value === githubActionsFramedRunnerCapability ? githubActionsFramedRunnerCapability : null;
 }
 
-export function parseGitHubActionsRunnerCapabilities(
-  message: string | ArrayBuffer,
-): string[] | null {
-  if (typeof message !== "string") return null;
-  try {
-    const parsed = JSON.parse(message) as Record<string, unknown>;
-    if (parsed.type !== runnerCapabilitiesMessageType || !Array.isArray(parsed.capabilities)) {
-      return null;
-    }
-    return parsed.capabilities.filter((capability): capability is string => {
-      return typeof capability === "string";
-    });
-  } catch {
-    return null;
-  }
-}
-
-export function parseGitHubActionsRunnerCapabilitiesAccepted(
-  message: string | ArrayBuffer,
-): string[] | null {
-  if (typeof message !== "string") return null;
-  try {
-    const parsed = JSON.parse(message) as Record<string, unknown>;
-    if (parsed.type !== runnerCapabilitiesMessageType || !Array.isArray(parsed.accepted)) {
-      return null;
-    }
-    return parsed.accepted.filter((capability): capability is string => {
-      return typeof capability === "string";
-    });
-  } catch {
-    return null;
-  }
+export function attachGitHubActionsRunnerProtocol(
+  socket: GitHubActionsRelaySocket,
+  protocol: GitHubActionsRunnerProtocol | null,
+): void {
+  socket.serializeAttachment?.(
+    protocol ? ({ protocol } satisfies GitHubActionsRunnerAttachment) : {},
+  );
 }
 
 export function encodeGitHubActionsRelayInputAcknowledgement(
@@ -472,23 +431,10 @@ function requireGitHubActionsRelayInputId(inputId: string): void {
   if (!inputId) throw new Error("invalid GitHub Actions relay input id");
 }
 
-function gitHubActionsRunnerUsesFramedProtocol(socket: GitHubActionsRelaySocket): boolean {
+export function gitHubActionsRunnerUsesFramedProtocol(socket: GitHubActionsRelaySocket): boolean {
   const attachment = socket.deserializeAttachment?.();
   if (!attachment || typeof attachment !== "object") return false;
   return (
     (attachment as GitHubActionsRunnerAttachment).protocol === githubActionsFramedRunnerCapability
-  );
-}
-
-function sendGitHubActionsRunnerCapabilitiesAccepted(
-  socket: GitHubActionsRelaySocket,
-  capabilities: string[],
-): void {
-  if (socket.readyState !== webSocketOpen) return;
-  socket.send(
-    JSON.stringify({
-      type: runnerCapabilitiesMessageType,
-      accepted: capabilities,
-    }),
   );
 }

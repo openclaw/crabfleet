@@ -59,6 +59,22 @@ test("worker entrypoint delegates OpenClaw and GitHub Actions composition", asyn
   assert.match(githubActions, /new GitHubActionsWorkStateService\(/);
 });
 
+test("GitHub Actions runner protocol is attached before the relay socket is accepted", async () => {
+  const [application, relay] = await Promise.all([
+    readFile(new URL("../src/worker/github-actions-application.ts", import.meta.url), "utf8"),
+    readFile(new URL("../src/worker/session-control-do.ts", import.meta.url), "utf8"),
+  ]);
+
+  assert.match(application, /stub\.fetch\(gitHubActionsRelayRunnerUrl\(request\)/);
+  const attach = relay.indexOf("attachGitHubActionsRunnerProtocol(server, runnerProtocol)");
+  const accept = relay.indexOf(
+    'this.ctx.acceptWebSocket(server, ["github-actions-runner"])',
+    attach,
+  );
+  assert.notEqual(attach, -1);
+  assert.ok(accept > attach);
+});
+
 test("worker entrypoint retains only routing and platform composition", async () => {
   const entrypoint = await readFile(new URL("../src/index.ts", import.meta.url), "utf8");
 

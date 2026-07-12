@@ -598,21 +598,18 @@ Response:
 }
 ```
 
-Every new registration and every resume requires `owner`; it must resolve to exactly one active Crabfleet user by login, email, or stable subject. Existing work keys resume only when the supplied owner resolves to the same stable owner subject already stored on the work key. Ownerless resumes fail closed before token rotation, and a work key cannot transfer to a different stable owner. `runnerPtyUrl` can be opened with Node's global `WebSocket` without custom headers. Existing runners retain raw input/output; runners advertise `cfr1-framed-io-v1` to negotiate the framed contract below. The query credential is session-scoped, rotates on registration, is stored only as a hash, and is not exposed through viewer/session APIs.
+Every new registration and every resume requires `owner`; it must resolve to exactly one active Crabfleet user by login, email, or stable subject. Existing work keys resume only when the supplied owner resolves to the same stable owner subject already stored on the work key. Ownerless resumes fail closed before token rotation, and a work key cannot transfer to a different stable owner. `runnerPtyUrl` can be opened with Node's global `WebSocket` without custom headers. Existing runners retain raw input/output by opening it unchanged; new runners add the exact `runnerProtocol=cfr1-framed-io-v1` query to opt into the framed contract below. The query credential is session-scoped, rotates on registration, is stored only as a hash, and is not exposed through viewer/session APIs.
 
 ### GET /api/agent/interactive-sessions/:id/runner-pty
 
 WebSocket endpoint for the outbound GitHub Actions runner. Authentication uses the scoped `agentToken` query parameter embedded in `runnerPtyUrl`. One runner is current; a reconnect replaces the previous runner while browser viewers remain attached.
 
-Runner sockets begin in legacy mode with raw input and output. A runner
-negotiates framed I/O by sending
-`{"type":"crabfleet_runner_capabilities","capabilities":["cfr1-framed-io-v1"]}`.
-The relay responds with the accepted capability. The runner must keep accepting
-raw input and sending raw output until that response arrives because viewer
-input can race the advertisement on another socket. Negotiated input, output,
-acknowledgements, and relay control traffic use binary `CFR1` frames. The relay
-wraps legacy output before forwarding it to viewers, so arbitrary raw PTY bytes
-cannot be consumed as control traffic.
+Opening the returned URL unchanged selects legacy raw input and output. Adding
+the exact `runnerProtocol=cfr1-framed-io-v1` query selects framed input, output,
+acknowledgements, and relay control traffic. The application propagates only
+that exact value to `SessionControlDO`, which stores the mode on the server
+socket before accepting it. The relay wraps legacy output before forwarding it
+to viewers, so arbitrary raw PTY bytes cannot be consumed as control traffic.
 
 Each `CFR1` frame occupies one binary WebSocket message and starts with:
 
@@ -642,9 +639,9 @@ generates a rejected acknowledgement only when no current runner is available
 to receive the input frame or the relay send fails. Stale or mismatched
 acknowledgement IDs do not complete another pending input.
 
-Before negotiation, the relay unwraps viewer input to raw bytes and reports
-acceptance once the runner socket accepts the send. This preserves existing
-runner integrations while negotiated runners provide PTY-level completion.
+For legacy connections, the relay unwraps viewer input to raw bytes and reports
+acceptance once the runner socket accepts the send. Framed connections provide
+PTY-level completion through correlated acknowledgements.
 
 See [GitHub Actions Sessions](/github-actions-sessions/#runner-pty) for a
 complete Node runner integration.

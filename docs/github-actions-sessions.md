@@ -265,13 +265,13 @@ returns only the sanitized event.
 The Action connects outbound to the returned `runnerPtyUrl`. Node's global
 `WebSocket` can open the URL without custom headers.
 
-Runner sockets begin in legacy mode with raw input and output. A runner requests
-collision-free framed I/O by advertising `cfr1-framed-io-v1` immediately after
-connecting, but it remains in legacy mode until the relay accepts the
-capability. Negotiated viewer input arrives in a binary `CFR1` frame
-carrying a correlation ID; runner output uses a distinct `CFR1` output frame.
-The runner returns a correlated acknowledgement only after its PTY accepts the
-input write.
+The returned URL opens a legacy raw-input/raw-output socket. A runner opts into
+collision-free framed I/O by adding the exact
+`runnerProtocol=cfr1-framed-io-v1` query before opening the socket. The relay
+records that mode before accepting the connection. Viewer input then arrives in
+a binary `CFR1` frame carrying a correlation ID, and runner output uses a
+distinct `CFR1` output frame. The runner returns a correlated acknowledgement
+only after its PTY accepts the input write.
 
 Complete Node runner integration:
 
@@ -288,20 +288,15 @@ if (!runnerPtyUrl) throw new Error("CRABFLEET_RUNNER_PTY_URL is required");
 const magic = new Uint8Array([0x43, 0x46, 0x52, 0x31]); // CFR1
 const decoder = new TextDecoder();
 const encoder = new TextEncoder();
-const terminal = new WebSocket(runnerPtyUrl);
+const framedRunnerPtyUrl = new URL(runnerPtyUrl);
+framedRunnerPtyUrl.searchParams.set("runnerProtocol", "cfr1-framed-io-v1");
+const terminal = new WebSocket(framedRunnerPtyUrl);
 terminal.binaryType = "arraybuffer";
-let framed = false;
 
 await new Promise((resolve, reject) => {
   terminal.addEventListener("open", resolve, { once: true });
   terminal.addEventListener("error", reject, { once: true });
 });
-terminal.send(
-  JSON.stringify({
-    type: "crabfleet_runner_capabilities",
-    capabilities: ["cfr1-framed-io-v1"],
-  }),
-);
 
 const pty = spawn(process.env.SHELL || "/bin/bash", [], {
   cwd: process.cwd(),
@@ -309,45 +304,22 @@ const pty = spawn(process.env.SHELL || "/bin/bash", [], {
 });
 
 pty.onData((output) => {
-  terminal.send(framed ? encodeOutput(output) : output);
+  terminal.send(encodeOutput(output));
 });
 
 terminal.addEventListener("message", (event) => {
-  if (acceptCapabilities(event.data)) {
-    framed = true;
-    return;
-  }
   acceptInput(event.data);
 });
 
 function acceptInput(data) {
   const input = decodeInput(data);
-  if (!input) {
-    if (!framed) {
-      pty.write(typeof data === "string" ? data : decoder.decode(data));
-    }
-    return;
-  }
+  if (!input) return;
   try {
     // A successful node-pty write is this adapter's PTY acceptance point.
     pty.write(decoder.decode(input.payload));
     terminal.send(encodeAck(input.inputId, true));
   } catch {
     terminal.send(encodeAck(input.inputId, false));
-  }
-}
-
-function acceptCapabilities(data) {
-  if (typeof data !== "string") return false;
-  try {
-    const message = JSON.parse(data);
-    return (
-      message.type === "crabfleet_runner_capabilities" &&
-      Array.isArray(message.accepted) &&
-      message.accepted.includes("cfr1-framed-io-v1")
-    );
-  } catch {
-    return false;
   }
 }
 
@@ -405,12 +377,9 @@ For a PTY API with an asynchronous write callback or promise, await that
 acceptance signal before sending `encodeAck(..., true)`. Do not acknowledge when
 the WebSocket merely queues the input frame.
 
-The relay answers the advertisement with
-`{"type":"crabfleet_runner_capabilities","accepted":["cfr1-framed-io-v1"]}`.
-The runner must continue accepting raw input and sending raw output until that
-acceptance arrives. Viewer input can race the advertisement because it comes
-from another socket; messages already sent in legacy mode arrive before the
-acceptance response. Each `CFR1` frame occupies one binary WebSocket message:
+The protocol query is consumed during connection setup and is not forwarded as
+terminal data. There is no capability message or mode transition after the
+socket opens. Each `CFR1` frame occupies one binary WebSocket message:
 
 | Offset | Size     | Value                                                                          |
 | ------ | -------- | ------------------------------------------------------------------------------ |
@@ -433,9 +402,10 @@ Properties:
 - Only one runner is current.
 - A new runner connection replaces the previous runner.
 - Multiple browser viewers may remain connected.
-- Legacy runners receive raw viewer input and send raw output.
-- Runners switch to framed input and `0x04` output only after receiving the
-  capability acceptance response.
+- Legacy runners open the returned URL unchanged, receive raw viewer input, and
+  send raw output.
+- Framed runners add the exact protocol query before connecting, receive framed
+  input immediately, and wrap every output payload in a `0x04` frame.
 - Negotiated input produces `input-accepted` only after the correlated runner
   acknowledgement. Legacy input reports acceptance after relay delivery.
 - Runner lifecycle events are typed binary frames even while no runner is

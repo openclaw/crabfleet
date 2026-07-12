@@ -7,10 +7,14 @@ import {
 } from "../credential-policy-fence.ts";
 import type { FleetSandboxPolicySummary } from "../fleet-state.ts";
 import {
+  attachGitHubActionsRunnerProtocol,
   githubActionsRelayRole,
+  githubActionsRunnerProtocolQuery,
   notifyGitHubActionsViewers,
+  parseGitHubActionsRunnerProtocol,
   relayGitHubActionsWebSocketMessage,
   replaceGitHubActionsRunner,
+  type GitHubActionsRunnerProtocol,
 } from "../github-actions-runtime.ts";
 import type { RuntimeEnv } from "./env.ts";
 import { json } from "./http.ts";
@@ -51,7 +55,10 @@ export class SessionControlDO extends DurableObject<RuntimeEnv> {
         request.method === "GET" &&
         url.pathname === "/api/session-control/github-actions/runner"
       ) {
-        return this.openGitHubActionsRelay("runner");
+        return this.openGitHubActionsRelay(
+          "runner",
+          parseGitHubActionsRunnerProtocol(url.searchParams.get(githubActionsRunnerProtocolQuery)),
+        );
       }
 
       if (
@@ -223,12 +230,16 @@ export class SessionControlDO extends DurableObject<RuntimeEnv> {
     socket.close(1011, "relay peer error");
   }
 
-  private openGitHubActionsRelay(role: "runner" | "viewer"): Response {
+  private openGitHubActionsRelay(
+    role: "runner" | "viewer",
+    runnerProtocol: GitHubActionsRunnerProtocol | null = null,
+  ): Response {
     const pair = new WebSocketPair();
     const client = pair[0];
     const server = pair[1];
     if (role === "runner") {
       replaceGitHubActionsRunner(this.ctx.getWebSockets("github-actions-runner"));
+      attachGitHubActionsRunnerProtocol(server, runnerProtocol);
       this.ctx.acceptWebSocket(server, ["github-actions-runner"]);
       notifyGitHubActionsViewers(
         this.ctx.getWebSockets("github-actions-viewer"),

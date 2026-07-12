@@ -97,29 +97,15 @@ Content-Type: application/json
 The response contains `{session, agentToken, runnerPtyUrl, browserUrl}`. New registrations and resumes require `owner` to resolve to one active Crabfleet user; resumes must prove the same stable owner subject already recorded on the `workKey`. The stable subject owns browser visibility while the OpenClaw service retains lifecycle authority for its session. `runnerPtyUrl` includes the rotated session-scoped query credential and can be opened with Node's global `WebSocket` without custom headers, but it is not a raw duplex byte stream. The abbreviated runner handler is:
 
 ```js
-const terminal = new WebSocket(runnerPtyUrl);
+const framedRunnerPtyUrl = new URL(runnerPtyUrl);
+framedRunnerPtyUrl.searchParams.set("runnerProtocol", "cfr1-framed-io-v1");
+const terminal = new WebSocket(framedRunnerPtyUrl);
 terminal.binaryType = "arraybuffer";
-let framed = false;
 
-terminal.onopen = () => {
-  terminal.send(
-    JSON.stringify({
-      type: "crabfleet_runner_capabilities",
-      capabilities: ["cfr1-framed-io-v1"],
-    }),
-  );
-};
-pty.onData((output) => terminal.send(framed ? encodeCfr1Output(output) : output));
+pty.onData((output) => terminal.send(encodeCfr1Output(output)));
 terminal.onmessage = ({ data }) => {
-  if (isAcceptedCapabilities(data)) {
-    framed = true;
-    return;
-  }
   const input = decodeCfr1Input(data);
-  if (!input) {
-    if (!framed) pty.write(typeof data === "string" ? data : new TextDecoder().decode(data));
-    return;
-  }
+  if (!input) return;
   try {
     pty.write(new TextDecoder().decode(input.payload));
     terminal.send(encodeCfr1Ack(input.inputId, true));
@@ -129,12 +115,13 @@ terminal.onmessage = ({ data }) => {
 };
 ```
 
-Existing runners retain raw input and output. A runner requests correlated
-binary `CFR1` input, output, and acknowledgement frames by advertising the
-`cfr1-framed-io-v1` capability immediately after connecting. It keeps accepting
-and sending raw traffic until the relay confirms that capability. Negotiated
-runners acknowledge only after their PTY accepts the input; the complete
-encoder, decoder, and Node runner example are in
+Existing runners retain raw input and output by opening the returned URL
+unchanged. A new runner opts into correlated binary `CFR1` input, output, and
+acknowledgement frames by adding the exact
+`runnerProtocol=cfr1-framed-io-v1` query before opening the socket. The relay
+selects that mode before accepting the connection, so there is no pending
+handshake. Framed runners acknowledge only after their PTY accepts the input;
+the complete encoder, decoder, and Node runner example are in
 [`docs/github-actions-sessions.md`](docs/github-actions-sessions.md#runner-pty).
 
 The runner reports heartbeat and durable progress with bearer `agentToken` to `POST /api/agent/interactive-sessions/:id/work-state`. Terminal states are `completed`, `blocked`, `failed`, and `canceled`; active work uses `registered` or `running` plus a specific `phase`.

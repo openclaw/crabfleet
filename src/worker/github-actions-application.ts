@@ -1,4 +1,8 @@
 import type { GitHubActionsSessionRegistrationInput } from "./github-actions-session-registration.ts";
+import {
+  githubActionsRunnerProtocolQuery,
+  parseGitHubActionsRunnerProtocol,
+} from "../github-actions-runtime.ts";
 import { AdminRepository } from "./admin-repository.ts";
 import {
   GitHubActionsSessionRegistrationService,
@@ -157,7 +161,7 @@ export class GitHubActionsApplication {
         this.appendMessageEvent(sessionId, user, message, now),
     };
     await new GitHubActionsRunnerConnectionService(store).connect(session);
-    return stub.fetch("https://crabfleet.internal/api/session-control/github-actions/runner", {
+    return stub.fetch(gitHubActionsRelayRunnerUrl(request), {
       headers: { upgrade: "websocket" },
     });
   }
@@ -199,6 +203,15 @@ export class GitHubActionsApplication {
       now,
     });
   }
+}
+
+export function gitHubActionsRelayRunnerUrl(request: Request): string {
+  const relayUrl = new URL("https://crabfleet.internal/api/session-control/github-actions/runner");
+  const protocol = parseGitHubActionsRunnerProtocol(
+    new URL(request.url).searchParams.get(githubActionsRunnerProtocolQuery),
+  );
+  if (protocol) relayUrl.searchParams.set(githubActionsRunnerProtocolQuery, protocol);
+  return relayUrl.toString();
 }
 
 function isConstraintError(error: unknown): boolean {
