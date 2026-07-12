@@ -144,7 +144,7 @@ final class MacRemoteInputController: RemoteInputForwarding, @unchecked Sendable
     let event: CGEvent?
     if let keyCode = Self.keyCode(for: keysym) {
       event = CGEvent(keyboardEventSource: eventSource(), virtualKey: keyCode, keyDown: down)
-    } else if let scalar = UnicodeScalar(keysym) {
+    } else if let scalar = Self.unicodeScalar(for: keysym) {
       let candidate = CGEvent(keyboardEventSource: eventSource(), virtualKey: 0, keyDown: down)
       var codeUnits = Array(String(scalar).utf16)
       candidate?.keyboardSetUnicodeString(
@@ -227,6 +227,14 @@ final class MacRemoteInputController: RemoteInputForwarding, @unchecked Sendable
     default:
       return nil
     }
+  }
+
+  static func unicodeScalar(for keysym: UInt32) -> UnicodeScalar? {
+    let value =
+      keysym & 0xFF00_0000 == 0x0100_0000
+      ? keysym & 0x00FF_FFFF
+      : keysym
+    return UnicodeScalar(value)
   }
 
   private static let asciiKeyCodes: [Character: CGKeyCode] = [

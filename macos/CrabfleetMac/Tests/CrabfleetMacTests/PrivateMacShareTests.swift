@@ -589,6 +589,13 @@ struct PrivateMacShareTests {
     #expect(MacRemoteInputController.keyCode(for: 0x1F980) == nil)
   }
 
+  @Test
+  func decodesX11UnicodeKeysymsForMacInput() {
+    #expect(MacRemoteInputController.unicodeScalar(for: 0x0100_03BB) == "λ")
+    #expect(MacRemoteInputController.unicodeScalar(for: 0x0101_F980) == "🦀")
+    #expect(MacRemoteInputController.unicodeScalar(for: 0x0111_0000) == nil)
+  }
+
   @Test @MainActor
   func servesRoyalVNCKitOverTheCurrentTailnet() async throws {
     guard ProcessInfo.processInfo.environment["CRABFLEET_TAILNET_RFB_SMOKE"] == "1" else {
