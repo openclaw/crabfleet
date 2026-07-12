@@ -333,7 +333,7 @@ private extension VNCProtocol.TightEncoding {
 		case gradient = 2
 	}
 
-    func resetZStreamsIfNeeded(control: UInt8,
+	func resetZStreamsIfNeeded(control: UInt8,
                                logger: VNCLogger) {
 		for idx in 0..<4 {
 			let mask = UInt8(1 << idx)
@@ -349,28 +349,30 @@ private extension VNCProtocol.TightEncoding {
 			}
 		}
 	}
+}
 
+extension VNCProtocol.TightEncoding {
 	func readCompactLength(connection: NetworkConnectionReading,
                            logger: VNCLogger) async throws -> Int {
-		var length = 0
-		var shift = 0
-
-		for _ in 0..<3 {
-//            logger.logDebug("Reading Tight Compact Length")
-
-			let byte = try await connection.readUInt8()
-			length |= Int(byte & 0x7F) << shift
-
-			if (byte & 0x80) == 0 {
-				return length
-			}
-
-			shift += 7
+		let first = try await connection.readUInt8()
+		var length = Int(first & 0x7F)
+		guard (first & 0x80) != 0 else {
+			return length
 		}
 
-		throw VNCError.protocol(.invalidData)
-	}
+		let second = try await connection.readUInt8()
+		length |= Int(second & 0x7F) << 7
+		guard (second & 0x80) != 0 else {
+			return length
+		}
 
+		let third = try await connection.readUInt8()
+		length |= Int(third) << 14
+		return length
+	}
+}
+
+private extension VNCProtocol.TightEncoding {
 	func readBuffered(connection: NetworkConnectionReading,
 					  length: Int,
                       logger: VNCLogger) async throws -> Data {

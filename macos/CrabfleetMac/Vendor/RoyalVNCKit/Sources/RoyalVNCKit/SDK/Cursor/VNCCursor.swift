@@ -96,10 +96,8 @@ public extension VNCCursor {
                 return
             }
 
-            // TODO: This assumes BGRA32 which might not be the case.
-            GraphicsUtils.copyBGRAtoRGBA(srcBuffer: ptrAddr,
-                                         dstBuffer: destinationPixelBuffer,
-                                         byteCount: byteCount)
+			destinationPixelBuffer.copyMemory(from: ptrAddr,
+											  byteCount: byteCount)
         }
     }
 }

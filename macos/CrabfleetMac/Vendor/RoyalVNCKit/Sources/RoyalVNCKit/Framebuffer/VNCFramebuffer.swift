@@ -731,10 +731,34 @@ private extension VNCFramebuffer {
 			return
 		}
 
-		var data = bufferData(ofRegion: sourceRegion)
+		let data = bufferData(ofRegion: sourceRegion)
+		let bytesPerPixel = destinationProperties.bytesPerPixel
+		let rowByteCount = Int(destinationRegion.width) * bytesPerPixel
+		let destinationX = Int(destinationRegion.x)
+		let destinationY = Int(destinationRegion.y)
 
-		updatePixelBufferWithData(&data,
-								  forRegion: destinationRegion)
+		guard data.count == rowByteCount * Int(destinationRegion.height) else {
+			logger.logError("Invalid internal framebuffer data length for CopyRect")
+			return
+		}
+
+		data.withUnsafeBytes { sourceBytes in
+			guard let sourceBase = sourceBytes.baseAddress else { return }
+
+			for row in 0..<Int(destinationRegion.height) {
+				let source = sourceBase.advanced(by: row * rowByteCount)
+				let destinationOffset = destinationOffsetOf(
+					row: destinationY + row,
+					width: width
+				) + destinationOffsetOf(column: destinationX)
+				surfaceAddress.advanced(by: destinationOffset).copyMemory(
+					from: source,
+					byteCount: rowByteCount
+				)
+			}
+		}
+
+		framebufferHasBeenUpdatedAtLeastOnce = true
     }
 
 	func bufferData(ofRegion region: VNCRegion) -> Data {

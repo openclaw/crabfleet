@@ -110,9 +110,15 @@ public final class VNCConnection: NSObjectOrAnyObject, @unchecked Sendable {
 	var framebufferRequestGeneration: UInt64 = 0
 	var framebufferUpdateRequestOutstanding = false
 	var framebufferPacingTask: Task<Void, Never>?
+	var pendingPixelFormatTransition: VNCProtocol.PixelFormat?
+	var isPixelFormatTransitionInFlight = false
 	private let queue = DispatchQueue(label: "com.royalapps.royalvnc.connectionqueue",
 									  attributes: .concurrent)
 	private let lifecycleLock = NSRecursiveLock()
+	private let credentialContinuationLock = NSLock()
+	private var pendingCredentialContinuations = [
+		UUID: CheckedContinuation<VNCCredential?, Never>
+	]()
 
 	private let sharedZStream: ZlibStream
     private let sharedZRLEZStream: ZlibStream
@@ -370,6 +376,7 @@ public final class VNCConnection: NSObjectOrAnyObject, @unchecked Sendable {
 	deinit {
 		let _self = self
 
+		_self.cancelPendingCredentialRequests()
 		_self.clipboardMonitor.delegate = nil
 		_self.clipboardDelegate = nil
 
@@ -379,14 +386,19 @@ public final class VNCConnection: NSObjectOrAnyObject, @unchecked Sendable {
 
 // MARK: - Internal Connection State API
 extension VNCConnection {
-	func beginConnecting() {
+	@discardableResult
+	func beginConnecting() -> Bool {
 		lifecycleLock.lock()
 		defer { lifecycleLock.unlock() }
-		guard !state.disconnectRequested else { return }
+		guard !state.disconnectRequested,
+			  connectionState.status == .disconnected else {
+			return false
+		}
 
 		updateConnectionState(.connecting)
 
 		connection.start(queue: queue)
+		return true
 	}
 
 	func beginDisconnecting(error: Error? = nil) {
@@ -397,6 +409,7 @@ extension VNCConnection {
 		updateConnectionState(.disconnecting)
 		handshakeTask?.cancel()
 		handshakeTask = nil
+		cancelPendingCredentialRequests()
 		receiveTask?.cancel()
 		receiveTask = nil
 		sendTask?.cancel()
@@ -416,6 +429,53 @@ extension VNCConnection {
 
 	func handleBreakingError(_ error: Error) {
 		beginDisconnecting(error: error)
+	}
+
+	func withLifecycleLock<T>(_ operation: () -> T) -> T {
+		lifecycleLock.lock()
+		defer { lifecycleLock.unlock() }
+		return operation()
+	}
+
+	func registerCredentialContinuation(
+		_ continuation: CheckedContinuation<VNCCredential?, Never>,
+		id: UUID
+	) -> Bool {
+		lifecycleLock.lock()
+		defer { lifecycleLock.unlock() }
+
+		guard !state.disconnectRequested else {
+			return false
+		}
+
+		credentialContinuationLock.lock()
+		defer { credentialContinuationLock.unlock() }
+
+		pendingCredentialContinuations[id] = continuation
+		return true
+	}
+
+	func resolveCredentialRequest(id: UUID, credential: VNCCredential?) {
+		credentialContinuationLock.lock()
+		let continuation = pendingCredentialContinuations.removeValue(forKey: id)
+		credentialContinuationLock.unlock()
+
+		continuation?.resume(returning: credential)
+	}
+
+	func cancelPendingCredentialRequest(id: UUID) {
+		resolveCredentialRequest(id: id, credential: nil)
+	}
+
+	func cancelPendingCredentialRequests() {
+		credentialContinuationLock.lock()
+		let continuations = Array(pendingCredentialContinuations.values)
+		pendingCredentialContinuations.removeAll()
+		credentialContinuationLock.unlock()
+
+		for continuation in continuations {
+			continuation.resume(returning: nil)
+		}
 	}
 
 	func updateConnectionState(_ newConnectionState: ConnectionState) {

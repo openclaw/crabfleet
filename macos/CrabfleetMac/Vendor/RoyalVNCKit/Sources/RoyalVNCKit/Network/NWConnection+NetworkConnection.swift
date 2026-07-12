@@ -76,36 +76,45 @@ extension NWConnection: NetworkConnectionReading {
               maximumLength: Int) async throws -> Data {
 		return try await withCheckedThrowingContinuation { continuation in
 			receive(minimumIncompleteLength: minimumLength, maximumLength: maximumLength) { content, _, isComplete, error in
-				guard !isComplete else {
-					continuation.resume(throwing: VNCError.connection(.closed))
-
-					return
+				do {
+					continuation.resume(returning: try Self.validateReadContent(
+						content,
+						isComplete: isComplete,
+						error: error,
+						minimumLength: minimumLength,
+						maximumLength: maximumLength
+					))
+				} catch {
+					continuation.resume(throwing: error)
 				}
-
-				guard error == nil else {
-					continuation.resume(throwing: error!)
-
-					return
-				}
-
-				guard let content else {
-					continuation.resume(throwing: VNCError.protocol(.noData))
-
-					return
-				}
-
-				let receivedLength = content.count
-
-				guard receivedLength >= minimumLength,
-					  receivedLength <= maximumLength else {
-					continuation.resume(throwing: VNCError.protocol(.invalidData))
-
-					return
-				}
-
-				continuation.resume(returning: content)
 			}
 		}
+	}
+
+	static func validateReadContent(
+		_ content: Data?,
+		isComplete: Bool,
+		error: Error?,
+		minimumLength: Int,
+		maximumLength: Int
+	) throws -> Data {
+		if let error {
+			throw error
+		}
+
+		if let content, !content.isEmpty {
+			guard content.count >= minimumLength,
+				  content.count <= maximumLength else {
+				throw VNCError.protocol(.invalidData)
+			}
+			return content
+		}
+
+		if isComplete {
+			throw VNCError.connection(.closed)
+		}
+
+		throw VNCError.protocol(.noData)
 	}
 }
 

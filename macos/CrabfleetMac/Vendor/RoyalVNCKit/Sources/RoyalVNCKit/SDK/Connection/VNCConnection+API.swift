@@ -4,6 +4,19 @@ import FoundationEssentials
 import Foundation
 #endif
 
+private struct PixelFormatTransitionMessage: VNCSendableMessage {
+	let pixelFormatMessage: VNCProtocol.SetPixelFormat
+	let didSend: () -> Void
+
+	var messageType: UInt8 { pixelFormatMessage.messageType }
+	var data: Data { pixelFormatMessage.data }
+
+	func send(connection: NetworkConnectionWriting) async throws {
+		try await pixelFormatMessage.send(connection: connection)
+		didSend()
+	}
+}
+
 // MARK: - Connect/Disconnect
 public extension VNCConnection {
 #if canImport(ObjectiveC)
@@ -26,19 +39,15 @@ public extension VNCConnection {
     @objc
 #endif
 	func updateColorDepth(_ colorDepth: Settings.ColorDepth) {
-		guard let framebuffer = framebuffer else { return }
+		withLifecycleLock {
+			guard connectionState.status == .connected,
+				  framebuffer != nil else {
+				return
+			}
 
-		let newPixelFormat = VNCProtocol.PixelFormat(depth: colorDepth.rawValue)
-
-		state.pixelFormat = newPixelFormat
-
-		let sendPixelFormatMessage = VNCProtocol.SetPixelFormat(pixelFormat: newPixelFormat)
-
-		enqueueClientToServerMessage(sendPixelFormatMessage)
-
-		recreateFramebuffer(size: framebuffer.size,
-							screens: framebuffer.screens,
-							pixelFormat: newPixelFormat)
+			let newPixelFormat = VNCProtocol.PixelFormat(depth: colorDepth.rawValue)
+			requestPixelFormatTransition(newPixelFormat)
+		}
 	}
 
 	/// Requests a single-screen desktop matching the viewer viewport.
@@ -70,6 +79,74 @@ public extension VNCConnection {
 			)
 		)
 		return true
+	}
+}
+
+private extension VNCConnection {
+	func requestPixelFormatTransition(_ pixelFormat: VNCProtocol.PixelFormat) {
+		framebufferRequestLock.lock()
+		pendingPixelFormatTransition = pixelFormat
+		framebufferRequestGeneration &+= 1
+		framebufferPacingTask?.cancel()
+		framebufferPacingTask = nil
+		let transition = takePendingPixelFormatTransitionLocked()
+		framebufferRequestLock.unlock()
+
+		if let transition {
+			enqueuePixelFormatTransition(transition)
+		}
+	}
+
+	func takePendingPixelFormatTransitionLocked() -> VNCProtocol.PixelFormat? {
+		guard !framebufferUpdateRequestOutstanding,
+			  !isPixelFormatTransitionInFlight,
+			  let pixelFormat = pendingPixelFormatTransition else {
+			return nil
+		}
+
+		pendingPixelFormatTransition = nil
+		isPixelFormatTransitionInFlight = true
+		return pixelFormat
+	}
+
+	func enqueuePixelFormatTransition(_ pixelFormat: VNCProtocol.PixelFormat) {
+		let message = PixelFormatTransitionMessage(
+			pixelFormatMessage: VNCProtocol.SetPixelFormat(pixelFormat: pixelFormat)
+		) { [weak self] in
+			self?.applyPixelFormatTransition(pixelFormat)
+		}
+
+		enqueueClientToServerMessage(message)
+	}
+
+	func applyPixelFormatTransition(_ pixelFormat: VNCProtocol.PixelFormat) {
+		var didApply = false
+
+		withLifecycleLock {
+			guard connectionState.status == .connected,
+				  let framebuffer = framebuffer else {
+				return
+			}
+
+			state.pixelFormat = pixelFormat
+			recreateFramebuffer(size: framebuffer.size,
+								screens: framebuffer.screens,
+								pixelFormat: pixelFormat)
+			didApply = connectionState.status == .connected
+		}
+
+		guard didApply else { return }
+
+		framebufferRequestLock.lock()
+		isPixelFormatTransitionInFlight = false
+		let nextTransition = takePendingPixelFormatTransitionLocked()
+		framebufferRequestLock.unlock()
+
+		if let nextTransition {
+			enqueuePixelFormatTransition(nextTransition)
+		} else {
+			scheduleNextFramebufferUpdate()
+		}
 	}
 }
 
@@ -240,7 +317,11 @@ extension VNCConnection {
 	func reserveFramebufferUpdateRequest() -> Bool {
 		framebufferRequestLock.lock()
 		defer { framebufferRequestLock.unlock() }
-		guard !framebufferUpdateRequestOutstanding else { return false }
+		guard !framebufferUpdateRequestOutstanding,
+			  pendingPixelFormatTransition == nil,
+			  !isPixelFormatTransitionInFlight else {
+			return false
+		}
 		framebufferUpdateRequestOutstanding = true
 		return true
 	}
@@ -248,14 +329,21 @@ extension VNCConnection {
 	func completeFramebufferUpdateRequest() {
 		framebufferRequestLock.lock()
 		framebufferUpdateRequestOutstanding = false
+		let transition = takePendingPixelFormatTransitionLocked()
 		framebufferRequestLock.unlock()
+
+		if let transition {
+			enqueuePixelFormatTransition(transition)
+		}
 	}
 
 	func scheduleNextFramebufferUpdate() {
 		framebufferRequestLock.lock()
 		framebufferPacingTask?.cancel()
 
-		guard !framebufferUpdateRequestOutstanding else {
+		guard !framebufferUpdateRequestOutstanding,
+			  pendingPixelFormatTransition == nil,
+			  !isPixelFormatTransitionInFlight else {
 			framebufferPacingTask = nil
 			framebufferRequestLock.unlock()
 			return
@@ -300,6 +388,8 @@ extension VNCConnection {
 		framebufferPacingTask?.cancel()
 		framebufferPacingTask = nil
 		framebufferUpdateRequestOutstanding = false
+		pendingPixelFormatTransition = nil
+		isPixelFormatTransitionInFlight = false
 		framebufferRequestLock.unlock()
 	}
 

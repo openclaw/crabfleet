@@ -1,0 +1,307 @@
+import Foundation
+import Testing
+
+#if canImport(Network)
+import Network
+#endif
+
+@testable import RoyalVNCKit
+
+struct AuditFindingsTests {
+  @Test
+  func rejectsOutOfRangeZRLEPackedPaletteIndex() async throws {
+    let framebuffer = try makeFramebuffer(width: 1, height: 1, depth: 24)
+    let encoding = VNCProtocol.ZRLEEncoding(zStream: ZlibStream())
+    let rectangle = VNCProtocol.Rectangle(
+      xPosition: 0,
+      yPosition: 0,
+      width: 1,
+      height: 1,
+      encodingType: Int32(VNCFrameEncodingType.zrle.rawValue.rawValue)
+    )
+
+    var payload = Data([3])
+    payload.append(contentsOf: [
+      0, 0, 0,
+      64, 64, 64,
+      128, 128, 128,
+      0xC0,
+    ])
+    let compressed = try ZlibOneShot.deflate(payload)
+    var compressedLength = UInt32(compressed.count).bigEndian
+    var wire = withUnsafeBytes(of: &compressedLength) { Data($0) }
+    wire.append(compressed)
+
+    await #expect(throws: (any Error).self) {
+      try await encoding.decodeRectangle(
+        rectangle,
+        framebuffer: framebuffer,
+        connection: AuditBufferConnection(wire),
+        logger: VNCPrintLogger()
+      )
+    }
+  }
+
+  @Test
+  func derivesZRLEInflationLimitFromRectangleGeometry() {
+    #expect(VNCProtocol.ZRLEEncoding.maximumInflatedSize(width: 1, height: 1) == 384)
+    #expect(VNCProtocol.ZRLEEncoding.maximumInflatedSize(width: 64, height: 64) == 16_385)
+    #expect(VNCProtocol.ZRLEEncoding.maximumInflatedSize(width: 65, height: 1) == 894)
+  }
+
+  @Test
+  func drainsPendingZlibOutputAfterConsumingAllInput() throws {
+    let expected = Data(repeating: 0xA5, count: 204_800)
+    let compressed = try ZlibOneShot.deflate(expected)
+
+    let actual = try ZlibStream().decompressedData(
+      compressedData: compressed,
+      maximumOutputSize: expected.count
+    )
+
+    #expect(actual == expected)
+  }
+
+  @Test
+  func consumesSyncFlushBytesAfterFixedSizeOutputIsFull() throws {
+    let firstCompressed = Data([
+      0x78, 0x9C, 0x72, 0x74, 0x1C, 0x05, 0xA3, 0x60, 0x14,
+      0x0C, 0x77, 0x00, 0x00, 0x00, 0x00, 0xFF, 0xFF,
+      0x00, 0x00, 0x00, 0xFF, 0xFF,
+    ])
+    let secondCompressed = Data([
+      0x72, 0x1A, 0x05, 0xA3, 0x60, 0x14, 0x0C,
+      0x7B, 0x00, 0x00, 0x00, 0x00, 0xFF, 0xFF,
+    ])
+    let stream = ZlibStream()
+
+    let first = try stream.decompressedData(
+      compressedData: firstCompressed,
+      uncompressedSize: 1_000
+    )
+    let second = try stream.decompressedData(
+      compressedData: secondCompressed,
+      uncompressedSize: 1_000
+    )
+
+    #expect(first == Data(repeating: 0x41, count: 1_000))
+    #expect(second == Data(repeating: 0x42, count: 1_000))
+  }
+
+  @Test
+  func readsAllEightBitsOfThirdTightLengthByte() async throws {
+    let encoding = VNCProtocol.TightEncoding()
+
+    let length = try await encoding.readCompactLength(
+      connection: AuditBufferConnection(Data([0x80, 0x80, 0xFF])),
+      logger: VNCPrintLogger()
+    )
+
+    #expect(length == 0xFF << 14)
+  }
+
+  @Test
+  func serializesPixelFormatAndFramebufferTransitionAtSendBoundary() async throws {
+    let connection = VNCConnection(
+      settings: makeSettings(),
+      framebufferAllocator: VNCFramebufferMallocAllocator()
+    )
+    let framebuffer = try makeFramebuffer(width: 2, height: 2, depth: 24)
+    connection.framebuffer = framebuffer
+    connection.state.pixelFormat = framebuffer.sourcePixelFormat
+    connection.connectionState = .connected
+    connection._framebufferUpdatePolicy = .paused
+    connection.framebufferUpdateRequestOutstanding = true
+
+    connection.updateColorDepth(.depth8Bit)
+    #expect(connection.state.pixelFormat?.depth == 24)
+    #expect(connection.state.pixelFormat?.depth == connection.framebuffer?.sourcePixelFormat.depth)
+    #expect(connection.clientToServerMessageQueue.dequeue() == nil)
+
+    connection.completeFramebufferUpdateRequest()
+
+    let queued = try #require(connection.clientToServerMessageQueue.dequeue())
+    let writer = AuditWritingConnection()
+    try await queued.message.send(connection: writer)
+
+    #expect(writer.data.count == 20)
+    #expect(connection.state.pixelFormat?.depth == 8)
+    #expect(connection.state.pixelFormat?.depth == connection.framebuffer?.sourcePixelFormat.depth)
+  }
+
+  @Test
+  func copyRectPreservesInternalFramebufferPixels() throws {
+    let framebuffer = try makeFramebuffer(width: 2, height: 1, depth: 16)
+    var redPixel = Data([0x00, 0x7C])
+    framebuffer.update(
+      region: VNCRegion(x: 0, y: 0, width: 1, height: 1),
+      data: &redPixel
+    )
+
+    framebuffer.copy(
+      region: VNCRegion(x: 0, y: 0, width: 1, height: 1),
+      to: VNCRegion(x: 1, y: 0, width: 1, height: 1)
+    )
+
+    let pixels = Data(bytes: framebuffer.surfaceAddress, count: framebuffer.surfaceByteCount)
+    #expect(pixels[0..<4] == pixels[4..<8])
+  }
+
+#if canImport(Network)
+  @Test
+  func returnsFinalNetworkContentBeforeReportingEOF() throws {
+    let finalContent = Data([1, 2, 3])
+
+    let received = try NWConnection.validateReadContent(
+      finalContent,
+      isComplete: true,
+      error: nil,
+      minimumLength: 1,
+      maximumLength: 3
+    )
+
+    #expect(received == finalContent)
+  }
+#endif
+
+  @Test
+  func rejectsRepeatConnectAttempts() {
+    let connection = VNCConnection(settings: makeSettings())
+    connection.connectionState = .connecting
+
+    #expect(connection.beginConnecting() == false)
+  }
+
+  @Test @MainActor
+  func disconnectCancelsPendingCredentialContinuation() async {
+    let connection = VNCConnection(settings: makeSettings())
+    let delegate = PendingCredentialDelegate()
+    connection.delegate = delegate
+
+    let credentialTask = Task {
+      try await connection.askDelegateForPasswordCredential(authenticationType: .vnc)
+    }
+
+    while delegate.completion == nil {
+      await Task.yield()
+    }
+
+    connection.disconnect()
+
+    do {
+      _ = try await credentialTask.value
+      Issue.record("Expected disconnect to cancel the pending credential request")
+    } catch {
+      #expect(connection.connectionState.status == .disconnected)
+    }
+
+    delegate.completion?(VNCPasswordCredential(password: "late"))
+  }
+
+  @Test
+  func preservesAlreadyRGBAFormattedCursorChannels() {
+    let cursor = VNCCursor(
+      imageData: Data([0x11, 0x22, 0x33, 0x44]),
+      size: VNCSize(width: 1, height: 1),
+      hotspot: .zero,
+      bitsPerComponent: 8,
+      bitsPerPixel: 32,
+      bytesPerPixel: 4
+    )
+    let destination = UnsafeMutableRawPointer.allocate(byteCount: 4, alignment: 1)
+    defer { destination.deallocate() }
+
+    cursor.copyPixelDataToRGBA32(destinationPixelBuffer: destination)
+
+    #expect(Data(bytes: destination, count: 4) == Data([0x11, 0x22, 0x33, 0x44]))
+  }
+
+  private func makeFramebuffer(width: UInt16, height: UInt16, depth: UInt8) throws
+    -> VNCFramebuffer
+  {
+    try VNCFramebuffer(
+      logger: VNCPrintLogger(),
+      size: VNCSize(width: width, height: height),
+      screens: [],
+      pixelFormat: VNCProtocol.PixelFormat(depth: depth),
+      allocator: VNCFramebufferMallocAllocator()
+    )
+  }
+
+  private func makeSettings() -> VNCConnection.Settings {
+    VNCConnection.Settings(
+      isDebugLoggingEnabled: false,
+      hostname: "127.0.0.1",
+      port: 5900,
+      isShared: true,
+      isScalingEnabled: true,
+      useDisplayLink: false,
+      inputMode: .none,
+      isClipboardRedirectionEnabled: false,
+      colorDepth: .depth24Bit,
+      frameEncodings: [.raw]
+    )
+  }
+}
+
+private final class AuditBufferConnection: NetworkConnectionReading {
+  private let data: Data
+  private var offset = 0
+
+  init(_ data: Data) {
+    self.data = data
+  }
+
+  func read(minimumLength: Int, maximumLength: Int) async throws -> Data {
+    let remaining = data.count - offset
+    guard minimumLength > 0,
+          maximumLength >= minimumLength,
+          remaining >= minimumLength else {
+      throw VNCError.protocol(.noData)
+    }
+
+    let count = min(maximumLength, remaining)
+    defer { offset += count }
+    return data.subdata(in: offset..<(offset + count))
+  }
+}
+
+private final class AuditWritingConnection: NetworkConnectionWriting {
+  var data = Data()
+
+  func write(data: Data) async throws {
+    self.data.append(data)
+  }
+}
+
+@MainActor
+private final class PendingCredentialDelegate: VNCConnectionDelegate {
+  var completion: ((VNCCredential?) -> Void)?
+
+  func connection(
+    _ connection: VNCConnection,
+    stateDidChange connectionState: VNCConnection.ConnectionState
+  ) {}
+
+  func connection(
+    _ connection: VNCConnection,
+    credentialFor authenticationType: VNCAuthenticationType,
+    completion: @escaping (VNCCredential?) -> Void
+  ) {
+    self.completion = completion
+  }
+
+  func connection(_ connection: VNCConnection, didCreateFramebuffer framebuffer: VNCFramebuffer) {}
+  func connection(_ connection: VNCConnection, didResizeFramebuffer framebuffer: VNCFramebuffer) {}
+
+  func connection(
+    _ connection: VNCConnection,
+    didUpdateFramebuffer framebuffer: VNCFramebuffer,
+    x: UInt16,
+    y: UInt16,
+    width: UInt16,
+    height: UInt16
+  ) {}
+
+  func connection(_ connection: VNCConnection, didUpdateCursor cursor: VNCCursor) {}
+}

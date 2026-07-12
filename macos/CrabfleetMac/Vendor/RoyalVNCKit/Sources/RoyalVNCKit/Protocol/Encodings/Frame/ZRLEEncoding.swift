@@ -68,7 +68,10 @@ extension VNCProtocol.ZRLEEncoding {
 
 		let decompressedData = try zStream.decompressedData(
 			compressedData: compressedData,
-			maximumOutputSize: VNCProtocolLimits.maximumFramebufferBytes
+			maximumOutputSize: Self.maximumInflatedSize(
+				width: Int(rectangle.width),
+				height: Int(rectangle.height)
+			)
 		)
 
 		let stream = DataStream(data: decompressedData)
@@ -156,6 +159,35 @@ extension VNCProtocol.ZRLEEncoding {
 
 		framebuffer.didUpdate(region: rectangle.region)
 	}
+
+	static func maximumInflatedSize(width: Int, height: Int) -> Int {
+		guard width > 0, height > 0 else { return 0 }
+
+		let tileSize = Int(Self.tileSize)
+		var maximumSize = 0
+
+		for tileY in stride(from: 0, to: height, by: tileSize) {
+			let tileHeight = min(tileSize, height - tileY)
+
+			for tileX in stride(from: 0, to: width, by: tileSize) {
+				let tileWidth = min(tileSize, width - tileX)
+				let pixelCount = tileWidth * tileHeight
+				let packedPaletteBytes = 16 * 3 + ((tileWidth * 4 + 7) / 8) * tileHeight
+				let rlePaletteBytes = 127 * 3 + pixelCount * 2
+				let tilePayloadBytes = max(
+					pixelCount * 3,
+					3,
+					packedPaletteBytes,
+					pixelCount * 4,
+					rlePaletteBytes
+				)
+
+				maximumSize += 1 + tilePayloadBytes
+			}
+		}
+
+		return maximumSize
+	}
 }
 
 private extension VNCProtocol.ZRLEEncoding {
@@ -234,6 +266,12 @@ private extension VNCProtocol.ZRLEEncoding {
 					}
 
 					let indexInPalette = (Int(encoded) >> shift) & mask
+					guard indexInPalette < Int(paletteSize) else {
+						throw VNCError.protocol(.zrlePaletteIndexOverflow(
+							paletteIndex: indexInPalette,
+							paletteSize: paletteSize
+						))
+					}
 
 					let sourceStartIndex = indexInPalette * 4
 

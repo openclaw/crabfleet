@@ -136,17 +136,32 @@ extension VNCConnection {
 
 private extension VNCConnection {
 	func askDelegateForCredential(authenticationType: VNCAuthenticationType) async throws -> VNCCredential {
-		let credential: VNCCredential? = await withCheckedContinuation { continuation in
-			DispatchQueue.main.async { [weak self] in
-				guard let self, let delegate = self.delegate else {
+		let requestID = UUID()
+		let credential: VNCCredential? = await withTaskCancellationHandler {
+			await withCheckedContinuation { continuation in
+				guard registerCredentialContinuation(continuation, id: requestID) else {
 					continuation.resume(returning: nil)
 					return
 				}
 
-				delegate.connection(self, credentialFor: authenticationType) { credential in
-					continuation.resume(returning: credential)
+				if Task.isCancelled {
+					cancelPendingCredentialRequest(id: requestID)
+					return
+				}
+
+				DispatchQueue.main.async { [weak self] in
+					guard let self, let delegate = self.delegate else {
+						self?.resolveCredentialRequest(id: requestID, credential: nil)
+						return
+					}
+
+					delegate.connection(self, credentialFor: authenticationType) { [weak self] credential in
+						self?.resolveCredentialRequest(id: requestID, credential: credential)
+					}
 				}
 			}
+		} onCancel: {
+			cancelPendingCredentialRequest(id: requestID)
 		}
 
 		guard let credential else {
