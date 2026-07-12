@@ -66,10 +66,12 @@ RUN set -eux; \
   case "$arch" in \
     amd64) \
       checksum="$CRABBOX_SHA256_AMD64"; \
+      checksum_arg="CRABBOX_SHA256_AMD64"; \
       pinned_checksum="3c41839257e4622e28bcec8b0f0153f19d78d436fd548894a7c7d7726d922611" \
       ;; \
     arm64) \
       checksum="$CRABBOX_SHA256_ARM64"; \
+      checksum_arg="CRABBOX_SHA256_ARM64"; \
       pinned_checksum="4bf87a0d2365441ee2f8cb34183cfd9ebeb065111697eb2d8dc867b3a627fdd2" \
       ;; \
     *) echo "unsupported arch: $arch" >&2; exit 1 ;; \
@@ -79,9 +81,8 @@ RUN set -eux; \
     if [ "$CRABBOX_VERSION" = "0.17.1" ]; then \
       checksum="$pinned_checksum"; \
     else \
-      checksum="$(curl -fsSL \
-        "https://github.com/openclaw/crabbox/releases/download/v${CRABBOX_VERSION}/checksums.txt" \
-        | awk -v archive="$archive" '$2 == archive { print $1 }')"; \
+      echo "an explicit $checksum_arg is required for non-default versions" >&2; \
+      exit 1; \
     fi; \
   fi; \
   printf '%s\n' "$checksum" | grep -Eq '^[0-9a-f]{64}$'; \
