@@ -241,6 +241,8 @@ The payload must be a JSON object with a positive integer `version`. Crabfleet
 keeps all additional fields so ClawSweeper can extend action metadata without a
 coordinated schema migration. Payloads are bounded to 64 KiB serialized, 16
 levels, 1,024 aggregate members, and 16 KiB per UTF-8 string or object key.
+Each session is also capped atomically at 2,048 structured events and 8 MiB of
+aggregate UTF-8 event data, keeping API and archive reads bounded.
 
 `eventKey` is unique within the session. An exact semantic replay succeeds and
 returns the original event with `duplicate: true`; changed content under the
