@@ -598,11 +598,47 @@ Response:
 }
 ```
 
-Every new registration and every resume requires `owner`; it must resolve to exactly one active Crabfleet user by login, email, or stable subject. Existing work keys resume only when the supplied owner resolves to the same stable owner subject already stored on the work key. Ownerless resumes fail closed before token rotation, and a work key cannot transfer to a different stable owner. `runnerPtyUrl` is directly usable with Node's global `WebSocket`; no custom headers are required. The query credential is session-scoped, rotates on registration, is stored only as a hash, and is not exposed through viewer/session APIs.
+Every new registration and every resume requires `owner`; it must resolve to exactly one active Crabfleet user by login, email, or stable subject. Existing work keys resume only when the supplied owner resolves to the same stable owner subject already stored on the work key. Ownerless resumes fail closed before token rotation, and a work key cannot transfer to a different stable owner. `runnerPtyUrl` can be opened with Node's global `WebSocket` without custom headers, but the runner must implement the framed input and acknowledgement protocol below. The query credential is session-scoped, rotates on registration, is stored only as a hash, and is not exposed through viewer/session APIs.
 
 ### GET /api/agent/interactive-sessions/:id/runner-pty
 
-WebSocket endpoint for the outbound GitHub Actions runner. Authentication uses the scoped `agentToken` query parameter embedded in `runnerPtyUrl`. The runner sends raw terminal output bytes and receives raw viewer input bytes. One runner is current; a reconnect replaces the previous runner while browser viewers remain attached.
+WebSocket endpoint for the outbound GitHub Actions runner. Authentication uses the scoped `agentToken` query parameter embedded in `runnerPtyUrl`. One runner is current; a reconnect replaces the previous runner while browser viewers remain attached.
+
+Runner output remains unframed: text and binary WebSocket messages are fanned
+out as raw terminal output. Viewer input and relay control traffic use binary
+`CFR1` frames so terminal text cannot be mistaken for an acknowledgement.
+Legacy runners that expect raw viewer input are incompatible and their
+unframed input is rejected.
+
+Each `CFR1` frame occupies one binary WebSocket message and starts with:
+
+| Offset | Size     | Value                                    |
+| ------ | -------- | ---------------------------------------- |
+| 0      | 4        | ASCII `CFR1` (`43 46 52 31` hexadecimal) |
+| 4      | 1        | frame type                               |
+| 5      | 1        | input ID byte length                     |
+| 6      | variable | input ID, then type-specific payload     |
+
+Input IDs are nonempty ASCII `[A-Za-z0-9_-]` values of at most 80 bytes.
+
+| Type                   | Direction        | Payload                                                                       |
+| ---------------------- | ---------------- | ----------------------------------------------------------------------------- |
+| `0x01` input           | relay to runner  | raw terminal input bytes                                                      |
+| `0x02` acknowledgement | runner to relay  | one byte: `1` accepted or `0` rejected, followed by optional UTF-8 error text |
+| `0x03` lifecycle event | relay to viewers | empty input ID and one event-code byte                                        |
+
+Lifecycle event codes are `0x01` runner connected, `0x02` runner disconnected,
+and `0x03` runner waiting.
+
+The runner must copy the input frame's ID into its acknowledgement. It must send
+an accepted acknowledgement only after its PTY write API has accepted the
+payload. Queueing the frame in `WebSocket.send()` is not acceptance. Crabfleet
+generates a rejected acknowledgement only when no current runner is available
+to receive the input frame or the relay send fails. Stale or mismatched
+acknowledgement IDs do not complete another pending input.
+
+See [GitHub Actions Sessions](/github-actions-sessions/#runner-pty) for a
+complete Node runner integration.
 
 ### POST /api/agent/interactive-sessions/:id/work-state
 

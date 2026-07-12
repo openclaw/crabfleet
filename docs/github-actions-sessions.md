@@ -41,7 +41,8 @@ flowchart LR
   E[GitHub Actions runner] -->|outbound WebSocket| D
   F[Browser Ghostty viewer] -->|terminal hub| D
   F -->|input| D
-  D -->|raw input bytes| E
+  D -->|CFR1 input frame| E
+  E -->|CFR1 acknowledgement| D
   E -->|Codex turn/steer| G[Codex app-server]
   E -->|heartbeat and work state| B
   B --> H[(R2 event archives)]
@@ -261,35 +262,139 @@ returns only the sanitized event.
 
 ## Runner PTY
 
-The Action connects outbound to the returned `runnerPtyUrl`:
+The Action connects outbound to the returned `runnerPtyUrl`. Node's global
+`WebSocket` can open the URL without custom headers, but runner input is a
+framed protocol rather than raw WebSocket bytes.
+
+Runner output remains unframed and raw. Viewer input arrives in a binary `CFR1`
+frame carrying a correlation ID. The runner returns a binary acknowledgement
+with the same ID only after its PTY accepts the input write. Legacy runners that
+expect raw viewer input are incompatible.
+
+Complete Node runner integration:
+
+```sh
+npm install @lydell/node-pty
+```
 
 ```js
+import { spawn } from "@lydell/node-pty";
+
+const runnerPtyUrl = process.env.CRABFLEET_RUNNER_PTY_URL;
+if (!runnerPtyUrl) throw new Error("CRABFLEET_RUNNER_PTY_URL is required");
+
+const magic = new Uint8Array([0x43, 0x46, 0x52, 0x31]); // CFR1
+const decoder = new TextDecoder();
+const encoder = new TextEncoder();
 const terminal = new WebSocket(runnerPtyUrl);
 terminal.binaryType = "arraybuffer";
 
-terminal.onmessage = (event) => {
-  // Browser input bytes for the active runner.
-};
+await new Promise((resolve, reject) => {
+  terminal.addEventListener("open", resolve, { once: true });
+  terminal.addEventListener("error", reject, { once: true });
+});
 
-function writeTerminal(bytes) {
-  terminal.send(bytes);
+const pty = spawn(process.env.SHELL || "/bin/bash", [], {
+  cwd: process.cwd(),
+  env: process.env,
+});
+
+pty.onData((output) => {
+  terminal.send(output); // Terminal output stays raw and unframed.
+});
+
+terminal.addEventListener("message", (event) => {
+  acceptInput(event.data);
+});
+
+function acceptInput(data) {
+  const input = decodeInput(data);
+  if (!input) return;
+  try {
+    // A successful node-pty write is this adapter's PTY acceptance point.
+    pty.write(decoder.decode(input.payload));
+    terminal.send(encodeAck(input.inputId, true));
+  } catch {
+    terminal.send(encodeAck(input.inputId, false));
+  }
 }
+
+function decodeInput(data) {
+  if (!(data instanceof ArrayBuffer)) return null;
+  const frame = new Uint8Array(data);
+  if (frame.byteLength < 7 || !magic.every((value, index) => frame[index] === value)) {
+    return null;
+  }
+  if (frame[4] !== 0x01) return null;
+  const inputIdBytes = frame[5];
+  if (!inputIdBytes || inputIdBytes > 80 || 6 + inputIdBytes > frame.byteLength) {
+    return null;
+  }
+  const inputId = decoder.decode(frame.subarray(6, 6 + inputIdBytes));
+  if (!/^[A-Za-z0-9_-]+$/.test(inputId)) return null;
+  return {
+    inputId,
+    payload: frame.slice(6 + inputIdBytes),
+  };
+}
+
+function encodeAck(inputId, accepted) {
+  const inputIdBytes = encoder.encode(inputId);
+  const frame = new Uint8Array(7 + inputIdBytes.byteLength);
+  frame.set(magic);
+  frame[4] = 0x02;
+  frame[5] = inputIdBytes.byteLength;
+  frame.set(inputIdBytes, 6);
+  frame[6 + inputIdBytes.byteLength] = accepted ? 1 : 0;
+  return frame;
+}
+
+terminal.addEventListener("close", () => {
+  pty.kill();
+});
+
+terminal.addEventListener("error", () => {
+  pty.kill();
+});
 ```
+
+Set `CRABFLEET_RUNNER_PTY_URL` to the `runnerPtyUrl` returned by registration.
+For a PTY API with an asynchronous write callback or promise, await that
+acceptance signal before sending `encodeAck(..., true)`. Do not acknowledge when
+the WebSocket merely queues the input frame.
+
+Each `CFR1` frame occupies one binary WebSocket message:
+
+| Offset | Size     | Value                                                           |
+| ------ | -------- | --------------------------------------------------------------- |
+| 0      | 4        | ASCII `CFR1`                                                    |
+| 4      | 1        | `0x01` input, `0x02` acknowledgement, or `0x03` lifecycle event |
+| 5      | 1        | input ID byte length                                            |
+| 6      | variable | input ID followed by the type-specific payload                  |
+
+Input payloads are raw terminal bytes. An acknowledgement payload starts with
+`1` for accepted or `0` for rejected and may include UTF-8 error text after the
+status byte. Lifecycle events use an empty input ID and event code `0x01` for
+runner connected, `0x02` for runner disconnected, or `0x03` for runner waiting.
+The full wire contract is also specified in
+[API](/api/#get-api-agent-interactive-sessions-id-runner-pty).
 
 Properties:
 
-- The URL is directly usable by Node's global `WebSocket`.
 - Authentication is the session-scoped `agentToken` query value.
 - Only one runner is current.
 - A new runner connection replaces the previous runner.
 - Multiple browser viewers may remain connected.
-- Runner output is fanned out to viewers.
-- Writable viewer input is sent to the current runner only.
-- Runner lifecycle events are visible to viewers even while no runner is
+- Unframed runner output is fanned out to viewers unchanged.
+- Writable viewer input is framed and sent to the current runner only.
+- A viewer sees `input-accepted` only after the correlated runner
+  acknowledgement.
+- Runner lifecycle events are typed binary frames even while no runner is
   connected.
+- Unframed viewer input is rejected.
 
-The relay transports raw terminal bytes. It does not interpret Codex JSON-RPC.
-The runner-side integration decides how terminal input maps to model steering.
+The relay does not interpret Codex JSON-RPC. The runner-side integration decides
+how accepted terminal input maps to model steering.
 
 ## Browser Attach
 
@@ -325,13 +430,15 @@ instead of inventing a local shell.
 
 ## Steering Semantics
 
-Crabfleet itself forwards terminal input bytes. In the ClawSweeper integration,
-the runner:
+Crabfleet forwards terminal input inside correlated `CFR1` frames. In the
+ClawSweeper integration, the runner:
 
-1. Collects printable input until Enter.
-2. Echoes `[steer] <instruction>` to the terminal.
-3. Calls Codex `turn/steer` with the active thread and expected turn ID.
-4. Reports rejection or no-active-turn conditions in the terminal.
+1. Accepts the framed bytes into its input handler and acknowledges that input
+   ID.
+2. Collects printable input until Enter.
+3. Echoes `[steer] <instruction>` to the terminal as raw output.
+4. Calls Codex `turn/steer` with the active thread and expected turn ID.
+5. Reports rejection or no-active-turn conditions in the terminal.
 
 `Ctrl-C` maps to `turn/interrupt`.
 

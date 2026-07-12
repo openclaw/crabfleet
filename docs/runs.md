@@ -120,8 +120,9 @@ Terminal contract:
 GitHub Actions PTY contract:
 
 - OpenClaw registers or resumes work through `POST /api/openclaw/action-sessions`.
-- The returned `runnerPtyUrl` is a `wss:` URL with a rotated session-scoped query credential, directly usable by Node's global `WebSocket`.
-- The Actions process connects outbound and sends raw terminal output bytes. Raw Ghostty input bytes are returned on the same socket.
+- The returned `runnerPtyUrl` is a `wss:` URL with a rotated session-scoped query credential. Node's global `WebSocket` can open it without custom headers, but the runner must implement the `CFR1` protocol.
+- The Actions process sends unframed raw terminal output. Viewer input arrives in correlated binary `CFR1` frames, and the runner returns the matching acknowledgement only after its PTY accepts the write.
+- Legacy runners that expect raw viewer input are incompatible; unframed viewer input is rejected.
 - `SessionControlDO` allows one current runner and multiple viewers. A new runner replaces the previous runner; viewers remain connected and receive runner lifecycle events.
 - Authorized browser viewers attach through the existing `/api/terminal/ws` hub. Service and agent credentials are never included in viewer responses.
 - The runner updates `state`, `phase`, `summary`, Codex thread/turn IDs, and heartbeat through the agent work-state endpoint. `completed`, `blocked`, `failed`, and `canceled` are terminal.

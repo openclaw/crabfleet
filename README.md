@@ -94,13 +94,31 @@ Content-Type: application/json
 {"workKey":"openclaw/crabfleet:pr:42","workKind":"pr_repair","repo":"openclaw/crabfleet","branch":"fix/pr-42","owner":"operator@example.test","sourceUrl":"https://github.com/openclaw/crabfleet/pull/42","runUrl":"https://github.com/openclaw/crabfleet/actions/runs/123","purpose":"repair PR 42","summary":"starting repair"}
 ```
 
-The response contains `{session, agentToken, runnerPtyUrl, browserUrl}`. New registrations and resumes require `owner` to resolve to one active Crabfleet user; resumes must prove the same stable owner subject already recorded on the `workKey`. The stable subject owns browser visibility while the OpenClaw service retains lifecycle authority for its session. `runnerPtyUrl` includes the rotated session-scoped query credential and works directly with Node's global `WebSocket`:
+The response contains `{session, agentToken, runnerPtyUrl, browserUrl}`. New registrations and resumes require `owner` to resolve to one active Crabfleet user; resumes must prove the same stable owner subject already recorded on the `workKey`. The stable subject owns browser visibility while the OpenClaw service retains lifecycle authority for its session. `runnerPtyUrl` includes the rotated session-scoped query credential and can be opened with Node's global `WebSocket` without custom headers, but it is not a raw duplex byte stream. The abbreviated runner handler is:
 
 ```js
 const terminal = new WebSocket(runnerPtyUrl);
-terminal.onmessage = (event) => process.stdout.write(Buffer.from(event.data));
-process.stdin.on("data", (chunk) => terminal.send(chunk));
+terminal.binaryType = "arraybuffer";
+
+pty.onData((output) => terminal.send(output)); // Runner output stays raw.
+terminal.onmessage = ({ data }) => {
+  const input = decodeCfr1Input(data);
+  if (!input) return;
+  try {
+    pty.write(new TextDecoder().decode(input.payload));
+    terminal.send(encodeCfr1Ack(input.inputId, true));
+  } catch {
+    terminal.send(encodeCfr1Ack(input.inputId, false));
+  }
+};
 ```
+
+Crabfleet sends viewer input in correlated binary `CFR1` frames. The runner must
+return the matching binary acknowledgement only after its PTY accepts the
+input. Runner terminal output remains unframed and raw. Legacy clients that
+expect raw viewer input are incompatible; the complete encoder, decoder, and
+Node runner example are in
+[`docs/github-actions-sessions.md`](docs/github-actions-sessions.md#runner-pty).
 
 The runner reports heartbeat and durable progress with bearer `agentToken` to `POST /api/agent/interactive-sessions/:id/work-state`. Terminal states are `completed`, `blocked`, `failed`, and `canceled`; active work uses `registered` or `running` plus a specific `phase`.
 
