@@ -17,7 +17,7 @@ test("the documented Node runner acknowledges only delivered UTF-8 input", async
   assert.match(guide, /pendingInputs\.push\(input\)/);
   assert.match(guide, /const text = decodeCompleteUtf8\(payload\)/);
   assert.match(guide, /if \(text === null\) return/);
-  assert.match(guide, /pty\.write\(text\);\s+settlePendingInputs\(true\)/);
+  assert.match(guide, /await deliverSteeringInput\(text\);\s+settlePendingInputs\(true\)/);
   assert.match(guide, /const maxPendingInputBytes = 16 \* 1024/);
   assert.match(guide, /const maxPendingInputFrames = 32/);
   assert.match(guide, /const maxPendingInputAgeMs = 1_000/);
@@ -27,16 +27,18 @@ test("the documented Node runner acknowledges only delivered UTF-8 input", async
   assert.match(guide, /clearTimeout\(pendingInputTimer\)/);
   assert.match(guide, /new TextDecoder\("utf-8", \{ fatal: true, ignoreBOM: true \}\)/);
   assert.doesNotMatch(guide, /inputDecoder\.decode/);
-  assert.match(guide, /pty\.onData\(\(outputText\) => \{/);
+  assert.match(guide, /subscribeSteeringOutput\(\(outputText\) => \{/);
   assert.match(guide, /encodeUtf8Output\(outputText\)/);
   assert.match(guide, /deliberately a UTF-8 text adapter/);
-  assert.match(guide, /lossless\s+arbitrary PTY bytes must use a byte-oriented PTY adapter/);
+  assert.match(guide, /byte-oriented restricted steering adapter/);
   assert.match(guide, /Generation-fenced viewers add `viewerProtocol=cfr1-framed-io-v2`/);
   assert.match(guide, /stale-generation input is rejected before it\s+can reach/);
   assert.match(guide, /encodeAck\(input\.inputId, input\.generation, accepted\)/);
   assert.match(guide, /Legacy viewers omit that query/);
-  assert.match(guide, /pty\.onExit\(\(\) => \{/);
+  assert.match(guide, /subscribeSteeringExit\(\(\) => \{/);
   assert.match(guide, /terminal\.close\(1000, "pty exited"\)/);
+  assert.match(guide, /must never forward that input to a\s+shell or subprocess/);
+  assert.doesNotMatch(guide, /spawn\(process\.env\.SHELL|env:\s*process\.env|pty\.write/);
 
   const decodeCompleteUtf8 = (payload: Uint8Array) => {
     const decoder = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true });

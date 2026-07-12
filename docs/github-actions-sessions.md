@@ -274,14 +274,15 @@ correlation ID and that generation, and runner output uses a distinct `CFR1`
 output frame. The runner copies the generation into its correlated
 acknowledgement only after its PTY accepts the input write.
 
-Complete Node runner integration:
-
-```sh
-npm install @lydell/node-pty
-```
+Complete Node framing adapter around a restricted Codex steering handler:
 
 ```js
-import { spawn } from "@lydell/node-pty";
+import {
+  closeSteering,
+  deliverSteeringInput,
+  subscribeSteeringExit,
+  subscribeSteeringOutput,
+} from "./restricted-codex-steering.js";
 
 const runnerPtyUrl = process.env.CRABFLEET_RUNNER_PTY_URL;
 if (!runnerPtyUrl) throw new Error("CRABFLEET_RUNNER_PTY_URL is required");
@@ -305,24 +306,19 @@ await new Promise((resolve, reject) => {
   terminal.addEventListener("error", reject, { once: true });
 });
 
-const pty = spawn(process.env.SHELL || "/bin/bash", [], {
-  cwd: process.cwd(),
-  env: process.env,
-});
-
-pty.onData((outputText) => {
+subscribeSteeringOutput((outputText) => {
   terminal.send(encodeUtf8Output(outputText));
 });
 
-pty.onExit(() => {
+subscribeSteeringExit(() => {
   if (terminal.readyState < WebSocket.CLOSING) terminal.close(1000, "pty exited");
 });
 
 terminal.addEventListener("message", (event) => {
-  acceptInput(event.data);
+  void acceptInput(event.data);
 });
 
-function acceptInput(data) {
+async function acceptInput(data) {
   const input = decodeInput(data);
   if (!input) return;
   pendingInputs.push(input);
@@ -345,7 +341,7 @@ function acceptInput(data) {
   try {
     const text = decodeCompleteUtf8(payload);
     if (text === null) return;
-    pty.write(text);
+    await deliverSteeringInput(text);
     settlePendingInputs(true);
   } catch {
     settlePendingInputs(false);
@@ -427,32 +423,36 @@ function encodeUtf8Output(outputText) {
 }
 
 terminal.addEventListener("close", () => {
-  pty.kill();
+  closeSteering();
 });
 
 terminal.addEventListener("error", () => {
-  pty.kill();
+  closeSteering();
 });
 ```
 
 Set `CRABFLEET_RUNNER_PTY_URL` to the `runnerPtyUrl` returned by registration.
-For a PTY API with an asynchronous write callback or promise, await that
-acceptance signal before sending `encodeAck(..., true)`. Do not acknowledge when
-the WebSocket merely queues the input frame. This Node adapter buffers a valid
-incomplete UTF-8 suffix together with every affected input ID. It writes and
-positively acknowledges those frames only after a later frame completes the
-sequence. Invalid UTF-8 rejects the buffered group without delivering any of it.
-The adapter also rejects the whole pending group when it exceeds 16 KiB, 32
-frames, or one second, bounding memory, copy work, and acknowledgement latency.
+Implement `restricted-codex-steering.js` as the integration's narrow
+`turn/steer` and `turn/interrupt` adapter. `deliverSteeringInput` must consume
+browser input as steering instructions; it must never forward that input to a
+shell or subprocess, and the adapter must not expose the GitHub Actions
+environment. Await the steering acceptance signal before sending
+`encodeAck(..., true)`. Do not acknowledge when the WebSocket merely queues the
+input frame. This Node adapter buffers a valid incomplete UTF-8 suffix together
+with every affected input ID. It delivers and positively acknowledges those
+frames only after a later frame completes the sequence. Invalid UTF-8 rejects
+the buffered group without delivering any of it. The adapter also rejects the
+whole pending group when it exceeds 16 KiB, 32 frames, or one second, bounding
+memory, copy work, and acknowledgement latency.
 
 The protocol query is consumed during connection setup and is not forwarded as
 terminal data. There is no capability message or mode transition after the
 socket opens. Each `CFR1` frame occupies one binary WebSocket message. At the
 wire level, input and output payloads are opaque terminal bytes. The example is
-deliberately a UTF-8 text adapter because `@lydell/node-pty` exposes input and
-output as JavaScript strings: it rejects input that is not complete valid UTF-8
-and encodes each output string as UTF-8. Deployments that require lossless
-arbitrary PTY bytes must use a byte-oriented PTY adapter instead of this example.
+deliberately a UTF-8 text adapter for the integration's string-based steering
+surface: it rejects input that is not complete valid UTF-8 and encodes each
+output string as UTF-8. Deployments that require lossless arbitrary terminal
+bytes must use a byte-oriented restricted steering adapter instead.
 
 | Offset | Size     | Value                                                                                                                                |
 | ------ | -------- | ------------------------------------------------------------------------------------------------------------------------------------ |
