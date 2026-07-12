@@ -65,22 +65,23 @@ RUN set -eux; \
   arch="$(dpkg --print-architecture)"; \
   case "$arch" in \
     amd64) \
-      checksum="$CRABBOX_SHA256_AMD64"; \
+      override_checksum="$CRABBOX_SHA256_AMD64"; \
       checksum_arg="CRABBOX_SHA256_AMD64"; \
       pinned_checksum="3c41839257e4622e28bcec8b0f0153f19d78d436fd548894a7c7d7726d922611" \
       ;; \
     arm64) \
-      checksum="$CRABBOX_SHA256_ARM64"; \
+      override_checksum="$CRABBOX_SHA256_ARM64"; \
       checksum_arg="CRABBOX_SHA256_ARM64"; \
       pinned_checksum="4bf87a0d2365441ee2f8cb34183cfd9ebeb065111697eb2d8dc867b3a627fdd2" \
       ;; \
     *) echo "unsupported arch: $arch" >&2; exit 1 ;; \
   esac; \
   archive="crabbox_${CRABBOX_VERSION}_linux_${arch}.tar.gz"; \
-  if [ -z "$checksum" ]; then \
-    if [ "$CRABBOX_VERSION" = "0.17.1" ]; then \
-      checksum="$pinned_checksum"; \
-    else \
+  if [ "$CRABBOX_VERSION" = "0.17.1" ]; then \
+    checksum="$pinned_checksum"; \
+  else \
+    checksum="$override_checksum"; \
+    if [ -z "$checksum" ]; then \
       echo "an explicit $checksum_arg is required for non-default versions" >&2; \
       exit 1; \
     fi; \

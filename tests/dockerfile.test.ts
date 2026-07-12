@@ -14,6 +14,10 @@ test("Crabbox image pins the default release and requires pinned version overrid
     /pinned_checksum="4bf87a0d2365441ee2f8cb34183cfd9ebeb065111697eb2d8dc867b3a627fdd2"/,
   );
   assert.doesNotMatch(dockerfile, /checksums\.txt/);
+  assert.match(
+    dockerfile,
+    /if \[ "\$CRABBOX_VERSION" = "0\.17\.1" \]; then \\\n\s+checksum="\$pinned_checksum"; \\\n\s+else \\\n\s+checksum="\$override_checksum";/,
+  );
   assert.match(dockerfile, /an explicit \$checksum_arg is required/);
   assert.match(dockerfile, /grep -Eq '\^\[0-9a-f\]\{64\}\$'/);
   assert.match(dockerfile, /sha256sum -c -/);
