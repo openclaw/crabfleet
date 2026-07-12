@@ -73,6 +73,10 @@ export class GitHubActionsRepository {
         .where("work_state", "=", expectedRegistration.work_state)
         .where("work_phase", "=", expectedRegistration.work_phase)
         .where("owner_subject", "=", values.owner_subject);
+      update =
+        expectedRegistration.agent_token_hash === null
+          ? update.where("agent_token_hash", "is", null)
+          : update.where("agent_token_hash", "=", expectedRegistration.agent_token_hash);
     } else if (isWorkStateUpdate(values) && terminalWorkStates.includes(values.work_state)) {
       if (!expectedTerminalStatus) {
         throw new Error("terminal GitHub Actions update requires expected session status");

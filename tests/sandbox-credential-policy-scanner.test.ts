@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
 import test from "node:test";
 
 import {
@@ -120,6 +121,25 @@ test("credential-policy scan rejects incomplete, expired, and mismatched ownersh
     ),
     null,
   );
+});
+
+test("staged rollback reclaims current ownership before restoring policy", async () => {
+  const source = await readFile(
+    new URL("../src/worker/sandbox-credential-policy-scanner.ts", import.meta.url),
+    "utf8",
+  );
+  const start = source.indexOf("async function scanStagedCredentialPolicyRegistrations");
+  const end = source.indexOf("async function readCredentialPolicyScanPage", start);
+  const stagedRecovery = source.slice(start, end);
+
+  assert.ok(
+    stagedRecovery.indexOf("if (!ownershipFence)") < stagedRecovery.indexOf("restoreRollback({"),
+  );
+  assert.ok(
+    stagedRecovery.indexOf("renewSandboxCredentialPolicyRegistration(") <
+      stagedRecovery.indexOf("restoreRollback({"),
+  );
+  assert.match(stagedRecovery, /if \(!registrationExpiresAt\)/);
 });
 
 test("credential-policy scan preserves live standalone and managed policies", () => {

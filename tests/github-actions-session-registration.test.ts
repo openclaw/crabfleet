@@ -266,6 +266,7 @@ test("GitHub Actions work keys can be resumed by the matching owner", async () =
   assert.equal(state.updates[0]?.values.owner_subject, "github:42");
   assert.equal(state.updates[0]?.values.agent_token_hash, "agent-token-hash");
   assert.deepEqual(state.updates[0]?.expected, {
+    agent_token_hash: existing.agent_token_hash,
     updated_at: existing.updated_at,
     status: existing.status,
     work_state: existing.work_state,
@@ -363,10 +364,8 @@ test("registration adopts a concurrently inserted work key", async () => {
   assert.equal(result.session.id, "IS-concurrent");
   assert.equal(state.workKeyReads, 2);
   assert.equal(state.updates[0]?.id, "IS-concurrent");
-  assert.equal(
-    state.updates[0]?.values.updated_at,
-    Math.max(100, state.concurrentRow.updated_at + 1),
-  );
+  assert.equal(state.updates[0]?.values.updated_at, 100);
+  assert.equal(state.updates[0]?.expected.agent_token_hash, state.concurrentRow.agent_token_hash);
 });
 
 test("concurrent registration adoption rotates exactly one usable token", async () => {
@@ -395,6 +394,7 @@ test("concurrent registration adoption rotates exactly one usable token", async 
     if (
       !current ||
       current.updated_at !== expected.updated_at ||
+      current.agent_token_hash !== expected.agent_token_hash ||
       current.status !== expected.status ||
       current.work_state !== expected.work_state ||
       current.work_phase !== expected.work_phase
@@ -428,7 +428,28 @@ test("concurrent registration adoption rotates exactly one usable token", async 
     state.rows.get(existing.id)?.agent_token_hash,
     `${fulfilled[0]?.value.agentToken}-hash`,
   );
-  assert.equal(state.rows.get(existing.id)?.updated_at, existing.updated_at + 1);
+  assert.equal(state.rows.get(existing.id)?.updated_at, 100);
+});
+
+test("registration repairs a future timestamp without blocking immediate writers", async () => {
+  const existing = sessionRow({
+    id: "IS-future-revision",
+    runtime: "github_actions",
+    work_key: "issue:future-revision",
+    owner: "operator",
+    owner_subject: "github:42",
+    updated_at: 500,
+  });
+  const { store, state } = registrationStore([existing]);
+
+  await new GitHubActionsSessionRegistrationService(store).register({
+    workKey: "issue:future-revision",
+    workKind: "issue",
+    repo: "openclaw/crabfleet",
+    owner: "operator@example.test",
+  });
+
+  assert.equal(state.rows.get(existing.id)?.updated_at, 100);
 });
 
 test("registration rejects invalid input and work keys owned by another runtime", async () => {

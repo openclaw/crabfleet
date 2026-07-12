@@ -12,6 +12,7 @@ import {
   abandonSandboxCredentialPolicyRegistration,
   finishSandboxCredentialPolicyRegistration,
   recordSandboxCredentialPolicyRefs,
+  renewSandboxCredentialPolicyRegistration,
   sandboxCredentialPolicyCleanupAuthorizedCondition,
   sandboxLookupIds,
   type SandboxCredentialPolicyOwnershipFence,
@@ -339,8 +340,17 @@ async function scanStagedCredentialPolicyRegistrations(
     };
     try {
       const ownershipFence = credentialPolicyScanOwnershipFence(row, now);
+      if (!ownershipFence) {
+        await abandonSandboxCredentialPolicyRegistration(
+          env,
+          row.session_id,
+          row.sandbox_id,
+          registration,
+          "sandbox credential policy owner is no longer current",
+        );
+        continue;
+      }
       if (
-        ownershipFence &&
         (await policyExists(env, row.sandbox_id, row.registration_generation)) &&
         (await finishSandboxCredentialPolicyRegistration(
           env,
@@ -354,9 +364,26 @@ async function scanStagedCredentialPolicyRegistrations(
       }
       if (row.rollback_policies_json !== null) {
         if (!restoreRollback) throw new Error("sandbox credential policy rollback is unavailable");
+        const registrationExpiresAt = await renewSandboxCredentialPolicyRegistration(
+          env,
+          row.session_id,
+          row.sandbox_id,
+          registration,
+          ownershipFence,
+        );
+        if (!registrationExpiresAt) {
+          await abandonSandboxCredentialPolicyRegistration(
+            env,
+            row.session_id,
+            row.sandbox_id,
+            registration,
+            "sandbox credential policy owner changed before rollback",
+          );
+          continue;
+        }
         await restoreRollback({
           registration,
-          registrationExpiresAt: row.registration_claim_expires_at,
+          registrationExpiresAt,
           rollbackJson: row.rollback_policies_json,
           sessionId: row.session_id,
         });

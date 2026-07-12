@@ -168,6 +168,7 @@ const registrationUpdate: GitHubActionsSessionRegistrationUpdate = {
 };
 
 const registrationExpectation = {
+  agent_token_hash: "prior-agent-hash",
   updated_at: 90,
   status: "stopped",
   work_state: "completed",
