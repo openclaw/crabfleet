@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -271,6 +272,90 @@ func TestClientSubscribesSendsInputAndAcknowledgesOutput(t *testing.T) {
 	}
 	if bytes := <-acknowledged; bytes != uint32(len("ready\n")) {
 		t.Fatalf("acknowledged = %d", bytes)
+	}
+}
+
+func TestSendInputConfirmedReturnsControlRevocation(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := websocket.Accept(w, r, nil)
+		if err != nil {
+			t.Error(err)
+			return
+		}
+		defer conn.Close(websocket.StatusNormalClosure, "")
+		for range 2 {
+			if _, _, err := conn.Read(r.Context()); err != nil {
+				t.Error(err)
+				return
+			}
+		}
+		subscribed, _ := json.Marshal(eventPayload{Type: "subscribed", CanInput: true})
+		if err := conn.Write(r.Context(), websocket.MessageBinary, encodeFrame(frame{
+			messageType: messageEvent,
+			sessionID:   "IS-revoked",
+			payload:     subscribed,
+		})); err != nil {
+			t.Error(err)
+			return
+		}
+		if _, _, err := conn.Read(r.Context()); err != nil {
+			t.Error(err)
+			return
+		}
+		revoked, _ := json.Marshal(eventPayload{Error: "terminal control revoked"})
+		_ = conn.Write(r.Context(), websocket.MessageBinary, encodeFrame(frame{
+			messageType: messageControlRevoked,
+			sessionID:   "IS-revoked",
+			payload:     revoked,
+		}))
+	}))
+	defer server.Close()
+
+	endpoint, err := Endpoint(server.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	client, err := Dial(context.Background(), endpoint, "IS-revoked", Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+	err = client.SendInputConfirmed(context.Background(), []byte("blocked\n"))
+	if err == nil || !strings.Contains(err.Error(), "control revoked") {
+		t.Fatalf("error = %v", err)
+	}
+}
+
+func TestDialUsesConfiguredHTTPClientAndTimeout(t *testing.T) {
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := websocket.Accept(w, r, nil)
+		if err != nil {
+			t.Error(err)
+			return
+		}
+		defer conn.Close(websocket.StatusNormalClosure, "")
+		for range 2 {
+			if _, _, err := conn.Read(r.Context()); err != nil {
+				return
+			}
+		}
+		<-r.Context().Done()
+	}))
+	defer server.Close()
+
+	endpoint, err := Endpoint(server.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	httpClient := server.Client()
+	httpClient.Timeout = 25 * time.Millisecond
+	started := time.Now()
+	_, err = Dial(context.Background(), endpoint, "IS-timeout", Options{HTTPClient: httpClient})
+	if err == nil {
+		t.Fatal("expected subscription timeout")
+	}
+	if elapsed := time.Since(started); elapsed > time.Second {
+		t.Fatalf("dial timeout took %s", elapsed)
 	}
 }
 

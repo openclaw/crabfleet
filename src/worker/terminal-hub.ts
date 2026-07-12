@@ -217,17 +217,24 @@ export class TerminalHub {
             if (!canInput) {
               return;
             }
-            if (subscription.upstream.readyState === WebSocket.OPEN) {
-              const inputs = await this.dependencies.inputPayloads(
-                subscription,
-                user,
-                frame.payload,
-              );
-              for (const [index, input] of inputs.entries()) {
-                if (index > 0) await sleep(index === inputs.length - 1 ? 80 : 2);
-                subscription.upstream.send(input);
-              }
+            if (subscription.upstream.readyState !== WebSocket.OPEN) {
+              sendTerminalJson(server, TerminalMessageType.Error, frame.sessionId, {
+                error: "terminal upstream is not open",
+              });
+              return;
             }
+            const inputs = await this.dependencies.inputPayloads(
+              subscription,
+              user,
+              frame.payload,
+            );
+            for (const [index, input] of inputs.entries()) {
+              if (index > 0) await sleep(index === inputs.length - 1 ? 80 : 2);
+              subscription.upstream.send(input);
+            }
+            sendTerminalJson(server, TerminalMessageType.Event, frame.sessionId, {
+              type: "input-accepted",
+            });
             return;
           }
           if (frame.type === TerminalMessageType.Resize) {

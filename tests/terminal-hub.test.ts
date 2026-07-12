@@ -337,6 +337,9 @@ test("terminal hub routes multiplex frames and explicit output acknowledgements"
   });
   await flushQueues();
   assert.deepEqual(new Uint8Array(upstream.sent.at(-1) as Uint8Array), inputPayload);
+  const inputAccepted = frame(server.sent.at(-1)!);
+  assert.equal(inputAccepted.type, TerminalMessageType.Event);
+  assert.deepEqual(decodeJsonPayload(inputAccepted.payload), { type: "input-accepted" });
 
   server.emit("message", {
     data: encodeTerminalFrame({
@@ -397,8 +400,14 @@ test("terminal hub publishes live controller downgrades and promotions", async (
     }),
   });
   await flushQueues();
-  assert.equal(frame(server.sent.at(-1)!).type, TerminalMessageType.ControlGranted);
+  assert.equal(
+    server.sent.map((payload) => frame(payload).type).at(-2),
+    TerminalMessageType.ControlGranted,
+  );
   assert.equal(new TextDecoder().decode(upstream.sent.at(-1) as Uint8Array), "allowed");
+  assert.deepEqual(decodeJsonPayload(frame(server.sent.at(-1)!).payload), {
+    type: "input-accepted",
+  });
   server.emit("close");
 });
 

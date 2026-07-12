@@ -193,7 +193,7 @@ func (c *Client) Message(
 	if enter {
 		message += "\n"
 	}
-	return client.SendInput(ctx, []byte(message))
+	return client.SendInputConfirmed(ctx, []byte(message))
 }
 
 func (c *Client) Attach(
@@ -222,9 +222,10 @@ func (c *Client) terminal(ctx context.Context, id string, cols uint32, rows uint
 		return nil, err
 	}
 	client, err := terminalws.Dial(ctx, endpoint, id, terminalws.Options{
-		Header: headers,
-		Cols:   cols,
-		Rows:   rows,
+		HTTPClient: c.http,
+		Header:     headers,
+		Cols:       cols,
+		Rows:       rows,
 	})
 	if err != nil {
 		var statusErr *terminalws.HandshakeStatusError

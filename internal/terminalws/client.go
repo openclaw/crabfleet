@@ -49,9 +49,10 @@ const (
 )
 
 type Options struct {
-	Header http.Header
-	Cols   uint32
-	Rows   uint32
+	HTTPClient *http.Client
+	Header     http.Header
+	Cols       uint32
+	Rows       uint32
 }
 
 type HandshakeStatusError struct {
@@ -122,7 +123,13 @@ func Dial(ctx context.Context, endpoint string, sessionID string, options Option
 	if sessionID == "" {
 		return nil, errors.New("terminal session id is required")
 	}
+	if options.HTTPClient != nil && options.HTTPClient.Timeout > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, options.HTTPClient.Timeout)
+		defer cancel()
+	}
 	conn, resp, err := websocket.Dial(ctx, endpoint, &websocket.DialOptions{
+		HTTPClient: options.HTTPClient,
 		HTTPHeader: options.Header,
 	})
 	if err != nil {
@@ -199,6 +206,47 @@ func (c *Client) SendInput(ctx context.Context, payload []byte) error {
 		sessionID:   c.sessionID,
 		payload:     payload,
 	})
+}
+
+func (c *Client) SendInputConfirmed(ctx context.Context, payload []byte) error {
+	if err := c.SendInput(ctx, payload); err != nil {
+		return err
+	}
+	for {
+		current, err := c.read(ctx)
+		if err != nil {
+			return err
+		}
+		if current.sessionID != "" && current.sessionID != c.sessionID {
+			continue
+		}
+		switch current.messageType {
+		case messageOutput:
+			if err := c.write(ctx, frame{
+				messageType: messageAck,
+				sessionID:   c.sessionID,
+				payload:     ackPayload(uint32(len(current.payload))),
+			}); err != nil {
+				return err
+			}
+		case messageError, messageControlRevoked:
+			c.canInput.Store(false)
+			return frameError(current, "terminal input rejected")
+		case messageControlGranted:
+			c.canInput.Store(true)
+		case messageEvent:
+			var event eventPayload
+			if err := json.Unmarshal(current.payload, &event); err != nil {
+				return fmt.Errorf("decode terminal event: %w", err)
+			}
+			switch event.Type {
+			case "input-accepted":
+				return nil
+			case "closed":
+				return errors.New("terminal closed before accepting input")
+			}
+		}
+	}
 }
 
 func (c *Client) Resize(ctx context.Context, size Size) error {
