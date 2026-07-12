@@ -36,7 +36,7 @@ const terminalInputAcknowledgementTimeoutMs = 5_000;
 
 type PendingTerminalInputAcknowledgement = {
   inputId: string;
-  runnerGeneration: number;
+  runnerGeneration: number | string;
   promise: Promise<GitHubActionsRelayInputAcknowledgement>;
   resolve(result: GitHubActionsRelayInputAcknowledgement): void;
   timeout: ReturnType<typeof setTimeout>;
@@ -46,6 +46,7 @@ export type TerminalUpstream = {
   socket: WebSocket;
   markConnected: () => Promise<void>;
   inputAcknowledgements?: boolean;
+  inputGenerations?: boolean;
   outputAcknowledgements: boolean;
 };
 
@@ -65,8 +66,9 @@ export type TerminalHubSubscription = {
   inputQueueFrames: number;
   inputQueueRejections: number;
   inputQueueRejectionScheduled: boolean;
+  inputGenerations: boolean;
   pendingInputAcknowledgements: Map<string, PendingTerminalInputAcknowledgement>;
-  runnerGeneration: number;
+  runnerGeneration: number | string;
   outputAcknowledgements: boolean;
   outputAcknowledgementBytes: number;
 };
@@ -302,7 +304,15 @@ export class TerminalHub {
                     if (acknowledgement) acknowledgements.push(acknowledgement);
                     try {
                       subscription.upstream.send(
-                        inputId ? encodeGitHubActionsRelayInput(inputId, input) : input,
+                        inputId
+                          ? encodeGitHubActionsRelayInput(
+                              inputId,
+                              input,
+                              subscription.inputGenerations
+                                ? String(subscription.runnerGeneration)
+                                : undefined,
+                            )
+                          : input,
                       );
                     } catch {
                       if (acknowledgement) {
@@ -516,8 +526,9 @@ export class TerminalHub {
         inputQueueFrames: 0,
         inputQueueRejections: 0,
         inputQueueRejectionScheduled: false,
+        inputGenerations: upstreamConnection.inputGenerations ?? false,
         pendingInputAcknowledgements: new Map(),
-        runnerGeneration: 0,
+        runnerGeneration: upstreamConnection.inputGenerations ? "none" : 0,
         outputAcknowledgements: outputAcknowledgements && upstreamConnection.outputAcknowledgements,
         outputAcknowledgementBytes: 0,
       };
@@ -558,10 +569,22 @@ export class TerminalHub {
         const receivedRelayEvent = activeSubscription.inputAcknowledgements
           ? parseSynchronousGitHubActionsRelayEvent(raw)
           : null;
-        let runnerGenerationAtReceipt =
-          receivedRelayEvent?.type === "runner_connected"
-            ? ++activeSubscription.runnerGeneration
-            : activeSubscription.runnerGeneration;
+        let runnerGenerationAtReceipt = activeSubscription.runnerGeneration;
+        if (receivedRelayEvent?.generation) {
+          runnerGenerationAtReceipt = receivedRelayEvent.generation;
+          if (receivedRelayEvent.type === "runner_disconnected") {
+            if (activeSubscription.runnerGeneration === receivedRelayEvent.generation) {
+              activeSubscription.runnerGeneration = "none";
+            }
+          } else {
+            activeSubscription.runnerGeneration = receivedRelayEvent.generation;
+          }
+        } else if (
+          receivedRelayEvent?.type === "runner_connected" &&
+          !activeSubscription.inputGenerations
+        ) {
+          runnerGenerationAtReceipt = ++(activeSubscription.runnerGeneration as number);
+        }
         outputQueue = outputQueue
           .catch(() => undefined)
           .then(async () => {
@@ -580,22 +603,55 @@ export class TerminalHub {
               const relayEvent = receivedRelayEvent ?? parseGitHubActionsRelayEvent(data);
               if (relayEvent) {
                 if (relayEvent.type === "runner_disconnected") {
+                  if (relayEvent.generation && activeSubscription.inputGenerations) {
+                    completeTerminalInputAcknowledgements(
+                      activeSubscription,
+                      (pending) => pending.runnerGeneration === relayEvent.generation,
+                      {
+                        accepted: false,
+                        error: "GitHub Actions runner disconnected before accepting input",
+                      },
+                    );
+                  } else {
+                    completeAllTerminalInputAcknowledgements(activeSubscription, {
+                      accepted: false,
+                      error: "GitHub Actions runner disconnected before accepting input",
+                    });
+                  }
+                } else if (relayEvent.type === "runner_connected") {
+                  if (relayEvent.generation && activeSubscription.inputGenerations) {
+                    runnerGenerationAtReceipt = relayEvent.generation;
+                    activeSubscription.runnerGeneration = relayEvent.generation;
+                    completeTerminalInputAcknowledgements(
+                      activeSubscription,
+                      (pending) => pending.runnerGeneration !== relayEvent.generation,
+                      {
+                        accepted: false,
+                        error: "GitHub Actions runner was replaced before accepting input",
+                      },
+                    );
+                  } else {
+                    if (!receivedRelayEvent) {
+                      runnerGenerationAtReceipt = ++(activeSubscription.runnerGeneration as number);
+                    }
+                    completeTerminalInputAcknowledgementsBeforeGeneration(
+                      activeSubscription,
+                      runnerGenerationAtReceipt as number,
+                      {
+                        accepted: false,
+                        error: "GitHub Actions runner was replaced before accepting input",
+                      },
+                    );
+                  }
+                } else if (
+                  relayEvent.type === "runner_waiting" &&
+                  activeSubscription.inputGenerations
+                ) {
+                  activeSubscription.runnerGeneration = relayEvent.generation ?? "none";
                   completeAllTerminalInputAcknowledgements(activeSubscription, {
                     accepted: false,
                     error: "GitHub Actions runner disconnected before accepting input",
                   });
-                } else if (relayEvent.type === "runner_connected") {
-                  if (!receivedRelayEvent) {
-                    runnerGenerationAtReceipt = ++activeSubscription.runnerGeneration;
-                  }
-                  completeTerminalInputAcknowledgementsBeforeGeneration(
-                    activeSubscription,
-                    runnerGenerationAtReceipt,
-                    {
-                      accepted: false,
-                      error: "GitHub Actions runner was replaced before accepting input",
-                    },
-                  );
                 }
                 sendTerminalJson(client, TerminalMessageType.Event, id, relayEvent);
                 return;
@@ -701,7 +757,7 @@ export class TerminalHub {
 function beginTerminalInputAcknowledgement(
   subscription: TerminalHubSubscription,
   inputId: string,
-  runnerGeneration: number,
+  runnerGeneration: number | string,
 ): PendingTerminalInputAcknowledgement {
   let resolve!: (result: GitHubActionsRelayInputAcknowledgement) => void;
   const promise = new Promise<GitHubActionsRelayInputAcknowledgement>((complete) => {
@@ -760,6 +816,9 @@ function completeTerminalInputAcknowledgement(
 ): boolean {
   const pending = subscription.pendingInputAcknowledgements.get(inputId);
   if (!pending) return false;
+  if (subscription.inputGenerations && result.generation !== String(pending.runnerGeneration)) {
+    return false;
+  }
   subscription.pendingInputAcknowledgements.delete(inputId);
   clearTimeout(pending.timeout);
   pending.resolve(result);
@@ -780,7 +839,7 @@ function completeTerminalInputAcknowledgementsBeforeGeneration(
 ): number {
   return completeTerminalInputAcknowledgements(
     subscription,
-    (pending) => pending.runnerGeneration < runnerGeneration,
+    (pending) => (pending.runnerGeneration as number) < runnerGeneration,
     result,
   );
 }

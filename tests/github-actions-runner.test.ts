@@ -48,6 +48,24 @@ test("runner acknowledges input only after the PTY write completes", async () =>
   });
 });
 
+test("runner copies the relay generation into its acknowledgement", async () => {
+  const socket = relaySocket();
+
+  assert.equal(
+    await acceptGitHubActionsRunnerInput(
+      socket,
+      encodeGitHubActionsRelayInput("input-generated", "steer", "generation-one"),
+      async () => {},
+    ),
+    true,
+  );
+  assert.deepEqual(parseGitHubActionsRelayInputAcknowledgement(socket.sent[0]!), {
+    inputId: "input-generated",
+    accepted: true,
+    generation: "generation-one",
+  });
+});
+
 test("runner rejects failed writes and ignores unframed terminal data", async () => {
   const socket = relaySocket();
 

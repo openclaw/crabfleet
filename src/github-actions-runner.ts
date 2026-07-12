@@ -24,11 +24,13 @@ export async function acceptGitHubActionsRunnerInput(
     sendGitHubActionsRelayInputAcknowledgement(socket, {
       inputId: input.inputId,
       accepted: true,
+      ...(input.generation ? { generation: input.generation } : {}),
     });
   } catch {
     sendGitHubActionsRelayInputAcknowledgement(socket, {
       inputId: input.inputId,
       accepted: false,
+      ...(input.generation ? { generation: input.generation } : {}),
     });
   }
   return true;

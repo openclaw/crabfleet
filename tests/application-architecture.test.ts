@@ -66,7 +66,7 @@ test("GitHub Actions runner protocol is attached before the relay socket is acce
   ]);
 
   assert.match(application, /stub\.fetch\(gitHubActionsRelayRunnerUrl\(request\)/);
-  const attach = relay.indexOf("attachGitHubActionsRunnerProtocol(server, protocol)");
+  const attach = relay.indexOf("attachGitHubActionsRunnerProtocol(server, protocol, generation)");
   const accept = relay.indexOf(
     'this.ctx.acceptWebSocket(server, ["github-actions-runner"])',
     attach,

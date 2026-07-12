@@ -15,6 +15,7 @@ import {
   encodeGitHubActionsRelayInputAcknowledgement,
   encodeGitHubActionsRelayOutput,
   githubActionsFramedRunnerCapability,
+  githubActionsGenerationFencedCapability,
   notifyGitHubActionsViewers,
   parseGitHubActionsRelayInput,
 } from "../src/github-actions-runtime.ts";
@@ -84,23 +85,37 @@ function relayInput(value: string | ArrayBuffer | ArrayBufferView | Blob) {
   assert.ok(input);
   return {
     inputId: input.inputId,
+    generation: input.generation,
     text: new TextDecoder().decode(input.payload),
   };
 }
 
-function emitRelayAcknowledgement(upstream: TestSocket, inputId: string, accepted: boolean): void {
+function emitRelayAcknowledgement(
+  upstream: TestSocket,
+  inputId: string,
+  accepted: boolean,
+  generation?: string,
+): void {
   upstream.emit("message", {
-    data: encodeGitHubActionsRelayInputAcknowledgement({ inputId, accepted }),
+    data: encodeGitHubActionsRelayInputAcknowledgement({
+      inputId,
+      accepted,
+      ...(generation ? { generation } : {}),
+    }),
   });
 }
 
 function emitRelayEvent(
   upstream: TestSocket,
   type: "runner_connected" | "runner_disconnected" | "runner_waiting",
+  generation?: string,
 ): void {
   const source = socket();
-  attachGitHubActionsViewerProtocol(source, githubActionsFramedRunnerCapability);
-  notifyGitHubActionsViewers([source], type);
+  attachGitHubActionsViewerProtocol(
+    source,
+    generation ? githubActionsGenerationFencedCapability : githubActionsFramedRunnerCapability,
+  );
+  notifyGitHubActionsViewers([source], type, generation);
   upstream.emit("message", { data: source.sent[0] });
 }
 
@@ -1522,6 +1537,107 @@ test("queued runner replacement rejects only acknowledgements sent to the old ge
   );
 
   emitRelayAcknowledgement(upstream, replacementInput.inputId, true);
+  await flushQueues();
+  await flushQueues();
+
+  const completions = server.sent
+    .map((payload) => frame(payload))
+    .filter((message) => message.type === TerminalMessageType.Event)
+    .map((message) => decodeJsonPayload(message.payload) as { type?: string; error?: string })
+    .filter((message) => message.type === "input-accepted" || message.type === "input-rejected");
+  assert.deepEqual(completions, [
+    {
+      type: "input-rejected",
+      error: "GitHub Actions runner was replaced before accepting input",
+    },
+  ]);
+  assert.deepEqual(upstream.closed, []);
+  server.emit("close");
+});
+
+test("relay generations bind interleaved replacement input before lifecycle processing", async () => {
+  const client = socket();
+  const server = socket();
+  const upstream = socket();
+  let releaseBlockedOutput: ((output: ArrayBuffer) => void) | undefined;
+  const blockedOutput = new Promise<ArrayBuffer>((resolve) => {
+    releaseBlockedOutput = resolve;
+  });
+  const hub = new TerminalHub(
+    dependencies(client, server, upstream, {
+      async readSession() {
+        return githubActionsSession;
+      },
+      async openUpstream() {
+        return {
+          socket: upstream,
+          inputAcknowledgements: true,
+          inputGenerations: true,
+          outputAcknowledgements: false,
+          async markConnected() {},
+        };
+      },
+      async inputPayloads() {
+        return [new TextEncoder().encode("old runner"), new TextEncoder().encode("new runner")];
+      },
+    }),
+  );
+  await hub.open(
+    new Request("https://fleet.example/api/terminal/ws", {
+      headers: { upgrade: "websocket" },
+    }),
+    user,
+  );
+  server.emit("message", {
+    data: encodeTerminalFrame({
+      type: TerminalMessageType.Subscribe,
+      sessionId: githubActionsSession.id,
+      payload: encodeSubscribePayload({ flags: 0, columns: 120, rows: 34 }),
+    }),
+  });
+  await flushQueues();
+  await flushQueues();
+  emitRelayEvent(upstream, "runner_connected", "generation-old");
+  await flushQueues();
+  await flushQueues();
+
+  upstream.emit("message", { data: { arrayBuffer: () => blockedOutput } });
+  const send = upstream.send.bind(upstream);
+  upstream.send = (data) => {
+    send(data);
+    if (upstream.sent.length === 1) {
+      emitRelayEvent(upstream, "runner_connected", "generation-new");
+    }
+  };
+  server.emit("message", {
+    data: encodeTerminalFrame({
+      type: TerminalMessageType.Input,
+      sessionId: githubActionsSession.id,
+      payload: new TextEncoder().encode("split input"),
+    }),
+  });
+  await waitForInputPayloads();
+
+  assert.equal(upstream.sent.length, 2);
+  const oldInput = relayInput(upstream.sent[0]!);
+  const replacementInput = relayInput(upstream.sent[1]!);
+  assert.equal(oldInput.generation, "generation-old");
+  assert.equal(replacementInput.generation, "generation-new");
+
+  releaseBlockedOutput?.(encodeGitHubActionsRelayOutput("blocked output"));
+  await flushQueues();
+  await flushQueues();
+  await flushQueues();
+  assert.equal(
+    server.sent
+      .map((payload) => frame(payload))
+      .filter((message) => message.type === TerminalMessageType.Event)
+      .map((message) => decodeJsonPayload(message.payload) as { type?: string })
+      .some((message) => message.type === "input-accepted" || message.type === "input-rejected"),
+    false,
+  );
+
+  emitRelayAcknowledgement(upstream, replacementInput.inputId, true, "generation-new");
   await flushQueues();
   await flushQueues();
 

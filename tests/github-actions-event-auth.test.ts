@@ -157,6 +157,10 @@ test("GitHub Actions application propagates only the exact runner protocol opt-i
   );
   assert.equal(
     gitHubActionsRelayRunnerUrl(new Request(`${base}&runnerProtocol=cfr1-framed-io-v2`)),
+    "https://crabfleet.internal/api/session-control/github-actions/runner?runnerProtocol=cfr1-framed-io-v2",
+  );
+  assert.equal(
+    gitHubActionsRelayRunnerUrl(new Request(`${base}&runnerProtocol=cfr1-framed-io-v3`)),
     "https://crabfleet.internal/api/session-control/github-actions/runner",
   );
 });

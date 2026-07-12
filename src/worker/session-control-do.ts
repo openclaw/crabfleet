@@ -9,6 +9,10 @@ import type { FleetSandboxPolicySummary } from "../fleet-state.ts";
 import {
   attachGitHubActionsRunnerProtocol,
   attachGitHubActionsViewerProtocol,
+  createGitHubActionsRelayGeneration,
+  gitHubActionsRelayGeneration,
+  gitHubActionsRelayUsesGenerations,
+  githubActionsLegacyRelayGeneration,
   githubActionsRelayRole,
   githubActionsRunnerProtocolQuery,
   githubActionsViewerProtocolHeader,
@@ -229,6 +233,7 @@ export class SessionControlDO extends DurableObject<RuntimeEnv> {
       notifyGitHubActionsViewers(
         this.ctx.getWebSockets("github-actions-viewer"),
         "runner_disconnected",
+        gitHubActionsRelayGeneration(socket) ?? githubActionsLegacyRelayGeneration,
       );
     }
   }
@@ -245,18 +250,29 @@ export class SessionControlDO extends DurableObject<RuntimeEnv> {
     const client = pair[0];
     const server = pair[1];
     if (role === "runner") {
+      const generation = createGitHubActionsRelayGeneration();
       replaceGitHubActionsRunner(this.ctx.getWebSockets("github-actions-runner"));
-      attachGitHubActionsRunnerProtocol(server, protocol);
+      attachGitHubActionsRunnerProtocol(server, protocol, generation);
       this.ctx.acceptWebSocket(server, ["github-actions-runner"]);
       notifyGitHubActionsViewers(
         this.ctx.getWebSockets("github-actions-viewer"),
         "runner_connected",
+        generation,
       );
     } else {
       attachGitHubActionsViewerProtocol(server, protocol);
       this.ctx.acceptWebSocket(server, ["github-actions-viewer"]);
-      if (this.ctx.getWebSockets("github-actions-runner").length === 0) {
+      const runner = this.ctx
+        .getWebSockets("github-actions-runner")
+        .find((socket) => socket.readyState === WebSocket.OPEN);
+      if (!runner) {
         notifyGitHubActionsViewers([server], "runner_waiting");
+      } else if (gitHubActionsRelayUsesGenerations(server)) {
+        notifyGitHubActionsViewers(
+          [server],
+          "runner_connected",
+          gitHubActionsRelayGeneration(runner) ?? githubActionsLegacyRelayGeneration,
+        );
       }
     }
     const responseInit: ResponseInit = { status: 101, webSocket: client };

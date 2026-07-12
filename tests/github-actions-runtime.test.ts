@@ -5,18 +5,23 @@ import {
   attachGitHubActionsViewerProtocol,
   buildGitHubActionsRunnerPtyUrl,
   buildGitHubActionsViewerRelayUrl,
+  createGitHubActionsRelayGeneration,
   encodeGitHubActionsRelayInput,
   encodeGitHubActionsRelayInputAcknowledgement,
   encodeGitHubActionsRelayOutput,
+  gitHubActionsRelayGeneration,
+  gitHubActionsRelayUsesGenerations,
   gitHubActionsSessionStatus,
   githubActionsCapabilities,
   githubActionsFramedRunnerCapability,
+  githubActionsGenerationFencedCapability,
   githubActionsRelayRole,
   githubActionsRunnerProtocolQuery,
   githubActionsRuntimeLabel,
   githubActionsViewerProtocolHeader,
   githubActionsViewerProtocolQuery,
   gitHubActionsViewerResponseUsesFramedProtocol,
+  gitHubActionsViewerResponseUsesGenerations,
   gitHubActionsRunnerUsesFramedProtocol,
   gitHubActionsViewerUsesFramedProtocol,
   isGitHubActionsViewerControlMessage,
@@ -67,6 +72,12 @@ function framedViewer() {
   return viewer;
 }
 
+function generatedViewer() {
+  const viewer = relaySocket();
+  attachGitHubActionsViewerProtocol(viewer, githubActionsGenerationFencedCapability);
+  return viewer;
+}
+
 test("github_actions exposes steerable terminal capabilities and label", () => {
   assert.equal(githubActionsRuntimeLabel("github_actions"), "GitHub Actions");
   assert.equal(githubActionsRuntimeLabel("container"), "");
@@ -86,7 +97,10 @@ test("runner URL works without custom WebSocket headers", () => {
     "wss://crabfleet.openclaw.ai/api/agent/interactive-sessions/IS-123/runner-pty?agentToken=token+with+spaces",
   );
   assert.equal(parseGitHubActionsRunnerProtocol(null), null);
-  assert.equal(parseGitHubActionsRunnerProtocol("cfr1-framed-io-v2"), null);
+  assert.equal(
+    parseGitHubActionsRunnerProtocol(githubActionsGenerationFencedCapability),
+    githubActionsGenerationFencedCapability,
+  );
   assert.equal(
     parseGitHubActionsRunnerProtocol(githubActionsFramedRunnerCapability),
     githubActionsFramedRunnerCapability,
@@ -94,13 +108,16 @@ test("runner URL works without custom WebSocket headers", () => {
   assert.equal(githubActionsRunnerProtocolQuery, "runnerProtocol");
   assert.equal(
     buildGitHubActionsViewerRelayUrl(),
-    "https://crabfleet.internal/api/session-control/github-actions/viewer?viewerProtocol=cfr1-framed-io-v1",
+    "https://crabfleet.internal/api/session-control/github-actions/viewer?viewerProtocol=cfr1-framed-io-v2",
   );
   assert.equal(parseGitHubActionsViewerProtocol(null), null);
-  assert.equal(parseGitHubActionsViewerProtocol("cfr1-framed-io-v2"), null);
   assert.equal(
     parseGitHubActionsViewerProtocol(githubActionsFramedRunnerCapability),
     githubActionsFramedRunnerCapability,
+  );
+  assert.equal(
+    parseGitHubActionsViewerProtocol(githubActionsGenerationFencedCapability),
+    githubActionsGenerationFencedCapability,
   );
   assert.equal(githubActionsViewerProtocolQuery, "viewerProtocol");
   assert.equal(githubActionsViewerProtocolHeader, "x-crabfleet-viewer-protocol");
@@ -115,6 +132,13 @@ test("runner URL works without custom WebSocket headers", () => {
     true,
   );
   assert.equal(gitHubActionsViewerResponseUsesFramedProtocol(new Response()), false);
+  const generatedResponse = new Response(null, {
+    headers: {
+      [githubActionsViewerProtocolHeader]: githubActionsGenerationFencedCapability,
+    },
+  });
+  assert.equal(gitHubActionsViewerResponseUsesFramedProtocol(generatedResponse), true);
+  assert.equal(gitHubActionsViewerResponseUsesGenerations(generatedResponse), true);
 });
 
 test("work states preserve running phases and map terminal outcomes", () => {
@@ -271,6 +295,110 @@ test("runner acknowledgements retain correlation and fan out to viewers", () => 
   assert.deepEqual(viewerTwo.sent, [acknowledgement]);
 });
 
+test("relay-owned generations fence stale input and bridge framed protocol versions", () => {
+  const runner = relaySocket();
+  const viewer = generatedViewer();
+  const generation = createGitHubActionsRelayGeneration();
+  attachGitHubActionsRunnerProtocol(runner, githubActionsFramedRunnerCapability, generation);
+
+  assert.equal(gitHubActionsRelayGeneration(runner), generation);
+  assert.equal(gitHubActionsRelayUsesGenerations(runner), false);
+  assert.equal(gitHubActionsRelayUsesGenerations(viewer), true);
+
+  const staleInput = encodeGitHubActionsRelayInput("input-stale", "old", "old-generation");
+  assert.equal(relayGitHubActionsWebSocketMessage("viewer", viewer, staleInput, [runner], []), 0);
+  assert.deepEqual(runner.sent, []);
+  assert.deepEqual(parseGitHubActionsRelayInputAcknowledgement(viewer.sent[0]!), {
+    inputId: "input-stale",
+    accepted: false,
+    error: "GitHub Actions runner did not accept terminal input",
+    generation: "old-generation",
+  });
+
+  const currentInput = encodeGitHubActionsRelayInput("input-current", "new", generation);
+  assert.equal(relayGitHubActionsWebSocketMessage("viewer", viewer, currentInput, [runner], []), 1);
+  assert.deepEqual(parseGitHubActionsRelayInput(runner.sent[0]!), {
+    inputId: "input-current",
+    payload: new TextEncoder().encode("new").buffer,
+  });
+
+  const acknowledgement = encodeGitHubActionsRelayInputAcknowledgement({
+    inputId: "input-current",
+    accepted: true,
+  });
+  assert.equal(
+    relayGitHubActionsWebSocketMessage("runner", runner, acknowledgement, [runner], [viewer]),
+    1,
+  );
+  assert.deepEqual(parseGitHubActionsRelayInputAcknowledgement(viewer.sent[1]!), {
+    inputId: "input-current",
+    accepted: true,
+    generation,
+  });
+});
+
+test("replacement relay drops acknowledgements from the superseded runner", () => {
+  const oldRunner = relaySocket();
+  const replacement = relaySocket();
+  const viewer = generatedViewer();
+  attachGitHubActionsRunnerProtocol(
+    oldRunner,
+    githubActionsGenerationFencedCapability,
+    "old-generation",
+  );
+  attachGitHubActionsRunnerProtocol(
+    replacement,
+    githubActionsGenerationFencedCapability,
+    "new-generation",
+  );
+  const acknowledgement = encodeGitHubActionsRelayInputAcknowledgement({
+    inputId: "input-old",
+    accepted: true,
+    generation: "old-generation",
+  });
+
+  assert.equal(
+    relayGitHubActionsWebSocketMessage(
+      "runner",
+      oldRunner,
+      acknowledgement,
+      [replacement],
+      [viewer],
+    ),
+    0,
+  );
+  assert.deepEqual(viewer.sent, []);
+});
+
+test("generation-fenced runners echo only their relay-owned generation", () => {
+  const runner = relaySocket();
+  const viewer = generatedViewer();
+  attachGitHubActionsRunnerProtocol(
+    runner,
+    githubActionsGenerationFencedCapability,
+    "current-generation",
+  );
+  const input = encodeGitHubActionsRelayInput("input-current", "steer", "current-generation");
+
+  assert.equal(relayGitHubActionsWebSocketMessage("viewer", viewer, input, [runner], []), 1);
+  assert.deepEqual(parseGitHubActionsRelayInput(runner.sent[0]!), {
+    inputId: "input-current",
+    generation: "current-generation",
+    payload: new TextEncoder().encode("steer").buffer,
+  });
+
+  const staleAcknowledgement = encodeGitHubActionsRelayInputAcknowledgement({
+    inputId: "input-current",
+    accepted: true,
+    generation: "stale-generation",
+  });
+  assert.equal(
+    relayGitHubActionsWebSocketMessage("runner", runner, staleAcknowledgement, [runner], [viewer]),
+    0,
+  );
+  assert.deepEqual(viewer.sent, []);
+});
+
 test("negotiated runners frame output so control-shaped terminal bytes stay output", () => {
   const runner = relaySocket();
   const viewer = framedViewer();
@@ -337,6 +465,20 @@ test("relay tags and runner lifecycle notifications stay explicit", () => {
   assert.equal(notifyGitHubActionsViewers([viewer], "runner_waiting"), 1);
   assert.deepEqual(parseGitHubActionsRelayEvent(viewer.sent[0]!), {
     type: "runner_waiting",
+  });
+});
+
+test("generation-fenced lifecycle events identify the relay runner", () => {
+  const viewer = generatedViewer();
+  assert.equal(notifyGitHubActionsViewers([viewer], "runner_connected", "generation-one"), 1);
+  assert.deepEqual(parseGitHubActionsRelayEvent(viewer.sent[0]!), {
+    type: "runner_connected",
+    generation: "generation-one",
+  });
+  assert.equal(notifyGitHubActionsViewers([viewer], "runner_waiting"), 1);
+  assert.deepEqual(parseGitHubActionsRelayEvent(viewer.sent[1]!), {
+    type: "runner_waiting",
+    generation: "none",
   });
 });
 

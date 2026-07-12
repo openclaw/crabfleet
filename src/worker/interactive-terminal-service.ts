@@ -9,6 +9,7 @@ import {
 import {
   buildGitHubActionsViewerRelayUrl,
   gitHubActionsViewerResponseUsesFramedProtocol,
+  gitHubActionsViewerResponseUsesGenerations,
   githubActionsRuntime,
 } from "../github-actions-runtime.ts";
 import { terminalFailureStatusForAdapter } from "../runtime-adapter.ts";
@@ -141,6 +142,7 @@ export class InteractiveTerminalService {
       return {
         socket: upstream,
         inputAcknowledgements: gitHubActionsViewerResponseUsesFramedProtocol(upstreamResponse),
+        inputGenerations: gitHubActionsViewerResponseUsesGenerations(upstreamResponse),
         outputAcknowledgements: false,
         markConnected: () =>
           markInteractiveTerminalConnected(
