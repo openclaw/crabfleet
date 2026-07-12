@@ -426,10 +426,11 @@ test("structured session events require bounded identifiers and a versioned obje
 test("structured session events retain valid supplementary Unicode", async () => {
   let payloadJson = "";
   const service = new InteractiveSessionEventLedgerService({
-    async persistAndInvalidate(event) {
+    async persist(event) {
       payloadJson = event.payloadJson;
       return {
         inserted: true,
+        refreshArchive: false,
         row: {
           id: 1,
           session_id: event.sessionId,
