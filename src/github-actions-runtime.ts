@@ -33,6 +33,7 @@ export type GitHubActionsRelayInput = {
 
 export const githubActionsFramedRunnerCapability = "cfr1-framed-io-v1";
 export const githubActionsGenerationFencedCapability = "cfr1-framed-io-v2";
+export const githubActionsRunnerProtocolHeader = "sec-websocket-protocol";
 export const githubActionsRunnerProtocolQuery = "runnerProtocol";
 export const githubActionsViewerProtocolQuery = "viewerProtocol";
 export const githubActionsViewerProtocolHeader = "x-crabfleet-viewer-protocol";
@@ -432,6 +433,18 @@ export function parseGitHubActionsRunnerProtocol(
   value: string | null,
 ): GitHubActionsRunnerProtocol | null {
   return isGitHubActionsRelayProtocol(value) ? value : null;
+}
+
+export function parseGitHubActionsRunnerProtocolOffer(
+  value: string | null,
+): typeof githubActionsGenerationFencedCapability | null {
+  if (!value) return null;
+  return value
+    .split(",")
+    .map((protocol) => protocol.trim())
+    .includes(githubActionsGenerationFencedCapability)
+    ? githubActionsGenerationFencedCapability
+    : null;
 }
 
 export function parseGitHubActionsViewerProtocol(

@@ -178,7 +178,7 @@ Crabfleet owns:
 
 - session identity and metadata;
 - rotating scoped agent token;
-- outbound runner relay through `SessionControlDO`, preserving raw and v1 framed traffic while exact v2 connection-query opt-in selects relay-generation-fenced binary `CFR1` input, acknowledgement, and lifecycle frames plus framed output;
+- outbound runner relay through `SessionControlDO`, preserving raw and v1 framed traffic while an explicitly selected v2 WebSocket subprotocol enables relay-generation-fenced binary `CFR1` input, acknowledgement, and lifecycle frames plus framed output;
 - browser terminal steering;
 - work-state heartbeats;
 - event and transcript finalization.
@@ -186,10 +186,11 @@ Crabfleet owns:
 The Action remains the execution host and mutation authority. A framed
 runner acknowledges viewer input only after its PTY accepts the correlated
 write; relay queueing is not acceptance. Legacy runners keep raw input/output
-and relay-level delivery reporting. The exact protocol query selects the mode
-before the runner socket is accepted, so there is no in-band handshake or
-mode-transition race. Ending the Crabfleet session does not cancel the workflow
-run.
+and relay-level delivery reporting. New runners offer the v2 WebSocket
+subprotocol and switch formats only when the relay selects it in the upgrade
+response. Relays that ignore the offer therefore remain raw-compatible, with no
+in-band handshake or mode-transition race. Ending the Crabfleet session does
+not cancel the workflow run.
 
 ## Session Lifecycle
 

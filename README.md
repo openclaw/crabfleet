@@ -94,22 +94,25 @@ Content-Type: application/json
 {"workKey":"openclaw/crabfleet:pr:42","workKind":"pr_repair","repo":"openclaw/crabfleet","branch":"fix/pr-42","owner":"operator@example.test","sourceUrl":"https://github.com/openclaw/crabfleet/pull/42","runUrl":"https://github.com/openclaw/crabfleet/actions/runs/123","purpose":"repair PR 42","summary":"starting repair"}
 ```
 
-The response contains `{session, agentToken, runnerPtyUrl, browserUrl}`. New registrations and resumes require `owner` to resolve to one active Crabfleet user; resumes must prove the same stable owner subject already recorded on the `workKey`. The stable subject owns browser visibility while the OpenClaw service retains lifecycle authority for its session. `runnerPtyUrl` includes the rotated session-scoped query credential and can be opened unchanged as the legacy raw duplex byte stream. New runners opt into framed input, output, and acknowledgements by adding the exact query parameter shown below before opening the socket:
+The response contains `{session, agentToken, runnerPtyUrl, browserUrl}`. New registrations and resumes require `owner` to resolve to one active Crabfleet user; resumes must prove the same stable owner subject already recorded on the `workKey`. The stable subject owns browser visibility while the OpenClaw service retains lifecycle authority for its session. `runnerPtyUrl` includes the rotated session-scoped query credential and can be opened unchanged as the legacy raw duplex byte stream. New runners offer the framed protocol as a WebSocket subprotocol:
 
 ```js
-const framedRunnerPtyUrl = new URL(runnerPtyUrl);
-framedRunnerPtyUrl.searchParams.set("runnerProtocol", "cfr1-framed-io-v2");
-const terminal = new WebSocket(framedRunnerPtyUrl);
+const terminal = new WebSocket(runnerPtyUrl, "cfr1-framed-io-v2");
 terminal.binaryType = "arraybuffer";
+terminal.addEventListener("open", () => {
+  const framed = terminal.protocol === "cfr1-framed-io-v2";
+  // Use CFR1 only when framed is true; otherwise retain raw compatibility.
+});
 ```
 
 Existing runners retain raw input and output by opening the returned URL
 unchanged. A new runner opts into correlated binary `CFR1` input, output, and
-acknowledgement frames by adding the exact
-`runnerProtocol=cfr1-framed-io-v2` query before opening the socket. The relay
-selects that mode before accepting the connection and fences runner input with
-the relay-owned connection generation. Framed runners acknowledge only after
-their PTY accepts the input. The complete byte-safe encoder, decoder, and Node PTY runner are in
+acknowledgement frames only when the relay selects the
+`cfr1-framed-io-v2` WebSocket subprotocol in the upgrade response. Relays that
+ignore the offer leave `WebSocket.protocol` empty, so new runners retain raw
+compatibility. The relay fences negotiated runner input with its connection
+generation. Framed runners acknowledge only after their PTY accepts the input.
+The complete byte-safe encoder, decoder, and Node PTY runner are in
 [`docs/github-actions-sessions.md`](docs/github-actions-sessions.md#runner-pty).
 
 The runner reports heartbeat and durable progress with bearer `agentToken` to `POST /api/agent/interactive-sessions/:id/work-state`. Terminal states are `completed`, `blocked`, `failed`, and `canceled`; active work uses `registered` or `running` plus a specific `phase`.

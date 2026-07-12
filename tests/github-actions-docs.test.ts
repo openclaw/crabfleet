@@ -9,8 +9,9 @@ test("the documented Node runner acknowledges only delivered UTF-8 input", async
   ]);
 
   assert.match(readme, /complete byte-safe encoder, decoder, and Node PTY runner/);
-  assert.match(readme, /runnerProtocol", "cfr1-framed-io-v2"/);
-  assert.match(readme, /`runnerProtocol=cfr1-framed-io-v2` query/);
+  assert.match(readme, /new WebSocket\(runnerPtyUrl, "cfr1-framed-io-v2"\)/);
+  assert.match(readme, /terminal\.protocol === "cfr1-framed-io-v2"/);
+  assert.match(readme, /ignore the offer leave `WebSocket\.protocol` empty/);
   assert.doesNotMatch(readme, /New runners opt into[\s\S]*cfr1-framed-io-v1/);
   assert.doesNotMatch(readme, /encodeCfr1Output|decodeCfr1Input|encodeCfr1Ack/);
   assert.match(guide, /let pendingInputs = \[\]/);

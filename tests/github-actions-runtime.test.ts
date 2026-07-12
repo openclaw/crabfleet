@@ -16,6 +16,7 @@ import {
   githubActionsFramedRunnerCapability,
   githubActionsGenerationFencedCapability,
   githubActionsRelayRole,
+  githubActionsRunnerProtocolHeader,
   githubActionsRunnerProtocolQuery,
   githubActionsRuntimeLabel,
   githubActionsViewerGenerationHeader,
@@ -34,6 +35,7 @@ import {
   parseGitHubActionsRelayInputAcknowledgement,
   parseGitHubActionsRelayOutput,
   parseGitHubActionsRunnerProtocol,
+  parseGitHubActionsRunnerProtocolOffer,
   parseGitHubActionsViewerProtocol,
   parseGitHubActionsWorkState,
   relayGitHubActionsWebSocketMessage,
@@ -106,6 +108,15 @@ test("runner URL works without custom WebSocket headers", () => {
   assert.equal(
     parseGitHubActionsRunnerProtocol(githubActionsFramedRunnerCapability),
     githubActionsFramedRunnerCapability,
+  );
+  assert.equal(githubActionsRunnerProtocolHeader, "sec-websocket-protocol");
+  assert.equal(parseGitHubActionsRunnerProtocolOffer(null), null);
+  assert.equal(parseGitHubActionsRunnerProtocolOffer(githubActionsFramedRunnerCapability), null);
+  assert.equal(
+    parseGitHubActionsRunnerProtocolOffer(
+      `other-protocol, ${githubActionsGenerationFencedCapability}`,
+    ),
+    githubActionsGenerationFencedCapability,
   );
   assert.equal(githubActionsRunnerProtocolQuery, "runnerProtocol");
   assert.equal(

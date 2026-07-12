@@ -5,9 +5,14 @@ import { sha256 } from "../src/worker/crypto.ts";
 import type { RuntimeEnv } from "../src/worker/env.ts";
 import {
   GitHubActionsApplication,
+  gitHubActionsRelayRunnerHeaders,
   gitHubActionsRelayRunnerUrl,
   structuredEventRequestMaxBytes,
 } from "../src/worker/github-actions-application.ts";
+import {
+  githubActionsGenerationFencedCapability,
+  githubActionsRunnerProtocolHeader,
+} from "../src/github-actions-runtime.ts";
 import { terminalAgentEventGraceMs } from "../src/worker/session-agent-auth.ts";
 import {
   handleServiceSessionRoute,
@@ -162,6 +167,37 @@ test("GitHub Actions application propagates only the exact runner protocol opt-i
   assert.equal(
     gitHubActionsRelayRunnerUrl(new Request(`${base}&runnerProtocol=cfr1-framed-io-v3`)),
     "https://crabfleet.internal/api/session-control/github-actions/runner",
+  );
+
+  const offered = gitHubActionsRelayRunnerHeaders(
+    new Request(base, {
+      headers: {
+        [githubActionsRunnerProtocolHeader]: `ignored, ${githubActionsGenerationFencedCapability}`,
+      },
+    }),
+  );
+  assert.equal(
+    gitHubActionsRelayRunnerUrl(
+      new Request(base, {
+        headers: {
+          [githubActionsRunnerProtocolHeader]: githubActionsGenerationFencedCapability,
+        },
+      }),
+    ),
+    "https://crabfleet.internal/api/session-control/github-actions/runner",
+  );
+  assert.equal(offered.get("upgrade"), "websocket");
+  assert.equal(
+    offered.get(githubActionsRunnerProtocolHeader),
+    githubActionsGenerationFencedCapability,
+  );
+  assert.equal(
+    gitHubActionsRelayRunnerHeaders(
+      new Request(base, {
+        headers: { [githubActionsRunnerProtocolHeader]: "cfr1-framed-io-v1" },
+      }),
+    ).get(githubActionsRunnerProtocolHeader),
+    null,
   );
 });
 

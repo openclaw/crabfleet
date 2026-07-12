@@ -14,12 +14,14 @@ import {
   gitHubActionsRelayUsesGenerations,
   githubActionsLegacyRelayGeneration,
   githubActionsRelayRole,
+  githubActionsRunnerProtocolHeader,
   githubActionsRunnerProtocolQuery,
   githubActionsViewerGenerationHeader,
   githubActionsViewerProtocolHeader,
   githubActionsViewerProtocolQuery,
   notifyGitHubActionsViewers,
   parseGitHubActionsRunnerProtocol,
+  parseGitHubActionsRunnerProtocolOffer,
   parseGitHubActionsViewerProtocol,
   relayGitHubActionsWebSocketMessage,
   replaceGitHubActionsRunner,
@@ -64,9 +66,16 @@ export class SessionControlDO extends DurableObject<RuntimeEnv> {
         request.method === "GET" &&
         url.pathname === "/api/session-control/github-actions/runner"
       ) {
+        const offeredProtocol = parseGitHubActionsRunnerProtocolOffer(
+          request.headers.get(githubActionsRunnerProtocolHeader),
+        );
         return this.openGitHubActionsRelay(
           "runner",
-          parseGitHubActionsRunnerProtocol(url.searchParams.get(githubActionsRunnerProtocolQuery)),
+          offeredProtocol ??
+            parseGitHubActionsRunnerProtocol(
+              url.searchParams.get(githubActionsRunnerProtocolQuery),
+            ),
+          offeredProtocol,
         );
       }
 
@@ -246,6 +255,7 @@ export class SessionControlDO extends DurableObject<RuntimeEnv> {
   private openGitHubActionsRelay(
     role: "runner" | "viewer",
     protocol: GitHubActionsRelayProtocol | null = null,
+    confirmedRunnerProtocol: GitHubActionsRelayProtocol | null = null,
   ): Response {
     const pair = new WebSocketPair();
     const client = pair[0];
@@ -279,7 +289,11 @@ export class SessionControlDO extends DurableObject<RuntimeEnv> {
       }
     }
     const responseInit: ResponseInit = { status: 101, webSocket: client };
-    if (role === "viewer" && protocol) {
+    if (role === "runner" && confirmedRunnerProtocol) {
+      responseInit.headers = {
+        [githubActionsRunnerProtocolHeader]: confirmedRunnerProtocol,
+      };
+    } else if (role === "viewer" && protocol) {
       responseInit.headers = {
         [githubActionsViewerProtocolHeader]: protocol,
         ...(initialRunnerGeneration

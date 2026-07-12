@@ -95,7 +95,7 @@ D1 is canonical for product metadata:
 ### Durable Objects
 
 - `Sandbox` runs first-party Cloudflare Sandbox workspaces.
-- `SessionControlDO` stores generation-fenced Sandbox credential/checkpoint state and relays one current GitHub Actions runner to multiple viewers. Existing runners retain raw input/output at the runner boundary; exact v2 connection-query opt-in selects relay-generation-fenced binary `CFR1` input, lifecycle, and acknowledgement frames before socket acceptance. Viewer framing is negotiated independently: opted-in viewers receive `CFR1` terminal, lifecycle, and acknowledgement frames, legacy viewers retain raw terminal output and JSON control-message fallbacks, and the relay translates v1 framed peers during rolling upgrades.
+- `SessionControlDO` stores generation-fenced Sandbox credential/checkpoint state and relays one current GitHub Actions runner to multiple viewers. Existing runners retain raw input/output at the runner boundary; new runners use relay-generation-fenced binary `CFR1` input, lifecycle, and acknowledgement frames only after the upgrade response selects the offered v2 WebSocket subprotocol. Ignored offers remain raw-compatible. Viewer framing is negotiated independently: opted-in viewers receive `CFR1` terminal, lifecycle, and acknowledgement frames, legacy viewers retain raw terminal output and JSON control-message fallbacks, and the relay translates v1 framed peers during rolling upgrades.
 
 There is no `BoardDO` or `RunDO`. General Board/Fleet state is D1 plus REST polling.
 

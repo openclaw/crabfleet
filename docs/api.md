@@ -598,22 +598,29 @@ Response:
 }
 ```
 
-Every new registration and every resume requires `owner`; it must resolve to exactly one active Crabfleet user by login, email, or stable subject. Existing work keys resume only when the supplied owner resolves to the same stable owner subject already stored on the work key. Ownerless resumes fail closed before token rotation, and a work key cannot transfer to a different stable owner. `runnerPtyUrl` can be opened with Node's global `WebSocket` without custom headers. Existing runners retain raw input/output by opening it unchanged; new runners add the exact `runnerProtocol=cfr1-framed-io-v2` query to opt into the generation-fenced contract below. The query credential is session-scoped, rotates on registration, is stored only as a hash, and is not exposed through viewer/session APIs.
+Every new registration and every resume requires `owner`; it must resolve to exactly one active Crabfleet user by login, email, or stable subject. Existing work keys resume only when the supplied owner resolves to the same stable owner subject already stored on the work key. Ownerless resumes fail closed before token rotation, and a work key cannot transfer to a different stable owner. `runnerPtyUrl` can be opened with Node's global `WebSocket` without custom headers. Existing runners retain raw input/output by opening it unchanged; new runners offer `cfr1-framed-io-v2` as a WebSocket subprotocol and enter the generation-fenced contract below only when the relay selects it. The query credential is session-scoped, rotates on registration, is stored only as a hash, and is not exposed through viewer/session APIs.
 
 ### GET /api/agent/interactive-sessions/:id/runner-pty
 
 WebSocket endpoint for the outbound GitHub Actions runner. Authentication uses the scoped `agentToken` query parameter embedded in `runnerPtyUrl`. One runner is current; a reconnect replaces the previous runner while browser viewers remain attached.
 
 Opening the returned URL unchanged selects legacy raw input and output. Adding
-the exact `runnerProtocol=cfr1-framed-io-v2` query selects generation-fenced
-input, output, acknowledgements, and relay control traffic. `SessionControlDO`
-stores the mode and a relay-owned runner generation on the server socket before
-accepting it. Viewer framing is negotiated independently: v2 viewers receive
+`cfr1-framed-io-v2` to the `WebSocket` constructor's protocol list offers
+generation-fenced input, output, acknowledgements, and relay control traffic.
+The runner switches formats only when `WebSocket.protocol` confirms that exact
+selection. An older relay that ignores the offer therefore remains a raw
+connection. `SessionControlDO` stores the selected mode and a relay-owned runner
+generation on the server socket before accepting it. Viewer framing is
+negotiated independently: v2 viewers receive
 `CFR1` output and generation-bearing control frames, while unnegotiated viewers
 retain raw output and legacy JSON notices. The relay translates the earlier
 `cfr1-framed-io-v1` format and raw sockets at each boundary during rolling
 upgrades. Arbitrary raw PTY bytes cannot be consumed as control traffic by
 framed viewers.
+
+The `runnerProtocol` query remains accepted for compatibility with already
+deployed query-aware runners. New runners must use subprotocol negotiation so
+they do not switch formats against a relay that did not explicitly confirm v2.
 
 Each `CFR1` frame occupies one binary WebSocket message and starts with:
 

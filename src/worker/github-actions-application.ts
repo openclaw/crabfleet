@@ -1,7 +1,9 @@
 import type { GitHubActionsSessionRegistrationInput } from "./github-actions-session-registration.ts";
 import {
+  githubActionsRunnerProtocolHeader,
   githubActionsRunnerProtocolQuery,
   parseGitHubActionsRunnerProtocol,
+  parseGitHubActionsRunnerProtocolOffer,
 } from "../github-actions-runtime.ts";
 import { AdminRepository } from "./admin-repository.ts";
 import {
@@ -174,7 +176,7 @@ export class GitHubActionsApplication {
     };
     await new GitHubActionsRunnerConnectionService(store).connect(session);
     return stub.fetch(gitHubActionsRelayRunnerUrl(request), {
-      headers: { upgrade: "websocket" },
+      headers: gitHubActionsRelayRunnerHeaders(request),
     });
   }
 
@@ -224,6 +226,15 @@ export function gitHubActionsRelayRunnerUrl(request: Request): string {
   );
   if (protocol) relayUrl.searchParams.set(githubActionsRunnerProtocolQuery, protocol);
   return relayUrl.toString();
+}
+
+export function gitHubActionsRelayRunnerHeaders(request: Request): Headers {
+  const headers = new Headers({ upgrade: "websocket" });
+  const offeredProtocol = parseGitHubActionsRunnerProtocolOffer(
+    request.headers.get(githubActionsRunnerProtocolHeader),
+  );
+  if (offeredProtocol) headers.set(githubActionsRunnerProtocolHeader, offeredProtocol);
+  return headers;
 }
 
 function isConstraintError(error: unknown): boolean {
