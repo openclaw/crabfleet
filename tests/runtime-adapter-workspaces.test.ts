@@ -448,6 +448,33 @@ test("superseded pending creates retry DELETE until the old workspace becomes vi
   ]);
 });
 
+test("superseded cleanup accepts missing workspaces after deletion was observed", async () => {
+  const service = new RuntimeAdapterWorkspaceLifecycle(
+    runtimeEnv(),
+    dependencies({
+      async fetch() {
+        return Response.json({ message: "workspace not found" }, { status: 404 });
+      },
+    }),
+  );
+
+  assert.deepEqual(
+    await service.stopForSession(
+      "IS-42",
+      "workspace-superseded",
+      {
+        profile: "default",
+        controlPlane: "https://adapter.example.test/",
+      },
+      false,
+    ),
+    {
+      status: "stopped",
+      message: "workspace not found",
+    },
+  );
+});
+
 test("session-bound stop redacts provider credentials from failures", async () => {
   const env = runtimeEnv(() => [
     {

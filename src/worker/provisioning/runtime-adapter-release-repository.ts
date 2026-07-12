@@ -135,6 +135,25 @@ export async function persistRuntimeAdapterWorkspaceCleanupEvidence(
     .execute();
 }
 
+export async function markRuntimeAdapterWorkspaceCleanupDeletionObserved(
+  env: RuntimeEnv,
+  cleanup: RuntimeAdapterWorkspaceCleanup,
+  now: number,
+): Promise<void> {
+  const row = await database(env)
+    .updateTable("runtime_adapter_workspace_cleanups")
+    .set({
+      deletion_observed: 1,
+      updated_at: sql<number>`MAX(updated_at + 1, ${now})`,
+    })
+    .where("session_id", "=", cleanup.sessionId)
+    .where("adapter_workspace_id", "=", cleanup.adapterWorkspaceId)
+    .where("cleanup_claim", "=", cleanup.claim)
+    .returning("deletion_observed")
+    .executeTakeFirst();
+  if (!row) throw new Error("runtime adapter cleanup ownership changed");
+}
+
 export async function completeRuntimeAdapterWorkspaceCleanup(
   env: RuntimeEnv,
   cleanup: RuntimeAdapterWorkspaceCleanup,
@@ -159,6 +178,7 @@ function cleanupClaim(row: RuntimeAdapterWorkspaceCleanupRow): RuntimeAdapterWor
           }
         : null,
     createPending: row.create_pending === 1,
+    deletionObserved: row.deletion_observed === 1,
     claim: row.cleanup_claim ?? "",
   };
 }

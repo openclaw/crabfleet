@@ -10,6 +10,7 @@ export type RuntimeAdapterWorkspaceCleanup = {
   adapterWorkspaceId: string;
   registration: RuntimeAdapterWorkspaceRegistration | null;
   createPending: boolean;
+  deletionObserved: boolean;
   claim: string;
 };
 
@@ -33,13 +34,14 @@ export type RuntimeAdapterReleaseServiceDependencies = {
     now: number,
     reconcileError: string | null,
   ): Promise<void>;
+  markCleanupDeletionObserved(cleanup: RuntimeAdapterWorkspaceCleanup, now: number): Promise<void>;
   completeCleanup(cleanup: RuntimeAdapterWorkspaceCleanup): Promise<void>;
   clearCreatePending(sessionId: string, adapterWorkspaceId: string): Promise<void>;
   stopWorkspace(
     sessionId: string,
     adapterWorkspaceId: string,
     registration: RuntimeAdapterWorkspaceRegistration | null,
-    createPending: boolean,
+    retryMissing: boolean,
   ): Promise<RuntimeAdapterWorkspaceStopResult>;
   confirmRelease(
     sessionId: string,
@@ -92,7 +94,8 @@ export class RuntimeAdapterReleaseService {
     cleanup: RuntimeAdapterWorkspaceCleanup,
     now: number,
   ): Promise<void> {
-    const { sessionId, adapterWorkspaceId, registration, createPending } = cleanup;
+    const { sessionId, adapterWorkspaceId, registration, createPending, deletionObserved } =
+      cleanup;
     try {
       if (!createPending) {
         await this.dependencies.clearCreatePending(sessionId, adapterWorkspaceId);
@@ -101,9 +104,10 @@ export class RuntimeAdapterReleaseService {
         sessionId,
         adapterWorkspaceId,
         registration,
-        createPending,
+        createPending && !deletionObserved,
       );
       if (release.status === "stopped") {
+        await this.dependencies.markCleanupDeletionObserved(cleanup, now);
         await this.dependencies.confirmRelease(sessionId, adapterWorkspaceId, now, release.message);
         await this.dependencies.completeCleanup(cleanup);
         return;

@@ -8,6 +8,7 @@ import {
   claimRuntimeAdapterWorkspaceCleanup,
   claimRuntimeAdapterWorkspaceCleanupBatch,
   completeRuntimeAdapterWorkspaceCleanup,
+  markRuntimeAdapterWorkspaceCleanupDeletionObserved,
   persistRuntimeAdapterWorkspaceCleanupEvidence,
   stageRuntimeAdapterWorkspaceCleanup,
 } from "../src/worker/provisioning/runtime-adapter-release-repository.ts";
@@ -46,6 +47,7 @@ function releaseDependencies(
         adapterWorkspaceId: input.adapterWorkspaceId,
         registration: input.registration,
         createPending: input.createPending,
+        deletionObserved: false,
         claim: "claim-1",
       };
     },
@@ -56,6 +58,7 @@ function releaseDependencies(
       return [];
     },
     async persistCleanupEvidence() {},
+    async markCleanupDeletionObserved() {},
     async completeCleanup() {},
     async clearCreatePending() {},
     async stopWorkspace() {
@@ -115,6 +118,7 @@ test("superseded release clears the create marker before stopping and confirming
           adapterWorkspaceId,
           registration,
           createPending: false,
+          deletionObserved: false,
           claim: "claim-1",
         };
       },
@@ -229,6 +233,7 @@ test("superseded cleanup survives ownership loss and retries only the old worksp
           adapterWorkspaceId: input.adapterWorkspaceId,
           registration: input.registration,
           createPending: input.createPending,
+          deletionObserved: false,
           claim: "claim-1",
         });
       },
@@ -297,6 +302,7 @@ test("superseded provider failures remain independently retryable", async () => 
           adapterWorkspaceId: input.adapterWorkspaceId,
           registration: input.registration,
           createPending: input.createPending,
+          deletionObserved: false,
           claim: "claim-1",
         });
       },
@@ -337,11 +343,79 @@ test("superseded provider failures remain independently retryable", async () => 
   assert.equal(cleanupRows.length, 0);
 });
 
+test("observed create-pending deletion survives completion persistence failure", async () => {
+  let cleanup: RuntimeAdapterWorkspaceCleanup | null = null;
+  const retryMissing: boolean[] = [];
+  let completionAttempts = 0;
+  const service = new RuntimeAdapterReleaseService(
+    releaseDependencies({
+      async stageCleanup(input) {
+        cleanup = {
+          sessionId: input.sessionId,
+          adapterWorkspaceId: input.adapterWorkspaceId,
+          registration: input.registration,
+          createPending: input.createPending,
+          deletionObserved: false,
+          claim: "claim-1",
+        };
+      },
+      async claimCleanup() {
+        return cleanup;
+      },
+      async claimPendingCleanups() {
+        return cleanup ? [{ ...cleanup, claim: "claim-2" }] : [];
+      },
+      async stopWorkspace(_sessionId, _adapterWorkspaceId, _registration, retry) {
+        retryMissing.push(retry);
+        return {
+          status: "stopped",
+          message: retry
+            ? "runtime adapter workspace released"
+            : "runtime adapter workspace already gone",
+        };
+      },
+      async markCleanupDeletionObserved(current) {
+        cleanup = { ...current, deletionObserved: true };
+      },
+      async completeCleanup() {
+        completionAttempts += 1;
+        if (completionAttempts === 1) throw new Error("completion persistence unavailable");
+        cleanup = null;
+      },
+      providerError(error) {
+        assert.ok(error instanceof Error);
+        return error.message;
+      },
+    }),
+  );
+
+  await service.stopSuperseded({
+    sessionId: "IS-101",
+    adapterWorkspaceId: "fleet-a-is-101-old",
+    registration,
+    createPending: true,
+    now: 200,
+  });
+  assert.equal(cleanup?.deletionObserved, true);
+
+  await service.retryPending(15_200);
+
+  assert.deepEqual(retryMissing, [true, false]);
+  assert.equal(completionAttempts, 2);
+  assert.equal(cleanup, null);
+});
+
 test("runtime adapter cleanup storage is independent and claim fenced", async () => {
   const sqlite = new DatabaseSync(":memory:");
   sqlite.exec(
     readFileSync(
       new URL("../migrations/0037_runtime_adapter_workspace_cleanup.sql", import.meta.url),
+      "utf8",
+    ),
+  );
+  sqlite.exec(
+    readFileSync(
+      new URL("../migrations/0039_runtime_adapter_cleanup_deletion_observed.sql", import.meta.url),
       "utf8",
     ),
   );
@@ -362,9 +436,11 @@ test("runtime adapter cleanup storage is independent and claim fenced", async ()
   );
   assert.ok(claimed);
   assert.equal(claimed.createPending, true);
+  assert.equal(claimed.deletionObserved, false);
   assert.deepEqual(claimed.registration, registration);
   assert.equal((await claimRuntimeAdapterWorkspaceCleanupBatch(env, 200, 3)).length, 0);
 
+  await markRuntimeAdapterWorkspaceCleanupDeletionObserved(env, claimed, 201);
   await persistRuntimeAdapterWorkspaceCleanupEvidence(
     env,
     claimed,
@@ -375,6 +451,7 @@ test("runtime adapter cleanup storage is independent and claim fenced", async ()
   assert.equal((await claimRuntimeAdapterWorkspaceCleanupBatch(env, 15_199, 3)).length, 0);
   const retry = await claimRuntimeAdapterWorkspaceCleanupBatch(env, 15_200, 3);
   assert.equal(retry.length, 1);
+  assert.equal(retry[0].deletionObserved, true);
   await completeRuntimeAdapterWorkspaceCleanup(env, retry[0]);
   assert.equal(
     sqlite.prepare("SELECT COUNT(*) AS count FROM runtime_adapter_workspace_cleanups").get()?.count,

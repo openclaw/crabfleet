@@ -188,13 +188,13 @@ export class RuntimeAdapterWorkspaceLifecycle {
     sessionId: string,
     adapterWorkspaceId: string,
     retainedRegistration?: RuntimeAdapterWorkspaceRegistration | null,
-    retainedCreatePending?: boolean,
+    retryMissing?: boolean,
   ): Promise<RuntimeAdapterWorkspaceStopResult> {
     const supersededCleanup = retainedRegistration !== undefined;
     const registration = retainedRegistration
       ? {
           adapter_control_plane: retainedRegistration.controlPlane,
-          adapter_create_pending: retainedCreatePending ? 1 : 0,
+          adapter_create_pending: retryMissing ? 1 : 0,
           profile: retainedRegistration.profile,
         }
       : await database(this.env)

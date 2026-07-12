@@ -7,6 +7,7 @@ import {
   claimRuntimeAdapterWorkspaceCleanup,
   claimRuntimeAdapterWorkspaceCleanupBatch,
   completeRuntimeAdapterWorkspaceCleanup,
+  markRuntimeAdapterWorkspaceCleanupDeletionObserved,
   persistRuntimeAdapterWorkspaceCleanupEvidence,
   stageRuntimeAdapterWorkspaceCleanup,
 } from "./provisioning/runtime-adapter-release-repository.ts";
@@ -206,15 +207,17 @@ export class RuntimeApplication {
               now,
               reconcileError,
             ),
+          markCleanupDeletionObserved: (cleanup, now) =>
+            markRuntimeAdapterWorkspaceCleanupDeletionObserved(this.env, cleanup, now),
           completeCleanup: (cleanup) => completeRuntimeAdapterWorkspaceCleanup(this.env, cleanup),
           clearCreatePending: (sessionId, adapterWorkspaceId) =>
             clearRuntimeAdapterCreatePending(this.env, sessionId, adapterWorkspaceId),
-          stopWorkspace: (sessionId, adapterWorkspaceId, registration, createPending) =>
+          stopWorkspace: (sessionId, adapterWorkspaceId, registration, retryMissing) =>
             this.workspaceLifecycle().stopForSession(
               sessionId,
               adapterWorkspaceId,
               registration,
-              createPending,
+              retryMissing,
             ),
           confirmRelease: (sessionId, adapterWorkspaceId, now, message) =>
             confirmRuntimeAdapterRelease(this.env, sessionId, adapterWorkspaceId, now, message),
