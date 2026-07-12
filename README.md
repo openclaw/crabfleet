@@ -101,22 +101,6 @@ const framedRunnerPtyUrl = new URL(runnerPtyUrl);
 framedRunnerPtyUrl.searchParams.set("runnerProtocol", "cfr1-framed-io-v1");
 const terminal = new WebSocket(framedRunnerPtyUrl);
 terminal.binaryType = "arraybuffer";
-const inputDecoder = new TextDecoder("utf-8", { fatal: true });
-
-pty.onData((output) => terminal.send(encodeCfr1Output(output)));
-pty.onExit(() => {
-  if (terminal.readyState < WebSocket.CLOSING) terminal.close(1000, "pty exited");
-});
-terminal.onmessage = ({ data }) => {
-  const input = decodeCfr1Input(data);
-  if (!input) return;
-  try {
-    pty.write(inputDecoder.decode(input.payload));
-    terminal.send(encodeCfr1Ack(input.inputId, true));
-  } catch {
-    terminal.send(encodeCfr1Ack(input.inputId, false));
-  }
-};
 ```
 
 Existing runners retain raw input and output by opening the returned URL
@@ -125,7 +109,7 @@ acknowledgement frames by adding the exact
 `runnerProtocol=cfr1-framed-io-v1` query before opening the socket. The relay
 selects that mode before accepting the connection, so there is no pending
 handshake. Framed runners acknowledge only after their PTY accepts the input;
-the complete encoder, decoder, and Node runner example are in
+the complete byte-safe encoder, decoder, and Node PTY runner are in
 [`docs/github-actions-sessions.md`](docs/github-actions-sessions.md#runner-pty).
 
 The runner reports heartbeat and durable progress with bearer `agentToken` to `POST /api/agent/interactive-sessions/:id/work-state`. Terminal states are `completed`, `blocked`, `failed`, and `canceled`; active work uses `registered` or `running` plus a specific `phase`.

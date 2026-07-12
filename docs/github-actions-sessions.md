@@ -320,8 +320,8 @@ function acceptInput(data) {
   const input = decodeInput(data);
   if (!input) return;
   try {
-    // Reject frames that split or contain invalid UTF-8 instead of corrupting PTY input.
-    pty.write(inputDecoder.decode(input.payload));
+    const text = inputDecoder.decode(input.payload, { stream: true });
+    if (text) pty.write(text);
     terminal.send(encodeAck(input.inputId, true));
   } catch {
     terminal.send(encodeAck(input.inputId, false));
