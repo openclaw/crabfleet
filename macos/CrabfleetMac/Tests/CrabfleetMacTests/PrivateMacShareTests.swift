@@ -191,6 +191,53 @@ struct PrivateMacShareTests {
   }
 
   @Test @MainActor
+  func failedDesktopPublicationIsNotUnregistered() async throws {
+    let identity = desktopIdentity(name: "failed-publish", address: "100.64.12.40")
+    let registration = RecordingDesktopRegistration(registerFailures: [identity.dnsName: 1])
+    let lifecycle = DesktopHostRegistrationLifecycle(registration: registration)
+
+    await #expect(throws: DesktopRegistrationTestError.failed) {
+      try await lifecycle.publish(identity: identity, port: 5_901)
+    }
+    try await lifecycle.removePublishedIdentities()
+
+    #expect(await registration.events == [.register(identity.dnsName)])
+  }
+
+  @Test @MainActor
+  func failedDesktopRemovalSurvivesLaterIdentityChanges() async throws {
+    let first = desktopIdentity(name: "first-host", address: "100.64.12.41")
+    let second = desktopIdentity(name: "second-host", address: "100.64.12.42")
+    let registration = RecordingDesktopRegistration(
+      unregisterFailures: [first.dnsName: 2]
+    )
+    let lifecycle = DesktopHostRegistrationLifecycle(registration: registration)
+
+    try await lifecycle.publish(identity: first, port: 5_901)
+    await #expect(throws: DesktopRegistrationTestError.failed) {
+      try await lifecycle.removePublishedIdentities()
+    }
+
+    try await lifecycle.publish(identity: second, port: 5_901)
+    await #expect(throws: DesktopRegistrationTestError.failed) {
+      try await lifecycle.removePublishedIdentities()
+    }
+    try await lifecycle.removePublishedIdentities()
+
+    #expect(
+      await registration.events
+        == [
+          .register(first.dnsName),
+          .unregister(first.dnsName),
+          .register(second.dnsName),
+          .unregister(first.dnsName),
+          .unregister(second.dnsName),
+          .unregister(first.dnsName),
+        ]
+    )
+  }
+
+  @Test @MainActor
   func applicationDelegateOwnsTheShareControllerUsedByTheApp() throws {
     let defaults = try #require(
       UserDefaults(suiteName: "CrabfleetMacTests.\(UUID().uuidString)")
@@ -767,6 +814,17 @@ struct PrivateMacShareTests {
     try JSONDecoder().decode(TailscaleStatusDocument.self, from: Data(statusJSON().utf8))
   }
 
+  private func desktopIdentity(name: String, address: String) -> TailnetIdentity {
+    TailnetIdentity(
+      tailnetName: "example.com",
+      loginName: "operator@example.com",
+      dnsName: "\(name).example.ts.net",
+      hostName: name,
+      ipv4Address: address,
+      userID: 42
+    )
+  }
+
   private func statusJSON() -> String {
     """
     {
@@ -944,6 +1002,52 @@ private actor SuspendedDesktopRegistration: DesktopHostRegistering {
   func finishRegistration() {
     registrationContinuation?.resume()
     registrationContinuation = nil
+  }
+}
+
+private enum DesktopRegistrationTestError: Error {
+  case failed
+}
+
+private actor RecordingDesktopRegistration: DesktopHostRegistering {
+  enum Event: Equatable {
+    case register(String)
+    case unregister(String)
+  }
+
+  private var registerFailures: [String: Int]
+  private var unregisterFailures: [String: Int]
+  private(set) var events: [Event] = []
+
+  init(
+    registerFailures: [String: Int] = [:],
+    unregisterFailures: [String: Int] = [:]
+  ) {
+    self.registerFailures = registerFailures
+    self.unregisterFailures = unregisterFailures
+  }
+
+  func register(identity: TailnetIdentity, port: UInt16) async throws {
+    events.append(.register(identity.dnsName))
+    if consumeFailure(for: identity.dnsName, from: &registerFailures) {
+      throw DesktopRegistrationTestError.failed
+    }
+  }
+
+  func unregister(identity: TailnetIdentity) async throws {
+    events.append(.unregister(identity.dnsName))
+    if consumeFailure(for: identity.dnsName, from: &unregisterFailures) {
+      throw DesktopRegistrationTestError.failed
+    }
+  }
+
+  private func consumeFailure(
+    for identity: String,
+    from failures: inout [String: Int]
+  ) -> Bool {
+    guard let remaining = failures[identity], remaining > 0 else { return false }
+    failures[identity] = remaining - 1
+    return true
   }
 }
 

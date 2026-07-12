@@ -13,6 +13,49 @@ enum PrivateMacSharePermissionPolicy {
 }
 
 @MainActor
+final class DesktopHostRegistrationLifecycle {
+  private let coordinator: DesktopHostRegistrationCoordinator
+  private var publishedIdentity: TailnetIdentity?
+  private var pendingRemovalIdentities: [TailnetIdentity] = []
+
+  init(registration: any DesktopHostRegistering) {
+    coordinator = DesktopHostRegistrationCoordinator(registration: registration)
+  }
+
+  func publish(identity: TailnetIdentity, port: UInt16) async throws {
+    try await coordinator.register(identity: identity, port: port)
+    if let publishedIdentity, publishedIdentity != identity,
+      !pendingRemovalIdentities.contains(publishedIdentity)
+    {
+      pendingRemovalIdentities.append(publishedIdentity)
+    }
+    pendingRemovalIdentities.removeAll { $0 == identity }
+    publishedIdentity = identity
+  }
+
+  func removePublishedIdentities() async throws {
+    if let publishedIdentity {
+      if !pendingRemovalIdentities.contains(publishedIdentity) {
+        pendingRemovalIdentities.append(publishedIdentity)
+      }
+      self.publishedIdentity = nil
+    }
+
+    var firstError: Error?
+    let identities = pendingRemovalIdentities
+    for identity in identities {
+      do {
+        try await coordinator.unregister(identity: identity)
+        pendingRemovalIdentities.removeAll { $0 == identity }
+      } catch {
+        firstError = firstError ?? error
+      }
+    }
+    if let firstError { throw firstError }
+  }
+}
+
+@MainActor
 final class PrivateMacShareController: ObservableObject {
   enum RegistryPhase: Equatable {
     case notConfigured
@@ -100,7 +143,7 @@ final class PrivateMacShareController: ObservableObject {
 
   private let runner: (any TailscaleCommandRunning)?
   private let desktopRegistration: (any DesktopHostRegistering)?
-  private let desktopRegistrationCoordinator: DesktopHostRegistrationCoordinator?
+  private let desktopRegistrationLifecycle: DesktopHostRegistrationLifecycle?
   private let runnerInitializationError: Error?
   private let defaults: UserDefaults
   private var capture: MacScreenCapture?
@@ -118,9 +161,7 @@ final class PrivateMacShareController: ObservableObject {
     defaults: UserDefaults = .standard
   ) {
     self.desktopRegistration = desktopRegistration
-    desktopRegistrationCoordinator = desktopRegistration.map {
-      DesktopHostRegistrationCoordinator(registration: $0)
-    }
+    desktopRegistrationLifecycle = desktopRegistration.map(DesktopHostRegistrationLifecycle.init)
     self.defaults = defaults
     registryPhase = desktopRegistration == nil ? .notConfigured : .notPublished
     let savedDisplayID = defaults.object(forKey: Self.selectedDisplayDefaultsKey) as? Int
@@ -323,20 +364,18 @@ final class PrivateMacShareController: ObservableObject {
     self.capture = nil
     await capture?.stop()
     await registrationTask?.value
-    var removedRegistryEntry = true
-    if let desktopRegistrationCoordinator, let activeIdentity {
+    activeIdentity = nil
+    if let desktopRegistrationLifecycle {
       do {
-        try await desktopRegistrationCoordinator.unregister(identity: activeIdentity)
+        try await desktopRegistrationLifecycle.removePublishedIdentities()
         registryPhase = .notPublished
       } catch {
-        removedRegistryEntry = false
         registryPhase = .failed(error.localizedDescription)
         notice = error.localizedDescription
       }
     } else {
       registryPhase = desktopRegistration == nil ? .notConfigured : .notPublished
     }
-    if removedRegistryEntry { self.activeIdentity = nil }
     guard isCurrent(generation) else { return }
     phase = .idle
   }
@@ -457,14 +496,14 @@ final class PrivateMacShareController: ObservableObject {
 
   private func registerDesktopHost(generation: UInt64) {
     guard registrationTask == nil else { return }
-    guard let desktopRegistrationCoordinator, let identity = activeIdentity else {
+    guard let desktopRegistrationLifecycle, let identity = activeIdentity else {
       registryPhase = desktopRegistration == nil ? .notConfigured : .notPublished
       return
     }
     registryPhase = .registering
     registrationTask = Task { [weak self] in
       do {
-        try await desktopRegistrationCoordinator.register(identity: identity, port: Self.port)
+        try await desktopRegistrationLifecycle.publish(identity: identity, port: Self.port)
         guard !Task.isCancelled, self?.serverGeneration == generation else { return }
         self?.registryPhase = .registered
       } catch is CancellationError {
@@ -482,7 +521,7 @@ final class PrivateMacShareController: ObservableObject {
       registryPhase = desktopRegistration == nil ? .notConfigured : .notPublished
       return
     }
-    guard let desktopRegistrationCoordinator, let activeIdentity else {
+    guard let desktopRegistrationLifecycle else {
       registrationTask = nil
       registryPhase = desktopRegistration == nil ? .notConfigured : .notPublished
       return
@@ -490,7 +529,7 @@ final class PrivateMacShareController: ObservableObject {
     registrationTask = Task { [weak self] in
       await pendingRegistration.value
       do {
-        try await desktopRegistrationCoordinator.unregister(identity: activeIdentity)
+        try await desktopRegistrationLifecycle.removePublishedIdentities()
         self?.registryPhase = .notPublished
       } catch {
         self?.registryPhase = .failed(error.localizedDescription)
