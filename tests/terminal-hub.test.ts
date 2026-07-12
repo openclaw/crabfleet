@@ -11,8 +11,11 @@ import {
   encodeTerminalFrame,
 } from "@openclaw/libterminal/protocol";
 import {
+  attachGitHubActionsViewerProtocol,
   encodeGitHubActionsRelayInputAcknowledgement,
   encodeGitHubActionsRelayOutput,
+  githubActionsFramedRunnerCapability,
+  notifyGitHubActionsViewers,
   parseGitHubActionsRelayInput,
 } from "../src/github-actions-runtime.ts";
 import type { User } from "../src/worker/models.ts";
@@ -27,6 +30,7 @@ class TestSocket {
   readonly sent: Array<string | ArrayBuffer | ArrayBufferView | Blob> = [];
   readonly closed: Array<{ code?: number; reason?: string }> = [];
   accepted = false;
+  private attachment: unknown;
   private readonly listeners = new Map<string, Listener[]>();
 
   accept(): void {
@@ -46,6 +50,14 @@ class TestSocket {
   close(code?: number, reason?: string): void {
     this.closed.push({ code, reason });
     this.readyState = WebSocket.CLOSED;
+  }
+
+  serializeAttachment(attachment: unknown): void {
+    this.attachment = attachment;
+  }
+
+  deserializeAttachment(): unknown {
+    return this.attachment;
   }
 
   emit(type: string, values: Record<string, unknown> = {}): void {
@@ -80,6 +92,16 @@ function emitRelayAcknowledgement(upstream: TestSocket, inputId: string, accepte
   upstream.emit("message", {
     data: encodeGitHubActionsRelayInputAcknowledgement({ inputId, accepted }),
   });
+}
+
+function emitRelayEvent(
+  upstream: TestSocket,
+  type: "runner_connected" | "runner_disconnected" | "runner_waiting",
+): void {
+  const source = socket();
+  attachGitHubActionsViewerProtocol(source, githubActionsFramedRunnerCapability);
+  notifyGitHubActionsViewers([source], type);
+  upstream.emit("message", { data: source.sent[0] });
 }
 
 async function flushQueues(): Promise<void> {
@@ -1282,6 +1304,149 @@ test("GitHub Actions close rejects every pending input acknowledgement", async (
     ),
     true,
   );
+  server.emit("close");
+});
+
+test("GitHub Actions runner disconnect rejects pending input without closing the viewer relay", async () => {
+  const client = socket();
+  const server = socket();
+  const upstream = socket();
+  const hub = new TerminalHub(
+    dependencies(client, server, upstream, {
+      async readSession() {
+        return githubActionsSession;
+      },
+    }),
+  );
+  await hub.open(
+    new Request("https://fleet.example/api/terminal/ws", {
+      headers: { upgrade: "websocket" },
+    }),
+    user,
+  );
+  server.emit("message", {
+    data: encodeTerminalFrame({
+      type: TerminalMessageType.Subscribe,
+      sessionId: githubActionsSession.id,
+      payload: encodeSubscribePayload({ flags: 0, columns: 120, rows: 34 }),
+    }),
+  });
+  await flushQueues();
+  await flushQueues();
+  server.emit("message", {
+    data: encodeTerminalFrame({
+      type: TerminalMessageType.Input,
+      sessionId: githubActionsSession.id,
+      payload: new TextEncoder().encode("pending"),
+    }),
+  });
+  await flushQueues();
+
+  emitRelayEvent(upstream, "runner_disconnected");
+  await flushQueues();
+  await flushQueues();
+  await flushQueues();
+
+  assert.deepEqual(upstream.closed, []);
+  const disconnectEvents = server.sent
+    .map((payload) => frame(payload))
+    .filter((message) => message.type === TerminalMessageType.Event)
+    .map((message) => decodeJsonPayload(message.payload));
+  assert.equal(
+    disconnectEvents.some(
+      (event) =>
+        (event as { type?: string }).type === "input-rejected" &&
+        (event as { error?: string }).error ===
+          "GitHub Actions runner disconnected before accepting input",
+    ),
+    true,
+    JSON.stringify(disconnectEvents),
+  );
+  server.emit("close");
+});
+
+test("GitHub Actions runner replacement rejects old input and accepts new input", async () => {
+  const client = socket();
+  const server = socket();
+  const upstream = socket();
+  const hub = new TerminalHub(
+    dependencies(client, server, upstream, {
+      async readSession() {
+        return githubActionsSession;
+      },
+    }),
+  );
+  await hub.open(
+    new Request("https://fleet.example/api/terminal/ws", {
+      headers: { upgrade: "websocket" },
+    }),
+    user,
+  );
+  server.emit("message", {
+    data: encodeTerminalFrame({
+      type: TerminalMessageType.Subscribe,
+      sessionId: githubActionsSession.id,
+      payload: encodeSubscribePayload({ flags: 0, columns: 120, rows: 34 }),
+    }),
+  });
+  await flushQueues();
+  await flushQueues();
+  server.emit("message", {
+    data: encodeTerminalFrame({
+      type: TerminalMessageType.Input,
+      sessionId: githubActionsSession.id,
+      payload: new TextEncoder().encode("old runner"),
+    }),
+  });
+  await flushQueues();
+  const oldInput = relayInput(upstream.sent.at(-1)!);
+
+  emitRelayEvent(upstream, "runner_connected");
+  await flushQueues();
+  await flushQueues();
+  await flushQueues();
+  assert.deepEqual(upstream.closed, []);
+  const replacementEvents = server.sent
+    .map((payload) => frame(payload))
+    .filter((message) => message.type === TerminalMessageType.Event)
+    .map((message) => decodeJsonPayload(message.payload));
+  assert.equal(
+    replacementEvents.some(
+      (event) =>
+        (event as { type?: string }).type === "input-rejected" &&
+        (event as { error?: string }).error ===
+          "GitHub Actions runner was replaced before accepting input",
+    ),
+    true,
+    JSON.stringify(replacementEvents),
+  );
+
+  emitRelayAcknowledgement(upstream, oldInput.inputId, true);
+  server.emit("message", {
+    data: encodeTerminalFrame({
+      type: TerminalMessageType.Input,
+      sessionId: githubActionsSession.id,
+      payload: new TextEncoder().encode("new runner"),
+    }),
+  });
+  await flushQueues();
+  await flushQueues();
+  const newInput = relayInput(upstream.sent.at(-1)!);
+  assert.equal(newInput.text, "new runner");
+  emitRelayAcknowledgement(upstream, newInput.inputId, true);
+  await flushQueues();
+  await flushQueues();
+
+  const completions = server.sent
+    .map((payload) => frame(payload))
+    .filter((message) => message.type === TerminalMessageType.Event)
+    .map((message) => decodeJsonPayload(message.payload) as { type?: string })
+    .filter((message) => message.type === "input-accepted" || message.type === "input-rejected");
+  assert.deepEqual(
+    completions.map((message) => message.type),
+    ["input-rejected", "input-accepted"],
+  );
+  assert.deepEqual(upstream.closed, []);
   server.emit("close");
 });
 

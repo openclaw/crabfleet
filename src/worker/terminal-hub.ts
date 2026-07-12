@@ -563,6 +563,17 @@ export class TerminalHub {
               }
               const relayEvent = parseGitHubActionsRelayEvent(data);
               if (relayEvent) {
+                if (relayEvent.type === "runner_disconnected") {
+                  completeAllTerminalInputAcknowledgements(activeSubscription, {
+                    accepted: false,
+                    error: "GitHub Actions runner disconnected before accepting input",
+                  });
+                } else if (relayEvent.type === "runner_connected") {
+                  completeAllTerminalInputAcknowledgements(activeSubscription, {
+                    accepted: false,
+                    error: "GitHub Actions runner was replaced before accepting input",
+                  });
+                }
                 sendTerminalJson(client, TerminalMessageType.Event, id, relayEvent);
                 return;
               }
