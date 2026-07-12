@@ -7,6 +7,34 @@ import CryptoSwift
 
 extension VNCProtocol.ARDAuthentication {
 	struct DiffieHellmanKeyAgreement {
+		struct ValidatedSafePrimeCache {
+			let capacity: Int
+			private var insertionOrder = [Data]()
+			private var values = Set<Data>()
+
+			init(capacity: Int) {
+				precondition(capacity > 0)
+				self.capacity = capacity
+			}
+
+			var count: Int {
+				values.count
+			}
+
+			func contains(_ value: Data) -> Bool {
+				values.contains(value)
+			}
+
+			mutating func insert(_ value: Data) {
+				guard values.insert(value).inserted else { return }
+
+				insertionOrder.append(value)
+				if values.count > capacity {
+					values.remove(insertionOrder.removeFirst())
+				}
+			}
+		}
+
 		let publicKey: Data
 		let privateKey: Data
 		let secretKey: Data
@@ -52,7 +80,7 @@ extension VNCProtocol.ARDAuthentication {
 
 private extension VNCProtocol.ARDAuthentication.DiffieHellmanKeyAgreement {
 	static let safePrimeCondition = NSCondition()
-	static var validatedSafePrimes = Set<Data>()
+	static var validatedSafePrimes = ValidatedSafePrimeCache(capacity: 32)
 	static var rejectedSafePrimes = Set<Data>()
 	static var safePrimeValidations = Set<Data>()
 

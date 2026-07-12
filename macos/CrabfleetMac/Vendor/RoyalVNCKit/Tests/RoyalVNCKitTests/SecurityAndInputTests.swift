@@ -84,6 +84,32 @@ struct SecurityAndInputTests {
   }
 
   @Test
+  func evictsValidatedAppleRemoteDesktopSafePrimesInInsertionOrder() {
+    var cache = ARDKeyAgreement.ValidatedSafePrimeCache(capacity: 3)
+    let values = (0..<5).map { Data([$0]) }
+
+    for value in values.prefix(3) {
+      cache.insert(value)
+    }
+    cache.insert(values[0])
+    cache.insert(values[3])
+
+    #expect(cache.count == 3)
+    #expect(!cache.contains(values[0]))
+    #expect(cache.contains(values[1]))
+    #expect(cache.contains(values[2]))
+    #expect(cache.contains(values[3]))
+
+    cache.insert(values[4])
+
+    #expect(cache.count == 3)
+    #expect(!cache.contains(values[1]))
+    #expect(cache.contains(values[2]))
+    #expect(cache.contains(values[3]))
+    #expect(cache.contains(values[4]))
+  }
+
+  @Test
   func computesUltraVNCModularArithmeticKnownAnswers() {
     #expect(
       UltraVNCBigNum.addM64(
