@@ -1131,8 +1131,8 @@ address, port, and timestamp while preserving its creation time.
 Clients opt into fenced registration by sending
 `X-Crabfleet-Ownership-Mode: token-v1` and a stable
 `X-Crabfleet-Publication-ID`. The publication ID identifies one client's
-attempt across retries and restarts; it must satisfy the same 1-80 character
-identifier rules as the host ID. The response includes an `ownershipToken`
+attempt across retries and restarts; it is an opaque 1-200 byte value that
+cannot contain whitespace or control characters. The response includes an `ownershipToken`
 required for deletion. Omitting the ownership-mode header preserves the legacy
 `{ "host": ... }` response and stores a tokenless registration so older clients
 can still clean up during rolling upgrades. Current clients tolerate a legacy
