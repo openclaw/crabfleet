@@ -195,7 +195,7 @@ test("terminal cleanup atomically stages the session and credential-policy refs"
     true,
   );
 
-  assert.equal(batch.length, 3);
+  assert.equal(batch.length, 4);
   const sql = batch.map((statement) => statement.sql).join("\n");
   const parameters = batch.flatMap((statement) => statement.parameters);
   assert.match(sql, /update "interactive_sessions"/i);
@@ -205,6 +205,7 @@ test("terminal cleanup atomically stages the session and credential-policy refs"
   assert.match(sql, /"lease_id" = \?/i);
   assert.match(sql, /on conflict\s*\(session_id, sandbox_id, lookup_id\)/i);
   assert.match(sql, /update "interactive_session_credential_policies"/i);
+  assert.match(sql, /update "interactive_session_credential_policy_registrations"/i);
   assert.match(sql, /not exists/i);
   assert.ok(parameters.includes("failed"));
   assert.ok(parameters.includes("generation:test-1"));

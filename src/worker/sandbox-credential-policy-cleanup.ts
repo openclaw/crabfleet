@@ -208,6 +208,19 @@ export async function stageTerminalCredentialPolicyCleanup(
       .where(
         sandboxCredentialPolicyCleanupAuthorizedCondition(session.id, sandboxId, stageRevision),
       ),
+    db
+      .updateTable("interactive_session_credential_policy_registrations")
+      .set({
+        state: "cleanup_pending",
+        registration_claim: null,
+        registration_claim_expires_at: null,
+        updated_at: stageRevision,
+      })
+      .where("session_id", "=", session.id)
+      .where("sandbox_id", "=", sandboxId)
+      .where(
+        sandboxCredentialPolicyCleanupAuthorizedCondition(session.id, sandboxId, stageRevision),
+      ),
   ]);
   await executeBatch(env, [sessionTransition, ...policyTransitions]);
   const staged = await db

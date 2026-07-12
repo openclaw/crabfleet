@@ -9,11 +9,15 @@ import { database, executeBatch, type Database } from "./database.ts";
 import type { RuntimeEnv } from "./env.ts";
 import type { InteractiveSessionStatus } from "./models.ts";
 import {
+  abandonSandboxCredentialPolicyRegistration,
+  finishSandboxCredentialPolicyRegistration,
   recordSandboxCredentialPolicyRefs,
   sandboxCredentialPolicyCleanupAuthorizedCondition,
+  sandboxLookupIds,
   type SandboxCredentialPolicyOwnershipFence,
 } from "./sandbox-credential-policy-repository.ts";
 import { sandboxLeaseInfo, sandboxLeasePrefix } from "./sandbox-lease.ts";
+import type { SandboxCredentialPolicyRegistration } from "./session-control-policy.ts";
 
 const credentialPolicyScanLimit = 32;
 export const credentialPolicyProvisioningStaleMs = 15 * 60_000;
@@ -45,6 +49,27 @@ export type CredentialPolicyScanRow = {
   standalone_updated_at: number | null;
 };
 
+type CredentialPolicyOwnershipRow = Pick<
+  CredentialPolicyScanRow,
+  | "session_id"
+  | "sandbox_id"
+  | "matched_session_id"
+  | "session_adapter"
+  | "session_lease_id"
+  | "session_sandbox_refresh_sandbox_id"
+  | "session_sandbox_refresh_claim"
+  | "session_sandbox_refresh_claim_expires_at"
+  | "matched_standalone_id"
+  | "standalone_state"
+  | "standalone_claim"
+  | "standalone_claim_expires_at"
+>;
+
+type StagedCredentialPolicyScanRow = CredentialPolicyOwnershipRow & {
+  registration_generation: string;
+  registration_claim: string;
+};
+
 export type SandboxCredentialPolicyExists = (
   env: RuntimeEnv,
   sandboxId: string,
@@ -58,6 +83,7 @@ export async function scanCredentialPolicyCleanupPage(
   sessionId?: string,
 ): Promise<void> {
   const db = database(env);
+  await scanStagedCredentialPolicyRegistrations(env, db, now, policyExists, sessionId);
   const state = sessionId
     ? null
     : await db
@@ -250,6 +276,75 @@ export async function scanCredentialPolicyCleanupPage(
   }
 }
 
+async function scanStagedCredentialPolicyRegistrations(
+  env: RuntimeEnv,
+  db: Kysely<Database>,
+  now: number,
+  policyExists: SandboxCredentialPolicyExists,
+  sessionId?: string,
+): Promise<void> {
+  const sessionFilter = sessionId ? sql`AND registration.session_id = ${sessionId}` : sql``;
+  const result = await sql<StagedCredentialPolicyScanRow>`
+    SELECT
+      registration.session_id,
+      registration.sandbox_id,
+      registration.registration_generation,
+      registration.registration_claim,
+      session.id AS matched_session_id,
+      session.adapter AS session_adapter,
+      session.lease_id AS session_lease_id,
+      session.sandbox_refresh_sandbox_id AS session_sandbox_refresh_sandbox_id,
+      session.sandbox_refresh_claim AS session_sandbox_refresh_claim,
+      session.sandbox_refresh_claim_expires_at AS session_sandbox_refresh_claim_expires_at,
+      standalone.id AS matched_standalone_id,
+      standalone.state AS standalone_state,
+      standalone.ownership_claim AS standalone_claim,
+      standalone.ownership_claim_expires_at AS standalone_claim_expires_at
+    FROM interactive_session_credential_policy_registrations AS registration
+    LEFT JOIN interactive_sessions AS session ON session.id = registration.session_id
+    LEFT JOIN standalone_sandbox_provisions AS standalone
+      ON standalone.id = registration.session_id
+      AND standalone.sandbox_id = registration.sandbox_id
+    WHERE registration.state = 'registering'
+      AND registration.registration_claim_expires_at <= ${now}
+      ${sessionFilter}
+    ORDER BY registration.updated_at ASC
+    LIMIT ${credentialPolicyScanLimit}
+  `.execute(db);
+  for (const row of result.rows) {
+    const registration: SandboxCredentialPolicyRegistration = {
+      generation: row.registration_generation,
+      claim: row.registration_claim,
+      lookupIds: sandboxLookupIds(env, row.sandbox_id),
+    };
+    try {
+      const ownershipFence = credentialPolicyScanOwnershipFence(row, now);
+      if (
+        ownershipFence &&
+        (await policyExists(env, row.sandbox_id, row.registration_generation)) &&
+        (await finishSandboxCredentialPolicyRegistration(
+          env,
+          row.session_id,
+          row.sandbox_id,
+          registration,
+          ownershipFence,
+        ))
+      ) {
+        continue;
+      }
+      await abandonSandboxCredentialPolicyRegistration(
+        env,
+        row.session_id,
+        row.sandbox_id,
+        registration,
+        "sandbox credential policy registration did not complete",
+      );
+    } catch (error) {
+      console.error("staged sandbox credential policy recovery failed", error);
+    }
+  }
+}
+
 async function readCredentialPolicyScanPage(
   db: Kysely<Database>,
   cursor: number,
@@ -341,7 +436,7 @@ async function repairActiveSandboxCredentialPolicyRegistration(
 }
 
 export function credentialPolicyScanOwnershipFence(
-  row: CredentialPolicyScanRow,
+  row: CredentialPolicyOwnershipRow,
   now: number,
 ): SandboxCredentialPolicyOwnershipFence | null {
   if (

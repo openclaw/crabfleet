@@ -1037,6 +1037,10 @@ test("sandbox credential cleanup is durably staged and retried", async () => {
     new URL("../migrations/0022_credential_policy_cleanup.sql", import.meta.url),
     "utf8",
   );
+  const registrationStagingMigration = await readFile(
+    new URL("../migrations/0034_credential_policy_registration_staging.sql", import.meta.url),
+    "utf8",
+  );
   const scanStart = scannerSource.indexOf("type CredentialPolicyScanRow");
   const scanSource = scannerSource.slice(scanStart);
   const batchStart = cleanupServiceSource.indexOf(
@@ -1207,14 +1211,20 @@ test("sandbox credential cleanup is durably staged and retried", async () => {
     registerSource.indexOf('stub.fetch("https://crabfleet.internal/api/session-control/register"') <
       registerSource.indexOf("finishSandboxCredentialPolicyRegistration"),
   );
-  assert.doesNotMatch(finishSource, /INSERT INTO|insertInto/);
-  assert.match(finishSource, /state: "active"/);
-  assert.match(finishSource, /where\(sandboxCredentialPolicyOwnerCondition/);
-  assert.doesNotMatch(finishSource, /cleanup_pending/);
+  assert.match(finishSource, /executeBatch/);
+  assert.match(finishSource, /sandboxCredentialPolicyPromotionQueries/);
+  assert.match(finishSource, /row\.state === "active"/);
+  assert.match(registrationLifecycleSource, /INSERT INTO interactive_session_credential_policies/);
+  assert.match(
+    registrationLifecycleSource,
+    /DELETE FROM interactive_session_credential_policy_registrations/,
+  );
   assert.match(registerSource, /abandonSandboxCredentialPolicyRegistration/);
-  assert.match(abandonSource, /sandboxCredentialPolicyCleanupAuthorizedCondition/);
-  assert.match(abandonSource, /THEN 'cleanup_pending'/);
-  assert.match(abandonSource, /ELSE 'registering'/);
+  assert.match(
+    abandonSource,
+    /updateTable\("interactive_session_credential_policy_registrations"\)/,
+  );
+  assert.match(abandonSource, /state: "cleanup_pending"/);
   assert.ok(
     scanDecisionSource.indexOf("sandboxExpected") <
       scanDecisionSource.indexOf("if (registrationAbandoned) return true"),
@@ -1229,6 +1239,11 @@ test("sandbox credential cleanup is durably staged and retried", async () => {
   assert.match(migration, /state IN \('registering', 'active', 'cleanup_pending'\)/);
   assert.match(migration, /registration_generation TEXT NOT NULL/);
   assert.match(migration, /registration_claim_expires_at INTEGER/);
+  assert.match(
+    registrationStagingMigration,
+    /CREATE TABLE IF NOT EXISTS interactive_session_credential_policy_registrations/,
+  );
+  assert.match(registrationStagingMigration, /state IN \('registering', 'cleanup_pending'\)/);
   assert.match(migration, /CREATE TABLE IF NOT EXISTS credential_policy_reconcile_state/);
   assert.match(migration, /scan_max_rowid INTEGER NOT NULL/);
   assert.match(migration, /group_max_session_id TEXT NOT NULL/);

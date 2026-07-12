@@ -7,6 +7,7 @@ import {
   database,
   type Database,
   type InteractiveSessionCredentialPolicyTable,
+  type InteractiveSessionCredentialPolicyRegistrationTable,
 } from "./database.ts";
 import type { RuntimeEnv } from "./env.ts";
 import { serviceUnavailable } from "./http.ts";
@@ -73,6 +74,98 @@ async function unregisterSandboxCredentialPolicyLookup(
   if (!response.ok) {
     throw serviceUnavailable("sandbox credential policy cleanup failed");
   }
+}
+
+async function reconcileStagedCredentialPolicyCleanup(
+  env: RuntimeEnv,
+  now: number,
+  sessionId?: string,
+): Promise<void> {
+  let query = database(env)
+    .selectFrom("interactive_session_credential_policy_registrations")
+    .selectAll()
+    .where("state", "=", "cleanup_pending")
+    .where((expression) =>
+      expression.or([
+        expression("cleanup_claim", "is", null),
+        expression("cleanup_claim_expires_at", "<", now),
+      ]),
+    )
+    .orderBy(sql`COALESCE(last_attempt_at, created_at)`, "asc")
+    .limit(credentialPolicyCleanupLimit);
+  if (sessionId) query = query.where("session_id", "=", sessionId);
+  await mapWithConcurrency(await query.execute(), 3, async (registration) => {
+    await reconcileStagedCredentialPolicyRegistration(env, registration, now);
+  });
+}
+
+async function reconcileStagedCredentialPolicyRegistration(
+  env: RuntimeEnv,
+  registration: Selectable<InteractiveSessionCredentialPolicyRegistrationTable>,
+  now: number,
+): Promise<void> {
+  const claim = crypto.randomUUID();
+  const claimed = await database(env)
+    .updateTable("interactive_session_credential_policy_registrations")
+    .set({
+      cleanup_claim: claim,
+      cleanup_claim_expires_at: now + credentialPolicyCleanupClaimMs,
+      attempt_count: sql<number>`attempt_count + 1`,
+      last_attempt_at: now,
+      updated_at: now,
+    })
+    .where("session_id", "=", registration.session_id)
+    .where("sandbox_id", "=", registration.sandbox_id)
+    .where("state", "=", "cleanup_pending")
+    .where("registration_generation", "=", registration.registration_generation)
+    .where((expression) =>
+      expression.or([
+        expression("cleanup_claim", "is", null),
+        expression("cleanup_claim_expires_at", "<", now),
+      ]),
+    )
+    .executeTakeFirst();
+  if ((claimed.numUpdatedRows ?? 0n) === 0n) return;
+  try {
+    await Promise.all(
+      sandboxLookupIds(env, registration.sandbox_id).map((lookupId) =>
+        unregisterSandboxCredentialPolicyLookup(
+          env,
+          lookupId,
+          registration.registration_generation,
+          registration.session_id,
+        ),
+      ),
+    );
+  } catch (error) {
+    await database(env)
+      .updateTable("interactive_session_credential_policy_registrations")
+      .set({
+        last_error: clean(error instanceof Error ? error.message : String(error), 500),
+        cleanup_claim: null,
+        cleanup_claim_expires_at: null,
+        updated_at: Date.now(),
+      })
+      .where("session_id", "=", registration.session_id)
+      .where("sandbox_id", "=", registration.sandbox_id)
+      .where("registration_generation", "=", registration.registration_generation)
+      .where("cleanup_claim", "=", claim)
+      .execute();
+    return;
+  }
+  await database(env)
+    .deleteFrom("interactive_session_credential_policy_registrations")
+    .where("session_id", "=", registration.session_id)
+    .where("sandbox_id", "=", registration.sandbox_id)
+    .where("registration_generation", "=", registration.registration_generation)
+    .where("cleanup_claim", "=", claim)
+    .execute();
+  await completeCredentialPolicyCleanupSession(env, registration.session_id, Date.now());
+  await completeStandaloneSandboxProvisionCleanupSafely(
+    env,
+    registration.session_id,
+    registration.sandbox_id,
+  );
 }
 
 async function normalizeCredentialPolicyCleanupGroups(
@@ -202,6 +295,9 @@ export async function reconcileSandboxCredentialPolicyCleanupBatch(
       console.error("credential policy cleanup scan failed", error);
     },
   );
+  await reconcileStagedCredentialPolicyCleanup(env, now, sessionId).catch((error) => {
+    console.error("staged credential policy cleanup failed", error);
+  });
   await normalizeCredentialPolicyCleanupGroups(env, now, sessionId).catch((error) => {
     console.error("credential policy cleanup group normalization failed", error);
   });
@@ -225,6 +321,16 @@ export async function reconcileSandboxCredentialPolicyCleanupBatch(
           AND registration.registration_claim_expires_at > ${now}
       )
     `)
+    .where(sql<boolean>`
+      NOT EXISTS (
+        SELECT 1
+        FROM interactive_session_credential_policy_registrations AS registration
+        WHERE registration.session_id = interactive_session_credential_policies.session_id
+          AND registration.sandbox_id = interactive_session_credential_policies.sandbox_id
+          AND registration.state = 'registering'
+          AND registration.registration_claim_expires_at > ${now}
+      )
+    `)
     .orderBy(sql`COALESCE(last_attempt_at, created_at)`, "asc")
     .orderBy("session_id", "asc")
     .orderBy("sandbox_id", "asc")
@@ -245,6 +351,11 @@ export async function reconcileSandboxCredentialPolicyCleanupBatch(
         SELECT 1
         FROM interactive_session_credential_policies AS policy
         WHERE policy.session_id = interactive_sessions.id
+      )
+      AND NOT EXISTS (
+        SELECT 1
+        FROM interactive_session_credential_policy_registrations AS registration
+        WHERE registration.session_id = interactive_sessions.id
       )
     `)
     .orderBy("stopped_at", "asc")
@@ -296,6 +407,14 @@ async function reconcileCredentialPolicyCleanup(
         WHERE registration.session_id = interactive_session_credential_policies.session_id
           AND registration.sandbox_id = interactive_session_credential_policies.sandbox_id
           AND registration.registration_claim IS NOT NULL
+          AND registration.registration_claim_expires_at > ${now}
+      )
+      AND NOT EXISTS (
+        SELECT 1
+        FROM interactive_session_credential_policy_registrations AS registration
+        WHERE registration.session_id = interactive_session_credential_policies.session_id
+          AND registration.sandbox_id = interactive_session_credential_policies.sandbox_id
+          AND registration.state = 'registering'
           AND registration.registration_claim_expires_at > ${now}
       )
   `.execute(database(env));
@@ -411,6 +530,12 @@ async function completeStandaloneSandboxProvisionCleanup(
         WHERE policy.session_id = ${provisionId}
           AND policy.sandbox_id = ${sandboxId}
       )
+      AND NOT EXISTS (
+        SELECT 1
+        FROM interactive_session_credential_policy_registrations AS registration
+        WHERE registration.session_id = ${provisionId}
+          AND registration.sandbox_id = ${sandboxId}
+      )
     `)
     .execute();
 }
@@ -421,12 +546,19 @@ async function completeCredentialPolicyCleanupSession(
   now: number,
 ): Promise<void> {
   const db = database(env);
-  const remaining = await db
-    .selectFrom("interactive_session_credential_policies")
-    .select(({ fn }) => fn.countAll<number>().as("count"))
-    .where("session_id", "=", sessionId)
-    .executeTakeFirst();
-  if (Number(remaining?.count ?? 0) > 0) return;
+  const remaining = await sql<{ count: number }>`
+    SELECT
+      (
+        SELECT count(*)
+        FROM interactive_session_credential_policies
+        WHERE session_id = ${sessionId}
+      ) + (
+        SELECT count(*)
+        FROM interactive_session_credential_policy_registrations
+        WHERE session_id = ${sessionId}
+      ) AS count
+  `.execute(db);
+  if (Number(remaining.rows[0]?.count ?? 0) > 0) return;
   const session = await db
     .selectFrom("interactive_sessions")
     .select([
@@ -477,6 +609,11 @@ async function completeCredentialPolicyCleanupSession(
       NOT EXISTS (
         SELECT 1
         FROM interactive_session_credential_policies
+        WHERE session_id = ${sessionId}
+      )
+      AND NOT EXISTS (
+        SELECT 1
+        FROM interactive_session_credential_policy_registrations
         WHERE session_id = ${sessionId}
       )
     `)

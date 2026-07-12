@@ -301,6 +301,22 @@ export type InteractiveSessionCredentialPolicyTable = {
   updated_at: number;
 };
 
+export type InteractiveSessionCredentialPolicyRegistrationTable = {
+  session_id: string;
+  sandbox_id: string;
+  state: "registering" | "cleanup_pending";
+  registration_generation: string;
+  registration_claim: string | null;
+  registration_claim_expires_at: number | null;
+  attempt_count: Generated<number>;
+  last_attempt_at: number | null;
+  last_error: string | null;
+  cleanup_claim: string | null;
+  cleanup_claim_expires_at: number | null;
+  created_at: number;
+  updated_at: number;
+};
+
 export type CredentialPolicyReconcileStateTable = {
   id: number;
   last_rowid: number;
@@ -381,6 +397,7 @@ export type Database = {
   interactive_session_events: InteractiveSessionEventTable;
   interactive_session_log_archives: InteractiveSessionLogArchiveTable;
   interactive_session_credential_policies: InteractiveSessionCredentialPolicyTable;
+  interactive_session_credential_policy_registrations: InteractiveSessionCredentialPolicyRegistrationTable;
   credential_policy_reconcile_state: CredentialPolicyReconcileStateTable;
   standalone_sandbox_provisions: StandaloneSandboxProvisionTable;
   repo_workflows: RepoWorkflowTable;

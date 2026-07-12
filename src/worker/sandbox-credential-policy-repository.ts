@@ -439,12 +439,11 @@ export function sandboxCredentialPolicyRegistrationQueries(
   now: number,
   ownershipFence: SandboxCredentialPolicyOwnershipFence,
 ): CompilableQuery[] {
-  return registration.lookupIds.map(
-    (lookupId) => sql`
-      INSERT INTO interactive_session_credential_policies (
+  return [
+    sql`
+      INSERT INTO interactive_session_credential_policy_registrations (
         session_id,
         sandbox_id,
-        lookup_id,
         state,
         registration_generation,
         registration_claim,
@@ -460,7 +459,6 @@ export function sandboxCredentialPolicyRegistrationQueries(
       SELECT
         ${sessionId},
         ${sandboxId},
-        ${lookupId},
         'registering',
         ${registration.generation},
         ${registration.claim},
@@ -473,7 +471,14 @@ export function sandboxCredentialPolicyRegistrationQueries(
         ${now},
         ${now}
       WHERE ${sandboxCredentialPolicyOwnerCondition(sessionId, sandboxId, ownershipFence, now)}
-      ON CONFLICT(session_id, sandbox_id, lookup_id) DO UPDATE SET
+        AND NOT EXISTS (
+          SELECT 1
+          FROM interactive_session_credential_policies
+          WHERE session_id = ${sessionId}
+            AND sandbox_id = ${sandboxId}
+            AND state = 'cleanup_pending'
+        )
+      ON CONFLICT(session_id, sandbox_id) DO UPDATE SET
         state = 'registering',
         registration_generation = excluded.registration_generation,
         registration_claim = excluded.registration_claim,
@@ -482,14 +487,21 @@ export function sandboxCredentialPolicyRegistrationQueries(
         cleanup_claim = NULL,
         cleanup_claim_expires_at = NULL,
         updated_at = excluded.updated_at
-      WHERE interactive_session_credential_policies.state != 'cleanup_pending'
+      WHERE interactive_session_credential_policy_registrations.state != 'cleanup_pending'
         AND (
-          interactive_session_credential_policies.registration_claim IS NULL
-          OR interactive_session_credential_policies.registration_claim_expires_at <= ${now}
+          interactive_session_credential_policy_registrations.registration_claim IS NULL
+          OR interactive_session_credential_policy_registrations.registration_claim_expires_at <= ${now}
         )
         AND ${sandboxCredentialPolicyOwnerCondition(sessionId, sandboxId, ownershipFence, now)}
+        AND NOT EXISTS (
+          SELECT 1
+          FROM interactive_session_credential_policies
+          WHERE session_id = ${sessionId}
+            AND sandbox_id = ${sandboxId}
+            AND state = 'cleanup_pending'
+        )
     `,
-  );
+  ];
 }
 
 export async function beginSandboxCredentialPolicyRegistration(
@@ -519,9 +531,8 @@ export async function beginSandboxCredentialPolicyRegistration(
     ),
   );
   const claimed = await db
-    .selectFrom("interactive_session_credential_policies")
+    .selectFrom("interactive_session_credential_policy_registrations")
     .select([
-      "lookup_id",
       "state",
       "registration_generation",
       "registration_claim",
@@ -529,17 +540,12 @@ export async function beginSandboxCredentialPolicyRegistration(
     ])
     .where("session_id", "=", sessionId)
     .where("sandbox_id", "=", sandboxId)
-    .where("lookup_id", "in", lookupIds)
-    .execute();
+    .executeTakeFirst();
   if (
-    claimed.length !== lookupIds.length ||
-    claimed.some(
-      (row) =>
-        row.state !== "registering" ||
-        row.registration_generation !== registration.generation ||
-        row.registration_claim !== registration.claim ||
-        row.registration_claim_expires_at !== registrationExpiresAt,
-    )
+    claimed?.state !== "registering" ||
+    claimed.registration_generation !== registration.generation ||
+    claimed.registration_claim !== registration.claim ||
+    claimed.registration_claim_expires_at !== registrationExpiresAt
   ) {
     await abandonSandboxCredentialPolicyRegistration(
       env,
@@ -563,22 +569,19 @@ export async function renewSandboxCredentialPolicyRegistration(
   const now = Date.now();
   const registrationExpiresAt = now + credentialPolicyRegistrationClaimMs;
   const renewed = await database(env)
-    .updateTable("interactive_session_credential_policies")
+    .updateTable("interactive_session_credential_policy_registrations")
     .set({
       registration_claim_expires_at: registrationExpiresAt,
       updated_at: now,
     })
     .where("session_id", "=", sessionId)
     .where("sandbox_id", "=", sandboxId)
-    .where("lookup_id", "in", registration.lookupIds)
     .where("state", "=", "registering")
     .where("registration_generation", "=", registration.generation)
     .where("registration_claim", "=", registration.claim)
     .where(sandboxCredentialPolicyOwnerCondition(sessionId, sandboxId, ownershipFence, now))
     .executeTakeFirst();
-  return Number(renewed.numUpdatedRows ?? 0n) === registration.lookupIds.length
-    ? registrationExpiresAt
-    : null;
+  return Number(renewed.numUpdatedRows ?? 0n) === 1 ? registrationExpiresAt : null;
 }
 
 export async function finishSandboxCredentialPolicyRegistration(
@@ -590,22 +593,17 @@ export async function finishSandboxCredentialPolicyRegistration(
 ): Promise<boolean> {
   const now = Date.now();
   const db = database(env);
-  await db
-    .updateTable("interactive_session_credential_policies")
-    .set({
-      state: "active",
-      registration_claim: null,
-      registration_claim_expires_at: null,
-      updated_at: now,
-    })
-    .where("session_id", "=", sessionId)
-    .where("sandbox_id", "=", sandboxId)
-    .where("lookup_id", "in", registration.lookupIds)
-    .where("state", "=", "registering")
-    .where("registration_generation", "=", registration.generation)
-    .where("registration_claim", "=", registration.claim)
-    .where(sandboxCredentialPolicyOwnerCondition(sessionId, sandboxId, ownershipFence, now))
-    .execute();
+  await executeBatch(
+    env,
+    sandboxCredentialPolicyPromotionQueries(
+      env,
+      sessionId,
+      sandboxId,
+      registration,
+      ownershipFence,
+      now,
+    ),
+  );
   const active = await db
     .selectFrom("interactive_session_credential_policies")
     .select(["lookup_id", "state", "registration_generation", "registration_claim"])
@@ -613,7 +611,14 @@ export async function finishSandboxCredentialPolicyRegistration(
     .where("sandbox_id", "=", sandboxId)
     .where("lookup_id", "in", registration.lookupIds)
     .execute();
+  const staged = await db
+    .selectFrom("interactive_session_credential_policy_registrations")
+    .select("registration_generation")
+    .where("session_id", "=", sessionId)
+    .where("sandbox_id", "=", sandboxId)
+    .executeTakeFirst();
   return (
+    !staged &&
     active.length === registration.lookupIds.length &&
     active.every(
       (row) =>
@@ -633,13 +638,9 @@ export async function abandonSandboxCredentialPolicyRegistration(
 ): Promise<void> {
   const now = Date.now();
   await database(env)
-    .updateTable("interactive_session_credential_policies")
+    .updateTable("interactive_session_credential_policy_registrations")
     .set({
-      state: sql<"registering" | "cleanup_pending">`CASE
-        WHEN ${sandboxCredentialPolicyCleanupAuthorizedCondition(sessionId, sandboxId, now)}
-        THEN 'cleanup_pending'
-        ELSE 'registering'
-      END`,
+      state: "cleanup_pending",
       registration_claim: null,
       registration_claim_expires_at: null,
       last_error: reason,
@@ -650,6 +651,106 @@ export async function abandonSandboxCredentialPolicyRegistration(
     .where("registration_generation", "=", registration.generation)
     .where("registration_claim", "=", registration.claim)
     .execute();
+}
+
+export function sandboxCredentialPolicyPromotionQueries(
+  env: RuntimeEnv,
+  sessionId: string,
+  sandboxId: string,
+  registration: SandboxCredentialPolicyRegistration,
+  ownershipFence: SandboxCredentialPolicyOwnershipFence,
+  now: number,
+): CompilableQuery[] {
+  const promotionAuthorized = sql<boolean>`
+    EXISTS (
+      SELECT 1
+      FROM interactive_session_credential_policy_registrations
+      WHERE session_id = ${sessionId}
+        AND sandbox_id = ${sandboxId}
+        AND state = 'registering'
+        AND registration_generation = ${registration.generation}
+        AND registration_claim = ${registration.claim}
+    )
+    AND NOT EXISTS (
+      SELECT 1
+      FROM interactive_session_credential_policies
+      WHERE session_id = ${sessionId}
+        AND sandbox_id = ${sandboxId}
+        AND state = 'cleanup_pending'
+    )
+    AND ${sandboxCredentialPolicyOwnerCondition(sessionId, sandboxId, ownershipFence, now)}
+  `;
+  const promotions = registration.lookupIds.map(
+    (lookupId) => sql`
+      INSERT INTO interactive_session_credential_policies (
+        session_id,
+        sandbox_id,
+        lookup_id,
+        state,
+        registration_generation,
+        registration_claim,
+        registration_claim_expires_at,
+        attempt_count,
+        last_attempt_at,
+        last_error,
+        cleanup_claim,
+        cleanup_claim_expires_at,
+        created_at,
+        updated_at
+      )
+      SELECT
+        ${sessionId},
+        ${sandboxId},
+        ${lookupId},
+        'active',
+        ${registration.generation},
+        NULL,
+        NULL,
+        0,
+        NULL,
+        NULL,
+        NULL,
+        NULL,
+        ${now},
+        ${now}
+      WHERE ${promotionAuthorized}
+      ON CONFLICT(session_id, sandbox_id, lookup_id) DO UPDATE SET
+        state = 'active',
+        registration_generation = excluded.registration_generation,
+        registration_claim = NULL,
+        registration_claim_expires_at = NULL,
+        last_error = NULL,
+        cleanup_claim = NULL,
+        cleanup_claim_expires_at = NULL,
+        updated_at = excluded.updated_at
+      WHERE interactive_session_credential_policies.state != 'cleanup_pending'
+        AND ${promotionAuthorized}
+    `,
+  );
+  const promotionComplete = sql<boolean>`
+    (
+      SELECT count(DISTINCT lookup_id)
+      FROM interactive_session_credential_policies
+      WHERE session_id = ${sessionId}
+        AND sandbox_id = ${sandboxId}
+        AND lookup_id IN (${sql.join(registration.lookupIds)})
+        AND state = 'active'
+        AND registration_generation = ${registration.generation}
+        AND registration_claim IS NULL
+    ) = ${registration.lookupIds.length}
+  `;
+  return [
+    ...promotions,
+    sql`
+      DELETE FROM interactive_session_credential_policy_registrations
+      WHERE session_id = ${sessionId}
+        AND sandbox_id = ${sandboxId}
+        AND state = 'registering'
+        AND registration_generation = ${registration.generation}
+        AND registration_claim = ${registration.claim}
+        AND ${promotionComplete}
+    `,
+  ];
 }
 
 export async function standaloneSandboxPolicyExpiresAt(

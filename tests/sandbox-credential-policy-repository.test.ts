@@ -1,10 +1,13 @@
 import assert from "node:assert/strict";
+import { DatabaseSync } from "node:sqlite";
 import test from "node:test";
 
 import {
   activeSandboxCredentialPolicyGeneration,
+  abandonSandboxCredentialPolicyRegistration,
   beginSandboxCredentialPolicyRegistration,
   currentSandboxCredentialPolicyGeneration,
+  finishSandboxCredentialPolicyRegistration,
   recordSandboxCredentialPolicyRefs,
   sandboxCredentialPolicyRegistrationQueries,
   sandboxLookupIds,
@@ -19,6 +22,19 @@ type PreparedStatement = {
   parameters: unknown[];
   all(): Promise<unknown>;
   run(): Promise<unknown>;
+};
+
+type SqliteStatement = {
+  all(...parameters: unknown[]): Record<string, unknown>[];
+  run(...parameters: unknown[]): { changes: number | bigint; lastInsertRowid: number | bigint };
+};
+
+type BoundStatement = PreparedStatement & {
+  execute(): {
+    results: Record<string, unknown>[];
+    success: true;
+    meta: { changes: number; last_row_id?: number };
+  };
 };
 
 function runtimeEnv(
@@ -67,6 +83,168 @@ function runtimeEnv(
         }
       : {}),
   } as RuntimeEnv;
+}
+
+function credentialPolicyDatabase(): DatabaseSync {
+  const db = new DatabaseSync(":memory:");
+  db.exec(`
+    CREATE TABLE interactive_sessions (
+      id TEXT PRIMARY KEY,
+      adapter TEXT,
+      status TEXT NOT NULL,
+      credential_cleanup_terminal_status TEXT,
+      agent_token_hash TEXT,
+      lease_id TEXT,
+      sandbox_refresh_sandbox_id TEXT,
+      sandbox_refresh_claim TEXT,
+      sandbox_refresh_claim_expires_at INTEGER
+    );
+    CREATE TABLE interactive_session_credential_policies (
+      session_id TEXT NOT NULL,
+      sandbox_id TEXT NOT NULL,
+      lookup_id TEXT NOT NULL,
+      state TEXT NOT NULL,
+      registration_generation TEXT NOT NULL,
+      registration_claim TEXT,
+      registration_claim_expires_at INTEGER,
+      attempt_count INTEGER NOT NULL DEFAULT 0,
+      last_attempt_at INTEGER,
+      last_error TEXT,
+      cleanup_claim TEXT,
+      cleanup_claim_expires_at INTEGER,
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL,
+      PRIMARY KEY (session_id, sandbox_id, lookup_id)
+    );
+    CREATE TABLE interactive_session_credential_policy_registrations (
+      session_id TEXT NOT NULL,
+      sandbox_id TEXT NOT NULL,
+      state TEXT NOT NULL,
+      registration_generation TEXT NOT NULL,
+      registration_claim TEXT,
+      registration_claim_expires_at INTEGER,
+      attempt_count INTEGER NOT NULL DEFAULT 0,
+      last_attempt_at INTEGER,
+      last_error TEXT,
+      cleanup_claim TEXT,
+      cleanup_claim_expires_at INTEGER,
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL,
+      PRIMARY KEY (session_id, sandbox_id)
+    );
+    INSERT INTO interactive_sessions (
+      id,
+      adapter,
+      status,
+      credential_cleanup_terminal_status,
+      agent_token_hash,
+      lease_id
+    ) VALUES (
+      'IS-42',
+      NULL,
+      'ready',
+      NULL,
+      'agent-token',
+      'sandbox:sandbox-1:terminal-1:autostart-v4'
+    );
+    INSERT INTO interactive_session_credential_policies (
+      session_id,
+      sandbox_id,
+      lookup_id,
+      state,
+      registration_generation,
+      registration_claim,
+      registration_claim_expires_at,
+      created_at,
+      updated_at
+    ) VALUES
+      ('IS-42', 'sandbox-1', 'sandbox-1', 'active', 'generation:existing', NULL, NULL, 1, 1),
+      ('IS-42', 'sandbox-1', 'do-1', 'active', 'generation:existing', NULL, NULL, 1, 1);
+  `);
+  return db;
+}
+
+function sqliteRuntimeEnv(
+  sqlite: DatabaseSync,
+  options: { interruptAfterStatement?: number } = {},
+): RuntimeEnv {
+  function execute(sql: string, parameters: unknown[]) {
+    const statement = sqlite.prepare(sql) as unknown as SqliteStatement;
+    if (/^\s*(?:select|pragma|with)\b|\breturning\b/i.test(sql)) {
+      const results = statement.all(...parameters).map((row) => ({ ...row }));
+      const changes = Number(sqlite.prepare("SELECT changes() AS changes").get()?.changes ?? 0);
+      return { results, success: true as const, meta: { changes } };
+    }
+    const result = statement.run(...parameters);
+    return {
+      results: [],
+      success: true as const,
+      meta: {
+        changes: Number(result.changes),
+        last_row_id: Number(result.lastInsertRowid),
+      },
+    };
+  }
+  return {
+    DB: {
+      prepare(sql: string) {
+        return {
+          bind(...parameters: unknown[]) {
+            const bound = {
+              sql,
+              parameters,
+              execute: () => execute(sql, parameters),
+              async all() {
+                return bound.execute();
+              },
+              async run() {
+                return bound.execute();
+              },
+            };
+            return bound;
+          },
+        };
+      },
+      async batch(statements: D1PreparedStatement[]) {
+        sqlite.exec("BEGIN IMMEDIATE");
+        try {
+          const results = [];
+          for (const [index, statement] of statements.entries()) {
+            results.push((statement as unknown as BoundStatement).execute());
+            if (options.interruptAfterStatement === index + 1) {
+              throw new Error("simulated batch interruption");
+            }
+          }
+          sqlite.exec("COMMIT");
+          return results;
+        } catch (error) {
+          sqlite.exec("ROLLBACK");
+          throw error;
+        }
+      },
+    } as unknown as D1Database,
+    SANDBOX: {
+      idFromName() {
+        return { toString: () => "do-1" };
+      },
+    } as unknown as DurableObjectNamespace,
+  } as RuntimeEnv;
+}
+
+const ownershipFence: SandboxCredentialPolicyOwnershipFence = {
+  leaseId: "sandbox:sandbox-1:terminal-1:autostart-v4",
+  sandboxId: "sandbox-1",
+};
+
+function activeCredentialPolicyRows(db: DatabaseSync): Record<string, unknown>[] {
+  return db
+    .prepare(`
+      SELECT lookup_id, state, registration_generation, registration_claim
+      FROM interactive_session_credential_policies
+      ORDER BY lookup_id
+    `)
+    .all()
+    .map((row) => ({ ...row }));
 }
 
 const registration: SandboxCredentialPolicyRegistration = {
@@ -124,6 +302,7 @@ test("credential-policy registration SQL proves every supported ownership fence"
     sandboxId: "sandbox-1",
   });
   assert.match(current.sql, /from interactive_sessions/i);
+  assert.match(current.sql, /interactive_session_credential_policy_registrations/i);
   assert.match(current.sql, /adapter is null|adapter !=/i);
   assert.match(current.sql, /agent_token_hash is not null/i);
   assert.match(current.sql, /lease_id =/i);
@@ -163,22 +342,20 @@ test("credential-policy rotation always claims a fresh generation", async () => 
   let statements: PreparedStatement[] = [];
   const env = runtimeEnv(
     (sql, _parameters, kind) => {
-      if (kind === "all" && /select .*lookup_id/i.test(sql)) {
+      if (
+        kind === "all" &&
+        /select .*state/i.test(sql) &&
+        /interactive_session_credential_policy_registrations/i.test(sql)
+      ) {
         return {
           results: [
             {
-              lookup_id: "sandbox-1",
               state: "registering",
               registration_generation: generation,
               registration_claim: claim,
               registration_claim_expires_at: registrationExpiresAt,
             },
           ],
-        };
-      }
-      if (kind === "all" && /select .*registration_generation/i.test(sql)) {
-        return {
-          results: [{ registration_generation: "generation:existing" }],
         };
       }
       return {};
@@ -215,6 +392,125 @@ test("credential-policy rotation always claims a fresh generation", async () => 
   assert.match(rotated.generation, /^generation:/);
   assert.notEqual(rotated.generation, "generation:existing");
   assert.equal(rotated.generation, generation);
+});
+
+test("partial credential-policy rotation failure preserves the prior active generation", async () => {
+  const sqlite = credentialPolicyDatabase();
+  const env = sqliteRuntimeEnv(sqlite);
+  const staged = await beginSandboxCredentialPolicyRegistration(
+    env,
+    "IS-42",
+    "sandbox-1",
+    ownershipFence,
+  );
+
+  assert.deepEqual(
+    activeCredentialPolicyRows(sqlite).map((row) => row.registration_generation),
+    ["generation:existing", "generation:existing"],
+  );
+
+  await abandonSandboxCredentialPolicyRegistration(
+    env,
+    "IS-42",
+    "sandbox-1",
+    staged,
+    "simulated Durable Object registration failure",
+  );
+
+  assert.deepEqual(
+    activeCredentialPolicyRows(sqlite).map((row) => row.registration_generation),
+    ["generation:existing", "generation:existing"],
+  );
+  assert.deepEqual(
+    {
+      ...sqlite
+        .prepare(`
+          SELECT state, registration_generation, registration_claim, last_error
+          FROM interactive_session_credential_policy_registrations
+          WHERE session_id = 'IS-42' AND sandbox_id = 'sandbox-1'
+        `)
+        .get(),
+    },
+    {
+      state: "cleanup_pending",
+      registration_generation: staged.generation,
+      registration_claim: null,
+      last_error: "simulated Durable Object registration failure",
+    },
+  );
+});
+
+test("completed credential-policy rotation atomically promotes every active lookup", async () => {
+  const sqlite = credentialPolicyDatabase();
+  const env = sqliteRuntimeEnv(sqlite);
+  const staged = await beginSandboxCredentialPolicyRegistration(
+    env,
+    "IS-42",
+    "sandbox-1",
+    ownershipFence,
+  );
+
+  assert.equal(
+    await finishSandboxCredentialPolicyRegistration(
+      env,
+      "IS-42",
+      "sandbox-1",
+      staged,
+      ownershipFence,
+    ),
+    true,
+  );
+  assert.deepEqual(
+    activeCredentialPolicyRows(sqlite).map((row) => ({
+      generation: row.registration_generation,
+      state: row.state,
+    })),
+    [
+      { generation: staged.generation, state: "active" },
+      { generation: staged.generation, state: "active" },
+    ],
+  );
+  assert.equal(
+    sqlite
+      .prepare("SELECT count(*) AS count FROM interactive_session_credential_policy_registrations")
+      .get()?.count,
+    0,
+  );
+});
+
+test("interrupted credential-policy promotion rolls back every active lookup", async () => {
+  const sqlite = credentialPolicyDatabase();
+  const staged = await beginSandboxCredentialPolicyRegistration(
+    sqliteRuntimeEnv(sqlite),
+    "IS-42",
+    "sandbox-1",
+    ownershipFence,
+  );
+
+  await assert.rejects(
+    finishSandboxCredentialPolicyRegistration(
+      sqliteRuntimeEnv(sqlite, { interruptAfterStatement: 1 }),
+      "IS-42",
+      "sandbox-1",
+      staged,
+      ownershipFence,
+    ),
+    /simulated batch interruption/,
+  );
+  assert.deepEqual(
+    activeCredentialPolicyRows(sqlite).map((row) => row.registration_generation),
+    ["generation:existing", "generation:existing"],
+  );
+  assert.equal(
+    sqlite
+      .prepare(`
+        SELECT registration_generation
+        FROM interactive_session_credential_policy_registrations
+        WHERE session_id = 'IS-42' AND sandbox_id = 'sandbox-1'
+      `)
+      .get()?.registration_generation,
+    staged.generation,
+  );
 });
 
 test("active credential-policy generation requires every exact lookup row", async () => {
