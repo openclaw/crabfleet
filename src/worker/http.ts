@@ -178,19 +178,23 @@ function clean(value: unknown, maximum: number): string {
 }
 
 function assertRoundTrippableJsonIntegers(value: unknown): void {
-  if (typeof value === "number") {
-    if (
-      !Number.isFinite(value) ||
-      (Number.isInteger(value) && (!Number.isSafeInteger(value) || Object.is(value, -0)))
-    ) {
-      throw badRequest("json integers must be safe and round-trippable");
+  const pending = [value];
+  while (pending.length > 0) {
+    const current = pending.pop();
+    if (typeof current === "number") {
+      if (
+        !Number.isFinite(current) ||
+        (Number.isInteger(current) && (!Number.isSafeInteger(current) || Object.is(current, -0)))
+      ) {
+        throw badRequest("json integers must be safe and round-trippable");
+      }
+      continue;
     }
-    return;
+    if (!current || typeof current !== "object") continue;
+    if (Array.isArray(current)) {
+      for (const item of current) pending.push(item);
+      continue;
+    }
+    for (const item of Object.values(current)) pending.push(item);
   }
-  if (!value || typeof value !== "object") return;
-  if (Array.isArray(value)) {
-    for (const item of value) assertRoundTrippableJsonIntegers(item);
-    return;
-  }
-  for (const item of Object.values(value)) assertRoundTrippableJsonIntegers(item);
 }

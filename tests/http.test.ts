@@ -135,6 +135,20 @@ test("JSON parsing rejects integers that cannot round-trip exactly", async () =>
   }
 });
 
+test("JSON parsing handles deeply nested bounded payloads without exhausting the call stack", async () => {
+  const depth = 20_000;
+  const body = `${"[".repeat(depth)}0${"]".repeat(depth)}`;
+  let current = await readBoundedJson<unknown>(
+    new Request("https://fleet.example", { method: "POST", body }),
+    body.length,
+  );
+  for (let index = 0; index < depth; index += 1) {
+    assert.ok(Array.isArray(current));
+    current = current[0];
+  }
+  assert.equal(current, 0);
+});
+
 test("bearer and cookie helpers normalize only their owned protocol surface", () => {
   assert.equal(
     bearerToken(
