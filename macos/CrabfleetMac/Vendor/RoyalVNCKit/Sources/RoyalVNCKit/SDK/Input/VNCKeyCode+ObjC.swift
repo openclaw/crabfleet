@@ -86,7 +86,7 @@ public final class _ObjC_VNCKeyCode: NSObject {
     @objc
     public static let ansiKeypadEnter = X11KeySymbols.XK_KP_Enter
     @objc
-    public static let ansiKeypadDecimal = X11KeySymbols.XK_KP_Separator
+    public static let ansiKeypadDecimal = X11KeySymbols.XK_KP_Decimal
 
     @objc
     public static let f1 = X11KeySymbols.XK_F1

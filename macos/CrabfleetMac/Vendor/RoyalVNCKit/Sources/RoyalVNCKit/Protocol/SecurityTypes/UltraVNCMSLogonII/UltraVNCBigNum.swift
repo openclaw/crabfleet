@@ -40,57 +40,61 @@ extension VNCProtocol.UltraVNCMSLogonIIAuthentication.DiffieHellmanKeyAgreement 
 		static func addM64(x: UInt64,
 						   y: UInt64,
 						   m: UInt64) -> UInt64 {
-			let part = Int64(x + y < x
-							 ? (-1 % .init(m) + 1) % .init(m)
-							 : 0)
+			guard m != 0 else { return 0 }
 
-			let partU: UInt64 = numericCast(part)
+			let reducedX = x % m
+			let reducedY = y % m
+			let distanceToModulus = m - reducedY
 
-			let result: UInt64 = (x + y) % m + partU
+			if reducedX >= distanceToModulus {
+				return reducedX - distanceToModulus
+			}
 
-			return result
+			return reducedX + reducedY
 		}
 
 		/// (x * y) % m
 		static func mulM64(x: UInt64,
 						   y: UInt64,
 						   m: UInt64) -> UInt64 {
-			var y = y
-			var r = UInt64(0)
-			var x = UInt64(0)
+			guard m != 0 else { return 0 }
 
-			repeat {
-				x>>=1
+			var multiplicand = x % m
+			var multiplier = y % m
+			var result = UInt64(0)
 
-				if x & 1 != 0 {
-					r = addM64(x: r, y: y, m: m)
+			while multiplier > 0 {
+				if multiplier & 1 != 0 {
+					result = addM64(x: result, y: multiplicand, m: m)
 				}
 
-				y = addM64(x: y, y: y, m: m)
-			} while x > 0
+				multiplier >>= 1
+				multiplicand = addM64(x: multiplicand, y: multiplicand, m: m)
+			}
 
-			return r
+			return result
 		}
 
 		/// (x ^ y) % m
 		static func powM64(b: UInt64,
 						   e: UInt64,
 						   m: UInt64) -> UInt64 {
-			var b = b
-			var r = UInt64(0)
-			var e = UInt64(0)
+			guard m != 0 else { return 0 }
 
-			repeat {
-				e>>=1
+			var base = b % m
+			var exponent = e
+			var result = UInt64(1) % m
 
-				if e & 1 != 0 {
-					r = mulM64(x: r, y: b, m: m)
+			while exponent > 0 {
+				if exponent & 1 != 0 {
+					result = mulM64(x: result, y: base, m: m)
 				}
 
-				b = mulM64(x: b, y: b, m: m)
-			} while e > 0
+				exponent >>= 1
+				base = mulM64(x: base, y: base, m: m)
+			}
 
-			return r
+			return result
 		}
 	}
 }

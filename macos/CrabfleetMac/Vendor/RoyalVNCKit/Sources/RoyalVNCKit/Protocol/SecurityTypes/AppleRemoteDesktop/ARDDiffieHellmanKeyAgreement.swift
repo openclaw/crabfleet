@@ -59,6 +59,7 @@ private extension VNCProtocol.ARDAuthentication.DiffieHellmanKeyAgreement {
 		let bigPubKey = BigNum()
 
 		guard let bigPrime = BigNum(data: prime),
+			  bigPrime.isGreaterThanOne,
 			  let bigGenerator = BigNum(data: generator) else {
 			return nil
 		}

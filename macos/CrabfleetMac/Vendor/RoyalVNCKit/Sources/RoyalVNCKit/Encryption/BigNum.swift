@@ -20,6 +20,10 @@ final class BigNum {
 }
 
 extension BigNum {
+    var isGreaterThanOne: Bool {
+        self.bigInt > 1
+    }
+
     var isZero: Bool {
         let isIt = self.bigInt == 0
 

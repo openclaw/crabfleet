@@ -48,7 +48,7 @@ public struct VNCKeyCode: Equatable {
 	public static let ansiKeypadMinus = VNCKeyCode(X11KeySymbols.XK_KP_Subtract)
 	public static let ansiKeypadPlus = VNCKeyCode(X11KeySymbols.XK_KP_Add)
 	public static let ansiKeypadEnter = VNCKeyCode(X11KeySymbols.XK_KP_Enter)
-	public static let ansiKeypadDecimal = VNCKeyCode(X11KeySymbols.XK_KP_Separator)
+	public static let ansiKeypadDecimal = VNCKeyCode(X11KeySymbols.XK_KP_Decimal)
 
 	public static let f1 = VNCKeyCode(X11KeySymbols.XK_F1)
     public static let f2 = VNCKeyCode(X11KeySymbols.XK_F2)
@@ -161,8 +161,12 @@ public extension VNCKeyCode {
 
 		for scalar in character.unicodeScalars {
 			let unicodeValue = scalar.value
+			let keySym =
+				(0x00a0...0x00ff).contains(unicodeValue)
+				? unicodeValue
+				: 0x0100_0000 | unicodeValue
 
-			codes.append(.init(unicodeValue))
+			codes.append(.init(keySym))
 		}
 
 		return codes
