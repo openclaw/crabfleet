@@ -1017,6 +1017,112 @@ func TestSendInputConfirmedSharesOneReaderWithAttach(t *testing.T) {
 	}
 }
 
+func TestSendInputConfirmedCanCancelWhileWaitingForPreviousConfirmation(t *testing.T) {
+	firstInput := make(chan struct{})
+	releaseFirst := make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := websocket.Accept(w, r, nil)
+		if err != nil {
+			t.Error(err)
+			return
+		}
+		defer conn.Close(websocket.StatusNormalClosure, "")
+		for range 2 {
+			if _, _, err := conn.Read(r.Context()); err != nil {
+				t.Error(err)
+				return
+			}
+		}
+		welcome, _ := json.Marshal(welcomePayload{InputAcknowledgements: true})
+		if err := conn.Write(r.Context(), websocket.MessageBinary, encodeFrame(frame{
+			messageType: messageWelcome,
+			payload:     welcome,
+		})); err != nil {
+			t.Error(err)
+			return
+		}
+		subscribed, _ := json.Marshal(eventPayload{Type: "subscribed", CanInput: true})
+		if err := conn.Write(r.Context(), websocket.MessageBinary, encodeFrame(frame{
+			messageType: messageEvent,
+			sessionID:   "IS-cancel-wait",
+			payload:     subscribed,
+		})); err != nil {
+			t.Error(err)
+			return
+		}
+
+		accepted, _ := json.Marshal(eventPayload{Type: "input-accepted"})
+		for index := range 2 {
+			_, payload, err := conn.Read(r.Context())
+			if err != nil {
+				t.Error(err)
+				return
+			}
+			current, err := decodeFrame(payload)
+			if err != nil {
+				t.Error(err)
+				return
+			}
+			if current.messageType != messageInput {
+				t.Errorf("message type = %d", current.messageType)
+				return
+			}
+			if index == 0 {
+				close(firstInput)
+				<-releaseFirst
+			}
+			if err := conn.Write(r.Context(), websocket.MessageBinary, encodeFrame(frame{
+				messageType: messageEvent,
+				sessionID:   "IS-cancel-wait",
+				payload:     accepted,
+			})); err != nil {
+				t.Error(err)
+				return
+			}
+		}
+	}))
+	defer server.Close()
+
+	endpoint, err := Endpoint(server.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	client, err := Dial(context.Background(), endpoint, "IS-cancel-wait", Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+
+	firstCtx, firstCancel := context.WithTimeout(context.Background(), time.Second)
+	defer firstCancel()
+	firstDone := make(chan error, 1)
+	go func() {
+		firstDone <- client.SendInputConfirmed(firstCtx, []byte("first\n"))
+	}()
+	<-firstInput
+
+	waitCtx, waitCancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer waitCancel()
+	started := time.Now()
+	err = client.SendInputConfirmed(waitCtx, []byte("canceled\n"))
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("error = %v", err)
+	}
+	if elapsed := time.Since(started); elapsed > 250*time.Millisecond {
+		t.Fatalf("waiting cancellation took %s", elapsed)
+	}
+
+	close(releaseFirst)
+	if err := <-firstDone; err != nil {
+		t.Fatal(err)
+	}
+	finalCtx, finalCancel := context.WithTimeout(context.Background(), time.Second)
+	defer finalCancel()
+	if err := client.SendInputConfirmed(finalCtx, []byte("final\n")); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestSendInputConfirmedReturnsImmediatelyForEmptyInput(t *testing.T) {
 	client := &Client{supportsInputAcknowledgement: true}
 	if err := client.SendInputConfirmed(context.Background(), nil); err != nil {
@@ -1084,6 +1190,73 @@ func TestSendInputConfirmedClosesAfterConfirmationTimeout(t *testing.T) {
 	<-inputReceived
 	if err := client.SendInputConfirmed(context.Background(), []byte("second\n")); err == nil {
 		t.Fatal("timed-out client accepted another input")
+	}
+}
+
+func TestAttachBoundsInputConfirmationAndRetiresConnection(t *testing.T) {
+	inputReceived := make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := websocket.Accept(w, r, nil)
+		if err != nil {
+			t.Error(err)
+			return
+		}
+		defer conn.Close(websocket.StatusNormalClosure, "")
+		for range 2 {
+			if _, _, err := conn.Read(r.Context()); err != nil {
+				t.Error(err)
+				return
+			}
+		}
+		welcome, _ := json.Marshal(welcomePayload{InputAcknowledgements: true})
+		if err := conn.Write(r.Context(), websocket.MessageBinary, encodeFrame(frame{
+			messageType: messageWelcome,
+			payload:     welcome,
+		})); err != nil {
+			t.Error(err)
+			return
+		}
+		subscribed, _ := json.Marshal(eventPayload{Type: "subscribed", CanInput: true})
+		if err := conn.Write(r.Context(), websocket.MessageBinary, encodeFrame(frame{
+			messageType: messageEvent,
+			sessionID:   "IS-attach-confirm-timeout",
+			payload:     subscribed,
+		})); err != nil {
+			t.Error(err)
+			return
+		}
+		if _, _, err := conn.Read(r.Context()); err != nil {
+			t.Error(err)
+			return
+		}
+		close(inputReceived)
+		_, _, _ = conn.Read(r.Context())
+	}))
+	defer server.Close()
+
+	endpoint, err := Endpoint(server.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	client, err := Dial(context.Background(), endpoint, "IS-attach-confirm-timeout", Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+	client.confirmationTimeout = 20 * time.Millisecond
+
+	terminal := &readWriter{reader: strings.NewReader("blocked\n")}
+	started := time.Now()
+	err = client.Attach(context.Background(), terminal, nil)
+	if err == nil {
+		t.Fatal("attachment succeeded without input confirmation")
+	}
+	if elapsed := time.Since(started); elapsed > 250*time.Millisecond {
+		t.Fatalf("attachment confirmation timeout took %s", elapsed)
+	}
+	<-inputReceived
+	if err := client.SendInputConfirmed(context.Background(), []byte("second\n")); err == nil {
+		t.Fatal("timed-out attachment left the connection reusable")
 	}
 }
 

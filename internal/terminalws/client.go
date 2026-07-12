@@ -23,6 +23,8 @@ const (
 	maxFrameBytes = 16 * 1024 * 1024
 	maxErrorBytes = 512
 
+	defaultInputConfirmationTimeout = 5 * time.Second
+
 	messageHello           = 1
 	messageWelcome         = 2
 	messageSubscribe       = 10
@@ -83,7 +85,9 @@ type Client struct {
 	canInput                     atomic.Bool
 	lastSize                     atomic.Uint64
 	writeMu                      sync.Mutex
-	confirmMu                    sync.Mutex
+	confirmOnce                  sync.Once
+	confirmGate                  chan struct{}
+	confirmationTimeout          time.Duration
 	stateMu                      sync.Mutex
 	inputWaiter                  chan error
 	attachment                   *terminalAttachment
@@ -183,7 +187,12 @@ func Dial(ctx context.Context, endpoint string, sessionID string, options Option
 		return nil, err
 	}
 	conn.SetReadLimit(maxFrameBytes)
-	client := &Client{conn: conn, sessionID: sessionID, cancel: setupCancel}
+	client := &Client{
+		conn:                conn,
+		sessionID:           sessionID,
+		cancel:              setupCancel,
+		confirmationTimeout: defaultInputConfirmationTimeout,
+	}
 	client.rememberSize(Size{Cols: options.Cols, Rows: options.Rows})
 	closeWithError := func(err error) (*Client, error) {
 		setupFinished.Store(true)
@@ -278,8 +287,10 @@ func (c *Client) SendInputConfirmed(ctx context.Context, payload []byte) error {
 	if !c.supportsInputAcknowledgement {
 		return c.SendInput(ctx, payload)
 	}
-	c.confirmMu.Lock()
-	defer c.confirmMu.Unlock()
+	if err := c.acquireConfirmation(ctx); err != nil {
+		return err
+	}
+	defer c.releaseConfirmation()
 
 	waiter := make(chan error, 1)
 	if err := c.registerInputWaiter(waiter); err != nil {
@@ -305,6 +316,33 @@ func (c *Client) SendInputConfirmed(ctx context.Context, payload []byte) error {
 		_ = c.Close()
 		return ctx.Err()
 	}
+}
+
+func (c *Client) acquireConfirmation(ctx context.Context) error {
+	c.confirmOnce.Do(func() {
+		c.confirmGate = make(chan struct{}, 1)
+	})
+	select {
+	case c.confirmGate <- struct{}{}:
+		if err := ctx.Err(); err != nil {
+			<-c.confirmGate
+			return err
+		}
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+func (c *Client) releaseConfirmation() {
+	<-c.confirmGate
+}
+
+func (c *Client) inputConfirmationTimeout() time.Duration {
+	if c.confirmationTimeout > 0 {
+		return c.confirmationTimeout
+	}
+	return defaultInputConfirmationTimeout
 }
 
 func (c *Client) Resize(ctx context.Context, size Size) error {
@@ -349,7 +387,13 @@ func (c *Client) Attach(ctx context.Context, terminal io.ReadWriter, resizes <-c
 		for {
 			count, err := terminal.Read(buffer)
 			if count > 0 && c.canInput.Load() {
-				if writeErr := c.SendInputConfirmed(ctx, buffer[:count]); writeErr != nil {
+				confirmationCtx, confirmationCancel := context.WithTimeout(
+					ctx,
+					c.inputConfirmationTimeout(),
+				)
+				writeErr := c.SendInputConfirmed(confirmationCtx, buffer[:count])
+				confirmationCancel()
+				if writeErr != nil {
 					errCh <- writeErr
 					return
 				}
