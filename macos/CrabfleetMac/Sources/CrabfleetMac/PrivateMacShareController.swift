@@ -309,13 +309,13 @@ final class PrivateMacShareController: ObservableObject {
     streamStats = nil
     registryPhase = desktopRegistration == nil ? .notConfigured : .registering
     await waitForRefreshCompletion()
-    guard isCurrent(generation), phase == .starting, !Task.isCancelled else { return }
+    guard canContinueStarting(generation) else { return }
     do {
       let loadedIdentity = try await fetchIdentity()
-      guard isCurrent(generation), phase == .starting else { return }
+      guard canContinueStarting(generation) else { return }
       identity = loadedIdentity
     } catch {
-      guard isCurrent(generation), phase == .starting else { return }
+      guard canContinueStarting(generation) else { return }
       identity = nil
       phase = .failed
       notice = error.localizedDescription
@@ -345,7 +345,7 @@ final class PrivateMacShareController: ObservableObject {
     let capture = MacScreenCapture()
     do {
       let descriptor = try await capture.start(displayID: selectedDisplayID)
-      guard isCurrent(generation), phase == .starting else {
+      guard canContinueStarting(generation) else {
         await capture.stop()
         return
       }
@@ -371,7 +371,7 @@ final class PrivateMacShareController: ObservableObject {
       self.clipboardBridge = bridge
       activeIdentity = identity
     } catch {
-      guard isCurrent(generation) else {
+      guard canContinueStarting(generation) else {
         await capture.stop()
         return
       }
@@ -414,6 +414,14 @@ final class PrivateMacShareController: ObservableObject {
     await stop()
     let cleanupTask = registrationTask
     await cleanupTask?.value
+    guard let desktopRegistrationLifecycle else { return }
+    do {
+      try await desktopRegistrationLifecycle.removePublishedIdentities()
+      registryPhase = .notPublished
+    } catch {
+      registryPhase = .failed(error.localizedDescription)
+      notice = error.localizedDescription
+    }
   }
 
   func openPrivacySettings(_ pane: PrivacyPane) {
@@ -593,6 +601,16 @@ final class PrivateMacShareController: ObservableObject {
 
   private func isCurrent(_ generation: UInt64) -> Bool {
     lifecycleGeneration == generation
+  }
+
+  private func canContinueStarting(_ generation: UInt64) -> Bool {
+    guard isCurrent(generation), phase == .starting else { return false }
+    guard !Task.isCancelled else {
+      phase = .idle
+      registryPhase = desktopRegistration == nil ? .notConfigured : .notPublished
+      return false
+    }
+    return true
   }
 
   @discardableResult

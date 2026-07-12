@@ -272,6 +272,35 @@ struct PrivateMacShareTests {
     #expect(controller.phase == .idle)
   }
 
+  @Test @MainActor
+  func cancellationRestoresIdleWhileStartWaitsForRefresh() async throws {
+    let runner = SequencedTailscaleRunner()
+    let defaults = try #require(
+      UserDefaults(suiteName: "CrabfleetMacTests.\(UUID().uuidString)")
+    )
+    let controller = PrivateMacShareController(
+      runner: runner,
+      desktopRegistration: nil,
+      defaults: defaults
+    )
+
+    let refreshTask = Task { await controller.refresh() }
+    #expect(await waitUntilAsync { await runner.callCount == 1 })
+
+    let startTask = Task { await controller.start() }
+    #expect(await waitUntilAsync { controller.phase == .starting })
+    startTask.cancel()
+
+    await runner.resumeNext(
+      .success(.init(standardOutput: statusJSON(), standardError: ""))
+    )
+    await refreshTask.value
+    await startTask.value
+
+    #expect(await runner.callCount == 1)
+    #expect(controller.phase == .idle)
+  }
+
   @Test
   func desktopRemovalWaitsForACommittedRegistrationAfterCancellation() async throws {
     let registration = SuspendedDesktopRegistration()
@@ -416,6 +445,41 @@ struct PrivateMacShareTests {
           .unregister(first.dnsName, "token:\(first.dnsName)"),
           .unregister(second.dnsName, "token:\(second.dnsName)"),
           .unregister(first.dnsName, "token:\(first.dnsName)"),
+        ]
+    )
+  }
+
+  @Test @MainActor
+  func terminationRetriesRetainedDesktopCleanup() async throws {
+    let identity = desktopIdentity(name: "retry-cleanup", address: "100.64.12.45")
+    let registration = RecordingDesktopRegistration(
+      unregisterFailures: [identity.dnsName: 1]
+    )
+    let lifecycle = DesktopHostRegistrationLifecycle(registration: registration)
+    try await lifecycle.publish(identity: identity, port: 5_901)
+    await #expect(throws: DesktopRegistrationTestError.failed) {
+      try await lifecycle.removePublishedIdentities()
+    }
+
+    let defaults = try #require(
+      UserDefaults(suiteName: "CrabfleetMacTests.\(UUID().uuidString)")
+    )
+    let controller = PrivateMacShareController(
+      runner: StaticTailscaleRunner(output: statusJSON()),
+      desktopRegistration: registration,
+      registrationLifecycle: lifecycle,
+      defaults: defaults
+    )
+
+    await controller.stopAndWaitForCleanup()
+
+    #expect(controller.registryPhase == .notPublished)
+    #expect(
+      await registration.events
+        == [
+          .register(identity.dnsName),
+          .unregister(identity.dnsName, "token:\(identity.dnsName)"),
+          .unregister(identity.dnsName, "token:\(identity.dnsName)"),
         ]
     )
   }
