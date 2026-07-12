@@ -2,8 +2,10 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { CardRepository } from "../src/worker/card-repository.ts";
+import type { CardRunClaimInput } from "../src/worker/card-lifecycle-service.ts";
 import type { RuntimeEnv } from "../src/worker/env.ts";
 import type { User } from "../src/worker/models.ts";
+import { containerCapabilities } from "../src/worker/session-model.ts";
 
 test("private card reads require the stable owner subject", async () => {
   const current: User = {
@@ -109,4 +111,53 @@ test("card list batches related D1 reads below the bind-parameter limit", async 
   assert.equal(result.length, 205);
   assert.equal(executions.filter(({ sql }) => /from "run_attempts"/i.test(sql)).length, 3);
   assert.equal(executions.filter(({ sql }) => /from events/i.test(sql)).length, 3);
+});
+
+test("card run claims batch the card transition with the run-attempt insert", async () => {
+  const batches: Array<Array<{ sql: string; parameters: unknown[] }>> = [];
+  const env = {
+    DB: {
+      prepare(sql: string) {
+        return {
+          bind(...parameters: unknown[]) {
+            return {
+              sql,
+              parameters,
+              async all() {
+                return { results: [], meta: { changes: 0 } };
+              },
+              async run() {
+                return { meta: { changes: 0 } };
+              },
+            };
+          },
+        };
+      },
+      async batch(statements: Array<{ sql: string; parameters: unknown[] }>) {
+        batches.push(statements);
+        return [{ meta: { changes: 1 } }, { meta: { changes: 1 } }];
+      },
+    } as unknown as D1Database,
+  } as RuntimeEnv;
+  const input = {
+    card: { id: "CY-101" },
+    runId: "CY-101-R1",
+    attempt: 1,
+    cap: 2,
+    descriptor: {
+      runtime: "container",
+      reason: "repo default",
+      capabilities: containerCapabilities,
+    },
+    now: 500,
+  } as CardRunClaimInput;
+
+  assert.equal(await new CardRepository(env).claimRun(input), "claimed");
+  assert.equal(batches.length, 1);
+  assert.equal(batches[0]?.length, 2);
+  assert.match(batches[0]?.[0]?.sql ?? "", /^\s*update cards/i);
+  assert.match(batches[0]?.[0]?.sql ?? "", /not exists/i);
+  assert.match(batches[0]?.[1]?.sql ?? "", /^\s*insert into run_attempts/i);
+  assert.ok(batches[0]?.[0]?.parameters.includes("CY-101-R1"));
+  assert.ok(batches[0]?.[1]?.parameters.includes("CY-101-R1"));
 });

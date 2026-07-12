@@ -337,7 +337,7 @@ export class CardRepository implements CardLifecycleStore {
 
   async claimRun(input: CardRunClaimInput): Promise<"claimed" | "capacity" | "active"> {
     const db = database(this.env);
-    const transition = await sql`
+    const transition = sql`
       UPDATE cards
         SET lane = 'Running',
           active_run_id = ${input.runId},
@@ -351,8 +351,42 @@ export class CardRepository implements CardLifecycleStore {
           AND (lane = 'Running' OR (
             SELECT count(*) FROM cards WHERE lane = 'Running' AND id <> ${input.card.id}
           ) < ${input.cap})
-    `.execute(db);
-    if ((transition.numAffectedRows ?? 0n) === 0n) {
+          AND NOT EXISTS (
+            SELECT 1
+            FROM run_attempts
+            WHERE id = ${input.runId}
+              OR (card_id = ${input.card.id} AND attempt = ${input.attempt})
+          )
+    `;
+    const insert = sql`
+      INSERT INTO run_attempts (
+        id, card_id, attempt, runtime, status, control_intent, lease_id, attach_url, vnc_url,
+        selection_reason, capabilities_json, operator, last_heartbeat_at, started_at, ended_at,
+        created_at, updated_at, error
+      )
+      SELECT
+        ${input.runId}, ${input.card.id}, ${input.attempt}, ${input.descriptor.runtime}, 'queued',
+        NULL, NULL, NULL, NULL, ${input.descriptor.reason},
+        ${JSON.stringify(input.descriptor.capabilities)}, NULL, ${input.now}, ${input.now}, NULL,
+        ${input.now}, ${input.now}, NULL
+      FROM cards
+      WHERE id = ${input.card.id}
+        AND active_run_id = ${input.runId}
+        AND updated_at = ${input.now}
+        AND NOT EXISTS (
+          SELECT 1
+          FROM run_attempts
+          WHERE id = ${input.runId}
+            OR (card_id = ${input.card.id} AND attempt = ${input.attempt})
+        )
+    `;
+    const results = await this.env.DB.batch(
+      [transition, insert].map((query) => {
+        const compiled = query.compile(db);
+        return this.env.DB.prepare(compiled.sql).bind(...compiled.parameters);
+      }),
+    );
+    if ((results[0]?.meta.changes ?? 0) === 0) {
       const activeCount = await db
         .selectFrom("cards")
         .select(sql<number>`count(*)`.as("count"))
@@ -360,30 +394,9 @@ export class CardRepository implements CardLifecycleStore {
         .executeTakeFirst();
       return Number(activeCount?.count ?? 0) >= input.cap ? "capacity" : "active";
     }
-    await db
-      .insertInto("run_attempts")
-      .values({
-        id: input.runId,
-        card_id: input.card.id,
-        attempt: input.attempt,
-        runtime: input.descriptor.runtime,
-        status: "queued",
-        control_intent: null,
-        lease_id: null,
-        attach_url: null,
-        vnc_url: null,
-        selection_reason: input.descriptor.reason,
-        capabilities_json: JSON.stringify(input.descriptor.capabilities),
-        operator: null,
-        last_heartbeat_at: input.now,
-        started_at: input.now,
-        ended_at: null,
-        created_at: input.now,
-        updated_at: input.now,
-        error: null,
-      })
-      .onConflict((conflict) => conflict.doNothing())
-      .execute();
+    if ((results[1]?.meta.changes ?? 0) !== 1) {
+      throw new Error("card run claim did not persist its run attempt");
+    }
     return "claimed";
   }
 
