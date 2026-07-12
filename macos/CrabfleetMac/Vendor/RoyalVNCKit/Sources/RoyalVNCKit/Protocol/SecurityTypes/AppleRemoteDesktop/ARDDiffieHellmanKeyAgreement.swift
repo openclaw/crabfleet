@@ -3,6 +3,7 @@ import FoundationEssentials
 #else
 import Foundation
 #endif
+import CryptoSwift
 
 extension VNCProtocol.ARDAuthentication {
 	struct DiffieHellmanKeyAgreement {
@@ -50,6 +51,11 @@ extension VNCProtocol.ARDAuthentication {
 }
 
 private extension VNCProtocol.ARDAuthentication.DiffieHellmanKeyAgreement {
+	static let safePrimeCondition = NSCondition()
+	static var validatedSafePrimes = Set<Data>()
+	static var rejectedSafePrimes = Set<Data>()
+	static var safePrimeValidations = Set<Data>()
+
 	struct KeyPair {
 		let publicKey: Data
 		let privateKey: Data
@@ -64,15 +70,50 @@ private extension VNCProtocol.ARDAuthentication.DiffieHellmanKeyAgreement {
 			  prime.count == keyLength,
 			  peerKey.count == keyLength,
 			  let bigPrime = BigNum(data: prime),
-			  bigPrime.bitsCount >= 1_024,
+			  bigPrime.bitsCount == keyLength * 8,
 			  let bigGenerator = BigNum(data: generator),
 			  bigGenerator.isValidDiffieHellmanElement(modulus: bigPrime),
 			  let bigPeerKey = BigNum(data: peerKey),
-			  bigPeerKey.isValidDiffieHellmanElement(modulus: bigPrime) else {
+			  bigPeerKey.isValidDiffieHellmanElement(modulus: bigPrime),
+			  Self.isSafePrime(prime) else {
 			return false
 		}
 
 		return true
+	}
+
+	static func isSafePrime(_ data: Data) -> Bool {
+		safePrimeCondition.lock()
+		while safePrimeValidations.contains(data) {
+			safePrimeCondition.wait()
+		}
+		if validatedSafePrimes.contains(data) {
+			safePrimeCondition.unlock()
+			return true
+		}
+		if rejectedSafePrimes.contains(data) {
+			safePrimeCondition.unlock()
+			return false
+		}
+		safePrimeValidations.insert(data)
+		safePrimeCondition.unlock()
+
+		let prime = CS.BigUInt(data)
+		let valid = prime.isPrime(rounds: 16) && ((prime - 1) >> 1).isPrime(rounds: 16)
+
+		safePrimeCondition.lock()
+		safePrimeValidations.remove(data)
+		if valid {
+			validatedSafePrimes.insert(data)
+		} else {
+			if rejectedSafePrimes.count >= 32, let evicted = rejectedSafePrimes.first {
+				rejectedSafePrimes.remove(evicted)
+			}
+			rejectedSafePrimes.insert(data)
+		}
+		safePrimeCondition.broadcast()
+		safePrimeCondition.unlock()
+		return valid
 	}
 
 	static func generateKeyPair(generator: Data,
@@ -101,7 +142,7 @@ private extension VNCProtocol.ARDAuthentication.DiffieHellmanKeyAgreement {
 									   x: bigPrivKey,
 									   p: bigPrime)
 
-		guard modSuccess else {
+		guard modSuccess, !bigPubKey.isZero else {
 			return nil
 		}
 
@@ -139,7 +180,7 @@ private extension VNCProtocol.ARDAuthentication.DiffieHellmanKeyAgreement {
 									   x: bigPrivKey,
 									   p: bigPrime)
 
-		guard modSuccess else {
+		guard modSuccess, !bigSharedKey.isZero else {
 			return nil
 		}
 

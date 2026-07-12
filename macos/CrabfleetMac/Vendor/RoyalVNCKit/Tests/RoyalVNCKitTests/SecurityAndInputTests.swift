@@ -16,6 +16,8 @@ struct SecurityAndInputTests {
       Data(repeating: 0, count: 128),
       Data(repeating: 1, count: 128),
       Data([0]) + Data(repeating: 0xFF, count: 127),
+      Data([0x80]) + Data(repeating: 0, count: 127),
+      appleRemoteDesktopUnsafePrime,
     ] {
       let agreement = ARDKeyAgreement(
         prime: prime,
@@ -30,8 +32,8 @@ struct SecurityAndInputTests {
 
   @Test
   func rejectsAppleRemoteDesktopElementsOutsideTheSafeRange() {
-    let prime = Data(repeating: 0xFF, count: 128)
-    let primeMinusOne = Data(repeating: 0xFF, count: 127) + Data([0xFE])
+    let prime = appleRemoteDesktopSafePrime
+    let primeMinusOne = prime.dropLast() + Data([0xFE])
 
     for generator in [
       Data([0]),
@@ -67,18 +69,18 @@ struct SecurityAndInputTests {
   }
 
   @Test
-  func acceptsAppleRemoteDesktopKeyMaterialAtAndAboveTheMinimum() {
-    for keyLength in [128, 256] {
-      let agreement = ARDKeyAgreement(
-        prime: Data(repeating: 0xFF, count: keyLength),
-        generator: Data([2]),
-        peerKey: Data(repeating: 0, count: keyLength - 1) + Data([2]),
-        keyLength: keyLength
-      )
+  func acceptsSafeAppleRemoteDesktopKeyMaterial() {
+    let agreement = ARDKeyAgreement(
+      prime: appleRemoteDesktopSafePrime,
+      generator: Data([2]),
+      peerKey: paddedARDValue(2),
+      keyLength: 128
+    )
 
-      #expect(agreement?.publicKey.count == keyLength)
-      #expect(agreement?.secretKey.count == keyLength)
-    }
+    #expect(agreement?.publicKey.count == 128)
+    #expect(agreement?.publicKey.contains { $0 != 0 } == true)
+    #expect(agreement?.secretKey.count == 128)
+    #expect(agreement?.secretKey.contains { $0 != 0 } == true)
   }
 
   @Test
@@ -194,6 +196,38 @@ struct SecurityAndInputTests {
 
   private func paddedARDValue(_ value: UInt8) -> Data {
     Data(repeating: 0, count: 127) + Data([value])
+  }
+
+  private var appleRemoteDesktopSafePrime: Data {
+    hexadecimalData(
+      """
+      C692B0343A9FC77AB54DD8F0912F24E657BACB3D4272E6525E624DCBAB26A479
+      904118111CCE782B6709522BD201F15C38EDF1B3E94DEAA7DEE91B4B4619607B
+      3B76E1A1F9B65F6F545D42982FEE07F1F78D5855E9C490CAD9B45855F6BDEA7
+      5BF549643A572571B9F8073EE56A36DD1B9EAD50DCF444406BFDFD851DE76E51B
+      """
+    )
+  }
+
+  private var appleRemoteDesktopUnsafePrime: Data {
+    hexadecimalData(
+      """
+      F1EEAEF06F42BDFEF9524C7A03A6B26F074DC39F74F8C160BD15BA3869F54450
+      CE55FD8DA6415AF88CEF7FFE7768BB1A061B7A3C0BCE0023B2C15C0A095D416B
+      E103EB8EE3BE0EE5874ADFE2BF7270B8719CC8F99B38BFFC126D6005DBEABAB
+      EE0037C10BAFB4D9CC864259DA28E1F5ECB949DCAC308512F9FA3E911F1E36061
+      """
+    )
+  }
+
+  private func hexadecimalData(_ value: String) -> Data {
+    let hex = value.filter(\.isHexDigit)
+    return Data(
+      stride(from: 0, to: hex.count, by: 2).compactMap { offset in
+        let start = hex.index(hex.startIndex, offsetBy: offset)
+        let end = hex.index(start, offsetBy: 2)
+        return UInt8(hex[start..<end], radix: 16)
+      })
   }
 
   private func ultraVNCValue(_ value: UInt64) -> Data {
