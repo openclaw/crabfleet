@@ -5,8 +5,10 @@ import Testing
 
 struct SecurityAndInputTests {
   typealias ARDKeyAgreement = VNCProtocol.ARDAuthentication.DiffieHellmanKeyAgreement
+  typealias UltraVNCKeyAgreement =
+    VNCProtocol.UltraVNCMSLogonIIAuthentication.DiffieHellmanKeyAgreement
   typealias UltraVNCBigNum =
-    VNCProtocol.UltraVNCMSLogonIIAuthentication.DiffieHellmanKeyAgreement.UltraVNCBigNum
+    UltraVNCKeyAgreement.UltraVNCBigNum
 
   @Test
   func rejectsWeakAppleRemoteDesktopModuli() {
@@ -130,6 +132,46 @@ struct SecurityAndInputTests {
   }
 
   @Test
+  func rejectsUltraVNCPMinusOneKeyAgreementElements() {
+    let modulus = ultraVNCValue(17)
+
+    #expect(
+      UltraVNCKeyAgreement(
+        generator: ultraVNCValue(16),
+        modulus: modulus,
+        resp: ultraVNCValue(3)
+      ) == nil
+    )
+    #expect(
+      UltraVNCKeyAgreement(
+        generator: ultraVNCValue(3),
+        modulus: modulus,
+        resp: ultraVNCValue(16)
+      ) == nil
+    )
+  }
+
+  @Test
+  func acceptsUltraVNCPMinusTwoKeyAgreementElements() {
+    let modulus = ultraVNCValue(17)
+
+    #expect(
+      UltraVNCKeyAgreement(
+        generator: ultraVNCValue(15),
+        modulus: modulus,
+        resp: ultraVNCValue(3)
+      ) != nil
+    )
+    #expect(
+      UltraVNCKeyAgreement(
+        generator: ultraVNCValue(3),
+        modulus: modulus,
+        resp: ultraVNCValue(15)
+      ) != nil
+    )
+  }
+
+  @Test
   func encodesCharactersAsX11KeySyms() {
     #expect(VNCKeyCode.withCharacter("A").map(\.rawValue) == [0x41])
     #expect(VNCKeyCode.withCharacter("é").map(\.rawValue) == [0xe9])
@@ -152,5 +194,9 @@ struct SecurityAndInputTests {
 
   private func paddedARDValue(_ value: UInt8) -> Data {
     Data(repeating: 0, count: 127) + Data([value])
+  }
+
+  private func ultraVNCValue(_ value: UInt64) -> Data {
+    withUnsafeBytes(of: value.bigEndian) { Data($0) }
   }
 }

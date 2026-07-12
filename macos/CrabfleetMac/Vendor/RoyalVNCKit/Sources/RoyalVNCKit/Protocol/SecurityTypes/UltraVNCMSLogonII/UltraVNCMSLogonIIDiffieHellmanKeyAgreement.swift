@@ -48,7 +48,7 @@ private extension VNCProtocol.UltraVNCMSLogonIIAuthentication.DiffieHellmanKeyAg
         guard modulusNum > 3,
               modulusNum < maxNum,
               generatorNum > 1,
-              generatorNum < modulusNum else {
+              generatorNum <= modulusNum - 2 else {
             return nil
         }
 
@@ -80,7 +80,7 @@ private extension VNCProtocol.UltraVNCMSLogonIIAuthentication.DiffieHellmanKeyAg
               privNum > 1,
               privNum < modulusNum,
               respNum > 1,
-              respNum < modulusNum else {
+              respNum <= modulusNum - 2 else {
             return nil
         }
 
