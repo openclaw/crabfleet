@@ -12,6 +12,7 @@ import {
   abandonSandboxCredentialPolicyRegistration,
   claimSandboxCredentialPolicyRegistrationRecovery,
   finishSandboxCredentialPolicyRegistration,
+  markSandboxCredentialPolicyRegistrationWriteStarted,
   recordSandboxCredentialPolicyRefs,
   sandboxCredentialPolicyCleanupAuthorizedCondition,
   sandboxCredentialPolicyPersistedLookupIds,
@@ -425,6 +426,16 @@ async function scanStagedCredentialPolicyRegistrations(
       }
       if (row.rollback_policies_json !== null) {
         if (!restoreRollback) throw new Error("sandbox credential policy rollback is unavailable");
+        const rollbackExpiresAt = await markSandboxCredentialPolicyRegistrationWriteStarted(
+          env,
+          row.session_id,
+          row.sandbox_id,
+          recovery.registration,
+          ownershipFence,
+        );
+        if (!rollbackExpiresAt) {
+          throw new Error("sandbox credential policy registration claim was revoked");
+        }
         const rollbackGeneration =
           parseSandboxCredentialPolicyRollback(
             row.rollback_policies_json,
@@ -453,7 +464,7 @@ async function scanStagedCredentialPolicyRegistrations(
             ...recovery.registration,
             lookupIds: rollbackLookupIds,
           },
-          registrationExpiresAt: recovery.registrationExpiresAt,
+          registrationExpiresAt: rollbackExpiresAt,
           rollbackJson: row.rollback_policies_json,
           sessionId: row.session_id,
         });

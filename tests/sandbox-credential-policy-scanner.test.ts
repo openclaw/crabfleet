@@ -62,6 +62,7 @@ function scannerDatabase(): DatabaseSync {
       registration_generation TEXT NOT NULL,
       registration_claim TEXT,
       registration_claim_expires_at INTEGER,
+      registration_write_started INTEGER NOT NULL DEFAULT 0,
       lookup_ids_json TEXT,
       rollback_policies_json TEXT,
       last_error TEXT,

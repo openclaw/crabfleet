@@ -118,6 +118,7 @@ test("cleanup candidates require finalized archives, no credentials, and no acti
         sessionReads += 1;
         assert.match(sql, /"terminal_finalize_pending" =/i);
         assert.match(sql, /interactive_session_credential_policies/i);
+        assert.match(sql, /interactive_session_credential_policy_registrations/i);
         assert.match(sql, /WITH RECURSIVE active_ancestor\(id\)/i);
         assert.match(sql, /archive\.session_updated_at = interactive_sessions\.updated_at/i);
         assert.match(sql, /events_key IS NOT NULL/i);
@@ -163,6 +164,7 @@ test("finalized deletion claims and removes events, archive metadata, and sessio
   assert.equal(batch.length, 5);
   assert.match(batch[0]?.sql ?? "", /update "interactive_sessions"/i);
   assert.match(batch[0]?.sql ?? "", /interactive_session_credential_policies/i);
+  assert.match(batch[0]?.sql ?? "", /interactive_session_credential_policy_registrations/i);
   assert.match(batch[0]?.sql ?? "", /WITH RECURSIVE active_ancestor\(id\)/i);
   assert.match(batch[0]?.sql ?? "", /event_count =/i);
   assert.match(batch[0]?.sql ?? "", /events_key IS/i);

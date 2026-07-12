@@ -187,6 +187,21 @@ export async function stageTerminalCredentialPolicyCleanup(
       ]),
     )
     .where(sandboxManagedStoredOwnershipCondition(ownership.fence));
+  const registrationTransitions = generations.map(({ sandboxId }) =>
+    db
+      .updateTable("interactive_session_credential_policy_registrations")
+      .set({
+        state: "cleanup_pending",
+        registration_claim: null,
+        registration_claim_expires_at: null,
+        updated_at: stageRevision,
+      })
+      .where("session_id", "=", session.id)
+      .where("sandbox_id", "=", sandboxId)
+      .where(
+        sandboxCredentialPolicyCleanupAuthorizedCondition(session.id, sandboxId, stageRevision),
+      ),
+  );
   const policyTransitions = generations.flatMap(({ generation, sandboxId }) => [
     ...sandboxCredentialPolicyRefQueries(
       env,
@@ -208,21 +223,8 @@ export async function stageTerminalCredentialPolicyCleanup(
       .where(
         sandboxCredentialPolicyCleanupAuthorizedCondition(session.id, sandboxId, stageRevision),
       ),
-    db
-      .updateTable("interactive_session_credential_policy_registrations")
-      .set({
-        state: "cleanup_pending",
-        registration_claim: null,
-        registration_claim_expires_at: null,
-        updated_at: stageRevision,
-      })
-      .where("session_id", "=", session.id)
-      .where("sandbox_id", "=", sandboxId)
-      .where(
-        sandboxCredentialPolicyCleanupAuthorizedCondition(session.id, sandboxId, stageRevision),
-      ),
   ]);
-  await executeBatch(env, [sessionTransition, ...policyTransitions]);
+  await executeBatch(env, [sessionTransition, ...registrationTransitions, ...policyTransitions]);
   const staged = await db
     .selectFrom("interactive_sessions")
     .select([

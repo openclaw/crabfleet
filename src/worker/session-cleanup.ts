@@ -13,11 +13,16 @@ import { cleanupSessionLogArchiveObjects } from "./session-log-archive.ts";
 const terminalCleanupDeletePending = 2;
 type SessionReference = string | RawBuilder<unknown>;
 
-function hasNoCredentialPolicy(sessionId: SessionReference): RawBuilder<boolean> {
+export function hasNoCredentialPolicyLifecycle(sessionId: SessionReference): RawBuilder<boolean> {
   return sql<boolean>`
     NOT EXISTS (
       SELECT 1
       FROM interactive_session_credential_policies
+      WHERE session_id = ${sessionId}
+    )
+    AND NOT EXISTS (
+      SELECT 1
+      FROM interactive_session_credential_policy_registrations
       WHERE session_id = ${sessionId}
     )
   `;
@@ -140,7 +145,7 @@ export async function readInteractiveSessionCleanupCandidates(
     .selectAll()
     .where("status", "in", deadInteractiveSessionStatuses)
     .where("terminal_finalize_pending", "=", 0)
-    .where(hasNoCredentialPolicy(sql.ref("interactive_sessions.id")))
+    .where(hasNoCredentialPolicyLifecycle(sql.ref("interactive_sessions.id")))
     .where(archiveCoversAllEvents(sql.ref("interactive_sessions.id")))
     .where(sql<boolean>`
       EXISTS (
@@ -185,7 +190,7 @@ export async function deleteFinalizedInteractiveSession(
     .where("status", "=", row.status)
     .where("updated_at", "=", row.updated_at)
     .where("terminal_finalize_pending", "=", 0)
-    .where(hasNoCredentialPolicy(row.id))
+    .where(hasNoCredentialPolicyLifecycle(row.id))
     .where(hasNoActiveDescendants(row.id))
     .where(sql<boolean>`
       ${archive ? 1 : 0} = 1

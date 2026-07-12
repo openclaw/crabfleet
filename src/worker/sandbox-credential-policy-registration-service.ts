@@ -10,6 +10,7 @@ import {
   existingSandboxCredentialPolicyGeneration,
   finishSandboxCredentialPolicyRegistration,
   incompleteSandboxCredentialPolicyGeneration,
+  markSandboxCredentialPolicyRegistrationWriteStarted,
   recordSandboxCredentialPolicyRefs,
   recordSandboxCredentialPolicyRollback,
   repairSandboxCredentialPolicyReferences,
@@ -115,9 +116,21 @@ async function repairIncompleteSandboxCredentialPolicyLookupSet(
   ) {
     throw new Error("sandbox credential policy registration claim was revoked");
   }
+  const missingLookupIds = registration.lookupIds.filter((lookupId) => !records.get(lookupId));
+  if (missingLookupIds.length > 0) {
+    registrationExpiresAt = await markSandboxCredentialPolicyRegistrationWriteStarted(
+      env,
+      sessionId,
+      sandboxId,
+      registration,
+      ownershipFence,
+    );
+    if (!registrationExpiresAt) {
+      throw new Error("sandbox credential policy registration claim was revoked");
+    }
+  }
   const repairExpiresAt = registrationExpiresAt - 1;
-  for (const lookupId of registration.lookupIds) {
-    if (records.get(lookupId)) continue;
+  for (const lookupId of missingLookupIds) {
     const response = await stub.fetch("https://crabfleet.internal/api/session-control/register", {
       method: "POST",
       body: JSON.stringify({
@@ -232,7 +245,7 @@ export async function restoreSandboxCredentialPolicyRollbackIfOwned(
   ownershipFence: SandboxCredentialPolicyOwnershipFence,
   restoreRollback: RestoreSandboxCredentialPolicyRollback = restoreSandboxCredentialPolicyRollback,
 ): Promise<boolean> {
-  const registrationExpiresAt = await renewSandboxCredentialPolicyRegistration(
+  const registrationExpiresAt = await markSandboxCredentialPolicyRegistrationWriteStarted(
     env,
     sessionId,
     sandboxId,
@@ -327,7 +340,7 @@ export async function registerSandboxCredentialPolicy(
       ...(env.OPENAI_ORG_ID ? { openAIOrgId: env.OPENAI_ORG_ID } : {}),
     };
     for (const lookupId of registration.lookupIds) {
-      const registrationExpiresAt = await renewSandboxCredentialPolicyRegistration(
+      const registrationExpiresAt = await markSandboxCredentialPolicyRegistrationWriteStarted(
         env,
         session.id,
         sandboxId,

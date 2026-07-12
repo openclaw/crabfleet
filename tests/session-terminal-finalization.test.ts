@@ -1,7 +1,12 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { terminalInteractiveSessionFinalizationMessage } from "../src/worker/session-terminal-finalization.ts";
+import { database } from "../src/worker/database.ts";
+import type { RuntimeEnv } from "../src/worker/env.ts";
+import {
+  terminalFinalizationClearPendingQuery,
+  terminalInteractiveSessionFinalizationMessage,
+} from "../src/worker/session-terminal-finalization.ts";
 
 test("terminal finalization messages preserve lifecycle and failure evidence", () => {
   assert.equal(
@@ -28,4 +33,13 @@ test("terminal finalization messages preserve lifecycle and failure evidence", (
     }),
     "interactive workspace failed after release",
   );
+});
+
+test("terminal finalization remains pending while any credential lifecycle row exists", () => {
+  const db = database({ DB: {} as D1Database } as RuntimeEnv);
+  const compiled = terminalFinalizationClearPendingQuery("IS-42", "stopped", true).compile(db);
+
+  assert.match(compiled.sql, /interactive_session_credential_policies/i);
+  assert.match(compiled.sql, /interactive_session_credential_policy_registrations/i);
+  assert.match(compiled.sql, /NOT EXISTS/i);
 });

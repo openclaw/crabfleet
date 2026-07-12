@@ -12,6 +12,7 @@ import {
   currentSandboxCredentialPolicyGeneration,
   finishSandboxCredentialPolicyRegistration,
   incompleteSandboxCredentialPolicyGeneration,
+  markSandboxCredentialPolicyRegistrationWriteStarted,
   recordSandboxCredentialPolicyRefs,
   recordSandboxCredentialPolicyRollback,
   repairSandboxCredentialPolicyReferences,
@@ -186,6 +187,15 @@ function credentialPolicyDatabase(options: { applyMigrations?: boolean } = {}): 
       readFileSync(
         new URL(
           "../migrations/0037_credential_policy_registration_lookup_ids.sql",
+          import.meta.url,
+        ),
+        "utf8",
+      ),
+    );
+    db.exec(
+      readFileSync(
+        new URL(
+          "../migrations/0040_credential_policy_registration_write_fence.sql",
           import.meta.url,
         ),
         "utf8",
@@ -905,7 +915,7 @@ test("staged rotations fence old-worker writes until the staged row is removed",
   assert.equal(postFenceClaim.changes, 2);
 });
 
-test("expired staged rotations release the legacy worker compatibility fence", async () => {
+test("expired pre-write staged rotations release the legacy worker compatibility fence", async () => {
   const sqlite = credentialPolicyDatabase();
   const env = sqliteRuntimeEnv(sqlite);
   await beginSandboxCredentialPolicyRegistration(env, "IS-42", "sandbox-1", ownershipFence);
@@ -936,6 +946,161 @@ test("expired staged rotations release the legacy worker compatibility fence", a
       .prepare("SELECT count(*) AS count FROM interactive_session_credential_policy_registrations")
       .get()?.count,
     1,
+  );
+});
+
+test("started staged rotations retain the legacy fence after claim expiry", async () => {
+  const sqlite = credentialPolicyDatabase();
+  const env = sqliteRuntimeEnv(sqlite);
+  const staged = await beginSandboxCredentialPolicyRegistration(
+    env,
+    "IS-42",
+    "sandbox-1",
+    ownershipFence,
+  );
+  assert.ok(
+    await markSandboxCredentialPolicyRegistrationWriteStarted(
+      env,
+      "IS-42",
+      "sandbox-1",
+      staged,
+      ownershipFence,
+    ),
+  );
+  sqlite
+    .prepare(`
+      UPDATE interactive_session_credential_policy_registrations
+      SET registration_claim_expires_at = 0, updated_at = 0
+      WHERE session_id = 'IS-42' AND sandbox_id = 'sandbox-1'
+    `)
+    .run();
+
+  const legacyClaim = sqlite
+    .prepare(`
+      UPDATE interactive_session_credential_policies
+      SET
+        state = 'registering',
+        registration_generation = 'generation:legacy-rollback',
+        registration_claim = 'legacy-rollback-claim',
+        registration_claim_expires_at = ?,
+        updated_at = 1
+      WHERE session_id = 'IS-42' AND sandbox_id = 'sandbox-1'
+    `)
+    .run(Number.MAX_SAFE_INTEGER);
+  const legacyCleanupInsert = sqlite
+    .prepare(`
+      INSERT INTO interactive_session_credential_policies (
+        session_id,
+        sandbox_id,
+        lookup_id,
+        state,
+        registration_generation,
+        registration_claim,
+        registration_claim_expires_at,
+        created_at,
+        updated_at
+      ) VALUES (
+        'IS-42',
+        'sandbox-1',
+        'legacy-cleanup',
+        'cleanup_pending',
+        'generation:existing',
+        NULL,
+        NULL,
+        1,
+        1
+      )
+    `)
+    .run();
+  const legacyDelete = sqlite
+    .prepare(`
+      DELETE FROM interactive_session_credential_policies
+      WHERE session_id = 'IS-42' AND sandbox_id = 'sandbox-1'
+    `)
+    .run();
+
+  assert.equal(legacyClaim.changes, 0);
+  assert.equal(legacyCleanupInsert.changes, 0);
+  assert.equal(legacyDelete.changes, 0);
+  assert.equal(
+    sqlite
+      .prepare(`
+        SELECT registration_write_started
+        FROM interactive_session_credential_policy_registrations
+        WHERE session_id = 'IS-42' AND sandbox_id = 'sandbox-1'
+      `)
+      .get()?.registration_write_started,
+    1,
+  );
+  assert.ok(
+    await claimSandboxCredentialPolicyRegistrationRecovery(
+      env,
+      "IS-42",
+      "sandbox-1",
+      staged,
+      0,
+      ownershipFence,
+    ),
+  );
+});
+
+test("write-fence migration conservatively protects existing staged rotations", () => {
+  const sqlite = credentialPolicyDatabase({ applyMigrations: false });
+  for (const migration of [
+    "0034_credential_policy_registration_staging.sql",
+    "0035_credential_policy_registration_rollback.sql",
+    "0036_credential_policy_lookup_repair.sql",
+    "0037_credential_policy_registration_lookup_ids.sql",
+  ]) {
+    sqlite.exec(readFileSync(new URL(`../migrations/${migration}`, import.meta.url), "utf8"));
+  }
+  sqlite
+    .prepare(`
+      INSERT INTO interactive_session_credential_policy_registrations (
+        session_id,
+        sandbox_id,
+        state,
+        registration_generation,
+        registration_claim,
+        registration_claim_expires_at,
+        lookup_ids_json,
+        created_at,
+        updated_at
+      ) VALUES (?, ?, 'registering', ?, ?, 0, ?, 1, 0)
+    `)
+    .run(
+      "IS-42",
+      "sandbox-1",
+      "generation:pre-write-fence",
+      "registration:pre-write-fence",
+      JSON.stringify(["sandbox-1", "do-1"]),
+    );
+  sqlite.exec(
+    readFileSync(
+      new URL("../migrations/0040_credential_policy_registration_write_fence.sql", import.meta.url),
+      "utf8",
+    ),
+  );
+
+  assert.equal(
+    sqlite
+      .prepare(`
+        SELECT registration_write_started
+        FROM interactive_session_credential_policy_registrations
+        WHERE session_id = 'IS-42' AND sandbox_id = 'sandbox-1'
+      `)
+      .get()?.registration_write_started,
+    1,
+  );
+  assert.equal(
+    sqlite
+      .prepare(`
+        UPDATE interactive_session_credential_policies
+        SET registration_generation = 'generation:legacy-after-rollback'
+        WHERE session_id = 'IS-42' AND sandbox_id = 'sandbox-1'
+      `)
+      .run().changes,
+    0,
   );
 });
 

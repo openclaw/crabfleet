@@ -687,6 +687,36 @@ export async function renewSandboxCredentialPolicyRegistration(
   return Number(renewed.numUpdatedRows ?? 0n) === 1 ? registrationExpiresAt : null;
 }
 
+export async function markSandboxCredentialPolicyRegistrationWriteStarted(
+  env: RuntimeEnv,
+  sessionId: string,
+  sandboxId: string,
+  registration: SandboxCredentialPolicyRegistration,
+  ownershipFence: SandboxCredentialPolicyOwnershipFence,
+): Promise<number | null> {
+  const now = Date.now();
+  const registrationExpiresAt = now + credentialPolicyRegistrationClaimMs;
+  const marked = await sql<{ registration_claim_expires_at: number }>`
+    UPDATE interactive_session_credential_policy_registrations
+    SET
+      registration_claim_expires_at = ${registrationExpiresAt},
+      registration_write_started = 1,
+      updated_at = ${now}
+    WHERE session_id = ${sessionId}
+      AND sandbox_id = ${sandboxId}
+      AND state = 'registering'
+      AND registration_generation = ${registration.generation}
+      AND registration_claim = ${registration.claim}
+      AND registration_claim_expires_at > ${now}
+      AND ${sandboxCredentialPolicyOwnerCondition(sessionId, sandboxId, ownershipFence, now)}
+      AND ${noLivePolicyTableRegistrationCondition(sessionId, sandboxId, now)}
+    RETURNING registration_claim_expires_at
+  `.execute(database(env));
+  return marked.rows[0]?.registration_claim_expires_at === registrationExpiresAt
+    ? registrationExpiresAt
+    : null;
+}
+
 export async function claimSandboxCredentialPolicyRegistrationRecovery(
   env: RuntimeEnv,
   sessionId: string,

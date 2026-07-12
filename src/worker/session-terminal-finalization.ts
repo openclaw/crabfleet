@@ -1,4 +1,4 @@
-import { sql, type Kysely } from "kysely";
+import { sql, type Kysely, type RawBuilder } from "kysely";
 
 import { retainedRuntimeAdapterFailureMessage } from "../runtime-adapter.ts";
 import { completeTerminalFinalization } from "../terminal-finalization.ts";
@@ -6,6 +6,7 @@ import { database, executeBatch, type CompilableQuery, type Database } from "./d
 import type { RuntimeEnv } from "./env.ts";
 import { deadInteractiveSessionStatuses } from "./models.ts";
 import { archiveInteractiveSessionLogs } from "./session-log-archive.ts";
+import { hasNoCredentialPolicyLifecycle } from "./session-cleanup.ts";
 import { countInteractiveSessionEvents } from "./session-repository.ts";
 
 export type TerminalInteractiveSessionStatus = "stopped" | "expired" | "failed";
@@ -39,6 +40,50 @@ export function terminalInteractiveSessionFinalizationMessage(
     );
   }
   return status === "expired" ? "interactive workspace expired" : "interactive workspace stopped";
+}
+
+export function terminalFinalizationClearPendingQuery(
+  id: string,
+  status: TerminalInteractiveSessionStatus,
+  sessionLogsEnabled: boolean,
+): RawBuilder<unknown> {
+  return sql`
+    UPDATE interactive_sessions
+    SET terminal_finalize_pending = 0
+    WHERE id = ${id}
+      AND status = ${status}
+      AND terminal_finalize_pending > 0
+      AND EXISTS (
+        SELECT 1
+        FROM interactive_session_log_archives AS archive
+        WHERE archive.session_id = interactive_sessions.id
+          AND archive.session_updated_at = interactive_sessions.updated_at
+      )
+      AND ${hasNoCredentialPolicyLifecycle(id)}
+      AND COALESCE(
+        (
+          SELECT event_count
+          FROM interactive_session_log_archives
+          WHERE session_id = ${id}
+        ),
+        -1
+      ) >= (
+        SELECT count(*)
+        FROM interactive_session_events
+        WHERE session_id = ${id}
+      )
+      AND (
+        ${sessionLogsEnabled ? 1 : 0} = 0
+        OR EXISTS (
+          SELECT 1
+          FROM interactive_session_log_archives
+          WHERE session_id = ${id}
+            AND events_key IS NOT NULL
+            AND transcript_key IS NOT NULL
+            AND summary_key IS NOT NULL
+        )
+      )
+  `;
 }
 
 export async function finalizeTerminalInteractiveSession(
@@ -105,47 +150,11 @@ export async function finalizeTerminalInteractiveSession(
     },
     archive: () => archiveInteractiveSessionLogs(env, id, now, { force: true }),
     clearPending: async () => {
-      const cleared = await sql`
-        UPDATE interactive_sessions
-        SET terminal_finalize_pending = 0
-        WHERE id = ${id}
-          AND status = ${status}
-          AND terminal_finalize_pending > 0
-          AND EXISTS (
-            SELECT 1
-            FROM interactive_session_log_archives AS archive
-            WHERE archive.session_id = interactive_sessions.id
-              AND archive.session_updated_at = interactive_sessions.updated_at
-          )
-          AND NOT EXISTS (
-            SELECT 1
-            FROM interactive_session_credential_policies
-            WHERE session_id = ${id}
-          )
-          AND COALESCE(
-            (
-              SELECT event_count
-              FROM interactive_session_log_archives
-              WHERE session_id = ${id}
-            ),
-            -1
-          ) >= (
-            SELECT count(*)
-            FROM interactive_session_events
-            WHERE session_id = ${id}
-          )
-          AND (
-            ${env.SESSION_LOGS ? 1 : 0} = 0
-            OR EXISTS (
-              SELECT 1
-              FROM interactive_session_log_archives
-              WHERE session_id = ${id}
-                AND events_key IS NOT NULL
-                AND transcript_key IS NOT NULL
-                AND summary_key IS NOT NULL
-            )
-          )
-      `.execute(db);
+      const cleared = await terminalFinalizationClearPendingQuery(
+        id,
+        status,
+        Boolean(env.SESSION_LOGS),
+      ).execute(db);
       if ((cleared.numAffectedRows ?? 0n) > 0n) return true;
       const current = await db
         .selectFrom("interactive_sessions")

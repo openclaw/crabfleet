@@ -197,6 +197,12 @@ test("terminal cleanup atomically stages the session and credential-policy refs"
   );
 
   assert.equal(batch.length, 4);
+  assert.match(
+    batch[1]?.sql ?? "",
+    /update "interactive_session_credential_policy_registrations"/i,
+  );
+  assert.match(batch[2]?.sql ?? "", /interactive_session_credential_policies/i);
+  assert.match(batch[3]?.sql ?? "", /update "interactive_session_credential_policies"/i);
   const sql = batch.map((statement) => statement.sql).join("\n");
   const parameters = batch.flatMap((statement) => statement.parameters);
   assert.match(sql, /update "interactive_sessions"/i);
