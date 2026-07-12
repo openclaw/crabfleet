@@ -1718,7 +1718,7 @@ test("relay generations bind interleaved replacement input before lifecycle proc
   server.emit("close");
 });
 
-test("viewer carries its initial runner generation through authorization setup", async () => {
+test("viewer captures runner replacement during authorization setup", async () => {
   const client = socket();
   const server = socket();
   const upstream = socket();
@@ -1755,10 +1755,28 @@ test("viewer carries its initial runner generation through authorization setup",
     }),
   });
   await flushQueues();
-  emitRelayEvent(upstream, "runner_connected", "generation-initial");
+  emitRelayEvent(upstream, "runner_connected", "generation-replacement");
+  upstream.emit("message", {
+    data: encodeGitHubActionsRelayOutput("output-before-authorization"),
+  });
   releaseView(true);
   await flushQueues();
   await flushQueues();
+
+  const messages = server.sent.map((payload) => frame(payload));
+  assert.deepEqual(
+    messages
+      .filter((message) => message.type === TerminalMessageType.Event)
+      .map(
+        (message) => decodeJsonPayload(message.payload) as { type?: string; generation?: string },
+      )
+      .filter((message) => message.type === "runner_connected"),
+    [{ type: "runner_connected", generation: "generation-replacement" }],
+  );
+  assert.equal(
+    messages.some((message) => message.type === TerminalMessageType.Output),
+    false,
+  );
 
   server.emit("message", {
     data: encodeTerminalFrame({
@@ -1770,8 +1788,8 @@ test("viewer carries its initial runner generation through authorization setup",
   await waitForInputPayloads();
 
   const input = relayInput(upstream.sent.at(-1)!);
-  assert.equal(input.generation, "generation-initial");
-  emitRelayAcknowledgement(upstream, input.inputId, true, "generation-initial");
+  assert.equal(input.generation, "generation-replacement");
+  emitRelayAcknowledgement(upstream, input.inputId, true, "generation-replacement");
   await flushQueues();
   await flushQueues();
 

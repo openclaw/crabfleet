@@ -33,6 +33,7 @@ const terminalFrameLimits = { maxFrameBytes: terminalMaxFrameBytes };
 const terminalInputQueueMaxBytes = terminalMaxFrameBytes;
 const terminalInputQueueMaxFrames = 32;
 const terminalInputAcknowledgementTimeoutMs = 5_000;
+const terminalPreAuthorizationRelayEventMax = 32;
 
 type PendingTerminalInputAcknowledgement = {
   inputId: string;
@@ -500,7 +501,46 @@ export class TerminalHub {
         return;
       }
       const upstream = upstreamConnection.socket;
-      if (!(await canView())) {
+      const inputAcknowledgements =
+        upstreamConnection.inputAcknowledgements ?? session.runtime === githubActionsRuntime;
+      const inputGenerations = upstreamConnection.inputGenerations ?? false;
+      let runnerGeneration: number | string = inputGenerations
+        ? (upstreamConnection.initialRunnerGeneration ?? "none")
+        : 0;
+      const bufferedRelayEvents: Array<
+        NonNullable<ReturnType<typeof parseGitHubActionsRelayEvent>>
+      > = [];
+      let captureRelayEvents = true;
+      upstream.addEventListener("message", (event) => {
+        if (!captureRelayEvents || !inputAcknowledgements) return;
+        const relayEvent = parseSynchronousGitHubActionsRelayEvent(event.data);
+        if (!relayEvent) return;
+        if (bufferedRelayEvents.length === terminalPreAuthorizationRelayEventMax) {
+          bufferedRelayEvents.shift();
+        }
+        bufferedRelayEvents.push(relayEvent);
+        if (relayEvent.generation) {
+          if (relayEvent.type === "runner_disconnected") {
+            if (runnerGeneration === relayEvent.generation) runnerGeneration = "none";
+          } else {
+            runnerGeneration = relayEvent.generation;
+          }
+        } else if (relayEvent.type === "runner_connected" && !inputGenerations) {
+          runnerGeneration = (runnerGeneration as number) + 1;
+        }
+      });
+      let canViewNow: boolean;
+      try {
+        canViewNow = await canView();
+      } catch (error) {
+        captureRelayEvents = false;
+        if (upstream.readyState < WebSocket.CLOSING) {
+          upstream.close(1011, "view authorization failed");
+        }
+        throw error;
+      }
+      if (!canViewNow) {
+        captureRelayEvents = false;
         if (upstream.readyState < WebSocket.CLOSING) upstream.close(1008, "share revoked");
         sendTerminalJson(client, TerminalMessageType.Error, id, {
           error: "interactive session not found",
@@ -508,6 +548,7 @@ export class TerminalHub {
         return;
       }
       if (!isHubOpen() || client.readyState !== WebSocket.OPEN) {
+        captureRelayEvents = false;
         if (upstream.readyState < WebSocket.CLOSING) upstream.close(1000, "client closed");
         return;
       }
@@ -523,18 +564,15 @@ export class TerminalHub {
         viewCheck,
         cols,
         rows,
-        inputAcknowledgements:
-          upstreamConnection.inputAcknowledgements ?? session.runtime === githubActionsRuntime,
+        inputAcknowledgements,
         inputQueue: Promise.resolve(),
         inputQueueBytes: 0,
         inputQueueFrames: 0,
         inputQueueRejections: 0,
         inputQueueRejectionScheduled: false,
-        inputGenerations: upstreamConnection.inputGenerations ?? false,
+        inputGenerations,
         pendingInputAcknowledgements: new Map(),
-        runnerGeneration: upstreamConnection.inputGenerations
-          ? (upstreamConnection.initialRunnerGeneration ?? "none")
-          : 0,
+        runnerGeneration,
         outputAcknowledgements: outputAcknowledgements && upstreamConnection.outputAcknowledgements,
         outputAcknowledgementBytes: 0,
       };
@@ -564,6 +602,7 @@ export class TerminalHub {
           });
       }, 5000);
       activeSubscription.viewCheck = viewCheck;
+      captureRelayEvents = false;
       subscriptions.set(id, activeSubscription);
       let outputQueue = Promise.resolve();
       sendTerminalJson(client, TerminalMessageType.Event, id, {
@@ -699,6 +738,9 @@ export class TerminalHub {
             }
           });
       });
+      for (const relayEvent of bufferedRelayEvents) {
+        sendTerminalJson(client, TerminalMessageType.Event, id, relayEvent);
+      }
       upstream.addEventListener("close", (event) => {
         completeAllTerminalInputAcknowledgements(activeSubscription, {
           accepted: false,
