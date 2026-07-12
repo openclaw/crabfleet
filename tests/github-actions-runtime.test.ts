@@ -14,7 +14,9 @@ import {
   githubActionsRelayRole,
   githubActionsRunnerProtocolQuery,
   githubActionsRuntimeLabel,
+  githubActionsViewerProtocolHeader,
   githubActionsViewerProtocolQuery,
+  gitHubActionsViewerResponseUsesFramedProtocol,
   gitHubActionsRunnerUsesFramedProtocol,
   gitHubActionsViewerUsesFramedProtocol,
   isGitHubActionsViewerControlMessage,
@@ -101,6 +103,18 @@ test("runner URL works without custom WebSocket headers", () => {
     githubActionsFramedRunnerCapability,
   );
   assert.equal(githubActionsViewerProtocolQuery, "viewerProtocol");
+  assert.equal(githubActionsViewerProtocolHeader, "x-crabfleet-viewer-protocol");
+  assert.equal(
+    gitHubActionsViewerResponseUsesFramedProtocol(
+      new Response(null, {
+        headers: {
+          [githubActionsViewerProtocolHeader]: githubActionsFramedRunnerCapability,
+        },
+      }),
+    ),
+    true,
+  );
+  assert.equal(gitHubActionsViewerResponseUsesFramedProtocol(new Response()), false);
 });
 
 test("work states preserve running phases and map terminal outcomes", () => {

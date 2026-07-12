@@ -32,6 +32,7 @@ export type GitHubActionsRelayInput = {
 export const githubActionsFramedRunnerCapability = "cfr1-framed-io-v1";
 export const githubActionsRunnerProtocolQuery = "runnerProtocol";
 export const githubActionsViewerProtocolQuery = "viewerProtocol";
+export const githubActionsViewerProtocolHeader = "x-crabfleet-viewer-protocol";
 export type GitHubActionsRelayProtocol = typeof githubActionsFramedRunnerCapability;
 export type GitHubActionsRunnerProtocol = GitHubActionsRelayProtocol;
 export type GitHubActionsViewerProtocol = GitHubActionsRelayProtocol;
@@ -111,6 +112,12 @@ export function buildGitHubActionsViewerRelayUrl(): string {
   const url = new URL("https://crabfleet.internal/api/session-control/github-actions/viewer");
   url.searchParams.set(githubActionsViewerProtocolQuery, githubActionsFramedRunnerCapability);
   return url.toString();
+}
+
+export function gitHubActionsViewerResponseUsesFramedProtocol(response: Response): boolean {
+  return (
+    response.headers.get(githubActionsViewerProtocolHeader) === githubActionsFramedRunnerCapability
+  );
 }
 
 export function parseGitHubActionsWorkState(value: unknown): GitHubActionsWorkState | null {

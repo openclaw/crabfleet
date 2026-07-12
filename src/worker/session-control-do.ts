@@ -11,6 +11,7 @@ import {
   attachGitHubActionsViewerProtocol,
   githubActionsRelayRole,
   githubActionsRunnerProtocolQuery,
+  githubActionsViewerProtocolHeader,
   githubActionsViewerProtocolQuery,
   notifyGitHubActionsViewers,
   parseGitHubActionsRunnerProtocol,
@@ -258,7 +259,11 @@ export class SessionControlDO extends DurableObject<RuntimeEnv> {
         notifyGitHubActionsViewers([server], "runner_waiting");
       }
     }
-    return new Response(null, { status: 101, webSocket: client });
+    const responseInit: ResponseInit = { status: 101, webSocket: client };
+    if (role === "viewer" && protocol) {
+      responseInit.headers = { [githubActionsViewerProtocolHeader]: protocol };
+    }
+    return new Response(null, responseInit);
   }
 }
 

@@ -82,6 +82,7 @@ test("GitHub Actions viewer protocol is requested and attached before relay acce
   ]);
 
   assert.match(terminal, /stub\.fetch\(\s*buildGitHubActionsViewerRelayUrl\(\)/);
+  assert.match(terminal, /gitHubActionsViewerResponseUsesFramedProtocol\(upstreamResponse\)/);
   const attach = relay.indexOf("attachGitHubActionsViewerProtocol(server, protocol)");
   const accept = relay.indexOf(
     'this.ctx.acceptWebSocket(server, ["github-actions-viewer"])',
@@ -89,6 +90,7 @@ test("GitHub Actions viewer protocol is requested and attached before relay acce
   );
   assert.notEqual(attach, -1);
   assert.ok(accept > attach);
+  assert.match(relay, /\[githubActionsViewerProtocolHeader\]: protocol/);
 });
 
 test("worker entrypoint retains only routing and platform composition", async () => {

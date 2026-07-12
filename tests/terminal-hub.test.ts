@@ -608,6 +608,58 @@ test("GitHub Actions input waits for the correlated runner acknowledgement", asy
   server.emit("close");
 });
 
+test("GitHub Actions falls back to raw relay input when viewer negotiation is absent", async () => {
+  const client = socket();
+  const server = socket();
+  const upstream = socket();
+  const hub = new TerminalHub(
+    dependencies(client, server, upstream, {
+      async readSession() {
+        return githubActionsSession;
+      },
+      async openUpstream() {
+        return {
+          socket: upstream,
+          inputAcknowledgements: false,
+          outputAcknowledgements: false,
+          async markConnected() {},
+        };
+      },
+    }),
+  );
+  await hub.open(
+    new Request("https://fleet.example/api/terminal/ws", {
+      headers: { upgrade: "websocket" },
+    }),
+    user,
+  );
+  server.emit("message", {
+    data: encodeTerminalFrame({
+      type: TerminalMessageType.Subscribe,
+      sessionId: githubActionsSession.id,
+      payload: encodeSubscribePayload({ flags: 0, columns: 120, rows: 34 }),
+    }),
+  });
+  await flushQueues();
+  await flushQueues();
+
+  server.emit("message", {
+    data: encodeTerminalFrame({
+      type: TerminalMessageType.Input,
+      sessionId: githubActionsSession.id,
+      payload: new TextEncoder().encode("legacy"),
+    }),
+  });
+  await flushQueues();
+  await flushQueues();
+
+  assert.equal(new TextDecoder().decode(upstream.sent.at(-1) as Uint8Array), "legacy");
+  assert.deepEqual(decodeJsonPayload(frame(server.sent.at(-1)!).payload), {
+    type: "input-accepted",
+  });
+  server.emit("close");
+});
+
 test("GitHub Actions relay rejection is request-scoped", async () => {
   const client = socket();
   const server = socket();

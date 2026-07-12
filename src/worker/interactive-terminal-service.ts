@@ -8,6 +8,7 @@ import {
 } from "../terminal-multiplayer.ts";
 import {
   buildGitHubActionsViewerRelayUrl,
+  gitHubActionsViewerResponseUsesFramedProtocol,
   githubActionsRuntime,
 } from "../github-actions-runtime.ts";
 import { terminalFailureStatusForAdapter } from "../runtime-adapter.ts";
@@ -139,6 +140,7 @@ export class InteractiveTerminalService {
       upstream.accept();
       return {
         socket: upstream,
+        inputAcknowledgements: gitHubActionsViewerResponseUsesFramedProtocol(upstreamResponse),
         outputAcknowledgements: false,
         markConnected: () =>
           markInteractiveTerminalConnected(

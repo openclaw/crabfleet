@@ -41,6 +41,7 @@ type PendingTerminalInputAcknowledgement = {
 export type TerminalUpstream = {
   socket: WebSocket;
   markConnected: () => Promise<void>;
+  inputAcknowledgements?: boolean;
   outputAcknowledgements: boolean;
 };
 
@@ -465,7 +466,8 @@ export class TerminalHub {
         viewCheck,
         cols,
         rows,
-        inputAcknowledgements: session.runtime === githubActionsRuntime,
+        inputAcknowledgements:
+          upstreamConnection.inputAcknowledgements ?? session.runtime === githubActionsRuntime,
         pendingInputAcknowledgements: new Map(),
         outputAcknowledgements: outputAcknowledgements && upstreamConnection.outputAcknowledgements,
         outputAcknowledgementBytes: 0,
