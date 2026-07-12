@@ -45,8 +45,10 @@ function dependencies(calls: string[]): ControlPlaneRouteDependencies {
       calls.push(`fleet:${user.login}`);
       return { handler: "fleet" };
     },
-    async registerDesktopHost(user, id, input, ownershipMode) {
-      calls.push(`desktop-host:register:${user.login}:${id}:${input.name}:${ownershipMode}`);
+    async registerDesktopHost(user, id, input, ownershipMode, publicationID) {
+      calls.push(
+        `desktop-host:register:${user.login}:${id}:${input.name}:${ownershipMode}:${publicationID ?? "none"}`,
+      );
       const registration = {
         host: {
           id,
@@ -61,6 +63,12 @@ function dependencies(calls: string[]): ControlPlaneRouteDependencies {
       return ownershipMode === desktopHostTokenOwnershipMode
         ? { ...registration, ownershipToken: "ownership-token" }
         : registration;
+    },
+    async recoverDesktopHost(user, id, publicationID) {
+      calls.push(`desktop-host:recover:${user.login}:${id}:${String(publicationID)}`);
+      return {
+        ownershipToken: publicationID === "publication-id" ? "ownership-token" : null,
+      };
     },
     async removeDesktopHost(user, id, ownershipToken) {
       calls.push(`desktop-host:remove:${user.login}:${id}:${ownershipToken ?? "legacy"}`);
@@ -165,6 +173,7 @@ test("desktop host routes register and remove only the authenticated user's host
       headers: {
         "content-type": "application/json",
         [desktopHostOwnershipModeHeader]: desktopHostTokenOwnershipMode,
+        "x-crabfleet-publication-id": "publication-id",
       },
       body: JSON.stringify({
         name: "Mac Studio",
@@ -198,9 +207,18 @@ test("desktop host routes register and remove only the authenticated user's host
     calls,
   );
   assert.equal(removed?.status, 200);
+  const recovered = await dispatch(
+    request("POST", "/api/desktop-hosts/mac%2Dstudio?recover=1", {
+      publicationID: "publication-id",
+    }),
+    viewer,
+    calls,
+  );
+  assert.deepEqual(await recovered?.json(), { ownershipToken: "ownership-token" });
   assert.deepEqual(calls, [
-    "desktop-host:register:viewer:mac-studio:Mac Studio:token-v1",
+    "desktop-host:register:viewer:mac-studio:Mac Studio:token-v1:publication-id",
     "desktop-host:remove:viewer:mac-studio:ownership-token",
+    "desktop-host:recover:viewer:mac-studio:publication-id",
   ]);
 
   const legacyCalls: string[] = [];
@@ -231,7 +249,7 @@ test("desktop host routes register and remove only the authenticated user's host
   );
   assert.equal(legacyRemoved?.status, 200);
   assert.deepEqual(legacyCalls, [
-    "desktop-host:register:viewer:legacy-studio:Legacy Studio:legacy",
+    "desktop-host:register:viewer:legacy-studio:Legacy Studio:legacy:none",
     "desktop-host:remove:viewer:legacy-studio:legacy",
   ]);
 });

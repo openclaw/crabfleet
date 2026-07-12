@@ -39,6 +39,15 @@ class MemoryDesktopHostStore implements DesktopHostStore {
     return stored;
   }
 
+  async ownershipTokenForPublication(
+    ownerSubject: string,
+    id: string,
+    publicationID: string,
+  ): Promise<string | null> {
+    const row = this.rows.get(`${ownerSubject}:${id}`);
+    return row?.publicationID === publicationID ? row.ownershipToken : null;
+  }
+
   async remove(ownerSubject: string, id: string, ownershipToken: string | null): Promise<void> {
     const key = `${ownerSubject}:${id}`;
     if (this.rows.get(key)?.ownershipToken === (ownershipToken ?? "")) {
@@ -152,6 +161,7 @@ test("tokenless cleanup removes only migrated legacy desktop hosts", async () =>
     address: "100.64.1.2",
     port: 5901,
     ownershipToken: "",
+    publicationID: "",
     createdAt: 1,
     updatedAt: 1,
   };
@@ -171,6 +181,34 @@ test("tokenless cleanup removes only migrated legacy desktop hosts", async () =>
   await service.remove(alice, registration.host.id, null);
 
   assert.deepEqual(await service.list(alice), [registration.host]);
+});
+
+test("ambiguous desktop recovery cannot acquire a newer publication", async () => {
+  const store = new MemoryDesktopHostStore();
+  const tokens = ["old-process-token", "new-process-token"];
+  const service = new DesktopHostService(
+    store,
+    () => 42,
+    () => tokens.shift() ?? "unexpected-token",
+  );
+  const input = { name: "Studio", address: "100.64.1.2", port: 5901 };
+
+  await service.register(alice, "studio", input, desktopHostTokenOwnershipMode, "publication-a");
+  const newer = await service.register(
+    alice,
+    "studio",
+    { ...input, name: "Newer Studio" },
+    desktopHostTokenOwnershipMode,
+    "publication-b",
+  );
+
+  assert.deepEqual(await service.recover(alice, "studio", "publication-a"), {
+    ownershipToken: null,
+  });
+  assert.deepEqual(await service.list(alice), [newer.host]);
+  assert.deepEqual(await service.recover(alice, "studio", "publication-b"), {
+    ownershipToken: newer.ownershipToken,
+  });
 });
 
 test("legacy clients register tokenless rows they can remove after a server upgrade", async () => {

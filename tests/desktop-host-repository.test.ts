@@ -77,6 +77,7 @@ test("desktop host repository scopes reads, upserts, and deletes by owner subjec
     address: "100.64.1.2",
     port: 5901,
     ownership_token: "ownership-token",
+    publication_id: "publication-id",
     created_at: 1,
     updated_at: 2,
   };
@@ -113,6 +114,7 @@ test("desktop host repository scopes reads, upserts, and deletes by owner subjec
       address: "100.64.1.2",
       port: 5901,
       ownershipToken: "ownership-token",
+      publicationID: "publication-id",
       createdAt: 1,
       updatedAt: 2,
     },
@@ -128,6 +130,7 @@ test("desktop host repository scopes reads, upserts, and deletes by owner subjec
     address: "100.64.1.2",
     port: 5901,
     ownershipToken: "ownership-token",
+    publicationID: "publication-id",
     createdAt: 1,
     updatedAt: 2,
   });
@@ -160,6 +163,7 @@ test("desktop host upsert returns the row written by the same atomic statement",
     address: "100.64.1.2",
     port: 5901,
     ownership_token: "token-a",
+    publication_id: "publication-a",
     created_at: 1,
     updated_at: 2,
   };
@@ -202,6 +206,7 @@ test("desktop host upsert returns the row written by the same atomic statement",
     address: written.address,
     port: written.port,
     ownershipToken: written.ownership_token,
+    publicationID: written.publication_id,
     createdAt: written.created_at,
     updatedAt: written.updated_at,
   });
@@ -222,6 +227,7 @@ test("legacy desktop host upserts preserve token ownership", async () => {
     address: "100.64.1.2",
     port: 5901,
     ownership_token: "current-token",
+    publication_id: "current-publication",
     created_at: 1,
     updated_at: 2,
   };
@@ -250,6 +256,7 @@ test("legacy desktop host upserts preserve token ownership", async () => {
     address: stored.address,
     port: stored.port,
     ownershipToken: "",
+    publicationID: "",
     createdAt: stored.created_at,
     updatedAt: stored.updated_at,
   });
@@ -275,12 +282,19 @@ test("legacy desktop host writes and cleanup cannot mutate token-owned rows", as
   sqlite.exec(
     readFileSync(new URL("../migrations/0033_desktop_host_ownership.sql", import.meta.url), "utf8"),
   );
+  sqlite.exec(
+    readFileSync(
+      new URL("../migrations/0038_desktop_host_publication_identity.sql", import.meta.url),
+      "utf8",
+    ),
+  );
   sqlite.exec(`
     INSERT INTO desktop_hosts (
-      owner_subject, id, owner, name, address, port, ownership_token, created_at, updated_at
+      owner_subject, id, owner, name, address, port, ownership_token, publication_id,
+      created_at, updated_at
     ) VALUES (
       'github:1', 'studio', 'alice', 'Token Studio', '100.64.1.2', 5901,
-      'current-token', 1, 2
+      'current-token', 'current-publication', 1, 2
     )
   `);
   const repository = new DesktopHostRepository(sqliteRuntimeEnv(sqlite));
@@ -293,6 +307,7 @@ test("legacy desktop host writes and cleanup cannot mutate token-owned rows", as
     address: "100.64.1.99",
     port: 5902,
     ownershipToken: "",
+    publicationID: "",
     createdAt: 10,
     updatedAt: 20,
   });
@@ -304,6 +319,7 @@ test("legacy desktop host writes and cleanup cannot mutate token-owned rows", as
     address: "100.64.1.2",
     port: 5901,
     ownershipToken: "current-token",
+    publicationID: "current-publication",
     createdAt: 1,
     updatedAt: 2,
   });
@@ -318,4 +334,38 @@ test("legacy desktop host writes and cleanup cannot mutate token-owned rows", as
 
   await repository.remove("github:1", "studio", "current-token");
   assert.equal(sqlite.prepare("SELECT count(*) AS count FROM desktop_hosts").get()?.count, 0);
+});
+
+test("desktop host publication recovery matches only the current publication", async () => {
+  const sqlite = new DatabaseSync(":memory:");
+  for (const migration of [
+    "0030_desktop_hosts.sql",
+    "0033_desktop_host_ownership.sql",
+    "0038_desktop_host_publication_identity.sql",
+  ]) {
+    sqlite.exec(readFileSync(new URL(`../migrations/${migration}`, import.meta.url), "utf8"));
+  }
+  const repository = new DesktopHostRepository(sqliteRuntimeEnv(sqlite));
+
+  await repository.upsert({
+    ownerSubject: "github:1",
+    id: "studio",
+    owner: "alice",
+    name: "Studio",
+    address: "100.64.1.2",
+    port: 5901,
+    ownershipToken: "token-b",
+    publicationID: "publication-b",
+    createdAt: 1,
+    updatedAt: 2,
+  });
+
+  assert.equal(
+    await repository.ownershipTokenForPublication("github:1", "studio", "publication-a"),
+    null,
+  );
+  assert.equal(
+    await repository.ownershipTokenForPublication("github:1", "studio", "publication-b"),
+    "token-b",
+  );
 });

@@ -8,6 +8,7 @@ import type {
 import {
   desktopHostOwnershipHeader,
   desktopHostOwnershipModeHeader,
+  desktopHostPublicationHeader,
   desktopHostTokenOwnershipMode,
   type DesktopHostInput,
   type DesktopHostOwnershipMode,
@@ -24,7 +25,13 @@ export type ControlPlaneRouteDependencies = {
     id: string,
     input: DesktopHostInput,
     ownershipMode: DesktopHostOwnershipMode,
+    publicationID: string | null,
   ): Promise<DesktopHostRegistration>;
+  recoverDesktopHost(
+    user: User,
+    id: string,
+    publicationID: unknown,
+  ): Promise<{ ownershipToken: string | null }>;
   removeDesktopHost(user: User, id: string, ownershipToken: string | null): Promise<void>;
   searchGitHubRefs(number: unknown): Promise<unknown>;
   createCard(request: Request, user: User): Promise<unknown>;
@@ -63,8 +70,16 @@ export async function handleControlPlaneRoute(
       request.headers.get(desktopHostOwnershipModeHeader) === desktopHostTokenOwnershipMode
         ? desktopHostTokenOwnershipMode
         : "legacy",
+      request.headers.get(desktopHostPublicationHeader),
     );
     return json(registration);
+  }
+  if (request.method === "POST" && desktopHostMatch && url.searchParams.get("recover") === "1") {
+    requireRole(user, "viewer");
+    const body = await readJson<{ publicationID?: unknown }>(request);
+    return json(
+      await dependencies.recoverDesktopHost(user, decoded(desktopHostMatch[1]), body.publicationID),
+    );
   }
   if (request.method === "DELETE" && desktopHostMatch) {
     requireRole(user, "viewer");

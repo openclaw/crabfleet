@@ -70,6 +70,7 @@ export type DesktopHostTable = {
   address: string;
   port: number;
   ownership_token: string;
+  publication_id: string;
   created_at: number;
   updated_at: number;
 };

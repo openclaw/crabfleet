@@ -16,6 +16,12 @@ test("desktop host migration creates an owner-scoped registry with bounded ports
   database.exec(migration);
   database.exec(migration);
   database.exec(ownershipMigration);
+  database.exec(
+    readFileSync(
+      new URL("../migrations/0038_desktop_host_publication_identity.sql", import.meta.url),
+      "utf8",
+    ),
+  );
 
   const insert = database.prepare(`
     INSERT INTO desktop_hosts
@@ -36,6 +42,12 @@ test("desktop host migration creates an owner-scoped registry with bounded ports
       .get()?.ownership_token,
     "",
   );
+  assert.equal(
+    database
+      .prepare("SELECT publication_id FROM desktop_hosts WHERE owner_subject = 'github:1'")
+      .get()?.publication_id,
+    "",
+  );
   assert.throws(
     () => insert.run("github:3", "bad", "bad", "Bad", "100.64.1.4", 0, 1, 1),
     /constraint/i,
@@ -45,6 +57,38 @@ test("desktop host migration creates an owner-scoped registry with bounded ports
       .prepare("SELECT name FROM sqlite_master WHERE type = 'index' AND name = ?")
       .get("idx_desktop_hosts_owner_updated")?.name,
     "idx_desktop_hosts_owner_updated",
+  );
+});
+
+test("desktop host publication migration clears identities rotated by old workers", () => {
+  const database = new DatabaseSync(":memory:");
+  for (const migration of [
+    "0030_desktop_hosts.sql",
+    "0033_desktop_host_ownership.sql",
+    "0038_desktop_host_publication_identity.sql",
+  ]) {
+    database.exec(readFileSync(new URL(`../migrations/${migration}`, import.meta.url), "utf8"));
+  }
+  database.exec(`
+    INSERT INTO desktop_hosts (
+      owner_subject, id, owner, name, address, port, ownership_token, publication_id,
+      created_at, updated_at
+    ) VALUES (
+      'github:1', 'studio', 'alice', 'Studio', '100.64.1.2', 5901,
+      'token-a', 'publication-a', 1, 2
+    );
+    UPDATE desktop_hosts
+    SET ownership_token = 'token-b'
+    WHERE owner_subject = 'github:1' AND id = 'studio';
+  `);
+
+  assert.deepEqual(
+    {
+      ...database
+        .prepare("SELECT ownership_token, publication_id FROM desktop_hosts WHERE id = 'studio'")
+        .get(),
+    },
+    { ownership_token: "token-b", publication_id: "" },
   );
 });
 

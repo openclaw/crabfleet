@@ -26,6 +26,7 @@ export type DesktopHostRegistration = {
 
 export const desktopHostOwnershipHeader = "x-crabfleet-ownership-token";
 export const desktopHostOwnershipModeHeader = "x-crabfleet-ownership-mode";
+export const desktopHostPublicationHeader = "x-crabfleet-publication-id";
 export const desktopHostTokenOwnershipMode = "token-v1";
 export type DesktopHostOwnershipMode = "legacy" | typeof desktopHostTokenOwnershipMode;
 
@@ -54,6 +55,7 @@ export class DesktopHostService {
     rawID: string,
     input: DesktopHostInput,
     ownershipMode: DesktopHostOwnershipMode = "legacy",
+    rawPublicationID: unknown = null,
   ): Promise<DesktopHostRegistration> {
     const id = desktopHostID(rawID);
     const name = boundedText(input.name, "name", 100);
@@ -62,6 +64,10 @@ export class DesktopHostService {
     const now = this.now();
     const ownershipToken =
       ownershipMode === desktopHostTokenOwnershipMode ? this.createOwnershipToken() : "";
+    const publicationID =
+      ownershipMode === desktopHostTokenOwnershipMode
+        ? optionalDesktopHostPublicationID(rawPublicationID)
+        : "";
     const host: DesktopHostRow = {
       ownerSubject: tenantSubject(user),
       id,
@@ -70,6 +76,7 @@ export class DesktopHostService {
       address,
       port,
       ownershipToken,
+      publicationID,
       createdAt: now,
       updatedAt: now,
     };
@@ -78,6 +85,19 @@ export class DesktopHostService {
     };
     if (ownershipToken) registration.ownershipToken = ownershipToken;
     return registration;
+  }
+
+  async recover(
+    user: User,
+    rawID: string,
+    rawPublicationID: unknown,
+  ): Promise<{ ownershipToken: string | null }> {
+    const ownershipToken = await this.store.ownershipTokenForPublication(
+      tenantSubject(user),
+      desktopHostID(rawID),
+      desktopHostPublicationID(rawPublicationID),
+    );
+    return { ownershipToken };
   }
 
   async remove(user: User, rawID: string, rawOwnershipToken: unknown): Promise<void> {
@@ -172,4 +192,24 @@ function desktopHostOwnershipToken(value: unknown): string | null {
     throw badRequest("desktop host ownership token is required");
   }
   return value;
+}
+
+function desktopHostPublicationID(value: unknown): string {
+  if (
+    typeof value !== "string" ||
+    value.length === 0 ||
+    new TextEncoder().encode(value).byteLength > 200 ||
+    [...value].some((character) => {
+      const codePoint = character.codePointAt(0) ?? 0;
+      return codePoint <= 0x20 || codePoint === 0x7f;
+    })
+  ) {
+    throw badRequest("desktop host publication id is required");
+  }
+  return value;
+}
+
+function optionalDesktopHostPublicationID(value: unknown): string {
+  if (value === null || value === undefined) return "";
+  return desktopHostPublicationID(value);
 }

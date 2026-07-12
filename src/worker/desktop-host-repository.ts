@@ -11,6 +11,7 @@ export type DesktopHostRow = {
   address: string;
   port: number;
   ownershipToken: string;
+  publicationID: string;
   createdAt: number;
   updatedAt: number;
 };
@@ -20,6 +21,11 @@ export type DesktopHostWrite = DesktopHostRow;
 export interface DesktopHostStore {
   list(ownerSubject: string): Promise<DesktopHostRow[]>;
   upsert(host: DesktopHostWrite): Promise<DesktopHostRow>;
+  ownershipTokenForPublication(
+    ownerSubject: string,
+    id: string,
+    publicationID: string,
+  ): Promise<string | null>;
   remove(ownerSubject: string, id: string, ownershipToken: string | null): Promise<void>;
 }
 
@@ -46,6 +52,7 @@ export class DesktopHostRepository implements DesktopHostStore {
       address: row.address,
       port: row.port,
       ownershipToken: row.ownership_token,
+      publicationID: row.publication_id,
       createdAt: row.created_at,
       updatedAt: row.updated_at,
     }));
@@ -62,6 +69,7 @@ export class DesktopHostRepository implements DesktopHostStore {
         address: host.address,
         port: host.port,
         ownership_token: host.ownershipToken,
+        publication_id: host.publicationID,
         created_at: host.createdAt,
         updated_at: host.updatedAt,
       })
@@ -74,6 +82,7 @@ export class DesktopHostRepository implements DesktopHostStore {
               address: host.address,
               port: host.port,
               ownership_token: host.ownershipToken,
+              publication_id: host.publicationID,
               updated_at: host.updatedAt,
             })
           : update.doUpdateSet({
@@ -109,9 +118,26 @@ export class DesktopHostRepository implements DesktopHostStore {
       address: row.address,
       port: row.port,
       ownershipToken: row.ownership_token,
+      publicationID: row.publication_id,
       createdAt: row.created_at,
       updatedAt: row.updated_at,
     };
+  }
+
+  async ownershipTokenForPublication(
+    ownerSubject: string,
+    id: string,
+    publicationID: string,
+  ): Promise<string | null> {
+    const row = await database(this.env)
+      .selectFrom("desktop_hosts")
+      .select("ownership_token")
+      .where("owner_subject", "=", ownerSubject)
+      .where("id", "=", id)
+      .where("publication_id", "=", publicationID)
+      .where("ownership_token", "<>", "")
+      .executeTakeFirst();
+    return row?.ownership_token ?? null;
   }
 
   async remove(ownerSubject: string, id: string, ownershipToken: string | null): Promise<void> {
