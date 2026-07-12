@@ -42,9 +42,9 @@ CREATE INDEX IF NOT EXISTS idx_credential_policy_registration_expiry
   );
 
 -- Once a new worker stages a rotation, legacy workers must not claim, promote,
--- or remove the policy rows underneath its rollback snapshot. Cleanup may
--- still transition an older generation into cleanup_pending, but its rows stay
--- fenced until the staged registration is removed.
+-- or remove the policy rows underneath its rollback snapshot. Expired claims
+-- and abandoned cleanup rows eventually release the compatibility fence so a
+-- rollback to legacy worker code cannot wedge this policy group forever.
 CREATE TRIGGER IF NOT EXISTS fence_staged_credential_policy_insert
 BEFORE INSERT ON interactive_session_credential_policies
 WHEN NEW.state != 'cleanup_pending'
@@ -54,6 +54,22 @@ WHEN NEW.state != 'cleanup_pending'
     WHERE staged.session_id = NEW.session_id
       AND staged.sandbox_id = NEW.sandbox_id
       AND staged.registration_generation != NEW.registration_generation
+      AND (
+        (
+          staged.state = 'registering'
+          AND staged.registration_claim_expires_at >
+            CAST(strftime('%s', 'now') AS INTEGER) * 1000
+        )
+        OR (
+          staged.state = 'cleanup_pending'
+          AND (
+            staged.cleanup_claim_expires_at >
+              CAST(strftime('%s', 'now') AS INTEGER) * 1000
+            OR staged.updated_at >
+              CAST(strftime('%s', 'now') AS INTEGER) * 1000 - 300000
+          )
+        )
+      )
   )
 BEGIN
   SELECT RAISE(IGNORE);
@@ -68,6 +84,22 @@ WHEN NOT (OLD.state != 'cleanup_pending' AND NEW.state = 'cleanup_pending')
     WHERE staged.session_id = NEW.session_id
       AND staged.sandbox_id = NEW.sandbox_id
       AND staged.registration_generation != NEW.registration_generation
+      AND (
+        (
+          staged.state = 'registering'
+          AND staged.registration_claim_expires_at >
+            CAST(strftime('%s', 'now') AS INTEGER) * 1000
+        )
+        OR (
+          staged.state = 'cleanup_pending'
+          AND (
+            staged.cleanup_claim_expires_at >
+              CAST(strftime('%s', 'now') AS INTEGER) * 1000
+            OR staged.updated_at >
+              CAST(strftime('%s', 'now') AS INTEGER) * 1000 - 300000
+          )
+        )
+      )
   )
 BEGIN
   SELECT RAISE(IGNORE);
@@ -80,6 +112,22 @@ WHEN EXISTS (
   FROM interactive_session_credential_policy_registrations AS staged
   WHERE staged.session_id = OLD.session_id
     AND staged.sandbox_id = OLD.sandbox_id
+    AND (
+      (
+        staged.state = 'registering'
+        AND staged.registration_claim_expires_at >
+          CAST(strftime('%s', 'now') AS INTEGER) * 1000
+      )
+      OR (
+        staged.state = 'cleanup_pending'
+        AND (
+          staged.cleanup_claim_expires_at >
+            CAST(strftime('%s', 'now') AS INTEGER) * 1000
+          OR staged.updated_at >
+            CAST(strftime('%s', 'now') AS INTEGER) * 1000 - 300000
+        )
+      )
+    )
 )
 BEGIN
   SELECT RAISE(IGNORE);

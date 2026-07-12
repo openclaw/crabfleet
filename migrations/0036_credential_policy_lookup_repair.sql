@@ -13,6 +13,22 @@ WHEN NEW.state != 'cleanup_pending'
     WHERE staged.session_id = NEW.session_id
       AND staged.sandbox_id = NEW.sandbox_id
       AND staged.registration_generation != NEW.registration_generation
+      AND (
+        (
+          staged.state = 'registering'
+          AND staged.registration_claim_expires_at >
+            CAST(strftime('%s', 'now') AS INTEGER) * 1000
+        )
+        OR (
+          staged.state = 'cleanup_pending'
+          AND (
+            staged.cleanup_claim_expires_at >
+              CAST(strftime('%s', 'now') AS INTEGER) * 1000
+            OR staged.updated_at >
+              CAST(strftime('%s', 'now') AS INTEGER) * 1000 - 300000
+          )
+        )
+      )
       AND NOT (
         staged.state = 'registering'
         AND staged.repair_generation = NEW.registration_generation
@@ -34,6 +50,22 @@ WHEN NOT (OLD.state != 'cleanup_pending' AND NEW.state = 'cleanup_pending')
     WHERE staged.session_id = NEW.session_id
       AND staged.sandbox_id = NEW.sandbox_id
       AND staged.registration_generation != NEW.registration_generation
+      AND (
+        (
+          staged.state = 'registering'
+          AND staged.registration_claim_expires_at >
+            CAST(strftime('%s', 'now') AS INTEGER) * 1000
+        )
+        OR (
+          staged.state = 'cleanup_pending'
+          AND (
+            staged.cleanup_claim_expires_at >
+              CAST(strftime('%s', 'now') AS INTEGER) * 1000
+            OR staged.updated_at >
+              CAST(strftime('%s', 'now') AS INTEGER) * 1000 - 300000
+          )
+        )
+      )
       AND NOT (
         staged.state = 'registering'
         AND staged.repair_generation = NEW.registration_generation

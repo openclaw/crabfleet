@@ -5,6 +5,7 @@ import {
   activeSandboxCredentialPolicyGeneration,
   abandonSandboxCredentialPolicyRegistration,
   beginSandboxCredentialPolicyRegistration,
+  claimObsoleteSandboxCredentialPolicyReferences,
   deferSandboxCredentialPolicyRollback,
   existingSandboxCredentialPolicyGeneration,
   finishSandboxCredentialPolicyRegistration,
@@ -12,7 +13,9 @@ import {
   recordSandboxCredentialPolicyRefs,
   recordSandboxCredentialPolicyRollback,
   repairSandboxCredentialPolicyReferences,
+  retireObsoleteSandboxCredentialPolicyReference,
   renewSandboxCredentialPolicyRegistration,
+  sandboxCredentialPolicyLookupIdsForGeneration,
   stageSandboxCredentialPolicyReferenceRepair,
   standaloneSandboxPolicyExpiresAt,
   type SandboxCredentialPolicyOwnershipFence,
@@ -52,26 +55,35 @@ async function repairIncompleteSandboxCredentialPolicyLookupSet(
     sandboxId,
   );
   if (!repairGeneration) return null;
-  const records = await Promise.all(
-    registration.lookupIds.map(async (lookupId) => {
-      const response = await stub.fetch(
-        `https://crabfleet.internal/api/session-control/egress/${encodeURIComponent(lookupId)}`,
-      );
-      if (response.status === 404) return null;
-      if (!response.ok) throw new Error("sandbox credential policy repair snapshot failed");
-      const generation = response.headers.get("x-crabfleet-policy-generation");
-      const policy = (await response.json()) as SandboxCredentialPolicy;
-      if (
-        generation !== repairGeneration ||
-        policy.sessionId !== sessionId ||
-        policy.sandboxId !== lookupId
-      ) {
-        throw new Error("sandbox credential policy repair snapshot is inconsistent");
-      }
-      return { generation, policy };
-    }),
+  const historicalLookupIds = await sandboxCredentialPolicyLookupIdsForGeneration(
+    env,
+    sessionId,
+    sandboxId,
+    repairGeneration,
   );
-  const surviving = records.filter((record) => record !== null);
+  const repairLookupIds = [...new Set([...historicalLookupIds, ...registration.lookupIds])];
+  const records = new Map(
+    await Promise.all(
+      repairLookupIds.map(async (lookupId) => {
+        const response = await stub.fetch(
+          `https://crabfleet.internal/api/session-control/egress/${encodeURIComponent(lookupId)}`,
+        );
+        if (response.status === 404) return [lookupId, null] as const;
+        if (!response.ok) throw new Error("sandbox credential policy repair snapshot failed");
+        const generation = response.headers.get("x-crabfleet-policy-generation");
+        const policy = (await response.json()) as SandboxCredentialPolicy;
+        if (
+          generation !== repairGeneration ||
+          policy.sessionId !== sessionId ||
+          policy.sandboxId !== lookupId
+        ) {
+          throw new Error("sandbox credential policy repair snapshot is inconsistent");
+        }
+        return [lookupId, { generation, policy }] as const;
+      }),
+    ),
+  );
+  const surviving = [...records.values()].filter((record) => record !== null);
   if (surviving.length === 0) return null;
   const source = surviving[0]!.policy;
   if (
@@ -104,8 +116,8 @@ async function repairIncompleteSandboxCredentialPolicyLookupSet(
     throw new Error("sandbox credential policy registration claim was revoked");
   }
   const repairExpiresAt = registrationExpiresAt - 1;
-  for (const [index, lookupId] of registration.lookupIds.entries()) {
-    if (records[index]) continue;
+  for (const lookupId of registration.lookupIds) {
+    if (records.get(lookupId)) continue;
     const response = await stub.fetch("https://crabfleet.internal/api/session-control/register", {
       method: "POST",
       body: JSON.stringify({
@@ -138,6 +150,74 @@ async function repairIncompleteSandboxCredentialPolicyLookupSet(
     ))
   ) {
     throw new Error("sandbox credential policy lookup references were not repaired");
+  }
+  const currentLookupIds = new Set(registration.lookupIds);
+  const obsoleteLookupIds = historicalLookupIds.filter(
+    (lookupId) => !currentLookupIds.has(lookupId),
+  );
+  if (obsoleteLookupIds.length > 0) {
+    registrationExpiresAt = await renewSandboxCredentialPolicyRegistration(
+      env,
+      sessionId,
+      sandboxId,
+      registration,
+      ownershipFence,
+    );
+    if (!registrationExpiresAt) {
+      throw new Error("sandbox credential policy registration claim was revoked");
+    }
+    const claimed = await claimObsoleteSandboxCredentialPolicyReferences(
+      env,
+      sessionId,
+      sandboxId,
+      registration,
+      repairGeneration,
+      obsoleteLookupIds,
+      ownershipFence,
+      registrationExpiresAt,
+    );
+    if (
+      claimed.length !== obsoleteLookupIds.length ||
+      obsoleteLookupIds.some((lookupId) => !claimed.includes(lookupId))
+    ) {
+      throw new Error("obsolete sandbox credential policy references were not claimed");
+    }
+    for (const lookupId of obsoleteLookupIds) {
+      const response = await stub.fetch(
+        `https://crabfleet.internal/api/session-control/sandbox/${encodeURIComponent(lookupId)}`,
+        {
+          method: "DELETE",
+          body: JSON.stringify({
+            generation: repairGeneration,
+            sessionId,
+            tombstonedAt: Date.now(),
+          }),
+          headers: { "content-type": "application/json" },
+        },
+      );
+      if (!response.ok) {
+        throw new Error("obsolete sandbox credential policy retirement failed");
+      }
+      if (
+        !(await retireObsoleteSandboxCredentialPolicyReference(
+          env,
+          sessionId,
+          sandboxId,
+          registration,
+          repairGeneration,
+          lookupId,
+          ownershipFence,
+          registrationExpiresAt,
+        ))
+      ) {
+        throw new Error("obsolete sandbox credential policy reference was not retired");
+      }
+    }
+  }
+  if (
+    (await activeSandboxCredentialPolicyGeneration(env, sessionId, sandboxId)) !== repairGeneration
+  ) {
+    throw new Error("sandbox credential policy namespace repair did not converge");
   }
   return repairGeneration;
 }
