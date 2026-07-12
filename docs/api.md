@@ -645,7 +645,9 @@ Agent-authenticated structured event append. Use `Authorization: Bearer <agentTo
 schema filtering. The serialized payload is limited to 64 KiB, 16 levels,
 1,024 aggregate array/object members, and 16 KiB per UTF-8 string or object key.
 Structural-limit violations return `400`; serialized payload overflow returns
-`413`.
+`413`. A session may retain at most 2,048 structured events and 8 MiB of their
+aggregate UTF-8 event data. The database enforces both limits atomically;
+overflow returns `413`, while an exact idempotent replay remains valid.
 
 The first append returns the stored public event with `duplicate: false`.
 Replaying the same key, type, trimmed message, and semantic JSON payload returns
