@@ -3,6 +3,11 @@ import { readFileSync } from "node:fs";
 import { DatabaseSync } from "node:sqlite";
 import test from "node:test";
 
+import {
+  structuredEventLedgerMaxBytes,
+  structuredEventLedgerMaxCount,
+} from "../src/worker/session-events.ts";
+
 test("action event migration preserves messages and keys structured events per session", () => {
   const database = new DatabaseSync(":memory:");
   database.exec(`
@@ -51,4 +56,46 @@ test("action event migration preserves messages and keys structured events per s
       ('IS-1', 'agent', 'unkeyed one', 3),
       ('IS-1', 'agent', 'unkeyed two', 4);
   `);
+
+  const budgetInsert = database.prepare(`
+    INSERT INTO interactive_session_events
+      (session_id, actor, event_key, event_type, message, payload_json, created_at)
+    VALUES (?, 'agent', ?, 'clawsweeper.action', 'm', '{"version":1}', 5)
+  `);
+  database.exec("BEGIN");
+  for (let index = 0; index < structuredEventLedgerMaxCount; index += 1) {
+    budgetInsert.run("IS-count-budget", `event:${index}`);
+  }
+  database.exec("COMMIT");
+  assert.throws(
+    () => budgetInsert.run("IS-count-budget", "event:overflow"),
+    /structured session event budget exceeded/i,
+  );
+  database
+    .prepare(`
+      INSERT OR IGNORE INTO interactive_session_events
+        (session_id, actor, event_key, event_type, message, payload_json, created_at)
+      VALUES ('IS-count-budget', 'agent', 'event:0', 'clawsweeper.action', 'replay', '{"version":2}', 6)
+    `)
+    .run();
+
+  const byteFiller = "x".repeat(structuredEventLedgerMaxBytes - 1024);
+  database
+    .prepare(`
+      INSERT INTO interactive_session_events
+        (session_id, actor, event_key, event_type, message, payload_json, created_at)
+      VALUES ('IS-byte-budget', 'agent', 'filler', 'clawsweeper.action', 'm', ?, 7)
+    `)
+    .run(byteFiller);
+  assert.throws(
+    () =>
+      database
+        .prepare(`
+          INSERT INTO interactive_session_events
+            (session_id, actor, event_key, event_type, message, payload_json, created_at)
+          VALUES ('IS-byte-budget', 'agent', 'overflow', 'clawsweeper.action', 'm', ?, 8)
+        `)
+        .run("x".repeat(2048)),
+    /structured session event budget exceeded/i,
+  );
 });

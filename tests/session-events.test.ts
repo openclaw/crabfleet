@@ -4,7 +4,10 @@ import test from "node:test";
 import type { RuntimeEnv } from "../src/worker/env.ts";
 import {
   appendInteractiveSessionEventRecord,
+  appendStructuredInteractiveSessionEventRecord,
   InteractiveSessionEventLedgerService,
+  structuredEventLedgerMaxBytes,
+  structuredEventLedgerMaxCount,
   structuredEventPayloadMaxBytes,
   structuredEventPayloadMaxDepth,
   structuredEventPayloadMaxMembers,
@@ -311,4 +314,52 @@ test("structured session event payload budgets fail with controlled client error
     );
   }
   assert.equal(persisted, false);
+});
+
+test("structured session aggregate budget failures return a controlled client error", async () => {
+  let archived = false;
+  const env = {
+    DB: {
+      prepare(sql: string) {
+        return {
+          bind(...parameters: unknown[]) {
+            return { sql, parameters };
+          },
+        };
+      },
+      async batch() {
+        throw new Error("D1_ERROR: structured session event budget exceeded");
+      },
+    } as unknown as D1Database,
+  } as RuntimeEnv;
+
+  await assert.rejects(
+    appendStructuredInteractiveSessionEventRecord(
+      env,
+      {
+        sessionId: "IS-1",
+        actor: "agent",
+        eventKey: "run:1",
+        type: "clawsweeper.action",
+        message: "updated pull request",
+        payload: { version: 1 },
+        now: 123,
+      },
+      async () => {
+        archived = true;
+      },
+    ),
+    (error) => {
+      assert.equal(
+        typeof error === "object" && error && "status" in error ? error.status : undefined,
+        413,
+      );
+      assert.match(
+        error instanceof Error ? error.message : "",
+        new RegExp(`${structuredEventLedgerMaxCount} events.*${structuredEventLedgerMaxBytes}`),
+      );
+      return true;
+    },
+  );
+  assert.equal(archived, false);
 });
