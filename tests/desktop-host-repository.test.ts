@@ -141,3 +141,50 @@ test("desktop host upsert returns the row written by the same atomic statement",
   assert.equal(row.name, "Host A");
   assert.equal(row.ownershipToken, "token-a");
 });
+
+test("legacy desktop host upserts preserve token ownership", async () => {
+  let statement = "";
+  const stored = {
+    owner_subject: "github:1",
+    id: "studio",
+    owner: "alice",
+    name: "Legacy Studio",
+    address: "100.64.1.2",
+    port: 5901,
+    ownership_token: "current-token",
+    created_at: 1,
+    updated_at: 2,
+  };
+  const env = {
+    DB: {
+      prepare(sql: string) {
+        statement = sql;
+        return {
+          bind() {
+            return {
+              async all() {
+                return { results: [stored], meta: { changes: 1 } };
+              },
+            };
+          },
+        };
+      },
+    } as unknown as D1Database,
+  } as RuntimeEnv;
+
+  const row = await new DesktopHostRepository(env).upsert({
+    ownerSubject: stored.owner_subject,
+    id: stored.id,
+    owner: stored.owner,
+    name: stored.name,
+    address: stored.address,
+    port: stored.port,
+    ownershipToken: "",
+    createdAt: stored.created_at,
+    updatedAt: stored.updated_at,
+  });
+
+  const updateClause = statement.split(/do update set/i)[1] ?? "";
+  assert.doesNotMatch(updateClause, /ownership_token/i);
+  assert.equal(row.ownershipToken, "current-token");
+});

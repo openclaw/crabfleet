@@ -69,7 +69,7 @@ export class DesktopHostRepository implements DesktopHostStore {
           name: host.name,
           address: host.address,
           port: host.port,
-          ownership_token: host.ownershipToken,
+          ...(host.ownershipToken ? { ownership_token: host.ownershipToken } : {}),
           updated_at: host.updatedAt,
         }),
       )
