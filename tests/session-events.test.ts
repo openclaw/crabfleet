@@ -293,6 +293,8 @@ test("structured event redaction spans private-key arrays and underscore secret 
     async archive() {},
   });
   const secret = ["sk", "live", "x".repeat(24)].join("_");
+  const privateKeyBegin = ["-----BEGIN PRIVATE", "KEY-----"].join(" ");
+  const privateKeyEnd = ["-----END PRIVATE", "KEY-----"].join(" ");
 
   const result = await service.append({
     sessionId: "IS-1",
@@ -303,9 +305,9 @@ test("structured event redaction spans private-key arrays and underscore secret 
     payload: {
       version: 1,
       output: [
-        "-----BEGIN PRIVATE KEY-----",
+        privateKeyBegin,
         "ZmFrZS1rZXktbWF0ZXJpYWw=",
-        "-----END PRIVATE KEY-----",
+        privateKeyEnd,
       ],
       commandOutput: `failed with ${secret}`,
     },
