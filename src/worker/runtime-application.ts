@@ -212,12 +212,19 @@ export class RuntimeApplication {
           completeCleanup: (cleanup) => completeRuntimeAdapterWorkspaceCleanup(this.env, cleanup),
           clearCreatePending: (sessionId, adapterWorkspaceId) =>
             clearRuntimeAdapterCreatePending(this.env, sessionId, adapterWorkspaceId),
-          stopWorkspace: (sessionId, adapterWorkspaceId, registration, retryMissing) =>
+          stopWorkspace: (
+            sessionId,
+            adapterWorkspaceId,
+            registration,
+            retryMissing,
+            deleteIdempotencyKey,
+          ) =>
             this.workspaceLifecycle().stopForSession(
               sessionId,
               adapterWorkspaceId,
               registration,
               retryMissing,
+              deleteIdempotencyKey,
             ),
           confirmRelease: (sessionId, adapterWorkspaceId, now, message) =>
             confirmRuntimeAdapterRelease(this.env, sessionId, adapterWorkspaceId, now, message),

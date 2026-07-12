@@ -20,6 +20,7 @@ export async function stageRuntimeAdapterWorkspaceCleanup(
     now: number;
   },
 ): Promise<void> {
+  const deleteIdempotencyKey = `runtime-cleanup-delete:${crypto.randomUUID()}`;
   await sql`
     INSERT INTO runtime_adapter_workspace_cleanups (
       session_id,
@@ -27,6 +28,7 @@ export async function stageRuntimeAdapterWorkspaceCleanup(
       profile,
       control_plane,
       create_pending,
+      delete_idempotency_key,
       message,
       reconcile_error,
       next_attempt_at,
@@ -38,6 +40,7 @@ export async function stageRuntimeAdapterWorkspaceCleanup(
       ${input.registration?.profile ?? null},
       ${input.registration?.controlPlane ?? null},
       ${input.createPending ? 1 : 0},
+      ${deleteIdempotencyKey},
       'superseded runtime adapter cleanup pending',
       NULL,
       ${input.now},
@@ -55,11 +58,13 @@ export async function claimRuntimeAdapterWorkspaceCleanup(
   now: number,
 ): Promise<RuntimeAdapterWorkspaceCleanup | null> {
   const claim = `runtime-cleanup:${crypto.randomUUID()}`;
+  const deleteIdempotencyKey = `runtime-cleanup-delete:${crypto.randomUUID()}`;
   const row = await database(env)
     .updateTable("runtime_adapter_workspace_cleanups")
     .set({
       cleanup_claim: claim,
       cleanup_claim_expires_at: now + cleanupClaimTtlMs,
+      delete_idempotency_key: sql<string>`COALESCE(delete_idempotency_key, ${deleteIdempotencyKey})`,
       attempt_count: sql<number>`attempt_count + 1`,
       last_attempt_at: now,
       updated_at: sql<number>`MAX(updated_at + 1, ${now})`,
@@ -179,6 +184,12 @@ function cleanupClaim(row: RuntimeAdapterWorkspaceCleanupRow): RuntimeAdapterWor
         : null,
     createPending: row.create_pending === 1,
     deletionObserved: row.deletion_observed === 1,
+    deleteIdempotencyKey: requiredDeleteIdempotencyKey(row.delete_idempotency_key),
     claim: row.cleanup_claim ?? "",
   };
+}
+
+function requiredDeleteIdempotencyKey(value: string | null): string {
+  if (!value) throw new Error("runtime adapter cleanup delete idempotency key is missing");
+  return value;
 }

@@ -230,6 +230,7 @@ export type RuntimeAdapterWorkspaceCleanupTable = {
   control_plane: string | null;
   create_pending: number;
   deletion_observed: Generated<number>;
+  delete_idempotency_key: string | null;
   message: string;
   reconcile_error: string | null;
   attempt_count: Generated<number>;

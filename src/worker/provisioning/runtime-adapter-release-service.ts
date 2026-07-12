@@ -11,6 +11,7 @@ export type RuntimeAdapterWorkspaceCleanup = {
   registration: RuntimeAdapterWorkspaceRegistration | null;
   createPending: boolean;
   deletionObserved: boolean;
+  deleteIdempotencyKey: string;
   claim: string;
 };
 
@@ -42,6 +43,7 @@ export type RuntimeAdapterReleaseServiceDependencies = {
     adapterWorkspaceId: string,
     registration: RuntimeAdapterWorkspaceRegistration | null,
     retryMissing: boolean,
+    deleteIdempotencyKey: string,
   ): Promise<RuntimeAdapterWorkspaceStopResult>;
   confirmRelease(
     sessionId: string,
@@ -94,8 +96,14 @@ export class RuntimeAdapterReleaseService {
     cleanup: RuntimeAdapterWorkspaceCleanup,
     now: number,
   ): Promise<void> {
-    const { sessionId, adapterWorkspaceId, registration, createPending, deletionObserved } =
-      cleanup;
+    const {
+      sessionId,
+      adapterWorkspaceId,
+      registration,
+      createPending,
+      deletionObserved,
+      deleteIdempotencyKey,
+    } = cleanup;
     try {
       if (!createPending) {
         await this.dependencies.clearCreatePending(sessionId, adapterWorkspaceId);
@@ -105,6 +113,7 @@ export class RuntimeAdapterReleaseService {
         adapterWorkspaceId,
         registration,
         createPending && !deletionObserved,
+        deleteIdempotencyKey,
       );
       if (release.status === "stopped") {
         await this.dependencies.markCleanupDeletionObserved(cleanup, now);

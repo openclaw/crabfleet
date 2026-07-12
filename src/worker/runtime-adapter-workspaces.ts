@@ -189,6 +189,7 @@ export class RuntimeAdapterWorkspaceLifecycle {
     adapterWorkspaceId: string,
     retainedRegistration?: RuntimeAdapterWorkspaceRegistration | null,
     retryMissing?: boolean,
+    deleteIdempotencyKey?: string,
   ): Promise<RuntimeAdapterWorkspaceStopResult> {
     const supersededCleanup = retainedRegistration !== undefined;
     const registration = retainedRegistration
@@ -220,6 +221,7 @@ export class RuntimeAdapterWorkspaceLifecycle {
       controlPlane,
       adapterWorkspaceId,
       supersededCleanup && registration?.adapter_create_pending !== 0,
+      deleteIdempotencyKey,
     );
   }
 
@@ -530,6 +532,7 @@ export class RuntimeAdapterWorkspaceLifecycle {
     registeredControlPlane: string,
     adapterWorkspaceId: string,
     retryMissing = false,
+    deleteIdempotencyKey?: string,
   ): Promise<RuntimeAdapterWorkspaceStopResult> {
     const controlPlane = requireRegisteredRuntimeAdapterControlPlane(
       this.env,
@@ -538,7 +541,10 @@ export class RuntimeAdapterWorkspaceLifecycle {
     );
     const response = await this.dependencies.fetch(
       runtimeAdapterWorkspaceUrl(controlPlane, adapterWorkspaceId),
-      { method: "DELETE" },
+      {
+        method: "DELETE",
+        ...(deleteIdempotencyKey ? { headers: { "idempotency-key": deleteIdempotencyKey } } : {}),
+      },
     );
     const body =
       response.status === 204 ? null : await this.dependencies.readResponseBody(response);
