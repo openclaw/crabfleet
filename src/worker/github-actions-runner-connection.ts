@@ -37,6 +37,7 @@ export class GitHubActionsRunnerConnectionService {
       throw badRequest("session is not a GitHub Actions work session");
     }
     const now = this.store.now();
+    const revision = Math.max(session.updatedAt + 1, now);
     const state =
       session.workState === "registered" || !session.workState ? "running" : session.workState;
     const phase =
@@ -53,7 +54,7 @@ export class GitHubActionsRunnerConnectionService {
         work_phase: phase,
         last_heartbeat_at: now,
         last_seen_at: now,
-        updated_at: now,
+        updated_at: revision,
         last_event: githubActionsRunnerConnectedEvent,
       },
       session.updatedAt,

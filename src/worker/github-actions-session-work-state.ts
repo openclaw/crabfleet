@@ -95,6 +95,7 @@ export class GitHubActionsWorkStateService {
       row.codex_turn_id !== codexTurnId ||
       row.completion_reason !== completionReason;
     const now = this.store.now();
+    const revision = Math.max(session.updatedAt + 1, now);
 
     await this.store.persist(
       session.id,
@@ -109,7 +110,7 @@ export class GitHubActionsWorkStateService {
         completion_reason: completionReason,
         last_event: lastEvent,
         last_seen_at: now,
-        updated_at: now,
+        updated_at: revision,
         stopped_at: terminal ? now : null,
       },
       session.updatedAt,

@@ -185,6 +185,18 @@ test("work-state updates retain the exact revision authenticated before a token 
   assert.equal(state.expectedRevision, 400);
 });
 
+test("work-state updates advance revisions when the authenticated clock is ahead", async () => {
+  const authenticated = workSession({ updated_at: 800 });
+  const { store, state } = workStateStore({ updated_at: 800 });
+
+  await new GitHubActionsWorkStateService(store).update(authenticated, {
+    state: "running",
+  });
+
+  assert.equal(state.expectedRevision, 800);
+  assert.equal(state.update?.updated_at, 801);
+});
+
 test("terminal runner disconnect races remain best effort", async () => {
   const { store, state } = workStateStore();
   state.disconnectError = new Error("runner already disconnected");

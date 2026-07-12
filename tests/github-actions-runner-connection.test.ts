@@ -100,6 +100,15 @@ test("runner connections retain the exact revision authenticated before a token 
   assert.deepEqual(expectedRevisions, [400]);
 });
 
+test("runner connections advance revisions when the authenticated clock is ahead", async () => {
+  const { store, updates, expectedRevisions } = connectionStore();
+
+  await new GitHubActionsRunnerConnectionService(store).connect(session({ updated_at: 800 }));
+
+  assert.deepEqual(expectedRevisions, [800]);
+  assert.equal(updates[0]?.updated_at, 801);
+});
+
 test("runner connections reject non-work sessions", async () => {
   const { store } = connectionStore();
   const service = new GitHubActionsRunnerConnectionService(store);
