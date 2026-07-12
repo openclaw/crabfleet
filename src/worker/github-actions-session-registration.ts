@@ -157,6 +157,7 @@ export class GitHubActionsSessionRegistrationService {
 
     const resumed = existing.work_state !== "registered" || existing.status !== "ready";
     const message = resumed ? "GitHub Actions work resumed" : "GitHub Actions work registered";
+    const registrationRevision = Math.max(now, existing.updated_at + 1);
     await this.store.updateSession(
       existing.id,
       {
@@ -174,7 +175,7 @@ export class GitHubActionsSessionRegistrationService {
         terminal_failure_reason: null,
         terminal_finalize_pending: 0,
         credential_cleanup_terminal_status: null,
-        updated_at: now,
+        updated_at: registrationRevision,
         last_seen_at: now,
         last_event: message,
         agent_token_hash: agentTokenHash,

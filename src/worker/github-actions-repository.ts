@@ -10,6 +10,7 @@ import type {
 } from "./github-actions-session-registration.ts";
 import type { GitHubActionsWorkStateUpdate } from "./github-actions-session-work-state.ts";
 import { conflict } from "./http.ts";
+import type { InteractiveSessionStatus } from "./models.ts";
 
 type GitHubActionsSessionUpdate =
   | GitHubActionsSessionRegistrationUpdate
@@ -54,6 +55,7 @@ export class GitHubActionsRepository {
     id: string,
     values: GitHubActionsSessionUpdate,
     expectedRegistration?: GitHubActionsSessionRegistrationExpectation,
+    expectedTerminalStatus?: InteractiveSessionStatus,
   ): Promise<void> {
     let update = database(this.env)
       .updateTable("interactive_sessions")
@@ -72,8 +74,13 @@ export class GitHubActionsRepository {
         .where("work_phase", "=", expectedRegistration.work_phase)
         .where("owner_subject", "=", values.owner_subject);
     } else if (isWorkStateUpdate(values) && terminalWorkStates.includes(values.work_state)) {
+      if (!expectedTerminalStatus) {
+        throw new Error("terminal GitHub Actions update requires expected session status");
+      }
       update = update
         .where("updated_at", "<=", values.updated_at)
+        .where("status", "=", expectedTerminalStatus)
+        .where("status", "not in", terminalSessionStatuses)
         .where((expressions) =>
           expressions.or([
             expressions("work_state", "not in", terminalWorkStates),

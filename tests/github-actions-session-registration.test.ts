@@ -363,6 +363,72 @@ test("registration adopts a concurrently inserted work key", async () => {
   assert.equal(result.session.id, "IS-concurrent");
   assert.equal(state.workKeyReads, 2);
   assert.equal(state.updates[0]?.id, "IS-concurrent");
+  assert.equal(
+    state.updates[0]?.values.updated_at,
+    Math.max(100, state.concurrentRow.updated_at + 1),
+  );
+});
+
+test("concurrent registration adoption rotates exactly one usable token", async () => {
+  const existing = sessionRow({
+    id: "IS-concurrent",
+    runtime: "github_actions",
+    work_key: "issue:race-cas",
+    owner: "operator",
+    owner_subject: "github:42",
+    updated_at: 100,
+  });
+  const { store, state } = registrationStore([existing]);
+  let tokenSequence = 0;
+  let arrivals = 0;
+  let releaseUpdates!: () => void;
+  const updatesReady = new Promise<void>((resolve) => {
+    releaseUpdates = resolve;
+  });
+  store.newAgentToken = () => `agent-token-${++tokenSequence}`;
+  store.hashToken = async (token) => `${token}-hash`;
+  store.updateSession = async (id, values, expected) => {
+    arrivals += 1;
+    if (arrivals === 2) releaseUpdates();
+    await updatesReady;
+    const current = state.rows.get(id);
+    if (
+      !current ||
+      current.updated_at !== expected.updated_at ||
+      current.status !== expected.status ||
+      current.work_state !== expected.work_state ||
+      current.work_phase !== expected.work_phase
+    ) {
+      throw new Error("GitHub Actions session changed; retry");
+    }
+    state.rows.set(id, { ...current, ...values });
+  };
+
+  const input = {
+    workKey: "issue:race-cas",
+    workKind: "issue",
+    repo: "openclaw/crabfleet",
+    owner: "operator@example.test",
+  };
+  const results = await Promise.allSettled([
+    new GitHubActionsSessionRegistrationService(store).register(input),
+    new GitHubActionsSessionRegistrationService(store).register(input),
+  ]);
+
+  const fulfilled = results.filter(
+    (
+      result,
+    ): result is PromiseFulfilledResult<
+      Awaited<ReturnType<GitHubActionsSessionRegistrationService["register"]>>
+    > => result.status === "fulfilled",
+  );
+  assert.equal(fulfilled.length, 1);
+  assert.equal(results.filter((result) => result.status === "rejected").length, 1);
+  assert.equal(
+    state.rows.get(existing.id)?.agent_token_hash,
+    `${fulfilled[0]?.value.agentToken}-hash`,
+  );
+  assert.equal(state.rows.get(existing.id)?.updated_at, existing.updated_at + 1);
 });
 
 test("registration rejects invalid input and work keys owned by another runtime", async () => {

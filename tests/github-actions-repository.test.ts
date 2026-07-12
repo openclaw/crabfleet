@@ -69,7 +69,7 @@ test("GitHub Actions repository owns registration and lifecycle SQL", async () =
     }),
   );
   await repository.updateSession("IS-101", registrationUpdate, registrationExpectation);
-  await repository.updateSession("IS-101", workStateUpdate);
+  await repository.updateSession("IS-101", workStateUpdate, undefined, "attached");
   await repository.updateSession("IS-101", runnerConnectionUpdate);
 
   assert.equal(executions.length, 6);
@@ -94,6 +94,10 @@ test("GitHub Actions repository owns registration and lifecycle SQL", async () =
   assert.match(executions[3].sql, /"work_state" = \?/i);
   assert.match(executions[3].sql, /"work_phase" = \?/i);
   assert.match(executions[4].sql, /"updated_at" <= \?/i);
+  assert.match(executions[4].sql, /"status" = \?/i);
+  assert.match(executions[4].sql, /"status" not in/i);
+  assert.ok(executions[4].parameters.includes("attached"));
+  assert.ok(executions[4].parameters.includes("expired"));
   assert.match(executions[5].sql, /"updated_at" <= \?/i);
   assert.match(executions[3].sql, /"owner_subject" = \?/i);
   assert.doesNotMatch(executions[3].sql, /"work_state" not in/i);
@@ -115,6 +119,24 @@ test("GitHub Actions repository rejects stale or invalid state transitions", asy
     return true;
   });
   assert.equal(executions.length, 1);
+});
+
+test("terminal work-state updates require an observed non-terminal status", async () => {
+  const executions: Execution[] = [];
+  const repository = new GitHubActionsRepository(runtimeEnv(executions));
+
+  await assert.rejects(
+    repository.updateSession("IS-101", {
+      ...workStateUpdate,
+      status: "stopped",
+      work_state: "completed",
+      stopped_at: 200,
+    }),
+    {
+      message: "terminal GitHub Actions update requires expected session status",
+    },
+  );
+  assert.equal(executions.length, 0);
 });
 
 const registrationUpdate: GitHubActionsSessionRegistrationUpdate = {

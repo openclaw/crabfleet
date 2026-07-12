@@ -13,6 +13,7 @@ import { sessionRow } from "./helpers/session-row.ts";
 type WorkStateStoreState = {
   row: InteractiveSessionRow | null;
   update: GitHubActionsWorkStateUpdate | null;
+  expectedTerminalStatus: InteractiveSessionRow["status"] | undefined;
   events: string[];
   operations: string[];
   disconnectError: unknown;
@@ -48,6 +49,7 @@ function workStateStore(values: Partial<InteractiveSessionRow> = {}): {
       ...values,
     }),
     update: null,
+    expectedTerminalStatus: undefined,
     events: [],
     operations: [],
     disconnectError: null,
@@ -55,9 +57,10 @@ function workStateStore(values: Partial<InteractiveSessionRow> = {}): {
   const store: GitHubActionsWorkStateStore = {
     now: () => 500,
     readRow: async () => state.row,
-    persist: async (_id, update) => {
+    persist: async (_id, update, expectedTerminalStatus) => {
       state.operations.push("persist");
       state.update = update;
+      state.expectedTerminalStatus = expectedTerminalStatus;
       if (state.row) state.row = { ...state.row, ...update };
     },
     appendEvent: async (_id, message) => {
@@ -139,8 +142,22 @@ test("terminal work-state updates stop the session and disconnect the runner", a
   assert.equal(result.status, "failed");
   assert.equal(state.update?.completion_reason, "existing reason");
   assert.equal(state.update?.stopped_at, 500);
+  assert.equal(state.expectedTerminalStatus, "ready");
   assert.deepEqual(state.events, ["failed: tests"]);
   assert.deepEqual(state.operations, ["persist", "event", "disconnect", "read"]);
+});
+
+test("terminal work-state updates carry the status observed before persistence", async () => {
+  const { store, state } = workStateStore({
+    status: "attached",
+    work_state: "running",
+  });
+
+  await new GitHubActionsWorkStateService(store).update(workSession(), {
+    state: "completed",
+  });
+
+  assert.equal(state.expectedTerminalStatus, "attached");
 });
 
 test("terminal runner disconnect races remain best effort", async () => {

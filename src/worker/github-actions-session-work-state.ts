@@ -38,7 +38,11 @@ export type GitHubActionsWorkStateUpdate = {
 export type GitHubActionsWorkStateStore = {
   now(): number;
   readRow(id: string): Promise<InteractiveSessionRow | null>;
-  persist(id: string, values: GitHubActionsWorkStateUpdate): Promise<void>;
+  persist(
+    id: string,
+    values: GitHubActionsWorkStateUpdate,
+    expectedTerminalStatus?: InteractiveSessionStatus,
+  ): Promise<void>;
   appendEvent(id: string, message: string, now: number): Promise<void>;
   disconnectRunner(id: string): Promise<void>;
   readSession(id: string): Promise<InteractiveSession | null>;
@@ -91,20 +95,24 @@ export class GitHubActionsWorkStateService {
       row.completion_reason !== completionReason;
     const now = this.store.now();
 
-    await this.store.persist(session.id, {
-      status,
-      summary,
-      work_state: state,
-      work_phase: phase,
-      codex_thread_id: codexThreadId,
-      codex_turn_id: codexTurnId,
-      last_heartbeat_at: now,
-      completion_reason: completionReason,
-      last_event: lastEvent,
-      last_seen_at: now,
-      updated_at: now,
-      stopped_at: terminal ? now : null,
-    });
+    await this.store.persist(
+      session.id,
+      {
+        status,
+        summary,
+        work_state: state,
+        work_phase: phase,
+        codex_thread_id: codexThreadId,
+        codex_turn_id: codexTurnId,
+        last_heartbeat_at: now,
+        completion_reason: completionReason,
+        last_event: lastEvent,
+        last_seen_at: now,
+        updated_at: now,
+        stopped_at: terminal ? now : null,
+      },
+      terminal ? row.status : undefined,
+    );
     if (changed) {
       await this.store.appendEvent(session.id, lastEvent, now);
     }

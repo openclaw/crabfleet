@@ -104,7 +104,8 @@ export class GitHubActionsApplication {
     const store: GitHubActionsWorkStateStore = {
       now: () => Date.now(),
       readRow: (sessionId) => repository.readById(sessionId),
-      persist: (sessionId, values) => repository.updateSession(sessionId, values),
+      persist: (sessionId, values, expectedTerminalStatus) =>
+        repository.updateSession(sessionId, values, undefined, expectedTerminalStatus),
       appendEvent: (sessionId, message, now) =>
         this.appendMessageEvent(sessionId, user, message, now),
       disconnectRunner: (sessionId) => this.disconnectRunner(sessionId),
