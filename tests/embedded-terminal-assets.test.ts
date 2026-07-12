@@ -6,34 +6,35 @@ import { loadGhosttyRuntime } from "@openclaw/libterminal/browser";
 import { GHOSTTY_ASSET_PATHS, readGhosttyAsset } from "@openclaw/libterminal/node";
 import { readGhosttyWorkerAsset } from "@openclaw/libterminal/worker-assets";
 
-import { generateAssetsForTest } from "./helpers/generated-assets.ts";
+import { withGeneratedAssetsForTest } from "./helpers/generated-assets.ts";
 
 test("libterminal Worker Ghostty assets are byte-exact and keep Crabfleet response policy", async () => {
-  await generateAssetsForTest();
-  const generated = await import(`../src/generated.ts?terminal-assets=${Date.now()}`);
-  const { terminalAssetResponse } = await import(
-    `../src/worker/terminal-assets.ts?terminal-assets=${Date.now()}`
-  );
-  assert.equal(generated.APP_HTML.includes("__GHOSTTY_WASM_PATH__"), false);
-  assert.equal(generated.APP_HTML.includes(GHOSTTY_ASSET_PATHS.wasm), true);
-  assert.equal("GHOSTTY_VT_WASM_BASE64" in generated, false);
-
-  for (const pathname of Object.values(GHOSTTY_ASSET_PATHS)) {
-    const expected = await readGhosttyAsset(pathname);
-    const workerAsset = readGhosttyWorkerAsset(pathname);
-    const response = terminalAssetResponse(pathname);
-    assert.ok(expected);
-    assert.equal(workerAsset?.contentType, expected.contentType);
-    assert.equal(
-      Buffer.compare(Buffer.from(workerAsset?.body ?? []), Buffer.from(expected.body)),
-      0,
+  await withGeneratedAssetsForTest(async () => {
+    const generated = await import(`../src/generated.ts?terminal-assets=${Date.now()}`);
+    const { terminalAssetResponse } = await import(
+      `../src/worker/terminal-assets.ts?terminal-assets=${Date.now()}`
     );
-    assert.equal(response?.status, 200);
-    assert.equal(response?.headers.get("content-type"), expected.contentType);
-    assert.equal(response?.headers.get("cache-control"), "no-store");
-    assert.equal(Buffer.compare(Buffer.from(await response!.arrayBuffer()), expected.body), 0);
-  }
-  assert.equal(terminalAssetResponse("/vendor/unknown.js"), null);
+    assert.equal(generated.APP_HTML.includes("__GHOSTTY_WASM_PATH__"), false);
+    assert.equal(generated.APP_HTML.includes(GHOSTTY_ASSET_PATHS.wasm), true);
+    assert.equal("GHOSTTY_VT_WASM_BASE64" in generated, false);
+
+    for (const pathname of Object.values(GHOSTTY_ASSET_PATHS)) {
+      const expected = await readGhosttyAsset(pathname);
+      const workerAsset = readGhosttyWorkerAsset(pathname);
+      const response = terminalAssetResponse(pathname);
+      assert.ok(expected);
+      assert.equal(workerAsset?.contentType, expected.contentType);
+      assert.equal(
+        Buffer.compare(Buffer.from(workerAsset?.body ?? []), Buffer.from(expected.body)),
+        0,
+      );
+      assert.equal(response?.status, 200);
+      assert.equal(response?.headers.get("content-type"), expected.contentType);
+      assert.equal(response?.headers.get("cache-control"), "no-store");
+      assert.equal(Buffer.compare(Buffer.from(await response!.arrayBuffer()), expected.body), 0);
+    }
+    assert.equal(terminalAssetResponse("/vendor/unknown.js"), null);
+  });
 });
 
 test("Ghostty loader injects the explicit WASM runtime into terminal modules", async () => {

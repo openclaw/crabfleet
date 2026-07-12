@@ -1,38 +1,65 @@
 import { execFile } from "node:child_process";
-import { mkdir, rm } from "node:fs/promises";
+import { createHash } from "node:crypto";
+import { createServer, type Server } from "node:net";
 import { setTimeout as delay } from "node:timers/promises";
+import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 
 const execFileAsync = promisify(execFile);
-const lockParent = new URL("../../dist/", import.meta.url);
-const lockPath = new URL("../../dist/.generated-assets-test.lock/", import.meta.url);
 const lockWaitMs = 120_000;
+const lockPortBase = 49_152;
+const lockPortRange = 65_535 - lockPortBase + 1;
+const lockPort =
+  lockPortBase +
+  (createHash("sha256")
+    .update(fileURLToPath(new URL("../../", import.meta.url)))
+    .digest()
+    .readUInt16BE(0) %
+    lockPortRange);
 
-export async function generateAssetsForTest(): Promise<void> {
-  await mkdir(lockParent, { recursive: true });
-  const deadline = Date.now() + lockWaitMs;
-  while (!(await tryAcquireLock())) {
-    if (Date.now() >= deadline) throw new Error("timed out waiting for generated asset test lock");
-    await delay(50);
-  }
-
+export async function withGeneratedAssetsForTest<T>(consume: () => T | Promise<T>): Promise<T> {
+  const lock = await acquireLock();
   try {
     await execFileAsync(process.execPath, ["scripts/generate-assets.mjs"]);
+    return await consume();
   } finally {
-    await rm(lockPath, { recursive: true, force: true });
+    await closeServer(lock);
   }
 }
 
-async function tryAcquireLock(): Promise<boolean> {
-  try {
-    await mkdir(lockPath);
-    return true;
-  } catch (error) {
-    if (!isAlreadyExists(error)) throw error;
-    return false;
+async function acquireLock(): Promise<Server> {
+  const deadline = Date.now() + lockWaitMs;
+  while (true) {
+    const server = createServer();
+    try {
+      await listen(server);
+      return server;
+    } catch (error) {
+      if (!isAddressInUse(error)) throw error;
+      if (Date.now() >= deadline)
+        throw new Error("timed out waiting for generated asset test lock");
+      await delay(50);
+    }
   }
 }
 
-function isAlreadyExists(error: unknown): boolean {
-  return error instanceof Error && "code" in error && error.code === "EEXIST";
+function listen(server: Server): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const onError = (error: Error) => reject(error);
+    server.once("error", onError);
+    server.listen({ host: "127.0.0.1", port: lockPort, exclusive: true }, () => {
+      server.off("error", onError);
+      resolve();
+    });
+  });
+}
+
+function closeServer(server: Server): Promise<void> {
+  return new Promise((resolve, reject) => {
+    server.close((error) => (error ? reject(error) : resolve()));
+  });
+}
+
+function isAddressInUse(error: unknown): boolean {
+  return error instanceof Error && "code" in error && error.code === "EADDRINUSE";
 }
