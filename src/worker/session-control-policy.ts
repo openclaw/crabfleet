@@ -29,6 +29,31 @@ export type SandboxCredentialPolicyRegistration = {
   lookupIds: string[];
 };
 
+export function sandboxCredentialPolicyRegistrationLookupIds(
+  value: string | null | undefined,
+  sandboxId: string,
+): string[] {
+  if (value) {
+    try {
+      const parsed = JSON.parse(value) as unknown;
+      if (
+        Array.isArray(parsed) &&
+        parsed.length > 0 &&
+        parsed.every(
+          (lookupId) =>
+            typeof lookupId === "string" && lookupId.length > 0 && lookupId.length <= 200,
+        )
+      ) {
+        const lookupIds = [...new Set(parsed)];
+        if (lookupIds.includes(sandboxId)) return lookupIds;
+      }
+    } catch {
+      // Upgraded rows are backfilled by migration; malformed rows retain the stable sandbox key.
+    }
+  }
+  return [sandboxId];
+}
+
 export function storedSandboxCredentialPolicy(
   value: unknown,
 ): StoredSandboxCredentialPolicy | undefined {
