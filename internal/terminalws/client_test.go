@@ -1957,6 +1957,94 @@ func TestAttachBoundsBlockedFrameConsumerShutdown(t *testing.T) {
 	close(terminal.releaseRead)
 }
 
+func TestLateRetiredAttachmentWriteFailureClosesConnection(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := websocket.Accept(w, r, nil)
+		if err != nil {
+			t.Error(err)
+			return
+		}
+		defer conn.Close(websocket.StatusNormalClosure, "")
+		for range 2 {
+			if _, _, err := conn.Read(r.Context()); err != nil {
+				t.Error(err)
+				return
+			}
+		}
+		subscribed, _ := json.Marshal(eventPayload{Type: "subscribed", CanInput: true})
+		if err := conn.Write(r.Context(), websocket.MessageBinary, encodeFrame(frame{
+			messageType: messageEvent,
+			sessionID:   "IS-late-write-failure",
+			payload:     subscribed,
+		})); err != nil {
+			t.Error(err)
+			return
+		}
+		if err := conn.Write(r.Context(), websocket.MessageBinary, encodeFrame(frame{
+			messageType: messageOutput,
+			sessionID:   "IS-late-write-failure",
+			payload:     []byte("blocked output\n"),
+		})); err != nil {
+			t.Error(err)
+			return
+		}
+		<-r.Context().Done()
+	}))
+	defer server.Close()
+
+	endpoint, err := Endpoint(server.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	client, err := Dial(context.Background(), endpoint, "IS-late-write-failure", Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+	client.attachmentShutdownTimeout = 10 * time.Millisecond
+
+	oldTerminal := newUncancelableReadBlockingWriteTerminal()
+	oldCtx, oldCancel := context.WithCancel(context.Background())
+	oldDone := make(chan error, 1)
+	go func() {
+		oldDone <- client.Attach(oldCtx, oldTerminal, nil)
+	}()
+	<-oldTerminal.readStarted
+	<-oldTerminal.writeStarted
+	oldCancel()
+	if err := <-oldDone; !errors.Is(err, context.Canceled) {
+		t.Fatalf("old attachment error = %v", err)
+	}
+
+	replacement := newBlockingTerminal()
+	replacementDone := make(chan error, 1)
+	go func() {
+		replacementDone <- client.Attach(context.Background(), replacement, nil)
+	}()
+	<-replacement.started
+
+	close(oldTerminal.releaseWrite)
+	select {
+	case <-oldTerminal.writeDone:
+	case <-time.After(time.Second):
+		t.Fatal("retired attachment write did not finish")
+	}
+	select {
+	case err := <-replacementDone:
+		if !errors.Is(err, errBlockedTerminalWrite) {
+			t.Fatalf("replacement attachment error = %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("late write failure did not retire the replacement attachment")
+	}
+	select {
+	case <-client.readerDone:
+	case <-time.After(time.Second):
+		t.Fatal("late write failure did not close the connection")
+	}
+	close(oldTerminal.releaseRead)
+}
+
 func TestRetiredBlockedAttachmentAcknowledgementKeepsReplacementConnectionOpen(t *testing.T) {
 	firstAcknowledged := make(chan struct{})
 	secondAcknowledged := make(chan struct{})
@@ -2325,6 +2413,103 @@ func TestClientContinuesReadOnlyAndResumesControl(t *testing.T) {
 	}
 	if client.canInput.Load() {
 		t.Fatal("closed terminal retained input control")
+	}
+}
+
+func TestClientReplaysControlGrantedToNextAttachment(t *testing.T) {
+	grantControl := make(chan struct{})
+	resumedSize := make(chan Size, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := websocket.Accept(w, r, nil)
+		if err != nil {
+			t.Error(err)
+			return
+		}
+		defer conn.Close(websocket.StatusNormalClosure, "")
+		for range 2 {
+			if _, _, err := conn.Read(r.Context()); err != nil {
+				t.Error(err)
+				return
+			}
+		}
+		subscribed, _ := json.Marshal(eventPayload{Type: "subscribed", CanInput: false})
+		if err := conn.Write(r.Context(), websocket.MessageBinary, encodeFrame(frame{
+			messageType: messageEvent,
+			sessionID:   "IS-between-attachments",
+			payload:     subscribed,
+		})); err != nil {
+			t.Error(err)
+			return
+		}
+		<-grantControl
+		if err := conn.Write(r.Context(), websocket.MessageBinary, encodeFrame(frame{
+			messageType: messageControlGranted,
+			sessionID:   "IS-between-attachments",
+		})); err != nil {
+			t.Error(err)
+			return
+		}
+		_, payload, err := conn.Read(r.Context())
+		if err != nil {
+			t.Error(err)
+			return
+		}
+		resize, err := decodeFrame(payload)
+		if err != nil || resize.messageType != messageResize {
+			t.Errorf("resumed resize = %#v, %v", resize, err)
+			return
+		}
+		resumedSize <- Size{
+			Cols: binary.LittleEndian.Uint32(resize.payload[0:4]),
+			Rows: binary.LittleEndian.Uint32(resize.payload[4:8]),
+		}
+		closed, _ := json.Marshal(eventPayload{Type: "closed"})
+		_ = conn.Write(r.Context(), websocket.MessageBinary, encodeFrame(frame{
+			messageType: messageEvent,
+			sessionID:   "IS-between-attachments",
+			payload:     closed,
+		}))
+	}))
+	defer server.Close()
+
+	endpoint, err := Endpoint(server.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	client, err := Dial(context.Background(), endpoint, "IS-between-attachments", Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+
+	if err := client.Attach(
+		context.Background(),
+		&readWriter{reader: bytes.NewReader(nil)},
+		nil,
+	); err != nil {
+		t.Fatal(err)
+	}
+	expectedSize := Size{Cols: 132, Rows: 43}
+	if err := client.Resize(context.Background(), expectedSize); err != nil {
+		t.Fatal(err)
+	}
+	close(grantControl)
+	deadline := time.Now().Add(time.Second)
+	for !client.canInput.Load() {
+		if time.Now().After(deadline) {
+			t.Fatal("control grant was not received")
+		}
+		time.Sleep(time.Millisecond)
+	}
+
+	terminal := newBlockingTerminal()
+	attachCtx, attachCancel := context.WithTimeout(context.Background(), time.Second)
+	defer attachCancel()
+	if err := client.Attach(attachCtx, terminal, nil); err != nil {
+		t.Fatal(err)
+	}
+	if size := <-resumedSize; size != expectedSize {
+		t.Fatalf("resumed size = %#v", size)
 	}
 }
 

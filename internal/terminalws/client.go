@@ -99,6 +99,8 @@ type Client struct {
 	inputWaiter                  chan error
 	attachment                   *terminalAttachment
 	attachmentReady              chan struct{}
+	controlGrantGeneration       uint64
+	handledControlGrant          uint64
 	terminalErr                  error
 	readerDone                   chan struct{}
 	readerErr                    error
@@ -111,13 +113,15 @@ type frame struct {
 }
 
 type terminalAttachment struct {
-	frames chan attachmentDelivery
-	done   chan struct{}
+	frames                 chan attachmentDelivery
+	done                   chan struct{}
+	controlGrantGeneration uint64
 }
 
 type attachmentDelivery struct {
-	frame    frame
-	accepted chan bool
+	frame                  frame
+	accepted               chan bool
+	controlGrantGeneration uint64
 }
 
 type eventPayload struct {
@@ -379,7 +383,9 @@ func (c *Client) closeNow() {
 	if c.readCancel != nil {
 		c.readCancel()
 	}
-	_ = c.conn.CloseNow()
+	if c.conn != nil {
+		_ = c.conn.CloseNow()
+	}
 	if c.cancel != nil {
 		c.cancel()
 	}
@@ -499,6 +505,12 @@ func (c *Client) Attach(ctx context.Context, terminal io.ReadWriter, resizes <-c
 	go func() {
 		defer wg.Done()
 		defer close(frameConsumerDone)
+		if generation := attachment.controlGrantGeneration; generation > 0 {
+			if err := c.resendRememberedSize(ctx, generation); err != nil {
+				errCh <- err
+				return
+			}
+		}
 		for {
 			select {
 			case <-ctx.Done():
@@ -514,6 +526,7 @@ func (c *Client) Attach(ctx context.Context, terminal io.ReadWriter, resizes <-c
 				switch current.messageType {
 				case messageOutput:
 					if _, err := terminal.Write(current.payload); err != nil {
+						c.retireConnection(err)
 						errCh <- err
 						return
 					}
@@ -535,15 +548,12 @@ func (c *Client) Attach(ctx context.Context, terminal io.ReadWriter, resizes <-c
 					errCh <- frameError(current, "terminal connection failed")
 					return
 				case messageControlGranted:
-					if size := c.rememberedSize(); size.Cols > 0 && size.Rows > 0 {
-						if err := c.write(ctx, frame{
-							messageType: messageResize,
-							sessionID:   c.sessionID,
-							payload:     resizePayload(size),
-						}); err != nil {
-							errCh <- err
-							return
-						}
+					if err := c.resendRememberedSize(
+						ctx,
+						delivery.controlGrantGeneration,
+					); err != nil {
+						errCh <- err
+						return
 					}
 				case messageEvent:
 					var event eventPayload
@@ -596,6 +606,25 @@ func (c *Client) rememberedSize() Size {
 	return Size{Cols: uint32(value >> 32), Rows: uint32(value)}
 }
 
+func (c *Client) resendRememberedSize(ctx context.Context, generation uint64) error {
+	size := c.rememberedSize()
+	if size.Cols > 0 && size.Rows > 0 {
+		if err := c.write(ctx, frame{
+			messageType: messageResize,
+			sessionID:   c.sessionID,
+			payload:     resizePayload(size),
+		}); err != nil {
+			return err
+		}
+	}
+	c.stateMu.Lock()
+	if generation > c.handledControlGrant {
+		c.handledControlGrant = generation
+	}
+	c.stateMu.Unlock()
+	return nil
+}
+
 func (c *Client) write(ctx context.Context, current frame) error {
 	c.writeMu.Lock()
 	defer c.writeMu.Unlock()
@@ -640,10 +669,20 @@ func (c *Client) handleFrame(ctx context.Context, current frame) error {
 		return err
 	case messageControlRevoked:
 		c.canInput.Store(false)
+		c.stateMu.Lock()
+		c.handledControlGrant = c.controlGrantGeneration
+		c.stateMu.Unlock()
 		c.deliverAttachment(ctx, current)
 	case messageControlGranted:
 		c.canInput.Store(true)
-		c.deliverAttachment(ctx, current)
+		c.stateMu.Lock()
+		c.controlGrantGeneration++
+		generation := c.controlGrantGeneration
+		attachment := c.attachment
+		c.stateMu.Unlock()
+		if attachment != nil {
+			c.deliverControlGranted(ctx, attachment, current, generation)
+		}
 	case messageEvent:
 		var event eventPayload
 		if err := json.Unmarshal(current.payload, &event); err != nil {
@@ -729,6 +768,9 @@ func (c *Client) registerAttachment() (*terminalAttachment, error) {
 		frames: make(chan attachmentDelivery),
 		done:   make(chan struct{}),
 	}
+	if c.handledControlGrant < c.controlGrantGeneration {
+		attachment.controlGrantGeneration = c.controlGrantGeneration
+	}
 	c.attachment = attachment
 	if c.attachmentReady != nil {
 		close(c.attachmentReady)
@@ -757,6 +799,11 @@ func (c *Client) markTerminalClosed(err error) {
 		c.terminalErr = err
 	}
 	c.stateMu.Unlock()
+}
+
+func (c *Client) retireConnection(err error) {
+	c.markTerminalClosed(err)
+	c.closeNow()
 }
 
 func (c *Client) deliverOrQueueOutput(ctx context.Context, current frame) error {
@@ -808,9 +855,33 @@ func (c *Client) deliverToAttachment(
 	attachment *terminalAttachment,
 	current frame,
 ) bool {
+	return c.deliverToAttachmentWithControlGrant(ctx, attachment, current, 0)
+}
+
+func (c *Client) deliverControlGranted(
+	ctx context.Context,
+	attachment *terminalAttachment,
+	current frame,
+	generation uint64,
+) bool {
+	return c.deliverToAttachmentWithControlGrant(
+		ctx,
+		attachment,
+		current,
+		generation,
+	)
+}
+
+func (c *Client) deliverToAttachmentWithControlGrant(
+	ctx context.Context,
+	attachment *terminalAttachment,
+	current frame,
+	generation uint64,
+) bool {
 	delivery := attachmentDelivery{
-		frame:    current,
-		accepted: make(chan bool, 1),
+		frame:                  current,
+		accepted:               make(chan bool, 1),
+		controlGrantGeneration: generation,
 	}
 	select {
 	case attachment.frames <- delivery:
@@ -841,6 +912,9 @@ func (c *Client) acceptAttachmentDelivery(
 func (c *Client) finishReader(err error) {
 	c.stateMu.Lock()
 	c.readerErr = normalizeCloseError(err)
+	if c.terminalErr != nil {
+		c.readerErr = c.terminalErr
+	}
 	waiter := c.inputWaiter
 	c.inputWaiter = nil
 	if waiter != nil {
