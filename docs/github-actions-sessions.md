@@ -290,9 +290,11 @@ if (!runnerPtyUrl) throw new Error("CRABFLEET_RUNNER_PTY_URL is required");
 const magic = new Uint8Array([0x43, 0x46, 0x52, 0x31]); // CFR1
 const inputIdDecoder = new TextDecoder();
 const encoder = new TextEncoder();
-const maxPendingInputBytes = 16 * 1024;
-const maxPendingInputFrames = 32;
+const maxAdmittedInputBytes = 16 * 1024;
+const maxAdmittedInputFrames = 32;
 const maxPendingInputAgeMs = 1_000;
+let admittedInputBytes = 0;
+let admittedInputFrames = 0;
 let pendingInputs = [];
 let pendingInputBytes = 0;
 let pendingInputTimer;
@@ -304,13 +306,11 @@ await new Promise((resolve, reject) => {
   terminal.addEventListener("open", resolve, { once: true });
   terminal.addEventListener("error", reject, { once: true });
 });
-if (terminal.protocol !== "cfr1-framed-io-v2") {
-  terminal.close(1002, "framed protocol not negotiated");
-  throw new Error("relay did not negotiate cfr1-framed-io-v2");
-}
+const framed = terminal.protocol === "cfr1-framed-io-v2";
+// An empty protocol means an older relay kept this socket in legacy raw mode.
 
 subscribeSteeringOutput((outputText) => {
-  terminal.send(encodeUtf8Output(outputText));
+  terminal.send(framed ? encodeUtf8Output(outputText) : outputText);
 });
 
 subscribeSteeringExit(() => {
@@ -318,22 +318,14 @@ subscribeSteeringExit(() => {
 });
 
 terminal.addEventListener("message", (event) => {
-  inputQueue = inputQueue
-    .then(() => acceptInput(event.data))
-    .catch(() => {
-      settleInputs(takePendingInputs(), false);
-    });
+  const input = admitInput(event.data);
+  if (!input) return;
+  inputQueue = inputQueue.then(() => acceptInput(input));
 });
 
-async function acceptInput(data) {
-  const input = decodeInput(data);
-  if (!input) return;
+async function acceptInput(input) {
   pendingInputs.push(input);
   pendingInputBytes += input.payload.byteLength;
-  if (pendingInputBytes > maxPendingInputBytes || pendingInputs.length > maxPendingInputFrames) {
-    settleInputs(takePendingInputs(), false);
-    return;
-  }
 
   const payload = new Uint8Array(pendingInputBytes);
   let offset = 0;
@@ -346,7 +338,7 @@ async function acceptInput(data) {
   try {
     text = decodeCompleteUtf8(payload);
   } catch {
-    settleInputs(takePendingInputs(), false);
+    rejectInputs(takePendingInputs(), 1007, "invalid UTF-8 input");
     return;
   }
   if (text === null) {
@@ -358,8 +350,36 @@ async function acceptInput(data) {
     await deliverSteeringInput(text);
     settleInputs(inputs, true);
   } catch {
-    settleInputs(inputs, false);
+    rejectInputs(inputs, 1011, "steering rejected input");
   }
+}
+
+function admitInput(data) {
+  if (!framed && typeof data === "string" && data.length > maxAdmittedInputBytes) {
+    closeRawOverflow();
+    return null;
+  }
+  const input = framed ? decodeInput(data) : decodeRawInput(data);
+  if (!input) return null;
+  const nextBytes = admittedInputBytes + input.payload.byteLength;
+  const nextFrames = admittedInputFrames + 1;
+  if (nextBytes > maxAdmittedInputBytes || nextFrames > maxAdmittedInputFrames) {
+    if (framed) {
+      sendAck(input, false);
+    } else {
+      closeRawOverflow();
+    }
+    return null;
+  }
+  admittedInputBytes = nextBytes;
+  admittedInputFrames = nextFrames;
+  return input;
+}
+
+function decodeRawInput(data) {
+  if (typeof data === "string") return { payload: encoder.encode(data) };
+  if (data instanceof ArrayBuffer) return { payload: new Uint8Array(data) };
+  return null;
 }
 
 function decodeCompleteUtf8(payload) {
@@ -371,7 +391,7 @@ function decodeCompleteUtf8(payload) {
 function armPendingInputTimer() {
   if (pendingInputTimer) return;
   pendingInputTimer = setTimeout(() => {
-    settleInputs(takePendingInputs(), false);
+    rejectInputs(takePendingInputs(), 1007, "incomplete UTF-8 input");
   }, maxPendingInputAgeMs);
 }
 
@@ -385,8 +405,39 @@ function takePendingInputs() {
 }
 
 function settleInputs(inputs, accepted) {
+  releaseInputs(inputs);
+  if (!framed) return;
   for (const input of inputs) {
+    sendAck(input, accepted);
+  }
+}
+
+function rejectInputs(inputs, rawCloseCode, rawCloseReason) {
+  settleInputs(inputs, false);
+  if (!framed && terminal.readyState < WebSocket.CLOSING) {
+    terminal.close(rawCloseCode, rawCloseReason);
+  }
+}
+
+function releaseInputs(inputs) {
+  for (const input of inputs) {
+    admittedInputBytes -= input.payload.byteLength;
+  }
+  admittedInputFrames -= inputs.length;
+}
+
+function sendAck(input, accepted) {
+  if (terminal.readyState !== WebSocket.OPEN) return;
+  try {
     terminal.send(encodeAck(input.inputId, input.generation, accepted));
+  } catch {
+    closeSteering();
+  }
+}
+
+function closeRawOverflow() {
+  if (terminal.readyState < WebSocket.CLOSING) {
+    terminal.close(1009, "input backlog exceeded");
   }
 }
 
@@ -419,7 +470,7 @@ function decodeInput(data) {
   return {
     inputId,
     generation,
-    payload: frame.slice(generationOffset + 1 + generationBytes),
+    payload: frame.subarray(generationOffset + 1 + generationBytes),
   };
 }
 
@@ -467,18 +518,29 @@ environment. Await the steering acceptance signal before sending
 input frame. This Node adapter buffers a valid incomplete UTF-8 suffix together
 with every affected input ID. It delivers and positively acknowledges those
 frames only after a later frame completes the sequence. Invalid UTF-8 rejects
-the buffered group without delivering any of it. The adapter also rejects the
-whole pending group when it exceeds 16 KiB, 32 frames, or one second, bounding
-memory, copy work, and acknowledgement latency.
+the buffered group without delivering any of it. Every message is decoded and
+admitted against the shared 16 KiB and 32-frame limits before it enters the
+serialized delivery tail. Those counters retain ownership while input is
+pending, queued, or blocked in `deliverSteeringInput`, so a stalled steering
+call cannot retain an unbounded sequence of `MessageEvent` payloads. Framed
+overflow receives a negative acknowledgement; raw overflow closes the socket
+because legacy mode has no acknowledgement channel. An incomplete UTF-8 group
+expires after one second.
 
-The protocol query is consumed during connection setup and is not forwarded as
-terminal data. There is no capability message or mode transition after the
-socket opens. Each `CFR1` frame occupies one binary WebSocket message. At the
-wire level, input and output payloads are opaque terminal bytes. The example is
-deliberately a UTF-8 text adapter for the integration's string-based steering
-surface: it rejects input that is not complete valid UTF-8 and encodes each
-output string as UTF-8. Deployments that require lossless arbitrary terminal
-bytes must use a byte-oriented restricted steering adapter instead.
+WebSocket subprotocol selection is fixed during the opening handshake. There is
+no capability message or mode transition after the socket opens. Older relays
+that ignore the offered subprotocol leave `WebSocket.protocol` empty; the
+adapter then receives raw input and sends raw string output. The
+`runnerProtocol` query remains compatibility-only for already-deployed runners.
+New runners must not add it, close, or reconnect solely because
+`WebSocket.protocol` is empty: a query cannot confirm that the relay selected
+framed I/O, while the existing socket is the required raw fallback. Each `CFR1`
+frame occupies one binary WebSocket message. At the wire level, input and output
+payloads are opaque terminal bytes. The example is deliberately a UTF-8 text
+adapter for the integration's string-based steering surface: it rejects input
+that is not complete valid UTF-8 and encodes each output string as UTF-8.
+Deployments that require lossless arbitrary terminal bytes must use a
+byte-oriented restricted steering adapter instead.
 
 | Offset | Size     | Value                                                                                                                                |
 | ------ | -------- | ------------------------------------------------------------------------------------------------------------------------------------ |
@@ -510,8 +572,9 @@ Properties:
 - Multiple browser viewers may remain connected.
 - Legacy runners open the returned URL unchanged, receive raw viewer input, and
   send raw output.
-- Framed runners add the exact protocol query before connecting, receive framed
-  input immediately, and wrap every output payload in a `0x04` frame.
+- Framed runners offer the exact WebSocket subprotocol before connecting,
+  confirm its selection through `WebSocket.protocol`, and wrap every output
+  payload in a `0x04` frame.
 - Generation-fenced viewers add `viewerProtocol=cfr1-framed-io-v2` before
   connecting. They receive `CFR1` output plus relay-generated lifecycle and
   acknowledgement frames regardless of the runner's mode.
@@ -520,7 +583,13 @@ Properties:
 - Legacy viewers omit that query. They receive raw terminal output plus JSON
   lifecycle and input-acknowledgement messages for compatibility.
 - Negotiated input produces `input-accepted` only after the correlated runner
-  acknowledgement. Legacy input reports acceptance after relay delivery.
+  acknowledgement. A definitive negative acknowledgement produces
+  `input-rejected`. If the terminal hub's acknowledgement deadline expires
+  while the runner write may still be in flight, it produces
+  `input-delivery-unknown`, not
+  `input-rejected`, because that write may still complete. Legacy input reports
+  acceptance after relay delivery. The unknown-delivery JSON control event
+  carries `{"type":"input-delivery-unknown","error":"terminal input delivery outcome is unknown; the runner may still complete it"}`.
 - Framed viewer lifecycle events remain typed binary frames while no runner is
   connected. Legacy viewers receive the JSON fallback.
 - When runner and viewer modes differ, the relay wraps or unwraps terminal

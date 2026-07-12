@@ -15,14 +15,22 @@ test("the documented Node runner acknowledges only delivered UTF-8 input", async
   assert.doesNotMatch(readme, /New runners opt into[\s\S]*cfr1-framed-io-v1/);
   assert.doesNotMatch(readme, /encodeCfr1Output|decodeCfr1Input|encodeCfr1Ack/);
   assert.match(guide, /new WebSocket\(runnerPtyUrl, "cfr1-framed-io-v2"\)/);
-  assert.match(guide, /terminal\.protocol !== "cfr1-framed-io-v2"/);
+  assert.match(guide, /const framed = terminal\.protocol === "cfr1-framed-io-v2"/);
+  assert.match(guide, /empty protocol means an older relay kept this socket in legacy raw mode/);
+  assert.match(guide, /terminal\.send\(framed \? encodeUtf8Output\(outputText\) : outputText\)/);
+  assert.doesNotMatch(guide, /close\(1002, "framed protocol not negotiated"\)/);
+  assert.doesNotMatch(guide, /throw new Error\("relay did not negotiate cfr1-framed-io-v2"\)/);
   assert.doesNotMatch(guide, /searchParams\.set\("runnerProtocol"/);
+  assert.match(guide, /`runnerProtocol` query remains compatibility-only/);
+  assert.match(guide, /New runners must not add it, close, or reconnect solely because/);
+  assert.equal(guide.match(/runnerProtocol/g)?.length, 1);
   assert.match(guide, /let pendingInputs = \[\]/);
   assert.match(guide, /let inputQueue = Promise\.resolve\(\)/);
   assert.match(
     guide,
-    /inputQueue = inputQueue\s+\.then\(\(\) => acceptInput\(event\.data\)\)\s+\.catch/,
+    /const input = admitInput\(event\.data\);\s+if \(!input\) return;\s+inputQueue = inputQueue\.then\(\(\) => acceptInput\(input\)\)/,
   );
+  assert.doesNotMatch(guide, /\.then\(\(\) => acceptInput\(event\.data\)\)/);
   assert.match(guide, /pendingInputs\.push\(input\)/);
   assert.match(guide, /text = decodeCompleteUtf8\(payload\)/);
   assert.match(guide, /if \(text === null\) \{\s+armPendingInputTimer\(\);\s+return;/);
@@ -30,13 +38,21 @@ test("the documented Node runner acknowledges only delivered UTF-8 input", async
     guide,
     /const inputs = takePendingInputs\(\);\s+try \{\s+await deliverSteeringInput\(text\);\s+settleInputs\(inputs, true\)/,
   );
-  assert.match(guide, /catch \{\s+settleInputs\(inputs, false\);/);
-  assert.match(guide, /const maxPendingInputBytes = 16 \* 1024/);
-  assert.match(guide, /const maxPendingInputFrames = 32/);
+  assert.match(guide, /catch \{\s+rejectInputs\(inputs, 1011, "steering rejected input"\);/);
+  assert.match(guide, /const maxAdmittedInputBytes = 16 \* 1024/);
+  assert.match(guide, /const maxAdmittedInputFrames = 32/);
   assert.match(guide, /const maxPendingInputAgeMs = 1_000/);
-  assert.match(guide, /settleInputs\(takePendingInputs\(\), false\)/);
-  assert.match(guide, /pendingInputBytes > maxPendingInputBytes/);
-  assert.match(guide, /pendingInputs\.length > maxPendingInputFrames/);
+  assert.match(guide, /const nextBytes = admittedInputBytes \+ input\.payload\.byteLength/);
+  assert.match(guide, /const nextFrames = admittedInputFrames \+ 1/);
+  assert.match(guide, /nextBytes > maxAdmittedInputBytes/);
+  assert.match(guide, /nextFrames > maxAdmittedInputFrames/);
+  assert.match(guide, /if \(framed\) \{\s+sendAck\(input, false\);/);
+  assert.match(guide, /terminal\.close\(1009, "input backlog exceeded"\)/);
+  assert.match(guide, /function decodeRawInput\(data\)/);
+  assert.match(guide, /typeof data === "string"/);
+  assert.match(guide, /data instanceof ArrayBuffer/);
+  assert.match(guide, /admittedInputBytes -= input\.payload\.byteLength/);
+  assert.match(guide, /admittedInputFrames -= inputs\.length/);
   assert.match(guide, /clearTimeout\(pendingInputTimer\)/);
   assert.match(
     guide,
@@ -46,16 +62,34 @@ test("the documented Node runner acknowledges only delivered UTF-8 input", async
   assert.doesNotMatch(guide, /inputDecoder\.decode/);
   assert.match(guide, /subscribeSteeringOutput\(\(outputText\) => \{/);
   assert.match(guide, /encodeUtf8Output\(outputText\)/);
-  assert.match(guide, /deliberately a UTF-8 text adapter/);
+  assert.match(guide, /deliberately\s+a UTF-8 text\s+adapter/);
   assert.match(guide, /byte-oriented restricted steering adapter/);
   assert.match(guide, /Generation-fenced viewers add `viewerProtocol=cfr1-framed-io-v2`/);
   assert.match(guide, /stale-generation input is rejected before it\s+can reach/);
   assert.match(guide, /encodeAck\(input\.inputId, input\.generation, accepted\)/);
   assert.match(guide, /Legacy viewers omit that query/);
+  assert.match(
+    guide,
+    /acknowledgement deadline expires\s+while the runner write may still be in flight[\s\S]*`input-delivery-unknown`, not\s+`input-rejected`, because that write may still complete/,
+  );
+  assert.match(
+    guide,
+    /\{"type":"input-delivery-unknown","error":"terminal input delivery outcome is unknown; the runner may still complete it"\}/,
+  );
   assert.match(guide, /subscribeSteeringExit\(\(\) => \{/);
   assert.match(guide, /terminal\.close\(1000, "pty exited"\)/);
   assert.match(guide, /must never forward that input to a\s+shell or subprocess/);
   assert.doesNotMatch(guide, /spawn\(process\.env\.SHELL|env:\s*process\.env|pty\.write/);
+
+  const messageHandler = guide.indexOf('terminal.addEventListener("message"');
+  const admission = guide.indexOf("const input = admitInput(event.data);", messageHandler);
+  const serialization = guide.indexOf(
+    "inputQueue = inputQueue.then(() => acceptInput(input));",
+    messageHandler,
+  );
+  assert.ok(messageHandler >= 0);
+  assert.ok(admission > messageHandler);
+  assert.ok(serialization > admission);
 
   const timerArm = guide.indexOf("armPendingInputTimer();");
   const batchSnapshot = guide.indexOf("const inputs = takePendingInputs();");
