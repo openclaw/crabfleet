@@ -350,6 +350,38 @@ test("relay-owned generations fence stale input and bridge framed protocol versi
   });
 });
 
+test("generation acknowledgements bridge to exact v1 frames for v1 viewers", () => {
+  const runner = relaySocket();
+  const viewer = framedViewer();
+  attachGitHubActionsRunnerProtocol(
+    runner,
+    githubActionsGenerationFencedCapability,
+    "current-generation",
+  );
+  const acknowledgement = encodeGitHubActionsRelayInputAcknowledgement({
+    inputId: "input-current",
+    accepted: false,
+    error: "rejected",
+    generation: "current-generation",
+  });
+
+  assert.equal(
+    relayGitHubActionsWebSocketMessage("runner", runner, acknowledgement, [runner], [viewer]),
+    1,
+  );
+  const expected = encodeGitHubActionsRelayInputAcknowledgement({
+    inputId: "input-current",
+    accepted: false,
+    error: "rejected",
+  });
+  assert.deepEqual(new Uint8Array(viewer.sent[0] as ArrayBuffer), new Uint8Array(expected));
+  assert.deepEqual(parseGitHubActionsRelayInputAcknowledgement(viewer.sent[0]!), {
+    inputId: "input-current",
+    accepted: false,
+    error: "rejected",
+  });
+});
+
 test("replacement relay drops acknowledgements from the superseded runner", () => {
   const oldRunner = relaySocket();
   const replacement = relaySocket();

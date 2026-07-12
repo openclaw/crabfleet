@@ -301,7 +301,9 @@ export function relayGitHubActionsWebSocketMessage(
         viewer.send(
           acknowledgement
             ? encodeGitHubActionsRelayInputAcknowledgement({
-                ...acknowledgement,
+                inputId: acknowledgement.inputId,
+                accepted: acknowledgement.accepted,
+                ...(acknowledgement.error ? { error: acknowledgement.error } : {}),
                 ...(gitHubActionsRelayUsesGenerations(viewer) && generation ? { generation } : {}),
               })
             : gitHubActionsViewerUsesFramedProtocol(viewer)
