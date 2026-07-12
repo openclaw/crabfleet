@@ -6,12 +6,14 @@ import Foundation
 
 private struct PixelFormatTransitionMessage: VNCSendableMessage {
 	let pixelFormatMessage: VNCProtocol.SetPixelFormat
+	let willSend: () -> Void
 	let didSend: () -> Void
 
 	var messageType: UInt8 { pixelFormatMessage.messageType }
 	var data: Data { pixelFormatMessage.data }
 
 	func send(connection: NetworkConnectionWriting) async throws {
+		willSend()
 		try await pixelFormatMessage.send(connection: connection)
 		didSend()
 	}
@@ -111,17 +113,18 @@ private extension VNCConnection {
 
 	func enqueuePixelFormatTransition(_ pixelFormat: VNCProtocol.PixelFormat) {
 		let message = PixelFormatTransitionMessage(
-			pixelFormatMessage: VNCProtocol.SetPixelFormat(pixelFormat: pixelFormat)
+			pixelFormatMessage: VNCProtocol.SetPixelFormat(pixelFormat: pixelFormat),
+			willSend: { [weak self] in
+				self?.beginPixelFormatTransition(pixelFormat)
+			}
 		) { [weak self] in
-			self?.applyPixelFormatTransition(pixelFormat)
+			self?.completePixelFormatTransition()
 		}
 
 		enqueueClientToServerMessage(message)
 	}
 
-	func applyPixelFormatTransition(_ pixelFormat: VNCProtocol.PixelFormat) {
-		var didApply = false
-
+	func beginPixelFormatTransition(_ pixelFormat: VNCProtocol.PixelFormat) {
 		withLifecycleLock {
 			guard connectionState.status == .connected,
 				  let framebuffer = framebuffer else {
@@ -132,11 +135,10 @@ private extension VNCConnection {
 			recreateFramebuffer(size: framebuffer.size,
 								screens: framebuffer.screens,
 								pixelFormat: pixelFormat)
-			didApply = connectionState.status == .connected
 		}
+	}
 
-		guard didApply else { return }
-
+	func completePixelFormatTransition() {
 		framebufferRequestLock.lock()
 		isPixelFormatTransitionInFlight = false
 		let nextTransition = takePendingPixelFormatTransitionLocked()

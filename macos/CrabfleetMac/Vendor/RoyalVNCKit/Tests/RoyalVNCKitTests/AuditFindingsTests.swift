@@ -121,7 +121,10 @@ struct AuditFindingsTests {
     connection.completeFramebufferUpdateRequest()
 
     let queued = try #require(connection.clientToServerMessageQueue.dequeue())
-    let writer = AuditWritingConnection()
+    let writer = AuditWritingConnection {
+      #expect(connection.state.pixelFormat?.depth == 8)
+      #expect(connection.state.pixelFormat?.depth == connection.framebuffer?.sourcePixelFormat.depth)
+    }
     try await queued.message.send(connection: writer)
 
     #expect(writer.data.count == 20)
@@ -268,8 +271,14 @@ private final class AuditBufferConnection: NetworkConnectionReading {
 
 private final class AuditWritingConnection: NetworkConnectionWriting {
   var data = Data()
+  private let onWrite: () -> Void
+
+  init(onWrite: @escaping () -> Void = {}) {
+    self.onWrite = onWrite
+  }
 
   func write(data: Data) async throws {
+    onWrite()
     self.data.append(data)
   }
 }

@@ -44,13 +44,15 @@ private extension VNCProtocol.UltraVNCMSLogonIIAuthentication.DiffieHellmanKeyAg
     static func generateKeyPair(generator: Data,
                                 modulus: Data) -> KeyPair? {
 		let generatorNum = UltraVNCBigNum.dataToBigNum(generator)
-        guard generatorNum < maxNum else { return nil }
-
 		let modulusNum = UltraVNCBigNum.dataToBigNum(modulus)
-        guard modulusNum < maxNum else { return nil }
+        guard modulusNum > 3,
+              modulusNum < maxNum,
+              generatorNum > 1,
+              generatorNum < modulusNum else {
+            return nil
+        }
 
-		let privNum = UltraVNCBigNum.randomBigNum(max: .init(maxNum))
-        guard privNum < maxNum else { return nil }
+        let privNum = UInt64.random(in: 2..<(modulusNum - 1))
 
 		let privData = UltraVNCBigNum.bigNumToData(privNum)
 
@@ -73,7 +75,14 @@ private extension VNCProtocol.UltraVNCMSLogonIIAuthentication.DiffieHellmanKeyAg
 		let modulusNum = UltraVNCBigNum.dataToBigNum(modulus)
 
 		let respNum = UltraVNCBigNum.dataToBigNum(resp)
-        guard respNum < maxNum else { return nil }
+        guard modulusNum > 3,
+              modulusNum < maxNum,
+              privNum > 1,
+              privNum < modulusNum,
+              respNum > 1,
+              respNum < modulusNum else {
+            return nil
+        }
 
 		let keyNum = UltraVNCBigNum.powM64(b: .init(respNum),
 									   e: .init(privNum),

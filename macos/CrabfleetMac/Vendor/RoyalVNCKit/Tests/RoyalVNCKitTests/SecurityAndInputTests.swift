@@ -49,6 +49,30 @@ struct SecurityAndInputTests {
   }
 
   @Test
+  func rejectsDegenerateUltraVNCKeyAgreementParameters() {
+    let eightBytes: (UInt64) -> Data = { value in
+      withUnsafeBytes(of: value.bigEndian) { Data($0) }
+    }
+
+    for (generator, modulus, response) in [
+      (2, 0, 3),
+      (2, 1, 3),
+      (1, 17, 3),
+      (17, 17, 3),
+      (2, 17, 1),
+      (2, 17, 17),
+    ] {
+      #expect(
+        VNCProtocol.UltraVNCMSLogonIIAuthentication.DiffieHellmanKeyAgreement(
+          generator: eightBytes(UInt64(generator)),
+          modulus: eightBytes(UInt64(modulus)),
+          resp: eightBytes(UInt64(response))
+        ) == nil
+      )
+    }
+  }
+
+  @Test
   func encodesCharactersAsX11KeySyms() {
     #expect(VNCKeyCode.withCharacter("A").map(\.rawValue) == [0x41])
     #expect(VNCKeyCode.withCharacter("é").map(\.rawValue) == [0xe9])
