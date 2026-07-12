@@ -254,6 +254,24 @@ test("desktop host routes register and remove only the authenticated user's host
   ]);
 });
 
+test("desktop host recovery rejects malformed encoded ids with a client error", async () => {
+  const calls: string[] = [];
+  await assert.rejects(
+    dispatch(
+      request("POST", "/api/desktop-hosts/%?recover=1", {
+        publicationID: "publication-id",
+      }),
+      viewer,
+      calls,
+    ),
+    (error) => {
+      assert.equal(status(error), 400);
+      return true;
+    },
+  );
+  assert.deepEqual(calls, []);
+});
+
 test("card actions derive viewer or maintainer authorization from the action", async () => {
   for (const action of ["attach", "watch"]) {
     const calls: string[] = [];

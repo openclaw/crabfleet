@@ -14,7 +14,7 @@ import {
   type DesktopHostOwnershipMode,
   type DesktopHostRegistration,
 } from "../desktop-host-service.ts";
-import { json, notFound, readJson } from "../http.ts";
+import { badRequest, json, notFound, readJson } from "../http.ts";
 import type { User } from "../models.ts";
 
 export type ControlPlaneRouteDependencies = {
@@ -154,5 +154,9 @@ export async function handleControlPlaneRoute(
 }
 
 function decoded(value: string | undefined): string {
-  return decodeURIComponent(value ?? "");
+  try {
+    return decodeURIComponent(value ?? "");
+  } catch {
+    throw badRequest("invalid path identifier");
+  }
 }
