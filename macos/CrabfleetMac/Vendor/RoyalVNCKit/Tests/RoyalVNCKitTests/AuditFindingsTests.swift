@@ -158,7 +158,7 @@ struct AuditFindingsTests {
   }
 
   @Test
-  func rejectsPartialFallbackFenceBoundaries() throws {
+  func rejectsPartialFenceBoundariesDuringContinuousUpdates() throws {
     let connection = VNCConnection(
       settings: makeSettings(),
       framebufferAllocator: VNCFramebufferMallocAllocator()
@@ -168,6 +168,7 @@ struct AuditFindingsTests {
     connection.state.pixelFormat = framebuffer.sourcePixelFormat
     connection.state.areFencesSupported = true
     connection.state.pixelFormatTransitionFenceFlags = [.blockAfter]
+    connection.state.areContinuousUpdatesEnabled = true
     connection.connectionState = .connected
     connection._framebufferUpdatePolicy = .paused
     connection.framebufferUpdateRequestOutstanding = true
@@ -195,7 +196,7 @@ struct AuditFindingsTests {
     try connection.handleServerFence(
       VNCProtocol.ServerFence(
         messageType: VNCProtocol.ServerFence.messageType,
-        flags: [.request, .blockAfter, .syncNext],
+        flags: [.request, .blockBefore, .syncNext],
         payload: Data("support".utf8)
       )
     )
@@ -203,7 +204,7 @@ struct AuditFindingsTests {
     let supportWriter = AuditWritingConnection()
     try await supportResponse.message.send(connection: supportWriter)
     #expect(supportWriter.data[0] == VNCProtocol.ClientFence.messageType)
-    #expect(supportWriter.data[4..<8] == Data([0, 0, 0, 0]))
+    #expect(supportWriter.data[4..<8] == Data([0, 0, 0, 1]))
     #expect(supportWriter.data[8] == 7)
 
     let capabilityProbe = try #require(connection.clientToServerMessageQueue.dequeue())
@@ -216,7 +217,7 @@ struct AuditFindingsTests {
     try connection.handleServerFence(
       VNCProtocol.ServerFence(
         messageType: VNCProtocol.ServerFence.messageType,
-        flags: [.blockAfter, .syncNext],
+        flags: [.blockBefore, .syncNext],
         payload: capabilityPayload
       )
     )
@@ -230,7 +231,7 @@ struct AuditFindingsTests {
 
     #expect(writer.data.count == 37)
     #expect(writer.data[0] == VNCProtocol.ClientFence.messageType)
-    #expect(writer.data[4..<8] == Data([0x80, 0, 0, 6]))
+    #expect(writer.data[4..<8] == Data([0x80, 0, 0, 5]))
     #expect(writer.data[8] == 8)
     #expect(writer.data[17] == VNCProtocol.SetPixelFormat(pixelFormat: framebuffer.sourcePixelFormat).messageType)
     #expect(connection.state.pixelFormat?.depth == 24)
@@ -239,7 +240,7 @@ struct AuditFindingsTests {
     try connection.handleServerFence(
       VNCProtocol.ServerFence(
         messageType: VNCProtocol.ServerFence.messageType,
-        flags: [.blockAfter, .syncNext],
+        flags: [.blockBefore, .syncNext],
         payload: payload
       )
     )
@@ -249,7 +250,7 @@ struct AuditFindingsTests {
   }
 
   @Test
-  func fencesForcedUpdateWhenSyncNextIsUnsupported() async throws {
+  func waitsForOutstandingUpdateWhenSyncNextIsUnsupported() async throws {
     let connection = VNCConnection(
       settings: makeSettings(),
       framebufferAllocator: VNCFramebufferMallocAllocator()
@@ -286,38 +287,17 @@ struct AuditFindingsTests {
       )
     )
 
-    let probe = try #require(connection.clientToServerMessageQueue.dequeue())
-    let probeWriter = AuditWritingConnection()
-    try await probe.message.send(connection: probeWriter)
-    #expect(probeWriter.data[0] == 3)
-    #expect(probeWriter.data[1] == 0)
-
     connection.completeFramebufferUpdateRequest()
     let transition = try #require(connection.clientToServerMessageQueue.dequeue())
     let transitionWriter = AuditWritingConnection {
-      #expect(connection.state.pixelFormat?.depth == 24)
+      #expect(connection.state.pixelFormat?.depth == 8)
     }
     try await transition.message.send(connection: transitionWriter)
-    #expect(transitionWriter.data.count == 37)
-    #expect(transitionWriter.data[0] == VNCProtocol.ClientFence.messageType)
-    #expect(transitionWriter.data[4..<8] == Data([0x80, 0, 0, 3]))
-    #expect(transitionWriter.data[8] == 8)
-    #expect(transitionWriter.data[17] == 0)
-    #expect(connection.state.pixelFormat?.depth == 24)
-
-    connection.completeFramebufferUpdateRequest()
-    #expect(connection.clientToServerMessageQueue.dequeue() == nil)
-    #expect(connection.state.pixelFormat?.depth == 24)
-
-    let transitionPayload = Data(transitionWriter.data[9..<17])
-    try connection.handleServerFence(
-      VNCProtocol.ServerFence(
-        messageType: VNCProtocol.ServerFence.messageType,
-        flags: [.blockBefore, .blockAfter],
-        payload: transitionPayload
-      )
+    #expect(transitionWriter.data.count == 20)
+    #expect(
+      transitionWriter.data[0]
+        == VNCProtocol.SetPixelFormat(pixelFormat: framebuffer.sourcePixelFormat).messageType
     )
-
     #expect(connection.state.pixelFormat?.depth == 8)
     #expect(connection.state.pixelFormat?.depth == connection.framebuffer?.sourcePixelFormat.depth)
   }

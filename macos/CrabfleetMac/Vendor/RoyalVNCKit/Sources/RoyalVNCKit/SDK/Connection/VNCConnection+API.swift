@@ -117,66 +117,42 @@ extension VNCConnection {
 		framebufferPacingTask?.cancel()
 		framebufferPacingTask = nil
 		let transition = takePendingPixelFormatTransitionLocked()
-		let probe = takePixelFormatTransitionProbeLocked()
 		framebufferRequestLock.unlock()
 
 		if let transition {
 			enqueuePixelFormatTransition(transition)
-		} else if let probe {
-			enqueueClientToServerMessage(probe)
 		}
 	}
 
 	private func takePendingPixelFormatTransitionLocked() -> PixelFormatTransition? {
 		guard !isPixelFormatTransitionInFlight,
 			  pixelFormatFenceCapabilityProbePayload == nil,
-			  !isPixelFormatTransitionProbeQueued,
 			  let pixelFormat = pendingPixelFormatTransition else {
 			return nil
 		}
 
 		let supportedFenceFlags = state.pixelFormatTransitionFenceFlags
-		let supportsFallbackBoundary =
+		let supportsSynchronizedBoundary =
 			supportedFenceFlags.contains(.blockBefore)
-			&& supportedFenceFlags.contains(.blockAfter)
-		let requiresFence = framebufferUpdateRequestOutstanding
-			|| pixelFormatTransitionRequiresFence
-			|| state.areContinuousUpdatesEnabled
+			&& supportedFenceFlags.contains(.syncNext)
 		var fenceFlags: VNCProtocol.FenceFlags = []
-		if requiresFence {
-			if framebufferUpdateRequestOutstanding {
-				if supportedFenceFlags.contains(.syncNext) {
-					fenceFlags = [.request, .syncNext]
-					if supportedFenceFlags.contains(.blockAfter) {
-						fenceFlags.insert(.blockAfter)
-					}
-				} else if !state.areFencesSupported {
+		if state.areContinuousUpdatesEnabled {
+			guard supportsSynchronizedBoundary else {
+				if !state.areFencesSupported {
 					schedulePixelFormatFenceNegotiationTimeoutLocked()
-					return nil
-				} else if !supportsFallbackBoundary {
-					pendingPixelFormatTransition = nil
-					pixelFormatTransitionRequiresFence = false
-					return nil
 				} else {
-					return nil
-				}
-			} else if pixelFormatTransitionRequiresFence {
-				guard supportsFallbackBoundary else {
 					pendingPixelFormatTransition = nil
-					pixelFormatTransitionRequiresFence = false
-					return nil
 				}
-				fenceFlags = [.request, .blockBefore, .blockAfter]
-			} else if supportedFenceFlags.contains(.syncNext) {
-				fenceFlags = [.request, .syncNext]
-				if supportedFenceFlags.contains(.blockAfter) {
-					fenceFlags.insert(.blockAfter)
-				}
-			} else if supportsFallbackBoundary {
-				fenceFlags = [.request, .blockBefore, .blockAfter]
+				return nil
+			}
+			fenceFlags = [.request, .blockBefore, .syncNext]
+		} else if framebufferUpdateRequestOutstanding {
+			if supportsSynchronizedBoundary {
+				fenceFlags = [.request, .blockBefore, .syncNext]
 			} else {
-				pendingPixelFormatTransition = nil
-				pixelFormatTransitionRequiresFence = false
+				if !state.areFencesSupported {
+					schedulePixelFormatFenceNegotiationTimeoutLocked()
+				}
 				return nil
 			}
 		}
@@ -191,46 +167,15 @@ extension VNCConnection {
 			var sequence = pixelFormatTransitionFenceSequence.bigEndian
 			fencePayload = withUnsafeBytes(of: &sequence) { Data($0) }
 			pixelFormatTransitionFencePayload = fencePayload
-			pixelFormatTransitionRequiredFenceFlags = fenceFlags.contains(.syncNext)
-				? [.syncNext]
-				: [.blockBefore, .blockAfter]
+			pixelFormatTransitionRequiredFenceFlags = [.blockBefore, .syncNext]
 		} else {
 			fencePayload = nil
 			pixelFormatTransitionRequiredFenceFlags = []
 		}
-		pixelFormatTransitionRequiresFence = false
 		return PixelFormatTransition(
 			pixelFormat: pixelFormat,
 			fenceFlags: fenceFlags,
 			fencePayload: fencePayload
-		)
-	}
-
-	private func takePixelFormatTransitionProbeLocked() -> VNCProtocol.FramebufferUpdateRequest? {
-		let supportedFenceFlags = state.pixelFormatTransitionFenceFlags
-		let supportsFallbackBoundary =
-			supportedFenceFlags.contains(.blockBefore)
-			&& supportedFenceFlags.contains(.blockAfter)
-		guard framebufferUpdateRequestOutstanding,
-			  !isPixelFormatTransitionProbeQueued,
-			  !isPixelFormatTransitionInFlight,
-			  pixelFormatFenceCapabilityProbePayload == nil,
-			  !supportedFenceFlags.contains(.syncNext),
-			  state.areFencesSupported,
-			  supportsFallbackBoundary,
-			  pendingPixelFormatTransition != nil,
-			  let framebuffer else {
-			return nil
-		}
-
-		isPixelFormatTransitionProbeQueued = true
-		pixelFormatTransitionRequiresFence = supportsFallbackBoundary
-		return VNCProtocol.FramebufferUpdateRequest(
-			incremental: false,
-			xPosition: 0,
-			yPosition: 0,
-			width: framebuffer.size.width,
-			height: framebuffer.size.height
 		)
 	}
 
@@ -296,14 +241,12 @@ extension VNCConnection {
 		framebufferRequestLock.lock()
 		cancelPixelFormatFenceNegotiationTimeoutLocked()
 		guard !state.areFencesSupported,
-			  framebufferUpdateRequestOutstanding,
 			  pendingPixelFormatTransition != nil,
 			  !isPixelFormatTransitionInFlight else {
 			framebufferRequestLock.unlock()
 			return
 		}
 		pendingPixelFormatTransition = nil
-		pixelFormatTransitionRequiresFence = false
 		framebufferRequestLock.unlock()
 
 		logger.logDebug("Rejecting pixel format transition because Fence support was not negotiated")
@@ -319,13 +262,10 @@ extension VNCConnection {
 				.syncNext
 			])
 			let transition = takePendingPixelFormatTransitionLocked()
-			let probe = takePixelFormatTransitionProbeLocked()
 			framebufferRequestLock.unlock()
 
 			if let transition {
 				enqueuePixelFormatTransition(transition)
-			} else if let probe {
-				enqueueClientToServerMessage(probe)
 			}
 			return
 		}
@@ -558,7 +498,6 @@ extension VNCConnection {
 	func completeFramebufferUpdateRequest() {
 		framebufferRequestLock.lock()
 		framebufferUpdateRequestOutstanding = false
-		isPixelFormatTransitionProbeQueued = false
 		let transition = takePendingPixelFormatTransitionLocked()
 		framebufferRequestLock.unlock()
 
@@ -621,8 +560,6 @@ extension VNCConnection {
 		pendingPixelFormatTransition = nil
 		isPixelFormatTransitionInFlight = false
 		pixelFormatTransitionInFlight = nil
-		isPixelFormatTransitionProbeQueued = false
-		pixelFormatTransitionRequiresFence = false
 		pixelFormatTransitionFencePayload = nil
 		pixelFormatTransitionRequiredFenceFlags = []
 		pixelFormatFenceCapabilityProbePayload = nil

@@ -113,8 +113,6 @@ public final class VNCConnection: NSObjectOrAnyObject, @unchecked Sendable {
 	var pendingPixelFormatTransition: VNCProtocol.PixelFormat?
 	var isPixelFormatTransitionInFlight = false
 	var pixelFormatTransitionInFlight: VNCProtocol.PixelFormat?
-	var isPixelFormatTransitionProbeQueued = false
-	var pixelFormatTransitionRequiresFence = false
 	var pixelFormatTransitionFenceSequence: UInt64 = 0
 	var pixelFormatTransitionFencePayload: Data?
 	var pixelFormatTransitionRequiredFenceFlags: VNCProtocol.FenceFlags = []
