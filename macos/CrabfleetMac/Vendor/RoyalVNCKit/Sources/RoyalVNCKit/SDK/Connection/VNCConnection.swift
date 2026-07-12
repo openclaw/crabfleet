@@ -113,6 +113,7 @@ public final class VNCConnection: NSObjectOrAnyObject, @unchecked Sendable {
 	var pendingPixelFormatTransition: VNCProtocol.PixelFormat?
 	var isPixelFormatTransitionInFlight = false
 	var isPixelFormatTransitionProbeQueued = false
+	var pixelFormatTransitionResponsesRemaining = 0
 	private let queue = DispatchQueue(label: "com.royalapps.royalvnc.connectionqueue",
 									  attributes: .concurrent)
 	private let lifecycleLock = NSRecursiveLock()

@@ -124,6 +124,10 @@ struct AuditFindingsTests {
     #expect(probeWriter.data[1] == 0)
 
     connection.completeFramebufferUpdateRequest()
+    #expect(connection.clientToServerMessageQueue.dequeue() == nil)
+    #expect(connection.state.pixelFormat?.depth == 24)
+
+    connection.completeFramebufferUpdateRequest()
 
     let queued = try #require(connection.clientToServerMessageQueue.dequeue())
     let writer = AuditWritingConnection {
