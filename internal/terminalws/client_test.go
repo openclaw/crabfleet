@@ -1528,10 +1528,11 @@ func TestAttachReturnsWhenContextCancelsAnUncancelableRead(t *testing.T) {
 	close(terminal.release)
 }
 
-func TestAttachWaitsForFrameConsumerWithUncancelableRead(t *testing.T) {
+func TestAttachBoundsBlockedFrameConsumerShutdown(t *testing.T) {
 	client := &Client{
-		readerDone:      make(chan struct{}),
-		attachmentReady: make(chan struct{}),
+		readerDone:                make(chan struct{}),
+		attachmentReady:           make(chan struct{}),
+		attachmentShutdownTimeout: 10 * time.Millisecond,
 	}
 	terminal := newUncancelableReadBlockingWriteTerminal()
 	ctx, cancel := context.WithCancel(context.Background())
@@ -1562,13 +1563,30 @@ func TestAttachWaitsForFrameConsumerWithUncancelableRead(t *testing.T) {
 	cancel()
 	select {
 	case err := <-attachDone:
-		t.Fatalf("Attach retired before its frame consumer exited: %v", err)
-	case <-time.After(20 * time.Millisecond):
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("error = %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Attach did not retire the blocked frame consumer")
+	}
+
+	replacement := newBlockingTerminal()
+	replacementCtx, replacementCancel := context.WithCancel(context.Background())
+	replacementDone := make(chan error, 1)
+	go func() {
+		replacementDone <- client.Attach(replacementCtx, replacement, nil)
+	}()
+	<-replacement.started
+	replacementCancel()
+	if err := <-replacementDone; !errors.Is(err, context.Canceled) {
+		t.Fatalf("replacement error = %v", err)
 	}
 
 	close(terminal.releaseWrite)
-	if err := <-attachDone; !errors.Is(err, context.Canceled) {
-		t.Fatalf("error = %v", err)
+	select {
+	case <-terminal.writeDone:
+	case <-time.After(time.Second):
+		t.Fatal("blocked frame consumer did not exit after terminal shutdown")
 	}
 	close(terminal.releaseRead)
 }
@@ -1869,6 +1887,7 @@ type uncancelableReadBlockingWriteTerminal struct {
 	writeStarted chan struct{}
 	writeOnce    sync.Once
 	releaseWrite chan struct{}
+	writeDone    chan struct{}
 }
 
 func newUncancelableReadBlockingWriteTerminal() *uncancelableReadBlockingWriteTerminal {
@@ -1877,6 +1896,7 @@ func newUncancelableReadBlockingWriteTerminal() *uncancelableReadBlockingWriteTe
 		releaseRead:  make(chan struct{}),
 		writeStarted: make(chan struct{}),
 		releaseWrite: make(chan struct{}),
+		writeDone:    make(chan struct{}),
 	}
 }
 
@@ -1889,6 +1909,7 @@ func (terminal *uncancelableReadBlockingWriteTerminal) Read(_ []byte) (int, erro
 }
 
 func (terminal *uncancelableReadBlockingWriteTerminal) Write(payload []byte) (int, error) {
+	defer close(terminal.writeDone)
 	terminal.writeOnce.Do(func() {
 		close(terminal.writeStarted)
 	})

@@ -23,7 +23,8 @@ const (
 	maxFrameBytes = 16 * 1024 * 1024
 	maxErrorBytes = 512
 
-	defaultInputConfirmationTimeout = 5 * time.Second
+	defaultInputConfirmationTimeout  = 5 * time.Second
+	defaultAttachmentShutdownTimeout = 250 * time.Millisecond
 
 	messageHello           = 1
 	messageWelcome         = 2
@@ -88,6 +89,7 @@ type Client struct {
 	confirmOnce                  sync.Once
 	confirmGate                  chan struct{}
 	confirmationTimeout          time.Duration
+	attachmentShutdownTimeout    time.Duration
 	stateMu                      sync.Mutex
 	inputWaiter                  chan error
 	attachment                   *terminalAttachment
@@ -485,11 +487,29 @@ func (c *Client) Attach(ctx context.Context, terminal io.ReadWriter, resizes <-c
 		err = ctx.Err()
 	}
 	cancelRead()
-	<-frameConsumerDone
-	if cancelableRead {
+	// Let completed writes preserve their acknowledgement ordering, but retire the
+	// attachment if its owner must close the terminal to unblock a write.
+	shutdownTimer := time.NewTimer(c.frameConsumerShutdownTimeout())
+	frameConsumerStopped := false
+	select {
+	case <-frameConsumerDone:
+		frameConsumerStopped = true
+		if !shutdownTimer.Stop() {
+			<-shutdownTimer.C
+		}
+	case <-shutdownTimer.C:
+	}
+	if cancelableRead && frameConsumerStopped {
 		wg.Wait()
 	}
 	return normalizeCloseError(err)
+}
+
+func (c *Client) frameConsumerShutdownTimeout() time.Duration {
+	if c.attachmentShutdownTimeout > 0 {
+		return c.attachmentShutdownTimeout
+	}
+	return defaultAttachmentShutdownTimeout
 }
 
 func (c *Client) rememberSize(size Size) {
