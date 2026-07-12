@@ -382,7 +382,10 @@ a negative acknowledgement and must be resent on valid boundaries.
 
 The protocol query is consumed during connection setup and is not forwarded as
 terminal data. There is no capability message or mode transition after the
-socket opens. Each `CFR1` frame occupies one binary WebSocket message:
+socket opens. Each `CFR1` frame occupies one binary WebSocket message. Payloads
+are opaque bytes; adapters targeting string-only PTY APIs must either preserve
+decoder state across acknowledgements or reject frames that end inside a text
+encoding sequence, as the Node example does:
 
 | Offset | Size     | Value                                                                          |
 | ------ | -------- | ------------------------------------------------------------------------------ |
