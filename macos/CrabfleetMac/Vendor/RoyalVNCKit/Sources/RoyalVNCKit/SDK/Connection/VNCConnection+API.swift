@@ -7,6 +7,8 @@ import Foundation
 private struct PixelFormatTransitionMessage: VNCSendableMessage {
 	let fenceMessage: VNCProtocol.ClientFence?
 	let pixelFormatMessage: VNCProtocol.SetPixelFormat
+	let encodingsMessage: VNCProtocol.SetEncodings
+	let willSendPixelFormat: () throws -> Void
 	let willSend: () -> Void
 	let didSend: () -> Void
 	let willSendFence: () -> Void
@@ -15,10 +17,11 @@ private struct PixelFormatTransitionMessage: VNCSendableMessage {
 
 	var messageType: UInt8 { fenceMessage?.messageType ?? pixelFormatMessage.messageType }
 	var data: Data {
-		(fenceMessage?.data ?? Data()) + pixelFormatMessage.data
+		(fenceMessage?.data ?? Data()) + pixelFormatMessage.data + encodingsMessage.data
 	}
 
 	func send(connection: NetworkConnectionWriting) async throws {
+		try willSendPixelFormat()
 		if fenceMessage == nil {
 			willSend()
 		} else {
@@ -49,12 +52,14 @@ private struct PixelFormatTransition {
 private struct FenceCapabilityProbeMessage: VNCSendableMessage {
 	let fenceMessage: VNCProtocol.ClientFence
 	let pixelFormatMessage: VNCProtocol.SetPixelFormat
+	let willSendPixelFormat: () throws -> Void
 	let didSend: () -> Void
 
 	var messageType: UInt8 { fenceMessage.messageType }
 	var data: Data { fenceMessage.data + pixelFormatMessage.data }
 
 	func send(connection: NetworkConnectionWriting) async throws {
+		try willSendPixelFormat()
 		try await connection.write(data: data)
 		didSend()
 	}
@@ -198,12 +203,23 @@ extension VNCConnection {
 	}
 
 	private func enqueuePixelFormatTransition(_ transition: PixelFormatTransition) {
+		let encodingTypes: [VNCEncodingType]
+		do {
+			encodingTypes = try orderedEncodingTypes(pixelFormat: transition.pixelFormat)
+		} catch {
+			handleBreakingError(error)
+			return
+		}
 		let fenceMessage = transition.fencePayload.map {
 			VNCProtocol.ClientFence(flags: transition.fenceFlags, payload: $0)
 		}
 		let message = PixelFormatTransitionMessage(
 			fenceMessage: fenceMessage,
 			pixelFormatMessage: VNCProtocol.SetPixelFormat(pixelFormat: transition.pixelFormat),
+			encodingsMessage: VNCProtocol.SetEncodings(encodingTypes: encodingTypes),
+			willSendPixelFormat: { [weak self] in
+				try self?.resetZRLECompressionState()
+			},
 			willSend: { [weak self] in
 				self?.beginPixelFormatTransition(transition.pixelFormat)
 			},
@@ -323,6 +339,9 @@ extension VNCConnection {
 					payload: payload
 				),
 				pixelFormatMessage: VNCProtocol.SetPixelFormat(pixelFormat: pixelFormat),
+				willSendPixelFormat: { [weak self] in
+					try self?.resetZRLECompressionState()
+				},
 				didSend: { [weak self] in
 					self?.didSendPixelFormatFenceCapabilityProbe(payload: payload)
 				}

@@ -423,11 +423,12 @@ struct AuditFindingsTests {
     try await queued.message.send(connection: writer)
 
     #expect(connection.pixelFormatTransitionDeadlineTask == nil)
-    #expect(writer.data.count == 37)
     #expect(writer.data[0] == VNCProtocol.ClientFence.messageType)
     #expect(writer.data[4..<8] == Data([0x80, 0, 0, 5]))
     #expect(writer.data[8] == 8)
     #expect(writer.data[17] == VNCProtocol.SetPixelFormat(pixelFormat: framebuffer.sourcePixelFormat).messageType)
+    #expect(writer.data[37] == VNCProtocol.SetEncodings(encodingTypes: []).messageType)
+    #expect(setEncodingValues(in: writer.data, at: 37).contains(Int32(VNCFrameEncodingType.raw.rawValue.rawValue)))
     #expect(connection.state.pixelFormat?.depth == 24)
 
     let payload = Data(writer.data[9..<17])
@@ -445,6 +446,88 @@ struct AuditFindingsTests {
     #expect(connection.state.pixelFormat?.depth == connection.framebuffer?.sourcePixelFormat.depth)
     #expect(connection.pixelFormatTransitionDeadlineTask == nil)
     #expect(connection.connectionState.status == .connected)
+  }
+
+  @Test
+  func renegotiatesEncodingsForSynchronizedPixelFormatTransition() async throws {
+    let connection = try await makeFenceCapableConnection(
+      settings: makeSettings(frameEncodings: [.tight, .zrle, .openH264, .raw])
+    )
+
+    let depth24Encodings = try connection.orderedEncodingTypes(
+      pixelFormat: VNCProtocol.PixelFormat(depth: 24)
+    )
+    #expect(depth24Encodings.contains(VNCFrameEncodingType.tight.rawValue))
+    #expect(depth24Encodings.contains(VNCFrameEncodingType.zrle.rawValue))
+#if canImport(VideoToolbox)
+    #expect(depth24Encodings.contains(VNCFrameEncodingType.openH264.rawValue))
+#endif
+
+    connection.updateColorDepth(.depth8Bit)
+    let queued = try #require(connection.clientToServerMessageQueue.dequeue())
+    let writer = AuditWritingConnection {
+      #expect(connection.state.pixelFormat?.depth == 24)
+    }
+    try await queued.message.send(connection: writer)
+
+    #expect(writer.data[0] == VNCProtocol.ClientFence.messageType)
+    #expect(writer.data[17] == VNCProtocol.SetPixelFormat(pixelFormat: VNCProtocol.PixelFormat(depth: 8)).messageType)
+    #expect(writer.data[37] == VNCProtocol.SetEncodings(encodingTypes: []).messageType)
+    let values = setEncodingValues(in: writer.data, at: 37)
+    #expect(!values.contains(Int32(VNCFrameEncodingType.tight.rawValue.rawValue)))
+    #expect(!values.contains(Int32(VNCFrameEncodingType.zrle.rawValue.rawValue)))
+    #expect(!values.contains(Int32(VNCFrameEncodingType.openH264.rawValue.rawValue)))
+    #expect(values.contains(Int32(VNCFrameEncodingType.copyRect.rawValue.rawValue)))
+    #expect(values.contains(Int32(VNCFrameEncodingType.raw.rawValue.rawValue)))
+
+    connection.cancelFramebufferUpdateScheduling()
+  }
+
+  @Test
+  func resetsZRLECompressionAtPixelFormatProbeAndTransitionBoundaries() async throws {
+    let connection = VNCConnection(
+      settings: makeSettings(frameEncodings: [.zrle, .raw]),
+      framebufferAllocator: VNCFramebufferMallocAllocator()
+    )
+    let framebuffer = try makeFramebuffer(width: 2, height: 2, depth: 24)
+    connection.framebuffer = framebuffer
+    connection.state.pixelFormat = framebuffer.sourcePixelFormat
+    connection.connectionState = .connected
+    connection._framebufferUpdatePolicy = .paused
+    let zrle = try #require(
+      connection.encodings[VNCFrameEncodingType.zrle.rawValue] as? VNCProtocol.ZRLEEncoding
+    )
+
+    try connection.handleServerFence(
+      VNCProtocol.ServerFence(
+        messageType: VNCProtocol.ServerFence.messageType,
+        flags: [.request, .blockBefore, .syncNext],
+        payload: Data("support".utf8)
+      )
+    )
+    _ = try #require(connection.clientToServerMessageQueue.dequeue())
+    let capabilityProbe = try #require(connection.clientToServerMessageQueue.dequeue())
+
+    try primeZRLEStream(zrle.zStream, byte: 0x41)
+    try await capabilityProbe.message.send(connection: AuditWritingConnection())
+    try verifyFreshZRLEStream(zrle.zStream, byte: 0x42)
+
+    let capabilityPayload = try #require(connection.pixelFormatFenceCapabilityProbePayload)
+    try connection.handleServerFence(
+      VNCProtocol.ServerFence(
+        messageType: VNCProtocol.ServerFence.messageType,
+        flags: [.blockBefore, .syncNext],
+        payload: capabilityPayload
+      )
+    )
+
+    connection.framebufferUpdateRequestOutstanding = true
+    connection.updateColorDepth(.depth8Bit)
+    let transition = try #require(connection.clientToServerMessageQueue.dequeue())
+    try await transition.message.send(connection: AuditWritingConnection())
+    try verifyFreshZRLEStream(zrle.zStream, byte: 0x44)
+
+    connection.cancelFramebufferUpdateScheduling()
   }
 
   @Test
@@ -624,11 +707,11 @@ struct AuditFindingsTests {
     }
     try await transition.message.send(connection: transitionWriter)
     #expect(connection.pixelFormatTransitionDeadlineTask == nil)
-    #expect(transitionWriter.data.count == 20)
     #expect(
       transitionWriter.data[0]
         == VNCProtocol.SetPixelFormat(pixelFormat: framebuffer.sourcePixelFormat).messageType
     )
+    #expect(transitionWriter.data[20] == VNCProtocol.SetEncodings(encodingTypes: []).messageType)
     #expect(connection.state.pixelFormat?.depth == 8)
     #expect(connection.state.pixelFormat?.depth == connection.framebuffer?.sourcePixelFormat.depth)
   }
@@ -818,7 +901,9 @@ struct AuditFindingsTests {
     )
   }
 
-  private func makeSettings() -> VNCConnection.Settings {
+  private func makeSettings(
+    frameEncodings: [VNCFrameEncodingType] = [.raw]
+  ) -> VNCConnection.Settings {
     VNCConnection.Settings(
       isDebugLoggingEnabled: false,
       hostname: "127.0.0.1",
@@ -829,13 +914,15 @@ struct AuditFindingsTests {
       inputMode: .none,
       isClipboardRedirectionEnabled: false,
       colorDepth: .depth24Bit,
-      frameEncodings: [.raw]
+      frameEncodings: frameEncodings
     )
   }
 
-  private func makeFenceCapableConnection() async throws -> VNCConnection {
+  private func makeFenceCapableConnection(
+    settings: VNCConnection.Settings? = nil
+  ) async throws -> VNCConnection {
     let connection = VNCConnection(
-      settings: makeSettings(),
+      settings: settings ?? makeSettings(),
       framebufferAllocator: VNCFramebufferMallocAllocator()
     )
     let framebuffer = try makeFramebuffer(width: 2, height: 2, depth: 24)
@@ -866,6 +953,32 @@ struct AuditFindingsTests {
       )
     )
     return connection
+  }
+
+  private func setEncodingValues(in data: Data, at offset: Int) -> [Int32] {
+    let count = Int(data[offset + 2]) << 8 | Int(data[offset + 3])
+    return (0..<count).map { index in
+      let start = offset + 4 + index * 4
+      let value =
+        UInt32(data[start]) << 24
+        | UInt32(data[start + 1]) << 16
+        | UInt32(data[start + 2]) << 8
+        | UInt32(data[start + 3])
+      return Int32(bitPattern: value)
+    }
+  }
+
+  private func primeZRLEStream(_ stream: ZlibStream, byte: UInt8) throws {
+    try verifyFreshZRLEStream(stream, byte: byte)
+  }
+
+  private func verifyFreshZRLEStream(_ stream: ZlibStream, byte: UInt8) throws {
+    let expected = Data(repeating: byte, count: 64)
+    let actual = try stream.decompressedData(
+      compressedData: ZlibOneShot.deflate(expected),
+      maximumOutputSize: expected.count
+    )
+    #expect(actual == expected)
   }
 }
 

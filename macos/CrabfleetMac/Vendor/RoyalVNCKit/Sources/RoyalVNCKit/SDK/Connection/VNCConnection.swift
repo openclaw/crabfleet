@@ -234,7 +234,7 @@ public final class VNCConnection: NSObjectOrAnyObject, @unchecked Sendable {
 		return enabledEncodings
 	}()
 
-	func orderedEncodingTypes() throws -> [VNCEncodingType] {
+	func orderedEncodingTypes(pixelFormat: VNCProtocol.PixelFormat? = nil) throws -> [VNCEncodingType] {
 		// Frame Encodings (Required)
 		var encs: [VNCEncodingType] = [
 			VNCFrameEncodingType.copyRect.rawValue
@@ -242,22 +242,23 @@ public final class VNCConnection: NSObjectOrAnyObject, @unchecked Sendable {
 
 		// Frame Encodings (Customizable)
 		var customizedFrameEncodings = settings.frameEncodings.map({ $0.rawValue })
+		let negotiatedPixelFormat = pixelFormat ?? state.pixelFormat
 
 		// TODO: Remove once we support ZRLE for non-24-bit pixel formats
-		if let pixelFormat = state.pixelFormat,
+		if let pixelFormat = negotiatedPixelFormat,
 		   customizedFrameEncodings.contains(VNCFrameEncodingType.zrle.rawValue),
 		   !VNCProtocol.ZRLEEncoding.supportsPixelFormat(pixelFormat) {
 			customizedFrameEncodings.removeAll(where: { $0 == VNCFrameEncodingType.zrle.rawValue })
 		}
 
-		if let pixelFormat = state.pixelFormat,
+		if let pixelFormat = negotiatedPixelFormat,
 		   customizedFrameEncodings.contains(VNCFrameEncodingType.tight.rawValue),
 		   !VNCProtocol.TightEncoding.supportsPixelFormat(pixelFormat) {
 			customizedFrameEncodings.removeAll(where: { $0 == VNCFrameEncodingType.tight.rawValue })
 		}
 
 #if canImport(VideoToolbox)
-		if let pixelFormat = state.pixelFormat,
+		if let pixelFormat = negotiatedPixelFormat,
 		   customizedFrameEncodings.contains(VNCFrameEncodingType.openH264.rawValue),
 		   !VNCProtocol.OpenH264Encoding.supportsPixelFormat(pixelFormat) {
 			customizedFrameEncodings.removeAll(where: { $0 == VNCFrameEncodingType.openH264.rawValue })
@@ -303,6 +304,10 @@ public final class VNCConnection: NSObjectOrAnyObject, @unchecked Sendable {
 		try uniqueEncs.validate()
 
 		return uniqueEncs
+	}
+
+	func resetZRLECompressionState() throws {
+		try sharedZRLEZStream.reset()
 	}
 
 	// MARK: - Public Initializers
