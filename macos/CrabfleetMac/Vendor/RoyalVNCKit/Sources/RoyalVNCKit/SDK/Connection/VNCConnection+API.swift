@@ -150,7 +150,7 @@ extension VNCConnection {
 					if supportedFenceFlags.contains(.blockAfter) {
 						fenceFlags.insert(.blockAfter)
 					}
-				} else if state.areFencesSupported && !supportsFallbackBoundary {
+				} else if !state.areFencesSupported || !supportsFallbackBoundary {
 					pendingPixelFormatTransition = nil
 					pixelFormatTransitionRequiresFence = false
 					return nil
@@ -212,7 +212,8 @@ extension VNCConnection {
 			  !isPixelFormatTransitionInFlight,
 			  pixelFormatFenceCapabilityProbePayload == nil,
 			  !supportedFenceFlags.contains(.syncNext),
-			  (!state.areFencesSupported || supportsFallbackBoundary),
+			  state.areFencesSupported,
+			  supportsFallbackBoundary,
 			  pendingPixelFormatTransition != nil,
 			  let framebuffer else {
 			return nil

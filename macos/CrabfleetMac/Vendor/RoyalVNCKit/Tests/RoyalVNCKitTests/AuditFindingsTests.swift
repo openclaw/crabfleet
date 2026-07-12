@@ -101,7 +101,7 @@ struct AuditFindingsTests {
   }
 
   @Test
-  func forcesLegacyFramebufferBeforeUnfencedPixelFormatTransition() async throws {
+  func rejectsUnsafeLegacyPixelFormatTransition() throws {
     let connection = VNCConnection(
       settings: makeSettings(),
       framebufferAllocator: VNCFramebufferMallocAllocator()
@@ -114,26 +114,11 @@ struct AuditFindingsTests {
     connection.framebufferUpdateRequestOutstanding = true
 
     connection.updateColorDepth(.depth8Bit)
+
     #expect(connection.state.pixelFormat?.depth == 24)
     #expect(connection.state.pixelFormat?.depth == connection.framebuffer?.sourcePixelFormat.depth)
-    let probe = try #require(connection.clientToServerMessageQueue.dequeue())
-    let probeWriter = AuditWritingConnection()
-    try await probe.message.send(connection: probeWriter)
-    #expect(probeWriter.data.count == 10)
-    #expect(probeWriter.data[0] == 3)
-    #expect(probeWriter.data[1] == 0)
-
-    connection.completeFramebufferUpdateRequest()
-    let queued = try #require(connection.clientToServerMessageQueue.dequeue())
-    let writer = AuditWritingConnection {
-      #expect(connection.state.pixelFormat?.depth == 8)
-      #expect(connection.state.pixelFormat?.depth == connection.framebuffer?.sourcePixelFormat.depth)
-    }
-    try await queued.message.send(connection: writer)
-
-    #expect(writer.data.count == 20)
-    #expect(connection.state.pixelFormat?.depth == 8)
-    #expect(connection.state.pixelFormat?.depth == connection.framebuffer?.sourcePixelFormat.depth)
+    #expect(connection.clientToServerMessageQueue.dequeue() == nil)
+    #expect(connection.pendingPixelFormatTransition == nil)
   }
 
   @Test
