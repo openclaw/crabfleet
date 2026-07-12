@@ -17,7 +17,7 @@ type Execution = {
   kind: "all" | "run";
 };
 
-function runtimeEnv(executions: Execution[]): RuntimeEnv {
+function runtimeEnv(executions: Execution[], mutationChanges = 1): RuntimeEnv {
   const row = sessionRow({
     id: "IS-101",
     runtime: "github_actions",
@@ -35,7 +35,7 @@ function runtimeEnv(executions: Execution[]): RuntimeEnv {
               },
               async run() {
                 executions.push({ sql, parameters, kind: "run" });
-                return { meta: { changes: 1 } };
+                return { meta: { changes: mutationChanges } };
               },
             };
           },
@@ -86,8 +86,28 @@ test("GitHub Actions repository owns registration and lifecycle SQL", async () =
   for (const execution of executions.slice(3)) {
     assert.match(execution.sql, /update "interactive_sessions"/i);
     assert.match(execution.sql, /where "id" = \?/i);
+    assert.match(execution.sql, /"runtime" = \?/i);
+    assert.match(execution.sql, /"updated_at" <= \?/i);
     assert.ok(execution.parameters.includes("IS-101"));
   }
+  assert.match(executions[3].sql, /"owner_subject" = \?/i);
+  assert.doesNotMatch(executions[3].sql, /"work_state" not in/i);
+  assert.match(executions[4].sql, /"work_state" not in/i);
+  assert.match(executions[5].sql, /"status" not in/i);
+});
+
+test("GitHub Actions repository rejects stale or invalid state transitions", async () => {
+  const executions: Execution[] = [];
+  const repository = new GitHubActionsRepository(runtimeEnv(executions, 0));
+
+  await assert.rejects(repository.updateSession("IS-101", runnerConnectionUpdate), (error) => {
+    assert.equal(
+      typeof error === "object" && error && "status" in error ? error.status : undefined,
+      409,
+    );
+    return true;
+  });
+  assert.equal(executions.length, 1);
 });
 
 const registrationUpdate: GitHubActionsSessionRegistrationUpdate = {
