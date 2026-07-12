@@ -28,6 +28,7 @@ private struct PixelFormatTransitionMessage: VNCSendableMessage {
 
 private struct PixelFormatTransition {
 	let pixelFormat: VNCProtocol.PixelFormat
+	let fenceFlags: VNCProtocol.FenceFlags
 	let fencePayload: Data?
 }
 
@@ -129,24 +130,58 @@ extension VNCConnection {
 	private func takePendingPixelFormatTransitionLocked() -> PixelFormatTransition? {
 		guard !isPixelFormatTransitionInFlight,
 			  pixelFormatFenceCapabilityProbePayload == nil,
-			  (!framebufferUpdateRequestOutstanding || state.areSyncNextFencesSupported),
+			  !isPixelFormatTransitionProbeQueued,
 			  let pixelFormat = pendingPixelFormatTransition else {
 			return nil
+		}
+
+		let supportedFenceFlags = state.pixelFormatTransitionFenceFlags
+		let requiresFence = framebufferUpdateRequestOutstanding
+			|| pixelFormatTransitionRequiresFence
+			|| state.areContinuousUpdatesEnabled
+		var fenceFlags: VNCProtocol.FenceFlags = []
+		if requiresFence {
+			if framebufferUpdateRequestOutstanding {
+				if supportedFenceFlags.contains(.syncNext) {
+					fenceFlags = [.request, .syncNext]
+					if supportedFenceFlags.contains(.blockAfter) {
+						fenceFlags.insert(.blockAfter)
+					}
+				} else {
+					return nil
+				}
+			} else if supportedFenceFlags.contains(.blockAfter) {
+				fenceFlags = [.request, .blockAfter]
+				if supportedFenceFlags.contains(.blockBefore) {
+					fenceFlags.insert(.blockBefore)
+				}
+			} else {
+				return nil
+			}
 		}
 
 		pendingPixelFormatTransition = nil
 		isPixelFormatTransitionInFlight = true
 		pixelFormatTransitionInFlight = pixelFormat
 		let fencePayload: Data?
-		if state.areSyncNextFencesSupported {
+		if !fenceFlags.isEmpty {
 			pixelFormatTransitionFenceSequence &+= 1
 			var sequence = pixelFormatTransitionFenceSequence.bigEndian
 			fencePayload = withUnsafeBytes(of: &sequence) { Data($0) }
 			pixelFormatTransitionFencePayload = fencePayload
+			pixelFormatTransitionRequiredFenceFlags = fenceFlags.contains(.syncNext)
+				? [.syncNext]
+				: [.blockAfter]
 		} else {
 			fencePayload = nil
+			pixelFormatTransitionRequiredFenceFlags = []
 		}
-		return PixelFormatTransition(pixelFormat: pixelFormat, fencePayload: fencePayload)
+		pixelFormatTransitionRequiresFence = false
+		return PixelFormatTransition(
+			pixelFormat: pixelFormat,
+			fenceFlags: fenceFlags,
+			fencePayload: fencePayload
+		)
 	}
 
 	private func takePixelFormatTransitionProbeLocked() -> VNCProtocol.FramebufferUpdateRequest? {
@@ -154,13 +189,15 @@ extension VNCConnection {
 			  !isPixelFormatTransitionProbeQueued,
 			  !isPixelFormatTransitionInFlight,
 			  pixelFormatFenceCapabilityProbePayload == nil,
-			  !state.areSyncNextFencesSupported,
+			  !state.pixelFormatTransitionFenceFlags.contains(.syncNext),
+			  state.pixelFormatTransitionFenceFlags.contains(.blockAfter),
 			  pendingPixelFormatTransition != nil,
 			  let framebuffer else {
 			return nil
 		}
 
 		isPixelFormatTransitionProbeQueued = true
+		pixelFormatTransitionRequiresFence = true
 		return VNCProtocol.FramebufferUpdateRequest(
 			incremental: false,
 			xPosition: 0,
@@ -172,7 +209,7 @@ extension VNCConnection {
 
 	private func enqueuePixelFormatTransition(_ transition: PixelFormatTransition) {
 		let fenceMessage = transition.fencePayload.map {
-			VNCProtocol.ClientFence(flags: [.request, .syncNext], payload: $0)
+			VNCProtocol.ClientFence(flags: transition.fenceFlags, payload: $0)
 		}
 		let message = PixelFormatTransitionMessage(
 			fenceMessage: fenceMessage,
@@ -187,21 +224,21 @@ extension VNCConnection {
 		enqueueClientToServerMessage(message)
 	}
 
-	func probeSyncNextFenceSupport() {
+	func probePixelFormatFenceSupport() {
 		framebufferRequestLock.lock()
 		guard pixelFormatFenceCapabilityProbePayload == nil,
 			  let pixelFormat = state.pixelFormat else {
 			framebufferRequestLock.unlock()
 			return
 		}
-		let payload = Data("royalvnc-sync-next".utf8)
+		let payload = Data("royalvnc-pixel-format".utf8)
 		pixelFormatFenceCapabilityProbePayload = payload
 		framebufferRequestLock.unlock()
 
 		enqueueClientToServerMessage(
 			FenceCapabilityProbeMessage(
 				fenceMessage: VNCProtocol.ClientFence(
-					flags: [.request, .syncNext],
+					flags: [.request, .blockBefore, .blockAfter, .syncNext],
 					payload: payload
 				),
 				pixelFormatMessage: VNCProtocol.SetPixelFormat(pixelFormat: pixelFormat)
@@ -213,7 +250,11 @@ extension VNCConnection {
 		framebufferRequestLock.lock()
 		if fence.payload == pixelFormatFenceCapabilityProbePayload {
 			pixelFormatFenceCapabilityProbePayload = nil
-			state.areSyncNextFencesSupported = fence.flags.contains(.syncNext)
+			state.pixelFormatTransitionFenceFlags = fence.flags.intersection([
+				.blockBefore,
+				.blockAfter,
+				.syncNext
+			])
 			let transition = takePendingPixelFormatTransitionLocked()
 			let probe = takePixelFormatTransitionProbeLocked()
 			framebufferRequestLock.unlock()
@@ -229,7 +270,8 @@ extension VNCConnection {
 			framebufferRequestLock.unlock()
 			return
 		}
-		guard fence.flags.contains(.syncNext) else {
+		let requiredFlags = pixelFormatTransitionRequiredFenceFlags
+		guard fence.flags.intersection(requiredFlags) == requiredFlags else {
 			framebufferRequestLock.unlock()
 			throw VNCError.protocol(.invalidData)
 		}
@@ -238,6 +280,7 @@ extension VNCConnection {
 			throw VNCError.protocol(.invalidData)
 		}
 		pixelFormatTransitionFencePayload = nil
+		pixelFormatTransitionRequiredFenceFlags = []
 		framebufferRequestLock.unlock()
 
 		beginPixelFormatTransition(pixelFormat)
@@ -516,7 +559,9 @@ extension VNCConnection {
 		isPixelFormatTransitionInFlight = false
 		pixelFormatTransitionInFlight = nil
 		isPixelFormatTransitionProbeQueued = false
+		pixelFormatTransitionRequiresFence = false
 		pixelFormatTransitionFencePayload = nil
+		pixelFormatTransitionRequiredFenceFlags = []
 		pixelFormatFenceCapabilityProbePayload = nil
 		framebufferRequestLock.unlock()
 	}

@@ -116,12 +116,7 @@ struct AuditFindingsTests {
     connection.updateColorDepth(.depth8Bit)
     #expect(connection.state.pixelFormat?.depth == 24)
     #expect(connection.state.pixelFormat?.depth == connection.framebuffer?.sourcePixelFormat.depth)
-    let probe = try #require(connection.clientToServerMessageQueue.dequeue())
-    let probeWriter = AuditWritingConnection()
-    try await probe.message.send(connection: probeWriter)
-    #expect(probeWriter.data.count == 10)
-    #expect(probeWriter.data[0] == 3)
-    #expect(probeWriter.data[1] == 0)
+    #expect(connection.clientToServerMessageQueue.dequeue() == nil)
 
     connection.completeFramebufferUpdateRequest()
     let queued = try #require(connection.clientToServerMessageQueue.dequeue())
@@ -173,7 +168,7 @@ struct AuditFindingsTests {
     try connection.handleServerFence(
       VNCProtocol.ServerFence(
         messageType: VNCProtocol.ServerFence.messageType,
-        flags: [.syncNext],
+        flags: [.blockAfter, .syncNext],
         payload: capabilityPayload
       )
     )
@@ -187,7 +182,7 @@ struct AuditFindingsTests {
 
     #expect(writer.data.count == 37)
     #expect(writer.data[0] == VNCProtocol.ClientFence.messageType)
-    #expect(writer.data[4..<8] == Data([0x80, 0, 0, 4]))
+    #expect(writer.data[4..<8] == Data([0x80, 0, 0, 6]))
     #expect(writer.data[8] == 8)
     #expect(writer.data[17] == VNCProtocol.SetPixelFormat(pixelFormat: framebuffer.sourcePixelFormat).messageType)
     #expect(connection.state.pixelFormat?.depth == 24)
@@ -196,7 +191,7 @@ struct AuditFindingsTests {
     try connection.handleServerFence(
       VNCProtocol.ServerFence(
         messageType: VNCProtocol.ServerFence.messageType,
-        flags: [.syncNext],
+        flags: [.blockAfter, .syncNext],
         payload: payload
       )
     )
@@ -206,7 +201,7 @@ struct AuditFindingsTests {
   }
 
   @Test
-  func fallsBackToForcedUpdateWhenSyncNextIsUnsupported() async throws {
+  func fencesForcedUpdateWhenSyncNextIsUnsupported() async throws {
     let connection = VNCConnection(
       settings: makeSettings(),
       framebufferAllocator: VNCFramebufferMallocAllocator()
@@ -238,7 +233,7 @@ struct AuditFindingsTests {
     try connection.handleServerFence(
       VNCProtocol.ServerFence(
         messageType: VNCProtocol.ServerFence.messageType,
-        flags: [],
+        flags: [.blockBefore, .blockAfter],
         payload: capabilityPayload
       )
     )
@@ -248,6 +243,35 @@ struct AuditFindingsTests {
     try await probe.message.send(connection: probeWriter)
     #expect(probeWriter.data[0] == 3)
     #expect(probeWriter.data[1] == 0)
+
+    connection.completeFramebufferUpdateRequest()
+    let transition = try #require(connection.clientToServerMessageQueue.dequeue())
+    let transitionWriter = AuditWritingConnection {
+      #expect(connection.state.pixelFormat?.depth == 24)
+    }
+    try await transition.message.send(connection: transitionWriter)
+    #expect(transitionWriter.data.count == 37)
+    #expect(transitionWriter.data[0] == VNCProtocol.ClientFence.messageType)
+    #expect(transitionWriter.data[4..<8] == Data([0x80, 0, 0, 3]))
+    #expect(transitionWriter.data[8] == 8)
+    #expect(transitionWriter.data[17] == 0)
+    #expect(connection.state.pixelFormat?.depth == 24)
+
+    connection.completeFramebufferUpdateRequest()
+    #expect(connection.clientToServerMessageQueue.dequeue() == nil)
+    #expect(connection.state.pixelFormat?.depth == 24)
+
+    let transitionPayload = Data(transitionWriter.data[9..<17])
+    try connection.handleServerFence(
+      VNCProtocol.ServerFence(
+        messageType: VNCProtocol.ServerFence.messageType,
+        flags: [.blockBefore, .blockAfter],
+        payload: transitionPayload
+      )
+    )
+
+    #expect(connection.state.pixelFormat?.depth == 8)
+    #expect(connection.state.pixelFormat?.depth == connection.framebuffer?.sourcePixelFormat.depth)
   }
 
   @Test

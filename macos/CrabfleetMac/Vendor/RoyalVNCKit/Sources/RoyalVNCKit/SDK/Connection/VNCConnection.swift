@@ -114,8 +114,10 @@ public final class VNCConnection: NSObjectOrAnyObject, @unchecked Sendable {
 	var isPixelFormatTransitionInFlight = false
 	var pixelFormatTransitionInFlight: VNCProtocol.PixelFormat?
 	var isPixelFormatTransitionProbeQueued = false
+	var pixelFormatTransitionRequiresFence = false
 	var pixelFormatTransitionFenceSequence: UInt64 = 0
 	var pixelFormatTransitionFencePayload: Data?
+	var pixelFormatTransitionRequiredFenceFlags: VNCProtocol.FenceFlags = []
 	var pixelFormatFenceCapabilityProbePayload: Data?
 	private let queue = DispatchQueue(label: "com.royalapps.royalvnc.connectionqueue",
 									  attributes: .concurrent)

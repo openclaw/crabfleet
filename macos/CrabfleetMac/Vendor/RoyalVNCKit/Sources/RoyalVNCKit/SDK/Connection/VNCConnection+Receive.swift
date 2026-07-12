@@ -221,7 +221,7 @@ extension VNCConnection {
 
 		if first {
 			logger.logDebug("Fence supported (server sent ServerFence)")
-			probeSyncNextFenceSupport()
+			probePixelFormatFenceSupport()
 		}
 	}
 
