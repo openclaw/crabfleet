@@ -119,6 +119,7 @@ export class TerminalHub {
       ok: true,
       version: TERMINAL_WS_VERSION,
       multiplex: true,
+      inputAcknowledgements: true,
     });
 
     const closeSubscription = (id: string, code = 1000, reason = "unsubscribed") => {
@@ -154,6 +155,7 @@ export class TerminalHub {
               ok: true,
               version: TERMINAL_WS_VERSION,
               multiplex: true,
+              inputAcknowledgements: true,
             });
             return;
           }

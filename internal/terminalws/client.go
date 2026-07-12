@@ -74,11 +74,12 @@ type Size struct {
 }
 
 type Client struct {
-	conn      *websocket.Conn
-	sessionID string
-	canInput  atomic.Bool
-	lastSize  atomic.Uint64
-	writeMu   sync.Mutex
+	conn                         *websocket.Conn
+	sessionID                    string
+	supportsInputAcknowledgement bool
+	canInput                     atomic.Bool
+	lastSize                     atomic.Uint64
+	writeMu                      sync.Mutex
 }
 
 type frame struct {
@@ -92,6 +93,10 @@ type eventPayload struct {
 	Error    string `json:"error"`
 	Reason   string `json:"reason"`
 	CanInput bool   `json:"canInput"`
+}
+
+type welcomePayload struct {
+	InputAcknowledgements bool `json:"inputAcknowledgements"`
 }
 
 type readCanceler interface {
@@ -171,6 +176,10 @@ func Dial(ctx context.Context, endpoint string, sessionID string, options Option
 		}
 		switch current.messageType {
 		case messageWelcome:
+			var welcome welcomePayload
+			if json.Unmarshal(current.payload, &welcome) == nil {
+				client.supportsInputAcknowledgement = welcome.InputAcknowledgements
+			}
 			continue
 		case messageError, messageControlRevoked:
 			return closeWithError(frameError(current, "terminal subscription failed"))
@@ -209,6 +218,9 @@ func (c *Client) SendInput(ctx context.Context, payload []byte) error {
 }
 
 func (c *Client) SendInputConfirmed(ctx context.Context, payload []byte) error {
+	if !c.supportsInputAcknowledgement {
+		return c.SendInput(ctx, payload)
+	}
 	if err := c.SendInput(ctx, payload); err != nil {
 		return err
 	}

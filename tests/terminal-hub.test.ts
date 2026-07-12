@@ -276,6 +276,7 @@ test("terminal hub routes multiplex frames and explicit output acknowledgements"
     ok: true,
     version: 2,
     multiplex: true,
+    inputAcknowledgements: true,
   });
 
   server.emit("message", {
