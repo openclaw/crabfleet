@@ -99,6 +99,45 @@ struct PrivateMacShareTests {
     #expect(await waitUntilAsync { Darwin.kill(Int32(cancelledPID), 0) != 0 })
   }
 
+  @Test
+  func tailscaleCommandTimeoutDoesNotWaitForDescendantPipeEOF() async throws {
+    let directory = FileManager.default.temporaryDirectory
+      .appendingPathComponent("CrabfleetMacTests.\(UUID().uuidString)")
+    try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let executable = directory.appendingPathComponent("tailscale")
+    let descendantPIDFile = directory.appendingPathComponent("descendant-pid")
+    try Data(
+      """
+      #!/bin/sh
+      (
+        trap '' HUP TERM
+        exec sleep 30
+      ) &
+      printf '%s' "$!" > '\(descendantPIDFile.path)'
+      exec sleep 30
+      """.utf8
+    ).write(to: executable)
+    try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: executable.path)
+
+    let runner = SystemTailscaleCommandRunner(executableURL: executable, timeout: 0.5)
+    let clock = ContinuousClock()
+    let startedAt = clock.now
+    await #expect(throws: PrivateMacShareError.commandTimedOut) {
+      _ = try await runner.run(arguments: ["status"])
+    }
+    let elapsed = startedAt.duration(to: clock.now)
+
+    let descendantPID = try #require(
+      Int32(String(contentsOf: descendantPIDFile, encoding: .utf8))
+    )
+    defer {
+      _ = Darwin.kill(descendantPID, SIGKILL)
+    }
+    #expect(Darwin.kill(descendantPID, 0) == 0)
+    #expect(elapsed < .seconds(2))
+  }
+
   @Test @MainActor
   func stopInvalidatesAnInFlightPrivateShareStart() async throws {
     let runner = SuspendedTailscaleRunner()

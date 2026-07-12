@@ -88,6 +88,8 @@ struct SystemTailscaleCommandRunner: TailscaleCommandRunning {
 }
 
 private final class TailscaleCommandExecution: @unchecked Sendable {
+  private static let stoppedProcessDrainTimeout: DispatchTimeInterval = .milliseconds(250)
+
   private enum StopReason {
     case cancelled
     case outputTooLarge
@@ -148,7 +150,7 @@ private final class TailscaleCommandExecution: @unchecked Sendable {
       Thread.sleep(forTimeInterval: 0.01)
     }
     process.waitUntilExit()
-    readGroup.wait()
+    finishCapture()
 
     switch currentStopReason() {
     case .cancelled:
@@ -234,6 +236,19 @@ private final class TailscaleCommandExecution: @unchecked Sendable {
       guard process.isRunning else { return }
       _ = Darwin.kill(pid, SIGKILL)
     }
+  }
+
+  private func finishCapture() {
+    guard currentStopReason() != nil else {
+      readGroup.wait()
+      return
+    }
+    guard readGroup.wait(timeout: .now() + Self.stoppedProcessDrainTimeout) == .timedOut else {
+      return
+    }
+    try? outputPipe.fileHandleForReading.close()
+    try? errorPipe.fileHandleForReading.close()
+    _ = readGroup.wait(timeout: .now() + Self.stoppedProcessDrainTimeout)
   }
 }
 
