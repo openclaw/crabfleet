@@ -268,6 +268,63 @@ test("structured session events canonicalize additive payloads and replay idempo
   assert.deepEqual(archives, ["IS-1", "IS-1"]);
 });
 
+test("structured event redaction spans private-key arrays and underscore secret tokens", async () => {
+  let persistedMessage = "";
+  let persistedPayload = "";
+  const service = new InteractiveSessionEventLedgerService({
+    async persist(event) {
+      persistedMessage = event.message;
+      persistedPayload = event.payloadJson;
+      return {
+        row: {
+          id: 1,
+          session_id: event.sessionId,
+          actor: event.actor,
+          event_key: event.eventKey,
+          event_type: event.type,
+          message: event.message,
+          payload_json: event.payloadJson,
+          created_at: event.now,
+        },
+        inserted: true,
+        refreshArchive: false,
+      };
+    },
+    async archive() {},
+  });
+  const secret = `sk_live_${"x".repeat(24)}`;
+
+  const result = await service.append({
+    sessionId: "IS-1",
+    actor: "operator",
+    eventKey: "run:private-key",
+    type: "clawsweeper.action",
+    message: secret,
+    payload: {
+      version: 1,
+      output: [
+        "-----BEGIN PRIVATE KEY-----",
+        "ZmFrZS1rZXktbWF0ZXJpYWw=",
+        "-----END PRIVATE KEY-----",
+      ],
+      commandOutput: `failed with ${secret}`,
+    },
+    now: 123,
+  });
+
+  assert.equal(persistedMessage, "[credential]");
+  assert.deepEqual(JSON.parse(persistedPayload), {
+    commandOutput: "failed with [credential]",
+    output: ["[credential]", "[credential]", "[credential]"],
+    version: 1,
+  });
+  assert.deepEqual(result.event.payload, {
+    commandOutput: "failed with [credential]",
+    output: ["[credential]", "[credential]", "[credential]"],
+    version: 1,
+  });
+});
+
 test("structured session event key conflicts reject changed content before side effects", async () => {
   const existing: InteractiveSessionEventRow = {
     id: 1,

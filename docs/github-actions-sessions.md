@@ -255,6 +255,8 @@ before D1/R2 persistence. Once the session is terminal, the endpoint accepts
 only side-effect-free exact replays of already-persisted events for five minutes
 and rejects new history. The endpoint rejects that credential after the retry
 window so completed sessions do not retain indefinite event access.
+An exact replay of a row written before credential redaction repairs the D1 row
+and archive and returns only the sanitized event.
 
 ## Runner PTY
 

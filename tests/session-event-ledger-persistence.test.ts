@@ -222,3 +222,54 @@ test("structured event races deduplicate and keep terminal replays side-effect f
     1,
   );
 });
+
+test("legacy credential-bearing replays repair D1 and refresh terminal archives", async () => {
+  const database = eventDatabase();
+  const rawMessage = "authorization: Bearer legacy-secret-value";
+  const rawPayload = JSON.stringify({ version: 1, output: rawMessage });
+  database
+    .prepare(`
+      INSERT INTO interactive_session_events
+        (session_id, actor, event_key, event_type, message, payload_json, created_at)
+      VALUES ('IS-1', 'operator', 'run:legacy', 'clawsweeper.action', ?, ?, 100)
+    `)
+    .run(rawMessage, rawPayload);
+  database.exec("UPDATE interactive_sessions SET status = 'stopped' WHERE id = 'IS-1'");
+  let archiveCalls = 0;
+
+  const replay = await appendStructuredInteractiveSessionEventRecord(
+    runtimeEnv(database),
+    {
+      sessionId: "IS-1",
+      actor: "operator",
+      eventKey: "run:legacy",
+      type: "clawsweeper.action",
+      message: rawMessage,
+      payload: { version: 1, output: rawMessage },
+      now: 200,
+    },
+    async () => {
+      archiveCalls += 1;
+    },
+  );
+
+  assert.equal(replay.duplicate, true);
+  assert.equal(replay.event.message, "[credential]");
+  assert.deepEqual(replay.event.payload, { output: "[credential]", version: 1 });
+  assert.equal(archiveCalls, 1);
+  assert.deepEqual(
+    {
+      ...database
+        .prepare(`
+          SELECT message, payload_json
+          FROM interactive_session_events
+          WHERE session_id = 'IS-1' AND event_key = 'run:legacy'
+        `)
+        .get(),
+    },
+    {
+      message: "[credential]",
+      payload_json: '{"output":"[credential]","version":1}',
+    },
+  );
+});

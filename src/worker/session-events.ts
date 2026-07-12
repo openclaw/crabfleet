@@ -78,14 +78,15 @@ export class InteractiveSessionEventLedgerService {
   ): Promise<AppendStructuredInteractiveSessionEventResult> {
     const event = normalizeStructuredEvent(input);
     const persisted = await this.store.persist(event);
-    if (!sameStructuredEvent(persisted.row, event)) {
+    const row = redactedStructuredEventRow(persisted.row);
+    if (!sameStructuredEvent(row, event)) {
       throw conflict("event key already belongs to a different session event");
     }
     if (persisted.refreshArchive) {
       await this.store.archive(event.sessionId, event.now).catch(() => undefined);
     }
     return {
-      event: interactiveSessionEvent(persisted.row),
+      event: interactiveSessionEvent(row),
       duplicate: !persisted.inserted,
     };
   }
@@ -160,7 +161,7 @@ export async function appendStructuredInteractiveSessionEventRecord(
           env.DB.prepare(compiledInsert.sql).bind(...compiledInsert.parameters),
         ]);
         const inserted = results[0]?.results?.[0];
-        const row =
+        let row =
           inserted ??
           (await db
             .selectFrom("interactive_session_events")
@@ -185,12 +186,41 @@ export async function appendStructuredInteractiveSessionEventRecord(
           }
           throw new Error("structured session event was not persisted");
         }
+        const redactedRow = redactedStructuredEventRow(row);
+        const repairsLegacyCredentials =
+          !inserted &&
+          sameStructuredEvent(redactedRow, event) &&
+          (row.message !== redactedRow.message || row.payload_json !== redactedRow.payload_json);
+        if (repairsLegacyCredentials) {
+          const repaired = await db
+            .updateTable("interactive_session_events")
+            .set({
+              message: redactedRow.message,
+              payload_json: redactedRow.payload_json,
+            })
+            .where("id", "=", row.id)
+            .where("message", "=", row.message)
+            .where("payload_json", "=", row.payload_json)
+            .returningAll()
+            .executeTakeFirst();
+          row =
+            repaired ??
+            (await db
+              .selectFrom("interactive_session_events")
+              .selectAll()
+              .where("id", "=", row.id)
+              .executeTakeFirstOrThrow());
+        }
         const terminal = Boolean(
           session &&
           (session.status === "stopping" ||
             deadInteractiveSessionStatuses.includes(session.status)),
         );
-        return { row, inserted: Boolean(inserted), refreshArchive: !terminal };
+        return {
+          row,
+          inserted: Boolean(inserted),
+          refreshArchive: !terminal || repairsLegacyCredentials,
+        };
       },
       archive,
     }).append(input);
@@ -233,6 +263,23 @@ function sameStructuredEvent(
     row.message === event.message &&
     row.payload_json === event.payloadJson
   );
+}
+
+function redactedStructuredEventRow(row: InteractiveSessionEventRow): InteractiveSessionEventRow {
+  return {
+    ...row,
+    message: redactedStructuredEventText(row.message),
+    payload_json: redactedStoredStructuredPayloadJson(row.payload_json),
+  };
+}
+
+function redactedStoredStructuredPayloadJson(value: string | null): string | null {
+  if (value === null) return null;
+  try {
+    return structuredPayloadJson(JSON.parse(value));
+  } catch {
+    return value;
+  }
 }
 
 function structuredPayloadJson(value: unknown): string {
@@ -280,10 +327,28 @@ function redactStructuredPayload(
 function redactStructuredPayloadValue(
   value: InteractiveSessionEventPayloadValue,
 ): InteractiveSessionEventPayloadValue {
-  if (Array.isArray(value)) return value.map(redactStructuredPayloadValue);
+  if (Array.isArray(value)) return redactStructuredPayloadArray(value);
   if (typeof value === "string") return redactedStructuredEventText(value);
   if (!value || typeof value !== "object") return value;
   return redactStructuredPayload(value);
+}
+
+const privateKeyBegin =
+  /-----BEGIN (?:RSA |DSA |EC |OPENSSH |PGP |ENCRYPTED )?PRIVATE KEY(?: BLOCK)?-----/iu;
+const privateKeyEnd =
+  /-----END (?:RSA |DSA |EC |OPENSSH |PGP |ENCRYPTED )?PRIVATE KEY(?: BLOCK)?-----/iu;
+
+function redactStructuredPayloadArray(
+  value: InteractiveSessionEventPayloadValue[],
+): InteractiveSessionEventPayloadValue[] {
+  let insidePrivateKey = false;
+  return value.map((nested) => {
+    if (typeof nested !== "string") return redactStructuredPayloadValue(nested);
+    const beginsPrivateKey = privateKeyBegin.test(nested);
+    if (!insidePrivateKey && !beginsPrivateKey) return redactedStructuredEventText(nested);
+    insidePrivateKey = !privateKeyEnd.test(nested);
+    return "[credential]";
+  });
 }
 
 function redactedStructuredEventText(value: string): string {
@@ -299,7 +364,7 @@ function redactedStructuredEventText(value: string): string {
       "[credential]",
     )
     .replace(
-      /-----BEGIN (?:RSA |DSA |EC |OPENSSH |PGP |ENCRYPTED )?PRIVATE KEY(?: BLOCK)?-----/giu,
+      /-----BEGIN (?:RSA |DSA |EC |OPENSSH |PGP |ENCRYPTED )?PRIVATE KEY(?: BLOCK)?-----[\s\S]*/giu,
       "[credential]",
     )
     .replace(
@@ -318,6 +383,7 @@ function redactedStructuredEventText(value: string): string {
     .replace(/\b(?:github_pat_|gh[pousr]_)[A-Za-z0-9_]{20,}\b/gu, "[credential]")
     .replace(/\bglpat-[A-Za-z0-9_-]{20,}\b/gu, "[credential]")
     .replace(/\b(?:sk|rk|pk|org|proj)-[A-Za-z0-9_-]{20,}\b/gu, "[credential]")
+    .replace(/\b(?:sk|rk)_(?:live|test)_[A-Za-z0-9]{16,}\b/gu, "[credential]")
     .replace(/\bxox[baprs]-[A-Za-z0-9-]{20,}\b/gu, "[credential]")
     .replace(/\bnpm_[A-Za-z0-9]{20,}\b/gu, "[credential]")
     .replace(/\b(?:AKIA|ASIA)[A-Z0-9]{16}\b/gu, "[credential]")

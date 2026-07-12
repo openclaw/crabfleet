@@ -660,6 +660,8 @@ exact replay of an already-persisted event is accepted without refreshing
 finalized archives; new terminal history is rejected. The terminal credential
 returns `403` after that window. Structured events do not change work state,
 `lastEvent`, or the existing message-event behavior.
+An exact replay of a pre-hardening row atomically redacts its stored credentials
+and refreshes its archive before returning the sanitized event.
 
 ### POST /api/interactive-sessions
 
