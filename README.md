@@ -98,7 +98,7 @@ The response contains `{session, agentToken, runnerPtyUrl, browserUrl}`. New reg
 
 ```js
 const framedRunnerPtyUrl = new URL(runnerPtyUrl);
-framedRunnerPtyUrl.searchParams.set("runnerProtocol", "cfr1-framed-io-v1");
+framedRunnerPtyUrl.searchParams.set("runnerProtocol", "cfr1-framed-io-v2");
 const terminal = new WebSocket(framedRunnerPtyUrl);
 terminal.binaryType = "arraybuffer";
 ```
@@ -106,10 +106,10 @@ terminal.binaryType = "arraybuffer";
 Existing runners retain raw input and output by opening the returned URL
 unchanged. A new runner opts into correlated binary `CFR1` input, output, and
 acknowledgement frames by adding the exact
-`runnerProtocol=cfr1-framed-io-v1` query before opening the socket. The relay
-selects that mode before accepting the connection, so there is no pending
-handshake. Framed runners acknowledge only after their PTY accepts the input;
-the complete byte-safe encoder, decoder, and Node PTY runner are in
+`runnerProtocol=cfr1-framed-io-v2` query before opening the socket. The relay
+selects that mode before accepting the connection and fences runner input with
+the relay-owned connection generation. Framed runners acknowledge only after
+their PTY accepts the input. The complete byte-safe encoder, decoder, and Node PTY runner are in
 [`docs/github-actions-sessions.md`](docs/github-actions-sessions.md#runner-pty).
 
 The runner reports heartbeat and durable progress with bearer `agentToken` to `POST /api/agent/interactive-sessions/:id/work-state`. Terminal states are `completed`, `blocked`, `failed`, and `canceled`; active work uses `registered` or `running` plus a specific `phase`.

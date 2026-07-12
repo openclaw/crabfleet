@@ -1122,12 +1122,34 @@ private session-tenancy mode. Re-registering the same ID updates its name,
 address, port, and timestamp while preserving its creation time.
 
 Clients opt into fenced registration by sending
-`X-Crabfleet-Ownership-Mode: token-v1`. The response then includes an
-`ownershipToken` required for deletion. Omitting the header preserves the
-legacy `{ "host": ... }` response and stores a tokenless registration so older
-clients can still clean up during rolling upgrades. Current clients tolerate a
-legacy server response without `ownershipToken` and use tokenless cleanup for
-that registration.
+`X-Crabfleet-Ownership-Mode: token-v1` and a stable
+`X-Crabfleet-Publication-ID`. The publication ID identifies one client's
+attempt across retries and restarts; it must satisfy the same 1-80 character
+identifier rules as the host ID. The response includes an `ownershipToken`
+required for deletion. Omitting the ownership-mode header preserves the legacy
+`{ "host": ... }` response and stores a tokenless registration so older clients
+can still clean up during rolling upgrades. Current clients tolerate a legacy
+server response without `ownershipToken` and retain enough state for guarded
+legacy cleanup.
+
+### POST /api/desktop-hosts/:id?recover=1
+
+Recovers the ownership token after a fenced `PUT` may have committed but its
+response was lost. The signed-in viewer and host ID must match the original
+registration, and the JSON body carries the same stable publication ID:
+
+```json
+{
+  "publicationID": "01JZDESKTOPPUBLICATION"
+}
+```
+
+The response is `{ "ownershipToken": "..." }` when that publication still owns
+the host, or `{ "ownershipToken": null }` when it does not. Recovery never
+reassigns ownership and cannot replace a newer publisher. A route-level `404`
+means the server predates publication recovery, not that the original `PUT`
+definitely failed; rolling-upgrade clients must preserve the uncertain
+registration or use guarded legacy cleanup rather than silently discarding it.
 
 ### DELETE /api/desktop-hosts/:id
 
