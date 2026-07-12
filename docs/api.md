@@ -654,7 +654,8 @@ Replaying the same key, type, trimmed message, and semantic JSON payload returns
 the original event with `duplicate: true`, including when object keys arrive in
 a different order. Reusing the key with different content returns `409`.
 Structured events do not change work state, `lastEvent`, or the existing
-message-event behavior.
+message-event behavior. A terminal session token remains valid for structured
+event append and replay for five minutes after `stoppedAt`, then returns `403`.
 
 ### POST /api/interactive-sessions
 

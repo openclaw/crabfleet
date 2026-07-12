@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { readdirSync, readFileSync } from "node:fs";
 import { DatabaseSync } from "node:sqlite";
 import test from "node:test";
 
@@ -7,6 +7,32 @@ import {
   structuredEventLedgerMaxBytes,
   structuredEventLedgerMaxCount,
 } from "../src/worker/session-events.ts";
+
+test("fresh migration chain creates the structured action event schema", () => {
+  const database = new DatabaseSync(":memory:");
+  const migrations = readdirSync(new URL("../migrations/", import.meta.url))
+    .filter((name) => name.endsWith(".sql"))
+    .sort();
+  for (const migration of migrations) {
+    database.exec(readFileSync(new URL(`../migrations/${migration}`, import.meta.url), "utf8"));
+  }
+
+  const columns = database
+    .prepare("PRAGMA table_info(interactive_session_events)")
+    .all()
+    .map((column) => String(column.name));
+  assert.ok(columns.includes("event_key"));
+  assert.ok(columns.includes("event_type"));
+  assert.ok(columns.includes("payload_json"));
+  assert.equal(
+    database
+      .prepare(
+        "SELECT count(*) AS count FROM sqlite_master WHERE type = 'trigger' AND name = 'enforce_interactive_session_action_event_budget'",
+      )
+      .get()?.count,
+    1,
+  );
+});
 
 test("action event migration preserves messages and keys structured events per session", () => {
   const database = new DatabaseSync(":memory:");

@@ -7,6 +7,7 @@ import {
   GitHubActionsApplication,
   structuredEventRequestMaxBytes,
 } from "../src/worker/github-actions-application.ts";
+import { terminalAgentEventGraceMs } from "../src/worker/session-agent-auth.ts";
 import {
   handleServiceSessionRoute,
   type ServiceSessionRouteDependencies,
@@ -29,7 +30,10 @@ function eventRequest(sessionId: string, token: string): Request {
   });
 }
 
-async function authEnvironment(targetStatus: "ready" | "stopped" | "failed" = "ready") {
+async function authEnvironment(
+  targetStatus: "ready" | "stopped" | "failed" = "ready",
+  stoppedAt: number | null = targetStatus === "ready" ? null : Date.now(),
+) {
   const rows = new Map([
     [
       "IS-source",
@@ -48,6 +52,7 @@ async function authEnvironment(targetStatus: "ready" | "stopped" | "failed" = "r
         work_key: "target",
         agent_token_hash: await sha256("target-token"),
         status: targetStatus,
+        stopped_at: stoppedAt,
       }),
     ],
   ]);
@@ -173,6 +178,20 @@ test("agent event endpoint retains exact-token authentication after terminal wor
     assert.deepEqual(subject.credentialReads, ["IS-target"]);
     assert.equal(subject.mutationCount(), 0);
   }
+});
+
+test("agent event endpoint rejects terminal credentials after the retry window", async () => {
+  const subject = await authEnvironment("stopped", Date.now() - terminalAgentEventGraceMs - 60_000);
+  const application = new GitHubActionsApplication(subject.env, {
+    audit: async () => undefined,
+  });
+
+  await assert.rejects(
+    application.appendStructuredEvent(eventRequest("IS-target", "target-token"), "IS-target"),
+    hasStatus(403),
+  );
+  assert.deepEqual(subject.credentialReads, ["IS-target"]);
+  assert.equal(subject.mutationCount(), 0);
 });
 
 test("authenticated event ingress rejects oversized chunked bodies before persistence", async () => {

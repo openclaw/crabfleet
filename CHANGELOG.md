@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-- Add an agent-authenticated structured action-event ledger with per-session idempotency keys, conflict detection, atomically enforced count and byte budgets, bounded versioned JSON payloads, and complete API/R2 archive exposure while preserving existing message events and work-state behavior.
+- Add an agent-authenticated structured action-event ledger with per-session idempotency keys, conflict detection, atomically enforced count and byte budgets, bounded versioned JSON payloads, complete API/R2 archive exposure, and a five-minute terminal retry window while preserving existing message events and work-state behavior.
 - Add a VideoToolbox-backed Open H.264 RFB pipeline for Share This Mac with up to 60 fps capture, adaptive 1.5–30 Mbit/s rate control, automatic Tight/JPEG fallback, live stream stats, larger resize limits, and a persisted host-enforced view-only mode.
 - Exchange full UTF-8 clipboard text between the native Mac viewer, Share This Mac hosts, and any Extended Clipboard-capable VNC server by completing the RoyalVNCKit fork's extension stub, keeping Latin-1 cut text as the fallback and dropping malformed extension bodies without tearing down the connection.
 - Add persisted send-only and receive-only clipboard directions to the native viewer's focus toolbar; automatic sync respects the direction while the explicit Send and Get actions keep working.
