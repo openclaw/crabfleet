@@ -67,6 +67,25 @@ test("JSON parsing and status errors retain stable messages and status codes", a
       "status" in error &&
       error.status === 400,
   );
+  const rejectedBody = new ReadableStream({
+    start(controller) {
+      controller.error(new Error("request body aborted"));
+    },
+  });
+  await assert.rejects(
+    readJson(
+      new Request("https://fleet.example", {
+        method: "POST",
+        body: rejectedBody,
+        duplex: "half",
+      } as RequestInit & { duplex: "half" }),
+    ),
+    (error: unknown) =>
+      error instanceof Error &&
+      error.message === "invalid json" &&
+      "status" in error &&
+      error.status === 400,
+  );
 
   for (const [error, status, message] of [
     [unauthorized(), 401, "unauthorized"],

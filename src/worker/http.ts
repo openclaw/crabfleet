@@ -54,7 +54,12 @@ export function wantsMarkdown(request: Request): boolean {
 }
 
 export async function readJson<T>(request: Request): Promise<T> {
-  const source = await request.text();
+  let source: string;
+  try {
+    source = await request.text();
+  } catch {
+    throw badRequest("invalid json");
+  }
   let parsed: unknown;
   try {
     parsed = JSON.parse(source) as unknown;
