@@ -7,7 +7,10 @@ import type {
 } from "../admin-service.ts";
 import {
   desktopHostOwnershipHeader,
+  desktopHostOwnershipModeHeader,
+  desktopHostTokenOwnershipMode,
   type DesktopHostInput,
+  type DesktopHostOwnershipMode,
   type DesktopHostRegistration,
 } from "../desktop-host-service.ts";
 import { json, notFound, readJson } from "../http.ts";
@@ -20,6 +23,7 @@ export type ControlPlaneRouteDependencies = {
     user: User,
     id: string,
     input: DesktopHostInput,
+    ownershipMode: DesktopHostOwnershipMode,
   ): Promise<DesktopHostRegistration>;
   removeDesktopHost(user: User, id: string, ownershipToken: string | null): Promise<void>;
   searchGitHubRefs(number: unknown): Promise<unknown>;
@@ -56,6 +60,9 @@ export async function handleControlPlaneRoute(
       user,
       decoded(desktopHostMatch[1]),
       await readJson<DesktopHostInput>(request),
+      request.headers.get(desktopHostOwnershipModeHeader) === desktopHostTokenOwnershipMode
+        ? desktopHostTokenOwnershipMode
+        : "legacy",
     );
     return json(registration);
   }

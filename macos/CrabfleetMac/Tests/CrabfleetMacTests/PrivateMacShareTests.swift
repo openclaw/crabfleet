@@ -617,6 +617,10 @@ struct PrivateMacShareTests {
     #expect(request.url?.absoluteString == "https://fleet.example/api/desktop-hosts/workstation-1")
     #expect(request.httpMethod == "PUT")
     #expect(request.value(forHTTPHeaderField: "Cookie") == "crabbox_session=secret")
+    #expect(
+      request.value(forHTTPHeaderField: CrabfleetDesktopRegistration.ownershipModeHeader)
+        == CrabfleetDesktopRegistration.tokenOwnershipMode
+    )
     let body = try #require(request.httpBody)
     let json = try #require(JSONSerialization.jsonObject(with: body) as? [String: Any])
     #expect(json["name"] as? String == "Workstation")
@@ -642,7 +646,7 @@ struct PrivateMacShareTests {
     let transport = DesktopRegistrationTransport { request in
       let responseURL = try #require(request.url)
       return (
-        Data(#"{"ownershipToken":"server-ownership-token"}"#.utf8),
+        Data(#"{"host":{"id":"workstation"},"ownershipToken":"server-ownership-token"}"#.utf8),
         try #require(
           HTTPURLResponse(
             url: responseURL,
@@ -666,6 +670,66 @@ struct PrivateMacShareTests {
       try await registration.register(identity: identity, port: 5_901)
         == "server-ownership-token"
     )
+  }
+
+  @Test
+  func desktopRegistrationFallsBackToLegacyCleanupForOldServers() async throws {
+    let transport = DesktopRegistrationTransport { request in
+      let responseURL = try #require(request.url)
+      return (
+        Data(#"{"host":{"id":"workstation"}}"#.utf8),
+        try #require(
+          HTTPURLResponse(
+            url: responseURL,
+            statusCode: 200,
+            httpVersion: nil,
+            headerFields: nil
+          ))
+      )
+    }
+    let registration = try #require(
+      CrabfleetDesktopRegistration(
+        environment: [
+          "CRABFLEET_API_URL": "https://fleet.example/api/fleet",
+          "CRABFLEET_SESSION_COOKIE": "crabbox_session=secret",
+        ],
+        transport: transport
+      ))
+    let identity = try TailnetIdentityPolicy.identity(from: statusDocument())
+
+    #expect(try await registration.register(identity: identity, port: 5_901) == nil)
+    let removal = try registration.removalRequest(identity: identity, ownershipToken: nil)
+    #expect(removal.value(forHTTPHeaderField: "X-Crabfleet-Ownership-Token") == nil)
+  }
+
+  @Test
+  func desktopRegistrationRejectsMalformedAdvertisedOwnershipTokens() async throws {
+    let transport = DesktopRegistrationTransport { request in
+      let responseURL = try #require(request.url)
+      return (
+        Data(#"{"host":{"id":"workstation"},"ownershipToken":null}"#.utf8),
+        try #require(
+          HTTPURLResponse(
+            url: responseURL,
+            statusCode: 200,
+            httpVersion: nil,
+            headerFields: nil
+          ))
+      )
+    }
+    let registration = try #require(
+      CrabfleetDesktopRegistration(
+        environment: [
+          "CRABFLEET_API_URL": "https://fleet.example/api/fleet",
+          "CRABFLEET_SESSION_COOKIE": "crabbox_session=secret",
+        ],
+        transport: transport
+      ))
+    let identity = try TailnetIdentityPolicy.identity(from: statusDocument())
+
+    await #expect(throws: DesktopHostRegistrationError.invalidResponse) {
+      try await registration.register(identity: identity, port: 5_901)
+    }
   }
 
   @Test
@@ -1312,7 +1376,7 @@ private actor SuspendedDesktopRegistration: DesktopHostRegistering {
     registrationContinuation != nil
   }
 
-  func register(identity: TailnetIdentity, port: UInt16) async throws -> String {
+  func register(identity: TailnetIdentity, port: UInt16) async throws -> String? {
     events.append(.registerStarted)
     await withCheckedContinuation { continuation in
       registrationContinuation = continuation
@@ -1321,7 +1385,7 @@ private actor SuspendedDesktopRegistration: DesktopHostRegistering {
     return "registration-token"
   }
 
-  func unregister(identity: TailnetIdentity, ownershipToken: String) async throws {
+  func unregister(identity: TailnetIdentity, ownershipToken: String?) async throws {
     #expect(ownershipToken == "registration-token")
     events.append(.unregisterStarted)
   }
@@ -1339,7 +1403,7 @@ private enum DesktopRegistrationTestError: Error {
 private actor RecordingDesktopRegistration: DesktopHostRegistering {
   enum Event: Equatable {
     case register(String)
-    case unregister(String, String)
+    case unregister(String, String?)
   }
 
   private var registerFailures: [String: Int]
@@ -1354,7 +1418,7 @@ private actor RecordingDesktopRegistration: DesktopHostRegistering {
     self.unregisterFailures = unregisterFailures
   }
 
-  func register(identity: TailnetIdentity, port: UInt16) async throws -> String {
+  func register(identity: TailnetIdentity, port: UInt16) async throws -> String? {
     events.append(.register(identity.dnsName))
     if consumeFailure(for: identity.dnsName, from: &registerFailures) {
       throw DesktopRegistrationTestError.failed
@@ -1362,7 +1426,7 @@ private actor RecordingDesktopRegistration: DesktopHostRegistering {
     return "token:\(identity.dnsName)"
   }
 
-  func unregister(identity: TailnetIdentity, ownershipToken: String) async throws {
+  func unregister(identity: TailnetIdentity, ownershipToken: String?) async throws {
     events.append(.unregister(identity.dnsName, ownershipToken))
     if consumeFailure(for: identity.dnsName, from: &unregisterFailures) {
       throw DesktopRegistrationTestError.failed
@@ -1386,11 +1450,11 @@ private actor SuspendedDesktopCleanupRegistration: DesktopHostRegistering {
     unregistrationContinuation != nil
   }
 
-  func register(identity: TailnetIdentity, port: UInt16) async throws -> String {
+  func register(identity: TailnetIdentity, port: UInt16) async throws -> String? {
     "slow-cleanup-token"
   }
 
-  func unregister(identity: TailnetIdentity, ownershipToken: String) async throws {
+  func unregister(identity: TailnetIdentity, ownershipToken: String?) async throws {
     #expect(ownershipToken == "slow-cleanup-token")
     await withCheckedContinuation { continuation in
       unregistrationContinuation = continuation

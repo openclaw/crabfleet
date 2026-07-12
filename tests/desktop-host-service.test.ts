@@ -2,7 +2,10 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import type { DesktopHostRow, DesktopHostStore } from "../src/worker/desktop-host-repository.ts";
-import { DesktopHostService } from "../src/worker/desktop-host-service.ts";
+import {
+  DesktopHostService,
+  desktopHostTokenOwnershipMode,
+} from "../src/worker/desktop-host-service.ts";
 import type { User } from "../src/worker/models.ts";
 
 const alice: User = {
@@ -53,11 +56,16 @@ test("desktop hosts are canonicalized and isolated to their stable owner", async
     () => now,
     () => tokens.shift() ?? "unexpected-token",
   );
-  const registration = await service.register(alice, " Studio.ONE ", {
-    name: " Peter's Mac Studio ",
-    address: "100.68.201.40",
-    port: 5901,
-  });
+  const registration = await service.register(
+    alice,
+    " Studio.ONE ",
+    {
+      name: " Peter's Mac Studio ",
+      address: "100.68.201.40",
+      port: 5901,
+    },
+    desktopHostTokenOwnershipMode,
+  );
   const host = registration.host;
 
   assert.deepEqual(host, {
@@ -74,11 +82,16 @@ test("desktop hosts are canonicalized and isolated to their stable owner", async
   assert.deepEqual(await service.list(bob), []);
 
   now = 84;
-  const updatedRegistration = await service.register(alice, host.id, {
-    name: "Renamed Studio",
-    address: host.address,
-    port: host.port,
-  });
+  const updatedRegistration = await service.register(
+    alice,
+    host.id,
+    {
+      name: "Renamed Studio",
+      address: host.address,
+      port: host.port,
+    },
+    desktopHostTokenOwnershipMode,
+  );
   const updated = updatedRegistration.host;
   assert.equal(updated.createdAt, 42);
   assert.equal(updated.updatedAt, 84);
@@ -101,11 +114,21 @@ test("stale desktop host cleanup cannot remove a newer registration", async () =
   );
   const input = { name: "Studio", address: "100.64.1.2", port: 5901 };
 
-  const oldRegistration = await service.register(alice, "studio", input);
-  const newRegistration = await service.register(alice, "studio", {
-    ...input,
-    name: "New Studio Process",
-  });
+  const oldRegistration = await service.register(
+    alice,
+    "studio",
+    input,
+    desktopHostTokenOwnershipMode,
+  );
+  const newRegistration = await service.register(
+    alice,
+    "studio",
+    {
+      ...input,
+      name: "New Studio Process",
+    },
+    desktopHostTokenOwnershipMode,
+  );
 
   await service.remove(alice, "studio", oldRegistration.ownershipToken);
   assert.deepEqual(await service.list(alice), [newRegistration.host]);
@@ -133,16 +156,41 @@ test("tokenless cleanup removes only migrated legacy desktop hosts", async () =>
     updatedAt: 1,
   };
   store.rows.set(`${alice.subject}:${legacy.id}`, legacy);
-  const registration = await service.register(alice, "new-studio", {
-    name: "New Studio",
-    address: "100.64.1.3",
-    port: 5901,
-  });
+  const registration = await service.register(
+    alice,
+    "new-studio",
+    {
+      name: "New Studio",
+      address: "100.64.1.3",
+      port: 5901,
+    },
+    desktopHostTokenOwnershipMode,
+  );
 
   await service.remove(alice, legacy.id, null);
   await service.remove(alice, registration.host.id, null);
 
   assert.deepEqual(await service.list(alice), [registration.host]);
+});
+
+test("legacy clients register tokenless rows they can remove after a server upgrade", async () => {
+  const store = new MemoryDesktopHostStore();
+  const service = new DesktopHostService(
+    store,
+    () => 42,
+    () => "must-not-be-created",
+  );
+
+  const registration = await service.register(alice, "rolling-upgrade", {
+    name: "Rolling Upgrade",
+    address: "100.64.1.4",
+    port: 5901,
+  });
+
+  assert.equal(registration.ownershipToken, undefined);
+  assert.equal(store.rows.get(`${alice.subject}:rolling-upgrade`)?.ownershipToken, "");
+  await service.remove(alice, registration.host.id, null);
+  assert.deepEqual(await service.list(alice), []);
 });
 
 test("desktop hosts accept only bounded metadata and Tailscale IPv4 endpoints", async () => {

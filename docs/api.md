@@ -1117,14 +1117,21 @@ The host is visible only to the same stable user, regardless of shared or
 private session-tenancy mode. Re-registering the same ID updates its name,
 address, port, and timestamp while preserving its creation time.
 
+Clients opt into fenced registration by sending
+`X-Crabfleet-Ownership-Mode: token-v1`. The response then includes an
+`ownershipToken` required for deletion. Omitting the header preserves the
+legacy `{ "host": ... }` response and stores a tokenless registration so older
+clients can still clean up during rolling upgrades. Current clients tolerate a
+legacy server response without `ownershipToken` and use tokenless cleanup for
+that registration.
+
 ### DELETE /api/desktop-hosts/:id
 
 Removes one registered desktop owned by the signed-in viewer. The route cannot
-remove another user's record with the same ID. Registrations created by current
-clients require the exact `X-Crabfleet-Ownership-Token` returned by `PUT`.
-Older clients may omit the header only to remove a migrated legacy registration
-whose stored ownership token is empty; omission never removes a tokenized
-registration.
+remove another user's record with the same ID. Fenced registrations require the
+exact `X-Crabfleet-Ownership-Token` returned by `PUT`. Legacy clients may omit
+the header only to remove a registration whose stored ownership token is empty;
+omission never removes a tokenized registration.
 
 ## Static Routes
 

@@ -6,6 +6,10 @@ import {
   handleControlPlaneRoute,
   type ControlPlaneRouteDependencies,
 } from "../src/worker/routes/control-plane.ts";
+import {
+  desktopHostOwnershipModeHeader,
+  desktopHostTokenOwnershipMode,
+} from "../src/worker/desktop-host-service.ts";
 
 const viewer: User = {
   subject: "github:1",
@@ -41,9 +45,9 @@ function dependencies(calls: string[]): ControlPlaneRouteDependencies {
       calls.push(`fleet:${user.login}`);
       return { handler: "fleet" };
     },
-    async registerDesktopHost(user, id, input) {
-      calls.push(`desktop-host:register:${user.login}:${id}:${input.name}`);
-      return {
+    async registerDesktopHost(user, id, input, ownershipMode) {
+      calls.push(`desktop-host:register:${user.login}:${id}:${input.name}:${ownershipMode}`);
+      const registration = {
         host: {
           id,
           owner: user.login ?? user.subject,
@@ -53,8 +57,10 @@ function dependencies(calls: string[]): ControlPlaneRouteDependencies {
           createdAt: 1,
           updatedAt: 1,
         },
-        ownershipToken: "ownership-token",
       };
+      return ownershipMode === desktopHostTokenOwnershipMode
+        ? { ...registration, ownershipToken: "ownership-token" }
+        : registration;
     },
     async removeDesktopHost(user, id, ownershipToken) {
       calls.push(`desktop-host:remove:${user.login}:${id}:${ownershipToken ?? "legacy"}`);
@@ -154,10 +160,17 @@ test("control-plane read and card routes enforce their role boundaries", async (
 test("desktop host routes register and remove only the authenticated user's host", async () => {
   const calls: string[] = [];
   const registered = await dispatch(
-    request("PUT", "/api/desktop-hosts/mac%2Dstudio", {
-      name: "Mac Studio",
-      address: "100.64.1.2",
-      port: 5901,
+    new Request("https://fleet.example/api/desktop-hosts/mac%2Dstudio", {
+      method: "PUT",
+      headers: {
+        "content-type": "application/json",
+        [desktopHostOwnershipModeHeader]: desktopHostTokenOwnershipMode,
+      },
+      body: JSON.stringify({
+        name: "Mac Studio",
+        address: "100.64.1.2",
+        port: 5901,
+      }),
     }),
     viewer,
     calls,
@@ -186,18 +199,41 @@ test("desktop host routes register and remove only the authenticated user's host
   );
   assert.equal(removed?.status, 200);
   assert.deepEqual(calls, [
-    "desktop-host:register:viewer:mac-studio:Mac Studio",
+    "desktop-host:register:viewer:mac-studio:Mac Studio:token-v1",
     "desktop-host:remove:viewer:mac-studio:ownership-token",
   ]);
 
   const legacyCalls: string[] = [];
+  const legacyRegistered = await dispatch(
+    request("PUT", "/api/desktop-hosts/legacy%2Dstudio", {
+      name: "Legacy Studio",
+      address: "100.64.1.3",
+      port: 5901,
+    }),
+    viewer,
+    legacyCalls,
+  );
+  assert.deepEqual(await legacyRegistered?.json(), {
+    host: {
+      id: "legacy-studio",
+      owner: "viewer",
+      name: "Legacy Studio",
+      address: "100.64.1.3",
+      port: 5901,
+      createdAt: 1,
+      updatedAt: 1,
+    },
+  });
   const legacyRemoved = await dispatch(
     request("DELETE", "/api/desktop-hosts/legacy%2Dstudio"),
     viewer,
     legacyCalls,
   );
   assert.equal(legacyRemoved?.status, 200);
-  assert.deepEqual(legacyCalls, ["desktop-host:remove:viewer:legacy-studio:legacy"]);
+  assert.deepEqual(legacyCalls, [
+    "desktop-host:register:viewer:legacy-studio:Legacy Studio:legacy",
+    "desktop-host:remove:viewer:legacy-studio:legacy",
+  ]);
 });
 
 test("card actions derive viewer or maintainer authorization from the action", async () => {

@@ -162,7 +162,8 @@ export class WorkerApplication {
     return {
       readState: (request, user) => this.readState(request, user, context),
       readFleet: (user) => this.readFleetState(user, undefined, context),
-      registerDesktopHost: (user, id, input) => this.desktopHosts().register(user, id, input),
+      registerDesktopHost: (user, id, input, ownershipMode) =>
+        this.desktopHosts().register(user, id, input, ownershipMode),
       removeDesktopHost: (user, id, ownershipToken) =>
         this.desktopHosts().remove(user, id, ownershipToken),
       searchGitHubRefs: (number) => this.githubReferenceService().search(number),

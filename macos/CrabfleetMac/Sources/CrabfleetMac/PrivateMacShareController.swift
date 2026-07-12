@@ -35,7 +35,7 @@ final class PrivateMacShareStopCoordinator {
 final class DesktopHostRegistrationLifecycle {
   private struct PublishedRegistration: Equatable {
     let identity: TailnetIdentity
-    let ownershipToken: String
+    let ownershipToken: String?
   }
 
   private let coordinator: DesktopHostRegistrationCoordinator

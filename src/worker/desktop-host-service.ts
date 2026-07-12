@@ -21,10 +21,13 @@ export type DesktopHost = {
 
 export type DesktopHostRegistration = {
   host: DesktopHost;
-  ownershipToken: string;
+  ownershipToken?: string;
 };
 
 export const desktopHostOwnershipHeader = "x-crabfleet-ownership-token";
+export const desktopHostOwnershipModeHeader = "x-crabfleet-ownership-mode";
+export const desktopHostTokenOwnershipMode = "token-v1";
+export type DesktopHostOwnershipMode = "legacy" | typeof desktopHostTokenOwnershipMode;
 
 export class DesktopHostService {
   private readonly store: DesktopHostStore;
@@ -50,13 +53,15 @@ export class DesktopHostService {
     user: User,
     rawID: string,
     input: DesktopHostInput,
+    ownershipMode: DesktopHostOwnershipMode = "legacy",
   ): Promise<DesktopHostRegistration> {
     const id = desktopHostID(rawID);
     const name = boundedText(input.name, "name", 100);
     const address = tailscaleIPv4(input.address);
     const port = desktopHostPort(input.port);
     const now = this.now();
-    const ownershipToken = this.createOwnershipToken();
+    const ownershipToken =
+      ownershipMode === desktopHostTokenOwnershipMode ? this.createOwnershipToken() : "";
     const host: DesktopHostRow = {
       ownerSubject: tenantSubject(user),
       id,
@@ -68,10 +73,11 @@ export class DesktopHostService {
       createdAt: now,
       updatedAt: now,
     };
-    return {
+    const registration: DesktopHostRegistration = {
       host: presentDesktopHost(await this.store.upsert(host)),
-      ownershipToken,
     };
+    if (ownershipToken) registration.ownershipToken = ownershipToken;
+    return registration;
   }
 
   async remove(user: User, rawID: string, rawOwnershipToken: unknown): Promise<void> {
