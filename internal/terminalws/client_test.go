@@ -649,6 +649,159 @@ func TestSendInputConfirmedFailsWhenConnectionClosesBeforeAcknowledgement(t *tes
 	}
 }
 
+func TestSendInputConfirmedPrefersAcceptanceBeforeReaderClose(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := websocket.Accept(w, r, nil)
+		if err != nil {
+			t.Error(err)
+			return
+		}
+		for range 2 {
+			if _, _, err := conn.Read(r.Context()); err != nil {
+				t.Error(err)
+				return
+			}
+		}
+		welcome, _ := json.Marshal(welcomePayload{InputAcknowledgements: true})
+		if err := conn.Write(r.Context(), websocket.MessageBinary, encodeFrame(frame{
+			messageType: messageWelcome,
+			payload:     welcome,
+		})); err != nil {
+			t.Error(err)
+			return
+		}
+		subscribed, _ := json.Marshal(eventPayload{Type: "subscribed", CanInput: true})
+		if err := conn.Write(r.Context(), websocket.MessageBinary, encodeFrame(frame{
+			messageType: messageEvent,
+			sessionID:   "IS-accepted-before-close",
+			payload:     subscribed,
+		})); err != nil {
+			t.Error(err)
+			return
+		}
+		if _, _, err := conn.Read(r.Context()); err != nil {
+			t.Error(err)
+			return
+		}
+		accepted, _ := json.Marshal(eventPayload{Type: "input-accepted"})
+		if err := conn.Write(r.Context(), websocket.MessageBinary, encodeFrame(frame{
+			messageType: messageEvent,
+			sessionID:   "IS-accepted-before-close",
+			payload:     accepted,
+		})); err != nil {
+			t.Error(err)
+			return
+		}
+		_ = conn.Close(websocket.StatusNormalClosure, "")
+	}))
+	defer server.Close()
+
+	endpoint, err := Endpoint(server.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	client, err := Dial(context.Background(), endpoint, "IS-accepted-before-close", Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+
+	if err := client.SendInputConfirmed(context.Background(), []byte("echo ready\n")); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestAttachRejectsSessionClosedBeforeAttachment(t *testing.T) {
+	closedSent := make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := websocket.Accept(w, r, nil)
+		if err != nil {
+			t.Error(err)
+			return
+		}
+		defer conn.Close(websocket.StatusNormalClosure, "")
+		for range 2 {
+			if _, _, err := conn.Read(r.Context()); err != nil {
+				t.Error(err)
+				return
+			}
+		}
+		welcome, _ := json.Marshal(welcomePayload{})
+		if err := conn.Write(r.Context(), websocket.MessageBinary, encodeFrame(frame{
+			messageType: messageWelcome,
+			payload:     welcome,
+		})); err != nil {
+			t.Error(err)
+			return
+		}
+		subscribed, _ := json.Marshal(eventPayload{Type: "subscribed", CanInput: true})
+		if err := conn.Write(r.Context(), websocket.MessageBinary, encodeFrame(frame{
+			messageType: messageEvent,
+			sessionID:   "IS-closed-before-attach",
+			payload:     subscribed,
+		})); err != nil {
+			t.Error(err)
+			return
+		}
+		closed, _ := json.Marshal(eventPayload{Type: "closed"})
+		if err := conn.Write(r.Context(), websocket.MessageBinary, encodeFrame(frame{
+			messageType: messageEvent,
+			sessionID:   "IS-closed-before-attach",
+			payload:     closed,
+		})); err != nil {
+			t.Error(err)
+			return
+		}
+		close(closedSent)
+		<-r.Context().Done()
+	}))
+	defer server.Close()
+
+	endpoint, err := Endpoint(server.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	client, err := Dial(context.Background(), endpoint, "IS-closed-before-attach", Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+	<-closedSent
+	deadline := time.Now().Add(time.Second)
+	for {
+		client.stateMu.Lock()
+		terminalErr := client.terminalErr
+		client.stateMu.Unlock()
+		if terminalErr != nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("terminal close was not retained")
+		}
+		time.Sleep(time.Millisecond)
+	}
+
+	err = client.Attach(context.Background(), newBlockingTerminal(), nil)
+	if err == nil || !strings.Contains(err.Error(), "terminal closed") {
+		t.Fatalf("error = %v", err)
+	}
+}
+
+func TestRetiredAttachmentCannotAcceptBufferedFrames(t *testing.T) {
+	attachment := &terminalAttachment{
+		frames: make(chan frame),
+		done:   make(chan struct{}),
+	}
+	close(attachment.done)
+	client := &Client{attachment: attachment}
+
+	for range 100 {
+		if client.deliverAttachment(context.Background(), frame{messageType: messageOutput}) {
+			t.Fatal("retired attachment accepted output")
+		}
+	}
+}
+
 func TestSendInputConfirmedRejectionDoesNotRevokeControl(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		conn, err := websocket.Accept(w, r, nil)
@@ -1452,8 +1605,8 @@ func TestClientContinuesReadOnlyAndResumesControl(t *testing.T) {
 	if size := <-resumedSize; size != (Size{Cols: 132, Rows: 43}) {
 		t.Fatalf("resumed size = %#v", size)
 	}
-	if !client.canInput.Load() {
-		t.Fatal("client did not resume input control")
+	if client.canInput.Load() {
+		t.Fatal("closed terminal retained input control")
 	}
 }
 

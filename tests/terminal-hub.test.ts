@@ -469,7 +469,11 @@ test("terminal hub publishes live controller downgrades and promotions", async (
     }),
   });
   await flushQueues();
-  assert.equal(frame(server.sent.at(-1)!).type, TerminalMessageType.ControlRevoked);
+  assert.equal(frame(server.sent.at(-2)!).type, TerminalMessageType.ControlRevoked);
+  assert.deepEqual(decodeJsonPayload(frame(server.sent.at(-1)!).payload), {
+    type: "input-rejected",
+    error: "terminal control is not granted",
+  });
   assert.deepEqual(upstream.sent, []);
 
   canInput = true;

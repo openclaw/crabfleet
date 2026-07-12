@@ -241,6 +241,10 @@ export class TerminalHub {
                 const canInput = await subscription.canInput();
                 updateTerminalInputCapability(server, subscription, canInput);
                 if (!canInput) {
+                  sendTerminalJson(server, TerminalMessageType.Event, frame.sessionId, {
+                    type: "input-rejected",
+                    error: "terminal control is not granted",
+                  });
                   return;
                 }
                 if (subscription.upstream.readyState !== WebSocket.OPEN) {

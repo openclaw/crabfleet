@@ -88,6 +88,7 @@ type Client struct {
 	inputWaiter                  chan error
 	attachment                   *terminalAttachment
 	attachmentReady              chan struct{}
+	terminalErr                  error
 	readerDone                   chan struct{}
 	readerErr                    error
 }
@@ -292,6 +293,11 @@ func (c *Client) SendInputConfirmed(ctx context.Context, payload []byte) error {
 	case err := <-waiter:
 		return err
 	case <-c.readerDone:
+		select {
+		case err := <-waiter:
+			return err
+		default:
+		}
 		c.clearInputWaiter(waiter)
 		return readerUnavailableError(c.readerError())
 	case <-ctx.Done():
@@ -510,6 +516,8 @@ func (c *Client) handleFrame(ctx context.Context, current frame) error {
 		case "input-rejected":
 			c.completeInput(frameError(current, "terminal input rejected"))
 		case "closed":
+			c.canInput.Store(false)
+			c.markTerminalClosed(errors.New("terminal closed"))
 			c.completeInput(errors.New("terminal closed before accepting input"))
 			c.deliverAttachment(ctx, current)
 		default:
@@ -528,6 +536,9 @@ func (c *Client) registerInputWaiter(waiter chan error) error {
 	case <-c.readerDone:
 		return readerUnavailableError(c.readerErr)
 	default:
+	}
+	if c.terminalErr != nil {
+		return c.terminalErr
 	}
 	c.inputWaiter = waiter
 	if c.attachment == nil && c.attachmentReady != nil {
@@ -561,13 +572,16 @@ func (c *Client) registerAttachment() (*terminalAttachment, error) {
 	if c.attachment != nil {
 		return nil, errors.New("terminal client is already attached")
 	}
+	if c.terminalErr != nil {
+		return nil, c.terminalErr
+	}
 	select {
 	case <-c.readerDone:
 		return nil, readerUnavailableError(c.readerErr)
 	default:
 	}
 	attachment := &terminalAttachment{
-		frames: make(chan frame, 16),
+		frames: make(chan frame),
 		done:   make(chan struct{}),
 	}
 	c.attachment = attachment
@@ -588,6 +602,14 @@ func (c *Client) clearAttachment(attachment *terminalAttachment) {
 		default:
 			c.attachmentReady = make(chan struct{})
 		}
+	}
+	c.stateMu.Unlock()
+}
+
+func (c *Client) markTerminalClosed(err error) {
+	c.stateMu.Lock()
+	if c.terminalErr == nil {
+		c.terminalErr = err
 	}
 	c.stateMu.Unlock()
 }
@@ -649,11 +671,11 @@ func (c *Client) finishReader(err error) {
 	c.readerErr = normalizeCloseError(err)
 	waiter := c.inputWaiter
 	c.inputWaiter = nil
-	close(c.readerDone)
-	c.stateMu.Unlock()
 	if waiter != nil {
 		waiter <- readerUnavailableError(c.readerErr)
 	}
+	close(c.readerDone)
+	c.stateMu.Unlock()
 }
 
 func (c *Client) readerError() error {
