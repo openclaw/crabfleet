@@ -2046,6 +2046,14 @@ test("credential refresh replaces an obsolete durable namespace without losing r
     ),
     true,
   );
+  registrationExpiresAt = await markSandboxCredentialPolicyRegistrationWriteStarted(
+    env,
+    "IS-42",
+    "sandbox-1",
+    registration,
+    ownershipFence,
+  );
+  assert.ok(registrationExpiresAt);
   assert.equal(
     (
       await stub.fetch("https://crabfleet.internal/api/session-control/register", {
@@ -2088,6 +2096,23 @@ test("credential refresh replaces an obsolete durable namespace without losing r
     ownershipFence,
   );
   assert.ok(registrationExpiresAt);
+  assert.equal(
+    sqlite
+      .prepare(`
+        UPDATE interactive_session_credential_policies
+        SET
+          state = 'cleanup_pending',
+          cleanup_claim = 'registration:wrong',
+          cleanup_claim_expires_at = ?,
+          updated_at = ?
+        WHERE session_id = 'IS-42'
+          AND sandbox_id = 'sandbox-1'
+          AND lookup_id = 'do-old'
+          AND state = 'active'
+      `)
+      .run(registrationExpiresAt, Date.now()).changes,
+    0,
+  );
   assert.deepEqual(
     await claimObsoleteSandboxCredentialPolicyReferences(
       env,

@@ -72,9 +72,27 @@ WHEN EXISTS (
       (
         staged.registration_write_started = 1
         AND NOT (
-          staged.state = 'cleanup_pending'
-          AND OLD.state != 'cleanup_pending'
-          AND NEW.state = 'cleanup_pending'
+          (
+            staged.state = 'cleanup_pending'
+            AND OLD.state != 'cleanup_pending'
+            AND NEW.state = 'cleanup_pending'
+          )
+          OR (
+            staged.state = 'registering'
+            AND staged.repair_generation = OLD.registration_generation
+            AND NEW.registration_generation = OLD.registration_generation
+            AND staged.registration_claim = NEW.cleanup_claim
+            AND staged.registration_claim_expires_at = NEW.cleanup_claim_expires_at
+            AND OLD.state = 'active'
+            AND NEW.state = 'cleanup_pending'
+            AND json_valid(staged.lookup_ids_json)
+            AND NOT EXISTS (
+              SELECT 1
+              FROM json_each(staged.lookup_ids_json) AS current_lookup
+              WHERE current_lookup.type = 'text'
+                AND current_lookup.value = OLD.lookup_id
+            )
+          )
         )
       )
       OR (
