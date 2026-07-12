@@ -727,7 +727,7 @@ func TestSendInputConfirmedFailsWhenConnectionClosesBeforeAcknowledgement(t *tes
 			t.Error(err)
 			return
 		}
-		_ = conn.Close(websocket.StatusNormalClosure, "")
+		_ = conn.Close(websocket.StatusInternalError, "reader lost after input write")
 	}))
 	defer server.Close()
 
@@ -744,8 +744,73 @@ func TestSendInputConfirmedFailsWhenConnectionClosesBeforeAcknowledgement(t *tes
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
 	err = client.SendInputConfirmed(ctx, []byte("echo ready\n"))
-	if err == nil {
-		t.Fatal("normal close before acknowledgement reported success")
+	if !errors.Is(err, ErrInputDeliveryUnknown) {
+		t.Fatalf("error = %v", err)
+	}
+	var closeError websocket.CloseError
+	if !errors.As(err, &closeError) {
+		t.Fatalf("error does not preserve websocket close: %v", err)
+	}
+	if closeError.Code != websocket.StatusInternalError {
+		t.Fatalf("close code = %v", closeError.Code)
+	}
+}
+
+func TestSendInputConfirmedKeepsPreWriteReaderLossOrdinary(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := websocket.Accept(w, r, nil)
+		if err != nil {
+			t.Error(err)
+			return
+		}
+		for range 2 {
+			if _, _, err := conn.Read(r.Context()); err != nil {
+				t.Error(err)
+				return
+			}
+		}
+		welcome, _ := json.Marshal(welcomePayload{InputAcknowledgements: true})
+		if err := conn.Write(r.Context(), websocket.MessageBinary, encodeFrame(frame{
+			messageType: messageWelcome,
+			payload:     welcome,
+		})); err != nil {
+			t.Error(err)
+			return
+		}
+		subscribed, _ := json.Marshal(eventPayload{Type: "subscribed", CanInput: true})
+		if err := conn.Write(r.Context(), websocket.MessageBinary, encodeFrame(frame{
+			messageType: messageEvent,
+			sessionID:   "IS-close-before-write",
+			payload:     subscribed,
+		})); err != nil {
+			t.Error(err)
+			return
+		}
+		_ = conn.Close(websocket.StatusPolicyViolation, "reader lost before input write")
+	}))
+	defer server.Close()
+
+	endpoint, err := Endpoint(server.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	client, err := Dial(context.Background(), endpoint, "IS-close-before-write", Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+	<-client.readerDone
+
+	err = client.SendInputConfirmed(context.Background(), []byte("never-written\n"))
+	if errors.Is(err, ErrInputDeliveryUnknown) {
+		t.Fatalf("pre-write error became ambiguous: %v", err)
+	}
+	var closeError websocket.CloseError
+	if !errors.As(err, &closeError) {
+		t.Fatalf("error does not preserve websocket close: %v", err)
+	}
+	if closeError.Code != websocket.StatusPolicyViolation {
+		t.Fatalf("close code = %v", closeError.Code)
 	}
 }
 
@@ -1547,6 +1612,9 @@ func TestSendInputConfirmedClosesAfterConfirmationTimeout(t *testing.T) {
 	defer cancel()
 	started := time.Now()
 	err = client.SendInputConfirmed(ctx, []byte("first\n"))
+	if !errors.Is(err, ErrInputDeliveryUnknown) {
+		t.Fatalf("error = %v", err)
+	}
 	if !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("error = %v", err)
 	}

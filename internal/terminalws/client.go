@@ -124,6 +124,18 @@ type attachmentDelivery struct {
 	controlGrantGeneration uint64
 }
 
+type inputConfirmationInterruptedError struct {
+	cause error
+}
+
+func (e *inputConfirmationInterruptedError) Error() string {
+	return e.cause.Error()
+}
+
+func (e *inputConfirmationInterruptedError) Unwrap() error {
+	return e.cause
+}
+
 type eventPayload struct {
 	Type     string `json:"type"`
 	Error    string `json:"error"`
@@ -341,7 +353,12 @@ func (c *Client) SendInputConfirmed(ctx context.Context, payload []byte) error {
 		c.clearInputWaiter(waiter)
 		return err
 	}
-	return c.waitForInputConfirmation(ctx, waiter)
+	err := c.waitForInputConfirmation(ctx, waiter)
+	var interrupted *inputConfirmationInterruptedError
+	if errors.As(err, &interrupted) {
+		return inputDeliveryUnknownCause(interrupted.cause)
+	}
+	return err
 }
 
 func (c *Client) drainInputConfirmation(waiter chan error) {
@@ -364,7 +381,9 @@ func (c *Client) waitForInputConfirmation(ctx context.Context, waiter chan error
 		if !c.clearInputWaiter(waiter) {
 			return <-waiter
 		}
-		return readerUnavailableError(c.readerError())
+		return &inputConfirmationInterruptedError{
+			cause: readerUnavailableError(c.readerError()),
+		}
 	case <-ctx.Done():
 		select {
 		case err := <-waiter:
@@ -375,7 +394,7 @@ func (c *Client) waitForInputConfirmation(ctx context.Context, waiter chan error
 			return <-waiter
 		}
 		c.closeNow()
-		return ctx.Err()
+		return &inputConfirmationInterruptedError{cause: ctx.Err()}
 	}
 }
 
@@ -918,7 +937,9 @@ func (c *Client) finishReader(err error) {
 	waiter := c.inputWaiter
 	c.inputWaiter = nil
 	if waiter != nil {
-		waiter <- readerUnavailableError(c.readerErr)
+		waiter <- &inputConfirmationInterruptedError{
+			cause: readerUnavailableError(c.readerErr),
+		}
 	}
 	close(c.readerDone)
 	c.stateMu.Unlock()
@@ -1029,6 +1050,13 @@ func inputDeliveryUnknownError(current frame) error {
 		return ErrInputDeliveryUnknown
 	}
 	return fmt.Errorf("%w: %s", ErrInputDeliveryUnknown, detail)
+}
+
+func inputDeliveryUnknownCause(cause error) error {
+	if cause == nil {
+		return ErrInputDeliveryUnknown
+	}
+	return fmt.Errorf("%w: %w", ErrInputDeliveryUnknown, cause)
 }
 
 func normalizeCloseError(err error) error {
