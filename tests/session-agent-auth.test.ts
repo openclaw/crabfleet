@@ -7,11 +7,15 @@ import {
   AgentSessionAuthenticator,
   agentSessionId,
   agentSessionToken,
+  terminalAgentEventGraceMs,
 } from "../src/worker/session-agent-auth.ts";
 import { interactiveSession } from "../src/worker/session-model.ts";
 import { sessionRow } from "./helpers/session-row.ts";
 
-function authenticator(values: Parameters<typeof sessionRow>[0] = {}): AgentSessionAuthenticator {
+function authenticator(
+  values: Parameters<typeof sessionRow>[0] = {},
+  now: () => number = () => 10_000,
+): AgentSessionAuthenticator {
   const session = interactiveSession(
     sessionRow({
       id: "IS-agent",
@@ -21,11 +25,14 @@ function authenticator(values: Parameters<typeof sessionRow>[0] = {}): AgentSess
     }),
     [],
   );
-  return new AgentSessionAuthenticator({
-    readCredential: async (id) =>
-      id === session.id ? { session, tokenHash: "agent-token-hash" } : null,
-    hashToken: async (token) => (token === "agent-token" ? "agent-token-hash" : sha256(token)),
-  });
+  return new AgentSessionAuthenticator(
+    {
+      readCredential: async (id) =>
+        id === session.id ? { session, tokenHash: "agent-token-hash" } : null,
+      hashToken: async (token) => (token === "agent-token" ? "agent-token-hash" : sha256(token)),
+    },
+    now,
+  );
 }
 
 test("agent session credentials use the canonical Crabfleet protocol", () => {
@@ -148,27 +155,43 @@ test("agent authentication rejects missing, invalid, and inactive credentials", 
   });
 });
 
-test("terminal event authentication permits only stopped and failed sessions", async () => {
+test("terminal event authentication is limited to the stopped-at retry window", async () => {
   const request = new Request("https://fleet.example/api/agent/state", {
     headers: {
       authorization: "Bearer agent-token",
       "x-crabfleet-session-id": "IS-agent",
     },
   });
+  const now = 1_000_000;
 
   for (const status of ["stopped", "failed"] as const) {
     await assert.doesNotReject(() =>
-      authenticator({ status }).require(request, "IS-agent", {
-        allowTerminalEventReplay: true,
-      }),
+      authenticator({ status, stopped_at: now - terminalAgentEventGraceMs }, () => now).require(
+        request,
+        "IS-agent",
+        {
+          allowTerminalEventReplay: true,
+        },
+      ),
     );
   }
   for (const status of ["stopping", "expired"] as const) {
     await assert.rejects(
       () =>
-        authenticator({ status }).require(request, "IS-agent", {
+        authenticator({ status, stopped_at: now }, () => now).require(request, "IS-agent", {
           allowTerminalEventReplay: true,
         }),
+      { message: "agent session is not active" },
+    );
+  }
+  for (const stoppedAt of [null, now + 1, now - terminalAgentEventGraceMs - 1]) {
+    await assert.rejects(
+      () =>
+        authenticator({ status: "stopped", stopped_at: stoppedAt }, () => now).require(
+          request,
+          "IS-agent",
+          { allowTerminalEventReplay: true },
+        ),
       { message: "agent session is not active" },
     );
   }

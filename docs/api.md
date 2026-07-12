@@ -655,11 +655,11 @@ the original event with `duplicate: true`, including when object keys arrive in
 a different order. Reusing the key with different content returns `409`.
 Credential-shaped payload fields are recursively replaced with `[redacted]`,
 and embedded credential text is scrubbed from payload strings and `message`
-before persistence. After a session becomes terminal, only an exact replay of
-an already-persisted event is accepted without refreshing finalized archives;
-new terminal history is rejected.
-Structured events do not change work state, `lastEvent`, or the existing
-message-event behavior.
+before persistence. For five minutes after a session becomes terminal, only an
+exact replay of an already-persisted event is accepted without refreshing
+finalized archives; new terminal history is rejected. The terminal credential
+returns `403` after that window. Structured events do not change work state,
+`lastEvent`, or the existing message-event behavior.
 
 ### POST /api/interactive-sessions
 

@@ -21,11 +21,15 @@ export type AgentSessionAuthenticationOptions = {
   allowTerminalEventReplay?: boolean;
 };
 
+export const terminalAgentEventGraceMs = 5 * 60 * 1000;
+
 export class AgentSessionAuthenticator {
   private readonly store: AgentSessionAuthenticationStore;
+  private readonly now: () => number;
 
-  constructor(store: AgentSessionAuthenticationStore) {
+  constructor(store: AgentSessionAuthenticationStore, now: () => number = Date.now) {
     this.store = store;
+    this.now = now;
   }
 
   async require(
@@ -47,9 +51,15 @@ export class AgentSessionAuthenticator {
     if (!credential?.tokenHash || credential.tokenHash !== (await this.store.hashToken(token))) {
       throw unauthorized();
     }
+    const now = this.now();
+    const stoppedAt = credential.session.stoppedAt;
     const terminalEventReplayAllowed =
       options.allowTerminalEventReplay &&
-      (credential.session.status === "stopped" || credential.session.status === "failed");
+      (credential.session.status === "stopped" || credential.session.status === "failed") &&
+      typeof stoppedAt === "number" &&
+      Number.isFinite(stoppedAt) &&
+      stoppedAt <= now &&
+      now - stoppedAt <= terminalAgentEventGraceMs;
     if (
       credential.session.status === "stopping" ||
       (deadInteractiveSessionStatuses.includes(credential.session.status) &&
