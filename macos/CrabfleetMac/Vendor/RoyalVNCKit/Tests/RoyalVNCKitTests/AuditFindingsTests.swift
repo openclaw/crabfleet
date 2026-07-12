@@ -232,10 +232,56 @@ struct AuditFindingsTests {
     connection.expirePixelFormatFenceNegotiation()
 
     #expect(connection.pixelFormatFenceCapabilityProbePayload == nil)
+    #expect(connection.expiredPixelFormatFenceCapabilityProbePayload != nil)
     let transition = try #require(connection.clientToServerMessageQueue.dequeue())
     try await transition.message.send(connection: AuditWritingConnection())
     #expect(connection.pendingPixelFormatTransition == nil)
     #expect(connection.state.pixelFormat?.depth == 8)
+  }
+
+  @Test
+  func acceptsLateFenceCapabilityResponseAfterProbeTimeout() async throws {
+    let connection = VNCConnection(
+      settings: makeSettings(),
+      framebufferAllocator: VNCFramebufferMallocAllocator()
+    )
+    let framebuffer = try makeFramebuffer(width: 2, height: 2, depth: 24)
+    connection.framebuffer = framebuffer
+    connection.state.pixelFormat = framebuffer.sourcePixelFormat
+    connection.connectionState = .connected
+    connection._framebufferUpdatePolicy = .paused
+
+    try connection.handleServerFence(
+      VNCProtocol.ServerFence(
+        messageType: VNCProtocol.ServerFence.messageType,
+        flags: [.request, .blockBefore, .syncNext],
+        payload: Data("support".utf8)
+      )
+    )
+    _ = try #require(connection.clientToServerMessageQueue.dequeue())
+    _ = try #require(connection.clientToServerMessageQueue.dequeue())
+    let probePayload = try #require(connection.pixelFormatFenceCapabilityProbePayload)
+
+    connection.updateColorDepth(.depth8Bit)
+    connection.expirePixelFormatFenceNegotiation()
+    let fallback = try #require(connection.clientToServerMessageQueue.dequeue())
+    try await fallback.message.send(connection: AuditWritingConnection())
+
+    try connection.handleServerFence(
+      VNCProtocol.ServerFence(
+        messageType: VNCProtocol.ServerFence.messageType,
+        flags: [.blockBefore, .syncNext],
+        payload: probePayload
+      )
+    )
+
+    #expect(connection.expiredPixelFormatFenceCapabilityProbePayload == nil)
+    #expect(connection.state.pixelFormatTransitionFenceFlags.contains(.blockBefore))
+    #expect(connection.state.pixelFormatTransitionFenceFlags.contains(.syncNext))
+
+    connection.state.areContinuousUpdatesEnabled = true
+    connection.updateColorDepth(.depth16Bit)
+    #expect(connection.clientToServerMessageQueue.dequeue() != nil)
   }
 
   @Test

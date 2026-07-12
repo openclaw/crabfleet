@@ -319,7 +319,10 @@ extension VNCConnection {
 			framebufferRequestLock.unlock()
 			return
 		}
-		pixelFormatFenceCapabilityProbePayload = nil
+		if probeTimedOut {
+			expiredPixelFormatFenceCapabilityProbePayload = pixelFormatFenceCapabilityProbePayload
+			pixelFormatFenceCapabilityProbePayload = nil
+		}
 		let isWaitingForLegacyFramebufferBoundary =
 			negotiationTimedOut
 			&& !state.areContinuousUpdatesEnabled
@@ -345,8 +348,11 @@ extension VNCConnection {
 
 	func completePixelFormatFence(_ fence: VNCProtocol.ServerFence) throws {
 		framebufferRequestLock.lock()
-		if fence.payload == pixelFormatFenceCapabilityProbePayload {
+		if fence.payload == pixelFormatFenceCapabilityProbePayload
+			|| fence.payload == expiredPixelFormatFenceCapabilityProbePayload {
+			cancelPixelFormatFenceNegotiationTimeoutLocked()
 			pixelFormatFenceCapabilityProbePayload = nil
+			expiredPixelFormatFenceCapabilityProbePayload = nil
 			state.pixelFormatTransitionFenceFlags = fence.flags.intersection([
 				.blockBefore,
 				.blockAfter,
@@ -661,6 +667,7 @@ extension VNCConnection {
 		pixelFormatTransitionFenceWasSent = false
 		cancelPixelFormatTransitionDeadlineLocked()
 		pixelFormatFenceCapabilityProbePayload = nil
+		expiredPixelFormatFenceCapabilityProbePayload = nil
 		cancelPixelFormatFenceNegotiationTimeoutLocked()
 		framebufferRequestLock.unlock()
 	}
