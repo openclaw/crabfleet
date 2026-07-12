@@ -412,6 +412,65 @@ test("terminal hub publishes live controller downgrades and promotions", async (
   server.emit("close");
 });
 
+test("terminal hub never acknowledges input after its upstream closes", async () => {
+  const client = socket();
+  const server = socket();
+  const upstream = socket();
+  let resolvePayloads: ((payloads: Uint8Array[]) => void) | undefined;
+  const payloads = new Promise<Uint8Array[]>((resolve) => {
+    resolvePayloads = resolve;
+  });
+  const hub = new TerminalHub(
+    dependencies(client, server, upstream, {
+      async inputPayloads() {
+        return payloads;
+      },
+    }),
+  );
+  await hub.open(
+    new Request("https://fleet.example/api/terminal/ws", {
+      headers: { upgrade: "websocket" },
+    }),
+    user,
+  );
+  server.emit("message", {
+    data: encodeTerminalFrame({
+      type: TerminalMessageType.Subscribe,
+      sessionId: session.id,
+      payload: encodeSubscribePayload({ flags: 0, columns: 120, rows: 34 }),
+    }),
+  });
+  await flushQueues();
+  await flushQueues();
+
+  server.emit("message", {
+    data: encodeTerminalFrame({
+      type: TerminalMessageType.Input,
+      sessionId: session.id,
+      payload: new TextEncoder().encode("dropped"),
+    }),
+  });
+  await flushQueues();
+  upstream.close(1011, "upstream failed");
+  resolvePayloads?.([new TextEncoder().encode("dropped")]);
+  await flushQueues();
+
+  assert.deepEqual(upstream.sent, []);
+  const messages = server.sent.map((payload) => frame(payload));
+  assert.equal(
+    messages.some(
+      (message) =>
+        message.type === TerminalMessageType.Event &&
+        (decodeJsonPayload(message.payload) as { type?: string }).type === "input-accepted",
+    ),
+    false,
+  );
+  assert.deepEqual(decodeJsonPayload(messages.at(-1)!.payload), {
+    error: "terminal upstream is not open",
+  });
+  server.emit("close");
+});
+
 test("terminal hub immediately acknowledges upstream output when the client opts out", async () => {
   const client = socket();
   const server = socket();

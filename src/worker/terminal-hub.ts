@@ -228,7 +228,23 @@ export class TerminalHub {
             const inputs = await this.dependencies.inputPayloads(subscription, user, frame.payload);
             for (const [index, input] of inputs.entries()) {
               if (index > 0) await sleep(index === inputs.length - 1 ? 80 : 2);
-              subscription.upstream.send(input);
+              if (
+                subscriptions.get(frame.sessionId) !== subscription ||
+                subscription.upstream.readyState !== WebSocket.OPEN
+              ) {
+                sendTerminalJson(server, TerminalMessageType.Error, frame.sessionId, {
+                  error: "terminal upstream is not open",
+                });
+                return;
+              }
+              try {
+                subscription.upstream.send(input);
+              } catch {
+                sendTerminalJson(server, TerminalMessageType.Error, frame.sessionId, {
+                  error: "terminal upstream send failed",
+                });
+                return;
+              }
             }
             sendTerminalJson(server, TerminalMessageType.Event, frame.sessionId, {
               type: "input-accepted",
