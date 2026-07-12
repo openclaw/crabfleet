@@ -1,7 +1,12 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { normalizedAppView, sessionOpenTarget, topOpenDrawer } from "../src/app/app-navigation.js";
+import {
+  appNavigationLocationState,
+  normalizedAppView,
+  sessionOpenTarget,
+  topOpenDrawer,
+} from "../src/app/app-navigation.js";
 
 test("navigation normalizes app views and closes the topmost drawer", () => {
   assert.equal(normalizedAppView("board"), "board");
@@ -46,5 +51,35 @@ test("session navigation derives focus and durable route targets", () => {
     clearFocus: true,
     urlSessionId: null,
     grid: true,
+  });
+});
+
+test("browser history locations reconcile view, drawers, and session focus", () => {
+  assert.deepEqual(
+    appNavigationLocationState({
+      pathname: "/sessions/IS-2",
+      search: "?token=shared",
+    }),
+    {
+      appView: "fleet",
+      drawers: { sessions: true },
+      focusedSessionId: "IS-2",
+      sharedSessionId: "IS-2",
+      sharedToken: "shared",
+    },
+  );
+  assert.deepEqual(appNavigationLocationState({ pathname: "/sessions", search: "" }), {
+    appView: "fleet",
+    drawers: { sessions: true },
+    focusedSessionId: null,
+    sharedSessionId: null,
+    sharedToken: null,
+  });
+  assert.deepEqual(appNavigationLocationState({ pathname: "/app/board", search: "" }), {
+    appView: "board",
+    drawers: {},
+    focusedSessionId: null,
+    sharedSessionId: null,
+    sharedToken: null,
   });
 });

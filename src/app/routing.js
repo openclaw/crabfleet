@@ -2,9 +2,17 @@ export const loginReturnKey = "crabbox-login-return";
 
 export function parseSessionLink(locationLike = location) {
   const match = locationLike.pathname.match(/^\/(?:app\/)?sessions(?:\/([^/]+))?\/?$/);
+  let id = null;
+  if (match?.[1]) {
+    try {
+      id = decodeURIComponent(match[1]);
+    } catch {
+      return { route: false, id: null, token: null };
+    }
+  }
   return {
     route: Boolean(match),
-    id: match?.[1] ? decodeURIComponent(match[1]) : null,
+    id,
     token: new URLSearchParams(locationLike.search).get("token"),
   };
 }

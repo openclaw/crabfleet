@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "preact/hooks";
-import { appViewUrl, initialAppView, sessionRouteUrl } from "./routing.js";
+import { appViewUrl, initialAppView, parseSessionLink, sessionRouteUrl } from "./routing.js";
 import { loadSessionLayout, saveSessionLayout } from "./session-layout.js";
 import { disposeAllTerminals, warmGhosttyModule } from "./terminal.js";
 
@@ -27,6 +27,17 @@ export function sessionOpenTarget(id, currentId, sessionItemById, options = {}) 
   };
 }
 
+export function appNavigationLocationState(locationLike = location) {
+  const sessionLink = parseSessionLink(locationLike);
+  return {
+    appView: initialAppView(locationLike),
+    drawers: sessionLink.route ? { sessions: true } : {},
+    focusedSessionId: sessionLink.id,
+    sharedSessionId: sessionLink.id,
+    sharedToken: sessionLink.token,
+  };
+}
+
 export function useAppNavigation({ initialSessionLink, sessionItemByIdRef }) {
   const [appView, setAppViewState] = useState(initialAppView);
   const [drawers, setDrawers] = useState(initialSessionLink.route ? { sessions: true } : {});
@@ -44,7 +55,18 @@ export function useAppNavigation({ initialSessionLink, sessionItemByIdRef }) {
   focusedSessionIdRef.current = focusedSessionId;
 
   useEffect(() => {
-    const onPopState = () => setAppViewState(initialAppView());
+    const onPopState = () => {
+      const next = appNavigationLocationState();
+      setAppViewState(next.appView);
+      setDrawers(next.drawers);
+      setActiveRunId(null);
+      setFocusedSessionId(next.focusedSessionId);
+      focusedSessionIdRef.current = next.focusedSessionId;
+      setSharedSessionId(next.sharedSessionId);
+      setSharedToken(next.sharedToken);
+      if (next.focusedSessionId) warmGhosttyModule();
+      else disposeAllTerminals();
+    };
     window.addEventListener("popstate", onPopState);
     return () => window.removeEventListener("popstate", onPopState);
   }, []);

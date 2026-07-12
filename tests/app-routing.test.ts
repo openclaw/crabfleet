@@ -26,6 +26,11 @@ test("app routing parses board and shared session locations", () => {
     id: null,
     token: null,
   });
+  assert.deepEqual(parseSessionLink({ pathname: "/sessions/%", search: "?token=ignored" }), {
+    route: false,
+    id: null,
+    token: null,
+  });
 });
 
 test("app and session route builders preserve only owned URL state", () => {
