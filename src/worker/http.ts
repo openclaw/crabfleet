@@ -54,11 +54,14 @@ export function wantsMarkdown(request: Request): boolean {
 }
 
 export async function readJson<T>(request: Request): Promise<T> {
+  let parsed: unknown;
   try {
-    return (await request.json()) as T;
+    parsed = JSON.parse(await request.text()) as unknown;
   } catch {
     throw badRequest("invalid json");
   }
+  assertRoundTrippableJsonIntegers(parsed);
+  return parsed as T;
 }
 
 export async function readBoundedJson<T>(request: Request, maximumBytes: number): Promise<T> {
@@ -97,11 +100,14 @@ export async function readBoundedJson<T>(request: Request, maximumBytes: number)
     bytes.set(chunk, offset);
     offset += chunk.byteLength;
   }
+  let parsed: unknown;
   try {
-    return JSON.parse(new TextDecoder().decode(bytes)) as T;
+    parsed = JSON.parse(new TextDecoder().decode(bytes)) as unknown;
   } catch {
     throw badRequest("invalid json");
   }
+  assertRoundTrippableJsonIntegers(parsed);
+  return parsed as T;
 }
 
 export function bearerToken(request: Request): string {
@@ -169,4 +175,22 @@ function clean(value: unknown, maximum: number): string {
   return String(value ?? "")
     .trim()
     .slice(0, maximum);
+}
+
+function assertRoundTrippableJsonIntegers(value: unknown): void {
+  if (typeof value === "number") {
+    if (
+      !Number.isFinite(value) ||
+      (Number.isInteger(value) && (!Number.isSafeInteger(value) || Object.is(value, -0)))
+    ) {
+      throw badRequest("json integers must be safe and round-trippable");
+    }
+    return;
+  }
+  if (!value || typeof value !== "object") return;
+  if (Array.isArray(value)) {
+    for (const item of value) assertRoundTrippableJsonIntegers(item);
+    return;
+  }
+  for (const item of Object.values(value)) assertRoundTrippableJsonIntegers(item);
 }

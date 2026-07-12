@@ -382,6 +382,26 @@ test("structured session events require bounded identifiers and a versioned obje
     { eventKey: "key", type: "action", message: "message", payload: [] },
     { eventKey: "key", type: "action", message: "message", payload: {} },
     { eventKey: "key", type: "action", message: "message", payload: { version: 0 } },
+    { eventKey: "\ud800", type: "action", message: "message", payload: { version: 1 } },
+    { eventKey: "key", type: "action", message: "\udfff", payload: { version: 1 } },
+    {
+      eventKey: "key",
+      type: "action",
+      message: "message",
+      payload: { version: 1, value: "\ud800" },
+    },
+    {
+      eventKey: "key",
+      type: "action",
+      message: "message",
+      payload: { version: 1, value: Number.MAX_SAFE_INTEGER + 1 },
+    },
+    {
+      eventKey: "key",
+      type: "action",
+      message: "message",
+      payload: { version: 1, value: -0 },
+    },
   ];
   for (const input of cases) {
     await assert.rejects(
@@ -401,6 +421,40 @@ test("structured session events require bounded identifiers and a versioned obje
     );
   }
   assert.equal(persisted, false);
+});
+
+test("structured session events retain valid supplementary Unicode", async () => {
+  let payloadJson = "";
+  const service = new InteractiveSessionEventLedgerService({
+    async persistAndInvalidate(event) {
+      payloadJson = event.payloadJson;
+      return {
+        inserted: true,
+        row: {
+          id: 1,
+          session_id: event.sessionId,
+          actor: event.actor,
+          event_key: event.eventKey,
+          event_type: event.type,
+          message: event.message,
+          payload_json: event.payloadJson,
+          created_at: event.now,
+        },
+      };
+    },
+    async archive() {},
+  });
+
+  await service.append({
+    sessionId: "IS-1",
+    actor: "operator",
+    eventKey: "run:\u{1f980}",
+    type: "action",
+    message: "valid \u{1f980}",
+    payload: { version: 1, value: "\u{1f980}" },
+    now: 123,
+  });
+  assert.equal(payloadJson, '{"value":"\u{1f980}","version":1}');
 });
 
 test("structured session event payload budgets fail with controlled client errors", async () => {

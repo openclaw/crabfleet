@@ -307,7 +307,7 @@ function structuredPayloadJson(value: unknown): string {
   if (
     !Object.hasOwn(record, "version") ||
     typeof version !== "number" ||
-    !Number.isInteger(version) ||
+    !Number.isSafeInteger(version) ||
     version < 1
   ) {
     throw badRequest("payload.version must be a positive integer");
@@ -432,6 +432,9 @@ function canonicalJsonValue(
   }
   if (typeof value === "number") {
     if (!Number.isFinite(value)) throw badRequest("payload must contain valid JSON values");
+    if (Number.isInteger(value) && (!Number.isSafeInteger(value) || Object.is(value, -0))) {
+      throw badRequest("payload integers must be safe and round-trippable");
+    }
     return value;
   }
   if (typeof value !== "object") {
@@ -466,6 +469,9 @@ function consumePayloadMembers(budget: { members: number }, count: number): void
 }
 
 function assertPayloadStringSize(value: string): void {
+  if (hasLoneSurrogate(value)) {
+    throw badRequest("payload strings must contain valid Unicode");
+  }
   if (encoder.encode(value).byteLength > structuredEventPayloadMaxStringBytes) {
     throw badRequest(
       `payload strings must be at most ${structuredEventPayloadMaxStringBytes} UTF-8 bytes`,
@@ -477,10 +483,25 @@ function requiredString(value: unknown, name: string, maximum: number): string {
   if (typeof value !== "string") throw badRequest(`${name} must be a string`);
   const normalized = value.trim();
   if (!normalized) throw badRequest(`${name} is required`);
+  if (hasLoneSurrogate(normalized)) throw badRequest(`${name} must contain valid Unicode`);
   if (normalized.length > maximum) {
     throw badRequest(`${name} must be at most ${maximum} characters`);
   }
   return normalized;
+}
+
+function hasLoneSurrogate(value: string): boolean {
+  for (let index = 0; index < value.length; index += 1) {
+    const code = value.charCodeAt(index);
+    if (code >= 0xd800 && code <= 0xdbff) {
+      const next = value.charCodeAt(index + 1);
+      if (!(next >= 0xdc00 && next <= 0xdfff)) return true;
+      index += 1;
+    } else if (code >= 0xdc00 && code <= 0xdfff) {
+      return true;
+    }
+  }
+  return false;
 }
 
 function clean(value: unknown, maximum: number): string {

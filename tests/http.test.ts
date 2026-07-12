@@ -113,6 +113,28 @@ test("bounded JSON parsing rejects declared and streamed bodies before unbounded
   }
 });
 
+test("JSON parsing rejects integers that cannot round-trip exactly", async () => {
+  for (const body of ['{"value":9007199254740993}', '{"value":-0}', '{"nested":[1e400]}']) {
+    for (const parse of [
+      () => readJson(new Request("https://fleet.example", { method: "POST", body })),
+      () =>
+        readBoundedJson(
+          new Request("https://fleet.example", { method: "POST", body }),
+          body.length + 1,
+        ),
+    ]) {
+      await assert.rejects(parse(), (error: unknown) => {
+        assert.equal(
+          typeof error === "object" && error && "status" in error ? error.status : undefined,
+          400,
+        );
+        assert.match(error instanceof Error ? error.message : "", /round-trippable/);
+        return true;
+      });
+    }
+  }
+});
+
 test("bearer and cookie helpers normalize only their owned protocol surface", () => {
   assert.equal(
     bearerToken(
