@@ -50,7 +50,7 @@ export class DesktopHostRepository implements DesktopHostStore {
   }
 
   async upsert(host: DesktopHostWrite): Promise<DesktopHostRow> {
-    await database(this.env)
+    const row = await database(this.env)
       .insertInto("desktop_hosts")
       .values({
         owner_subject: host.ownerSubject,
@@ -73,12 +73,7 @@ export class DesktopHostRepository implements DesktopHostStore {
           updated_at: host.updatedAt,
         }),
       )
-      .execute();
-    const row = await database(this.env)
-      .selectFrom("desktop_hosts")
-      .selectAll()
-      .where("owner_subject", "=", host.ownerSubject)
-      .where("id", "=", host.id)
+      .returningAll()
       .executeTakeFirstOrThrow();
     return {
       ownerSubject: row.owner_subject,
