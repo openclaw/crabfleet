@@ -299,17 +299,15 @@ final class DesktopHostRegistrationLifecycle {
           identity: target.identity,
           publicationID: target.publicationID
         )
-        if let ownershipToken {
-          let recovered = PublishedRegistration(
-            identity: target.identity,
-            hostID: target.hostID,
-            publicationID: target.publicationID,
-            ownershipToken: ownershipToken,
-            usesLegacyCleanup: false
-          )
-          if !pendingRemovals.contains(recovered) {
-            pendingRemovals.append(recovered)
-          }
+        let recovered = PublishedRegistration(
+          identity: target.identity,
+          hostID: target.hostID,
+          publicationID: target.publicationID,
+          ownershipToken: ownershipToken,
+          usesLegacyCleanup: ownershipToken == nil
+        )
+        if !pendingRemovals.contains(recovered) {
+          pendingRemovals.append(recovered)
         }
         self.uncertainRegistrations.removeAll { $0 == target }
         try persistState()
@@ -323,7 +321,11 @@ final class DesktopHostRegistrationLifecycle {
         pendingRemovals.append(publishedRegistration)
       }
       self.publishedRegistration = nil
-      try persistState()
+      do {
+        try persistState()
+      } catch {
+        firstError = firstError ?? error
+      }
     }
 
     let removals = pendingRemovals

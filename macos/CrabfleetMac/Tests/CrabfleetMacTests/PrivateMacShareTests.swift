@@ -501,6 +501,21 @@ struct PrivateMacShareTests {
   }
 
   @Test @MainActor
+  func ambiguousLegacyDesktopPublicationAttemptsGuardedCleanup() async throws {
+    let identity = desktopIdentity(name: "ambiguous-legacy", address: "100.64.12.62")
+    let registration = AmbiguousLegacyDesktopRegistration()
+    let lifecycle = DesktopHostRegistrationLifecycle(registration: registration)
+
+    await #expect(throws: DesktopHostRegistrationResultUncertainError.self) {
+      try await lifecycle.publish(identity: identity, port: 5_901)
+    }
+    try await lifecycle.removePublishedIdentities()
+
+    #expect(!(await registration.isPublished))
+    #expect(await registration.events == [.register, .recover, .unregister])
+  }
+
+  @Test @MainActor
   func ambiguousDesktopPublicationRetryRecoversOnlyTheExactIdentity() async throws {
     let identity = desktopIdentity(name: "retry-publish", address: "100.64.12.50")
     let registration = IdentityAwareAmbiguousDesktopRegistration(
@@ -993,6 +1008,33 @@ struct PrivateMacShareTests {
           .register(identity.ipv4Address, 5_901, "persisted-publication"),
           .recover(identity.ipv4Address, "persisted-publication"),
           .unregister(identity.ipv4Address, "recovered:persisted-publication"),
+        ]
+    )
+  }
+
+  @Test @MainActor
+  func persistenceFailureDoesNotAbortDesktopUnregister() async throws {
+    let identity = desktopIdentity(name: "persist-failure", address: "100.64.12.63")
+    let registration = RecordingDesktopRegistration()
+    let stateStore = ToggleDesktopRegistrationStateStore()
+    let recoveryScope = desktopRecoveryScope()
+    let lifecycle = DesktopHostRegistrationLifecycle(
+      registration: registration,
+      stateStore: stateStore,
+      recoveryScopeProvider: { recoveryScope }
+    )
+    try await lifecycle.publish(identity: identity, port: 5_901)
+    stateStore.failsWrites = true
+
+    await #expect(throws: DesktopRegistrationTestError.failed) {
+      try await lifecycle.removePublishedIdentities()
+    }
+
+    #expect(
+      await registration.events
+        == [
+          .register(identity.dnsName),
+          .unregister(identity.dnsName, "token:\(identity.dnsName)"),
         ]
     )
   }
@@ -2649,6 +2691,38 @@ private actor AmbiguousDesktopRegistration: DesktopHostRegistering {
 
   func unregister(identity: TailnetIdentity, ownershipToken: String?) async throws {
     events.append(.unregister(identity.dnsName, ownershipToken))
+  }
+}
+
+private actor AmbiguousLegacyDesktopRegistration: DesktopHostRegistering {
+  enum Event: Equatable {
+    case register
+    case recover
+    case unregister
+  }
+
+  private(set) var isPublished = false
+  private(set) var events: [Event] = []
+
+  func register(
+    identity: TailnetIdentity,
+    port: UInt16,
+    publicationID: String
+  ) async throws -> String? {
+    events.append(.register)
+    isPublished = true
+    throw DesktopHostRegistrationResultUncertainError(message: "legacy response lost")
+  }
+
+  func recover(identity: TailnetIdentity, publicationID: String) async throws -> String? {
+    events.append(.recover)
+    return nil
+  }
+
+  func unregister(identity: TailnetIdentity, ownershipToken: String?) async throws {
+    #expect(ownershipToken == nil)
+    events.append(.unregister)
+    isPublished = false
   }
 }
 
