@@ -403,10 +403,14 @@ extension VNCConnection {
 			framebufferRequestLock.unlock()
 			return
 		}
-		if probeTimedOut {
-			expiredPixelFormatFenceCapabilityProbePayload = pixelFormatFenceCapabilityProbePayload
-			pixelFormatFenceCapabilityProbePayload = nil
-		}
+			if probeTimedOut {
+				expiredPixelFormatFenceCapabilityProbePayload = pixelFormatFenceCapabilityProbePayload
+				pixelFormatFenceCapabilityProbePayload = nil
+				framebufferRequestLock.unlock()
+				handleBreakingError(VNCError.protocol(.pixelFormatTransitionTimedOut))
+				logger.logDebug("Fence capability negotiation timed out")
+				return
+			}
 		let isWaitingForLegacyFramebufferBoundary =
 			negotiationTimedOut
 			&& !state.areContinuousUpdatesEnabled
@@ -414,19 +418,15 @@ extension VNCConnection {
 		if negotiationTimedOut && !isWaitingForLegacyFramebufferBoundary {
 			pendingPixelFormatTransition = nil
 		}
-		let transition = probeTimedOut ? takePendingPixelFormatTransitionLocked() : nil
-		let shouldResumeUpdates =
-			transition == nil
-			&& pendingPixelFormatTransition == nil
-			&& !framebufferUpdateRequestOutstanding
-			&& !isPixelFormatTransitionInFlight
-		framebufferRequestLock.unlock()
+			let shouldResumeUpdates =
+				pendingPixelFormatTransition == nil
+				&& !framebufferUpdateRequestOutstanding
+				&& !isPixelFormatTransitionInFlight
+			framebufferRequestLock.unlock()
 
-		if let transition {
-			enqueuePixelFormatTransition(transition)
-		} else if shouldResumeUpdates {
-			scheduleNextFramebufferUpdate()
-		}
+			if shouldResumeUpdates {
+				scheduleNextFramebufferUpdate()
+			}
 		logger.logDebug("Fence capability negotiation timed out")
 	}
 

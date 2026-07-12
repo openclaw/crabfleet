@@ -271,7 +271,7 @@ struct AuditFindingsTests {
   }
 
   @Test
-  func expiresUnansweredFenceCapabilityProbeWithoutStallingUpdates() async throws {
+  func disconnectsWhenFenceCapabilityProbeIsUnanswered() async throws {
     let connection = VNCConnection(
       settings: makeSettings(),
       framebufferAllocator: VNCFramebufferMallocAllocator()
@@ -298,15 +298,15 @@ struct AuditFindingsTests {
     connection.expirePixelFormatFenceNegotiation()
 
     #expect(connection.pixelFormatFenceCapabilityProbePayload == nil)
-    #expect(connection.expiredPixelFormatFenceCapabilityProbePayload != nil)
-    let transition = try #require(connection.clientToServerMessageQueue.dequeue())
-    try await transition.message.send(connection: AuditWritingConnection())
+    #expect(connection.expiredPixelFormatFenceCapabilityProbePayload == nil)
+    #expect(connection.connectionState.status == .disconnected)
     #expect(connection.pendingPixelFormatTransition == nil)
-    #expect(connection.state.pixelFormat?.depth == 8)
+    #expect(connection.state.pixelFormat?.depth == 24)
+    #expect(connection.clientToServerMessageQueue.dequeue() == nil)
   }
 
   @Test
-  func acceptsLateFenceCapabilityResponseAfterProbeTimeout() async throws {
+  func lateFenceCapabilityResponseCannotReviveTimedOutConnection() async throws {
     let connection = VNCConnection(
       settings: makeSettings(),
       framebufferAllocator: VNCFramebufferMallocAllocator()
@@ -330,8 +330,7 @@ struct AuditFindingsTests {
 
     connection.updateColorDepth(.depth8Bit)
     connection.expirePixelFormatFenceNegotiation()
-    let fallback = try #require(connection.clientToServerMessageQueue.dequeue())
-    try await fallback.message.send(connection: AuditWritingConnection())
+    #expect(connection.connectionState.status == .disconnected)
 
     try connection.handleServerFence(
       VNCProtocol.ServerFence(
@@ -342,12 +341,9 @@ struct AuditFindingsTests {
     )
 
     #expect(connection.expiredPixelFormatFenceCapabilityProbePayload == nil)
-    #expect(connection.state.pixelFormatTransitionFenceFlags.contains(.blockBefore))
-    #expect(connection.state.pixelFormatTransitionFenceFlags.contains(.syncNext))
-
-    connection.state.areContinuousUpdatesEnabled = true
-    connection.updateColorDepth(.depth16Bit)
-    #expect(connection.clientToServerMessageQueue.dequeue() != nil)
+    #expect(connection.connectionState.status == .disconnected)
+    #expect(connection.state.pixelFormatTransitionFenceFlags.isEmpty)
+    #expect(connection.clientToServerMessageQueue.dequeue() == nil)
   }
 
   @Test
@@ -631,14 +627,7 @@ struct AuditFindingsTests {
     )
     connection.updateColorDepth(.depth8Bit)
     connection.expirePixelFormatFenceNegotiation()
-    let transition = try #require(connection.clientToServerMessageQueue.dequeue())
-    try await transition.message.send(connection: AuditWritingConnection())
-
-    let restartedAfterTransition = try zrle.zStream.decompressedData(
-      compressedData: compressedChunks[0],
-      uncompressedSize: 1_000
-    )
-    #expect(restartedAfterTransition == Data(repeating: 0x41, count: 1_000))
+    #expect(connection.connectionState.status == .disconnected)
 
     try connection.handleServerFence(
       VNCProtocol.ServerFence(
