@@ -1013,6 +1013,194 @@ test("stale foreground rollback cannot renew after recovery takes its claim", as
   assert.equal(renewed, null);
 });
 
+test("expired staged registration claims cannot be revived by renewal", async () => {
+  const sqlite = credentialPolicyDatabase();
+  const env = sqliteRuntimeEnv(sqlite);
+  const staged = await beginSandboxCredentialPolicyRegistration(
+    env,
+    "IS-42",
+    "sandbox-1",
+    ownershipFence,
+  );
+  const expiredAt = 1;
+  sqlite
+    .prepare(`
+      UPDATE interactive_session_credential_policy_registrations
+      SET registration_claim_expires_at = ?
+      WHERE session_id = 'IS-42' AND sandbox_id = 'sandbox-1'
+    `)
+    .run(expiredAt);
+
+  assert.equal(
+    await renewSandboxCredentialPolicyRegistration(
+      env,
+      "IS-42",
+      "sandbox-1",
+      staged,
+      ownershipFence,
+    ),
+    null,
+  );
+  assert.equal(
+    sqlite
+      .prepare(`
+        SELECT registration_claim_expires_at
+        FROM interactive_session_credential_policy_registrations
+        WHERE session_id = 'IS-42' AND sandbox_id = 'sandbox-1'
+      `)
+      .get()?.registration_claim_expires_at,
+    expiredAt,
+  );
+});
+
+test("staged renewal cannot extend across a live legacy registration claim", async () => {
+  const sqlite = credentialPolicyDatabase();
+  const env = sqliteRuntimeEnv(sqlite);
+  const staged = await beginSandboxCredentialPolicyRegistration(
+    env,
+    "IS-42",
+    "sandbox-1",
+    ownershipFence,
+  );
+  sqlite
+    .prepare(`
+      UPDATE interactive_session_credential_policy_registrations
+      SET registration_claim_expires_at = 1
+      WHERE session_id = 'IS-42' AND sandbox_id = 'sandbox-1'
+    `)
+    .run();
+  const legacyClaim = sqlite
+    .prepare(`
+      UPDATE interactive_session_credential_policies
+      SET
+        state = 'registering',
+        registration_generation = 'generation:legacy-renewal',
+        registration_claim = 'registration:legacy-renewal',
+        registration_claim_expires_at = ?
+      WHERE session_id = 'IS-42' AND sandbox_id = 'sandbox-1'
+    `)
+    .run(Number.MAX_SAFE_INTEGER);
+  assert.equal(legacyClaim.changes, 2);
+  sqlite
+    .prepare(`
+      UPDATE interactive_session_credential_policy_registrations
+      SET registration_claim_expires_at = ?
+      WHERE session_id = 'IS-42' AND sandbox_id = 'sandbox-1'
+    `)
+    .run(Number.MAX_SAFE_INTEGER);
+
+  assert.equal(
+    await renewSandboxCredentialPolicyRegistration(
+      env,
+      "IS-42",
+      "sandbox-1",
+      staged,
+      ownershipFence,
+    ),
+    null,
+  );
+  assert.deepEqual(
+    sqlite
+      .prepare(`
+        SELECT DISTINCT registration_generation, registration_claim, registration_claim_expires_at
+        FROM interactive_session_credential_policies
+        WHERE session_id = 'IS-42' AND sandbox_id = 'sandbox-1'
+      `)
+      .all()
+      .map((row) => ({ ...row })),
+    [
+      {
+        registration_generation: "generation:legacy-renewal",
+        registration_claim: "registration:legacy-renewal",
+        registration_claim_expires_at: Number.MAX_SAFE_INTEGER,
+      },
+    ],
+  );
+});
+
+test("expired staged recovery cannot race a live legacy registration owner", async () => {
+  const sqlite = credentialPolicyDatabase();
+  const env = sqliteRuntimeEnv(sqlite);
+  const staged = await beginSandboxCredentialPolicyRegistration(
+    env,
+    "IS-42",
+    "sandbox-1",
+    ownershipFence,
+  );
+  const expiredAt = 1;
+  sqlite
+    .prepare(`
+      UPDATE interactive_session_credential_policy_registrations
+      SET registration_claim_expires_at = ?
+      WHERE session_id = 'IS-42' AND sandbox_id = 'sandbox-1'
+    `)
+    .run(expiredAt);
+  const legacyClaim = sqlite
+    .prepare(`
+      UPDATE interactive_session_credential_policies
+      SET
+        state = 'registering',
+        registration_generation = 'generation:legacy-recovery',
+        registration_claim = 'registration:legacy-recovery',
+        registration_claim_expires_at = ?
+      WHERE session_id = 'IS-42' AND sandbox_id = 'sandbox-1'
+    `)
+    .run(Number.MAX_SAFE_INTEGER);
+  assert.equal(legacyClaim.changes, 2);
+
+  const recoveries = await Promise.all([
+    claimSandboxCredentialPolicyRegistrationRecovery(
+      env,
+      "IS-42",
+      "sandbox-1",
+      staged,
+      expiredAt,
+      ownershipFence,
+    ),
+    claimSandboxCredentialPolicyRegistrationRecovery(
+      env,
+      "IS-42",
+      "sandbox-1",
+      staged,
+      expiredAt,
+      ownershipFence,
+    ),
+  ]);
+
+  assert.deepEqual(recoveries, [null, null]);
+  assert.deepEqual(
+    {
+      ...sqlite
+        .prepare(`
+          SELECT registration_claim, registration_claim_expires_at
+          FROM interactive_session_credential_policy_registrations
+          WHERE session_id = 'IS-42' AND sandbox_id = 'sandbox-1'
+        `)
+        .get(),
+    },
+    {
+      registration_claim: staged.claim,
+      registration_claim_expires_at: expiredAt,
+    },
+  );
+  assert.deepEqual(
+    activeCredentialPolicyRows(sqlite).map((row) => ({
+      generation: row.registration_generation,
+      claim: row.registration_claim,
+    })),
+    [
+      {
+        generation: "generation:legacy-recovery",
+        claim: "registration:legacy-recovery",
+      },
+      {
+        generation: "generation:legacy-recovery",
+        claim: "registration:legacy-recovery",
+      },
+    ],
+  );
+});
+
 test("expired registration recovery grants one fresh exclusive claim", async () => {
   const sqlite = credentialPolicyDatabase();
   const env = sqliteRuntimeEnv(sqlite);
