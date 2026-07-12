@@ -258,11 +258,12 @@ final class CrabboxVNCBridge: @unchecked Sendable {
       value.unicodeScalars.allSatisfy { !CharacterSet.controlCharacters.contains($0) }
   }
 
-  private static func validGrant(_ grant: NativeVNCGrant) -> Bool {
+  static func validGrant(_ grant: NativeVNCGrant) -> Bool {
     let ticketPrefix = "native_vnc_"
     let ticketSuffix = grant.ticket.dropFirst(ticketPrefix.count)
-    let secureBroker = (grant.brokerURL.scheme == "https" && grant.brokerURL.host?.isEmpty == false)
-      || (grant.brokerURL.scheme == "http"
+    let scheme = grant.brokerURL.scheme?.lowercased()
+    let secureBroker = (scheme == "https" && grant.brokerURL.host?.isEmpty == false)
+      || (scheme == "http"
         && ["localhost", "127.0.0.1", "::1"].contains(grant.brokerURL.host ?? ""))
     return secureBroker
       && grant.brokerURL.user == nil

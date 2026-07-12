@@ -191,6 +191,18 @@ struct FleetModelsTests {
   }
 
   @Test
+  func acceptsCaseInsensitiveNativeGrantSchemes() {
+    let grant = NativeVNCGrant(
+      brokerURL: URL(string: "HTTPS://crabbox.example.test/native-vnc")!,
+      leaseID: "cbx_native123",
+      ticket: nativeVNCTicket,
+      expiresAt: Date().addingTimeInterval(60)
+    )
+
+    #expect(CrabboxVNCBridge.validGrant(grant))
+  }
+
+  @Test
   func parsesGenericVNCAddresses() throws {
     let direct = try VNCAddress.parse("workstation.example:5907")
     #expect(direct.host == "workstation.example")
