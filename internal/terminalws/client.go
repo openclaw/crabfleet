@@ -275,6 +275,31 @@ func (c *Client) SendInput(ctx context.Context, payload []byte) error {
 	if !c.canInput.Load() {
 		return errors.New("terminal control has not been granted")
 	}
+	if !c.supportsInputAcknowledgement {
+		return c.writeInput(ctx, payload)
+	}
+	if err := c.acquireConfirmation(ctx); err != nil {
+		return err
+	}
+
+	waiter := make(chan error, 1)
+	if err := c.registerInputWaiter(waiter); err != nil {
+		c.releaseConfirmation()
+		return err
+	}
+	if err := c.writeInput(ctx, payload); err != nil {
+		c.clearInputWaiter(waiter)
+		c.releaseConfirmation()
+		return err
+	}
+	go c.drainInputConfirmation(waiter)
+	return nil
+}
+
+func (c *Client) writeInput(ctx context.Context, payload []byte) error {
+	if !c.canInput.Load() {
+		return errors.New("terminal control has not been granted")
+	}
 	return c.write(ctx, frame{
 		messageType: messageInput,
 		sessionID:   c.sessionID,
@@ -298,10 +323,21 @@ func (c *Client) SendInputConfirmed(ctx context.Context, payload []byte) error {
 	if err := c.registerInputWaiter(waiter); err != nil {
 		return err
 	}
-	if err := c.SendInput(ctx, payload); err != nil {
+	if err := c.writeInput(ctx, payload); err != nil {
 		c.clearInputWaiter(waiter)
 		return err
 	}
+	return c.waitForInputConfirmation(ctx, waiter)
+}
+
+func (c *Client) drainInputConfirmation(waiter chan error) {
+	defer c.releaseConfirmation()
+	ctx, cancel := context.WithTimeout(context.Background(), c.inputConfirmationTimeout())
+	defer cancel()
+	_ = c.waitForInputConfirmation(ctx, waiter)
+}
+
+func (c *Client) waitForInputConfirmation(ctx context.Context, waiter chan error) error {
 	select {
 	case err := <-waiter:
 		return err

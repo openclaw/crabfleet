@@ -1017,6 +1017,146 @@ func TestSendInputConfirmedSharesOneReaderWithAttach(t *testing.T) {
 	}
 }
 
+func TestSendInputDrainsAcknowledgementBeforeConfirmedSend(t *testing.T) {
+	rawReceived := make(chan struct{})
+	confirmedReceived := make(chan struct{})
+	releaseRawAcknowledgement := make(chan struct{})
+	releaseConfirmedAcknowledgement := make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := websocket.Accept(w, r, nil)
+		if err != nil {
+			t.Error(err)
+			return
+		}
+		defer conn.Close(websocket.StatusNormalClosure, "")
+		for range 2 {
+			if _, _, err := conn.Read(r.Context()); err != nil {
+				t.Error(err)
+				return
+			}
+		}
+		welcome, _ := json.Marshal(welcomePayload{InputAcknowledgements: true})
+		if err := conn.Write(r.Context(), websocket.MessageBinary, encodeFrame(frame{
+			messageType: messageWelcome,
+			payload:     welcome,
+		})); err != nil {
+			t.Error(err)
+			return
+		}
+		subscribed, _ := json.Marshal(eventPayload{Type: "subscribed", CanInput: true})
+		if err := conn.Write(r.Context(), websocket.MessageBinary, encodeFrame(frame{
+			messageType: messageEvent,
+			sessionID:   "IS-raw-confirmed",
+			payload:     subscribed,
+		})); err != nil {
+			t.Error(err)
+			return
+		}
+
+		inputs := make(chan frame, 2)
+		go func() {
+			for range 2 {
+				_, payload, readErr := conn.Read(r.Context())
+				if readErr != nil {
+					return
+				}
+				current, decodeErr := decodeFrame(payload)
+				if decodeErr != nil {
+					t.Error(decodeErr)
+					return
+				}
+				inputs <- current
+			}
+		}()
+
+		raw := <-inputs
+		if raw.messageType != messageInput || string(raw.payload) != "raw\n" {
+			t.Errorf("raw input = %#v", raw)
+			return
+		}
+		close(rawReceived)
+		select {
+		case confirmed := <-inputs:
+			if confirmed.messageType != messageInput || string(confirmed.payload) != "confirmed\n" {
+				t.Errorf("confirmed input = %#v", confirmed)
+				return
+			}
+			close(confirmedReceived)
+		case <-releaseRawAcknowledgement:
+		}
+
+		accepted, _ := json.Marshal(eventPayload{Type: "input-accepted"})
+		if err := conn.Write(r.Context(), websocket.MessageBinary, encodeFrame(frame{
+			messageType: messageEvent,
+			sessionID:   "IS-raw-confirmed",
+			payload:     accepted,
+		})); err != nil {
+			t.Error(err)
+			return
+		}
+		select {
+		case <-confirmedReceived:
+		default:
+			confirmed := <-inputs
+			if confirmed.messageType != messageInput || string(confirmed.payload) != "confirmed\n" {
+				t.Errorf("confirmed input = %#v", confirmed)
+				return
+			}
+			close(confirmedReceived)
+		}
+		<-releaseConfirmedAcknowledgement
+		if err := conn.Write(r.Context(), websocket.MessageBinary, encodeFrame(frame{
+			messageType: messageEvent,
+			sessionID:   "IS-raw-confirmed",
+			payload:     accepted,
+		})); err != nil {
+			t.Error(err)
+		}
+	}))
+	defer server.Close()
+
+	endpoint, err := Endpoint(server.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	client, err := Dial(context.Background(), endpoint, "IS-raw-confirmed", Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+
+	if err := client.SendInput(context.Background(), []byte("raw\n")); err != nil {
+		t.Fatal(err)
+	}
+	<-rawReceived
+
+	confirmedStarted := make(chan struct{})
+	confirmedDone := make(chan error, 1)
+	go func() {
+		close(confirmedStarted)
+		confirmedDone <- client.SendInputConfirmed(context.Background(), []byte("confirmed\n"))
+	}()
+	<-confirmedStarted
+	select {
+	case <-confirmedReceived:
+		t.Fatal("confirmed input was written before the raw acknowledgement")
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	close(releaseRawAcknowledgement)
+	<-confirmedReceived
+	select {
+	case err := <-confirmedDone:
+		t.Fatalf("confirmed send completed from the raw acknowledgement: %v", err)
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	close(releaseConfirmedAcknowledgement)
+	if err := <-confirmedDone; err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestSendInputConfirmedCanCancelWhileWaitingForPreviousConfirmation(t *testing.T) {
 	firstInput := make(chan struct{})
 	releaseFirst := make(chan struct{})
