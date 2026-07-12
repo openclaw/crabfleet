@@ -171,6 +171,12 @@ test("structured session events canonicalize additive payloads and replay idempo
         cloudCredentialOne,
         privateKeyOne,
       ],
+      urlSamples: [
+        "https://:secret@example.com/repo",
+        "https://token:@example.com/repo",
+        "https://alice:p@ss@example.com/repo",
+        "https://alice@example.com:pass@host.example/repo",
+      ],
     },
     now: 123,
   });
@@ -202,6 +208,12 @@ test("structured session events canonicalize additive payloads and replay idempo
         providerCredentialTwo,
         cloudCredentialTwo,
         privateKeyTwo,
+      ],
+      urlSamples: [
+        "https://:changed@example.com/repo",
+        "https://changed:@example.com/repo",
+        "https://bob:n@ew@example.com/repo",
+        "https://bob@example.com:changed@host.example/repo",
       ],
       target: { a: 1, z: true },
       version: 2,
@@ -238,13 +250,19 @@ test("structured session events canonicalize additive payloads and replay idempo
         "[credential]",
         "[credential]",
       ],
+      urlSamples: [
+        "https://[credential]@example.com/repo",
+        "https://[credential]@example.com/repo",
+        "https://[credential]@example.com/repo",
+        "https://[credential]@host.example/repo",
+      ],
       version: 2,
     },
     createdAt: 123,
   });
   assert.deepEqual(persistedPayloads, [
-    '{"accessKeyId":"[redacted]","accountKey":"[redacted]","additiveField":["kept"],"connectionString":"[redacted]","credentials":"[redacted]","note":"request failed: [credential]","pemAssignment":"private_key=[credential]","remote":"https://[credential]@example.com/repo","secretAccessKey":"[redacted]","secretKey":"[redacted]","sharedAccessKey":"[redacted]","storageKey":"[redacted]","target":{"a":1,"z":true},"tokenSamples":["[credential]","[credential]","[credential]","[credential]","[credential]"],"version":2}',
-    '{"accessKeyId":"[redacted]","accountKey":"[redacted]","additiveField":["kept"],"connectionString":"[redacted]","credentials":"[redacted]","note":"request failed: [credential]","pemAssignment":"private_key=[credential]","remote":"https://[credential]@example.com/repo","secretAccessKey":"[redacted]","secretKey":"[redacted]","sharedAccessKey":"[redacted]","storageKey":"[redacted]","target":{"a":1,"z":true},"tokenSamples":["[credential]","[credential]","[credential]","[credential]","[credential]"],"version":2}',
+    '{"accessKeyId":"[redacted]","accountKey":"[redacted]","additiveField":["kept"],"connectionString":"[redacted]","credentials":"[redacted]","note":"request failed: [credential]","pemAssignment":"private_key=[credential]","remote":"https://[credential]@example.com/repo","secretAccessKey":"[redacted]","secretKey":"[redacted]","sharedAccessKey":"[redacted]","storageKey":"[redacted]","target":{"a":1,"z":true},"tokenSamples":["[credential]","[credential]","[credential]","[credential]","[credential]"],"urlSamples":["https://[credential]@example.com/repo","https://[credential]@example.com/repo","https://[credential]@example.com/repo","https://[credential]@host.example/repo"],"version":2}',
+    '{"accessKeyId":"[redacted]","accountKey":"[redacted]","additiveField":["kept"],"connectionString":"[redacted]","credentials":"[redacted]","note":"request failed: [credential]","pemAssignment":"private_key=[credential]","remote":"https://[credential]@example.com/repo","secretAccessKey":"[redacted]","secretKey":"[redacted]","sharedAccessKey":"[redacted]","storageKey":"[redacted]","target":{"a":1,"z":true},"tokenSamples":["[credential]","[credential]","[credential]","[credential]","[credential]"],"urlSamples":["https://[credential]@example.com/repo","https://[credential]@example.com/repo","https://[credential]@example.com/repo","https://[credential]@host.example/repo"],"version":2}',
   ]);
   assert.deepEqual(invalidations, ["IS-1", "IS-1"]);
   assert.deepEqual(archives, ["IS-1", "IS-1"]);
