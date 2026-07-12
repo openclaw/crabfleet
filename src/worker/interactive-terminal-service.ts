@@ -1,4 +1,3 @@
-import { getSandbox } from "@cloudflare/sandbox";
 import { terminalOutputAcknowledgements } from "@openclaw/libterminal/worker";
 
 import {
@@ -19,7 +18,6 @@ import {
   isOpenClawEmbedSessionToken,
   terminalInputAuthorization,
 } from "./openclaw-embed-access.ts";
-import { SandboxLifecycleService } from "./provisioning/sandbox-lifecycle.ts";
 import { isSandboxLeaseOwnerReconnectError } from "./provisioning/sandbox.ts";
 import {
   readTerminalClipboardBytes,
@@ -28,7 +26,6 @@ import {
   terminalClipboardMaxBytes,
 } from "./interactive-terminal.ts";
 import { InteractiveTerminalRepository } from "./interactive-terminal-repository.ts";
-import { reconcileSandboxCredentialPolicyCleanupBatch } from "./sandbox-credential-policy-cleanup-service.ts";
 import { stageTerminalCredentialPolicyCleanupById } from "./sandbox-credential-policy-cleanup.ts";
 import { isSandboxInteractiveSession, sandboxLeaseInfo } from "./sandbox-lease.ts";
 import { openSandboxTerminalResponse, sandboxWorkdir } from "./sandbox-runtime.ts";
@@ -56,7 +53,38 @@ import {
 import { interactiveTerminalFetch } from "./runtime-adapter-transport.ts";
 import { tenancyMode, tenantSubject } from "./tenancy.ts";
 
-const terminalInputStates = new Map<string, TerminalInputState>();
+export class TerminalInputStateRegistry {
+  private readonly entries = new Map<string, { state: TerminalInputState; subscribers: number }>();
+
+  retain(sessionId: string): void {
+    const entry = this.entry(sessionId);
+    entry.subscribers += 1;
+  }
+
+  release(sessionId: string): void {
+    const entry = this.entries.get(sessionId);
+    if (!entry || entry.subscribers <= 1) {
+      this.entries.delete(sessionId);
+      return;
+    }
+    entry.subscribers -= 1;
+  }
+
+  state(sessionId: string): TerminalInputState {
+    return this.entry(sessionId).state;
+  }
+
+  private entry(sessionId: string): { state: TerminalInputState; subscribers: number } {
+    let entry = this.entries.get(sessionId);
+    if (!entry) {
+      entry = { state: newTerminalInputState(), subscribers: 0 };
+      this.entries.set(sessionId, entry);
+    }
+    return entry;
+  }
+}
+
+const terminalInputStates = new TerminalInputStateRegistry();
 
 export type InteractiveTerminalServiceDependencies = {
   readSession(sessionId: string): Promise<InteractiveSession | null>;
@@ -125,12 +153,14 @@ export class InteractiveTerminalService {
     const routeKind = interactivePtyRouteKind(this.env, session);
     if (routeKind === "sandbox" && this.env.SANDBOX) {
       const runtimeSession = await this.dependencies.resolveSandboxSession(request, user, session);
+      const { SandboxLifecycleService } = await import("./provisioning/sandbox-lifecycle.ts");
       const sandboxSession = await new SandboxLifecycleService(this.env).ensureCurrentLease(
         request,
         user,
         runtimeSession,
       );
       const lease = sandboxLeaseInfo(sandboxSession);
+      const { getSandbox } = await import("@cloudflare/sandbox");
       const sandbox = getSandbox(this.env.SANDBOX, lease.sandboxId);
       const upstreamResponse = await openSandboxTerminalResponse(
         request,
@@ -212,6 +242,7 @@ export class InteractiveTerminalService {
   }
 
   private terminalHub(): TerminalHub {
+    const retainedInputSessions = new Set<string>();
     return new TerminalHub({
       createSocketPair: () => {
         const pair = new WebSocketPair();
@@ -241,11 +272,25 @@ export class InteractiveTerminalService {
         terminalViewGrant(request, this.env, this.repository, user, session),
       reconcileSubscription: (sessionId) =>
         terminalSubscriptionReconciler(this.dependencies, sessionId),
-      openUpstream: (request, user, session, cols, rows) =>
-        this.openUpstream(request, user, session, cols, rows),
+      openUpstream: async (request, user, session, cols, rows) => {
+        const upstream = await this.openUpstream(request, user, session, cols, rows);
+        return {
+          ...upstream,
+          markConnected: async () => {
+            if (!retainedInputSessions.has(session.id)) {
+              retainedInputSessions.add(session.id);
+              terminalInputStates.retain(session.id);
+            }
+            await upstream.markConnected();
+          },
+        };
+      },
       inputPayloads: (subscription, user, payload) =>
         multiplayerTerminalInputPayloads(this.repository, subscription, user, payload),
-      releaseInputState: releaseTerminalInputState,
+      releaseInputState: (sessionId) => {
+        if (!retainedInputSessions.delete(sessionId)) return;
+        terminalInputStates.release(sessionId);
+      },
       markConnectionFailure: async (user, session, message, error) => {
         if (isSandboxLeaseOwnerReconnectError(error)) return;
         const markTerminal =
@@ -285,6 +330,7 @@ async function writeTerminalClipboardFile(
   const mediaType = clean(rawMediaType || "application/octet-stream", 120);
   const name = terminalClipboardFilename(rawName, mediaType);
   const lease = sandboxLeaseInfo(session);
+  const { getSandbox } = await import("@cloudflare/sandbox");
   const sandbox = getSandbox(env.SANDBOX, lease.sandboxId);
   const directory = `${sandboxWorkdir(session.id)}/.crabbox/clipboard`;
   const path = `${directory}/${Date.now()}-${crypto.randomUUID().slice(0, 8)}-${name}`;
@@ -357,6 +403,8 @@ async function markInteractiveTerminalUnavailable(
     );
     if (!staged) return;
     await appendTerminalLog(env, sessionId, user, message, now);
+    const { reconcileSandboxCredentialPolicyCleanupBatch } =
+      await import("./sandbox-credential-policy-cleanup-service.ts");
     await reconcileSandboxCredentialPolicyCleanupBatch(env, now, sessionId);
     return;
   }
@@ -544,16 +592,7 @@ async function multiplayerTerminalInputPayloads(
 }
 
 function terminalInputState(sessionId: string): TerminalInputState {
-  let state = terminalInputStates.get(sessionId);
-  if (!state) {
-    state = newTerminalInputState();
-    terminalInputStates.set(sessionId, state);
-  }
-  return state;
-}
-
-function releaseTerminalInputState(sessionId: string): void {
-  terminalInputStates.delete(sessionId);
+  return terminalInputStates.state(sessionId);
 }
 
 async function readInteractiveSessionMultiplayerMode(

@@ -5,6 +5,7 @@ import {
   readTerminalClipboardBytes,
   terminalClipboardFilename,
 } from "../src/worker/interactive-terminal.ts";
+import { TerminalInputStateRegistry } from "../src/worker/interactive-terminal-service.ts";
 
 test("terminal clipboard filenames are bounded, sanitized, and typed", () => {
   assert.equal(terminalClipboardFilename("screen shot", "image/png"), "screen-shot.png");
@@ -39,4 +40,17 @@ test("terminal clipboard upload rejects empty and declared oversized bodies", as
     ),
     new Uint8Array([97, 98, 99]),
   );
+});
+
+test("terminal input state survives until the final subscriber releases it", () => {
+  const states = new TerminalInputStateRegistry();
+  states.retain("IS-1");
+  states.retain("IS-1");
+  states.state("IS-1").line = "shared input";
+
+  states.release("IS-1");
+  assert.equal(states.state("IS-1").line, "shared input");
+
+  states.release("IS-1");
+  assert.equal(states.state("IS-1").line, "");
 });
