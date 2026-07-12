@@ -12,6 +12,7 @@ import {
   runtimeProfileByID,
   runtimeProfileCapabilities,
 } from "../src/runtime-profiles.ts";
+import { runtimeAdapterControlPlaneForProfile } from "../src/runtime-adapter.ts";
 
 test("runtime profile catalog preserves generic labels, targets, and capabilities", () => {
   const profiles = parseRuntimeProfiles(
@@ -69,10 +70,10 @@ test("runtime profile catalog fails closed on malformed or ambiguous input", () 
     '[{"id":"a","label":"A","capabilities":null}]',
     '[{"id":"a","label":"A","capabilities":{"unknown":true}}]',
     '[{"id":"a","label":"A","privateProvider":"hidden"}]',
-    '[{"id":"Desktop","label":"Desktop"}]',
-    '[{"id":"desktop.profile","label":"Desktop"}]',
-    '[{"id":"desktop_profile","label":"Desktop"}]',
-    `[{"id":"${"a".repeat(64)}","label":"Desktop"}]`,
+    '[{"id":"profile/escape","label":"Desktop"}]',
+    '[{"id":"-profile","label":"Desktop"}]',
+    '[{"id":"profile.","label":"Desktop"}]',
+    `[{"id":"${"a".repeat(121)}","label":"Desktop"}]`,
     '[{"id":"a","label":"A","codexSsh":null}]',
     '[{"id":"a","label":"A","codexSsh":{"aliasTemplate":"box {sessionId}"}}]',
     '[{"id":"a","label":"A","codexSsh":{"aliasTemplate":"box-{unknown}"}}]',
@@ -86,11 +87,49 @@ test("runtime profile catalog fails closed on malformed or ambiguous input", () 
     assert.throws(() => parseRuntimeProfiles(value));
   }
   assert.equal(
-    parseRuntimeProfiles(JSON.stringify([{ id: "a".repeat(63), label: "Maximum" }]))[0]?.id.length,
-    63,
+    parseRuntimeProfiles(JSON.stringify([{ id: `A${"_".repeat(118)}Z`, label: "Maximum" }]))[0]?.id
+      .length,
+    120,
   );
   assert.deepEqual(parseRuntimeProfiles(undefined), []);
   assert.deepEqual(parseRuntimeProfiles(""), []);
+});
+
+test("fixed adapters accept opaque profile ids without weakening profile-routed URLs", () => {
+  const profiles = parseRuntimeProfiles(
+    JSON.stringify([
+      { id: "Desktop.PROFILE_2026", label: "Desktop" },
+      { id: "desktop_profile", label: "Terminal" },
+    ]),
+  );
+
+  for (const profile of profiles) {
+    assert.equal(
+      runtimeAdapterControlPlaneForProfile(
+        "https://adapter.example.test/base",
+        undefined,
+        profile.id,
+      ),
+      "https://adapter.example.test/base",
+    );
+    assert.equal(
+      runtimeAdapterControlPlaneForProfile(
+        undefined,
+        "https://controller.example.test/adapters/{profile}",
+        profile.id,
+      ),
+      null,
+    );
+  }
+
+  assert.equal(
+    runtimeAdapterControlPlaneForProfile(
+      undefined,
+      "https://controller.example.test/adapters/{profile}",
+      "desktop-profile",
+    ),
+    "https://controller.example.test/adapters/desktop-profile",
+  );
 });
 
 test("runtime profiles resolve bounded Codex SSH handoff data", () => {
