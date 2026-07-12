@@ -10,7 +10,10 @@ import {
   encodeSubscribePayload,
   encodeTerminalFrame,
 } from "@openclaw/libterminal/protocol";
-import { sendGitHubActionsRelayInputAcknowledgement } from "../src/github-actions-runtime.ts";
+import {
+  encodeGitHubActionsRelayInputAcknowledgement,
+  parseGitHubActionsRelayInput,
+} from "../src/github-actions-runtime.ts";
 import type { User } from "../src/worker/models.ts";
 import { containerCapabilities, interactiveSession } from "../src/worker/session-model.ts";
 import { TerminalHub, type TerminalHubDependencies } from "../src/worker/terminal-hub.ts";
@@ -60,6 +63,22 @@ function frame(value: string | ArrayBuffer | ArrayBufferView | Blob) {
   const decoded = decodeTerminalFrame(value);
   assert.ok(decoded);
   return decoded;
+}
+
+function relayInput(value: string | ArrayBuffer | ArrayBufferView | Blob) {
+  assert.ok(value instanceof ArrayBuffer);
+  const input = parseGitHubActionsRelayInput(value);
+  assert.ok(input);
+  return {
+    inputId: input.inputId,
+    text: new TextDecoder().decode(input.payload),
+  };
+}
+
+function emitRelayAcknowledgement(upstream: TestSocket, inputId: string, accepted: boolean): void {
+  upstream.emit("message", {
+    data: encodeGitHubActionsRelayInputAcknowledgement({ inputId, accepted }),
+  });
 }
 
 async function flushQueues(): Promise<void> {
@@ -486,7 +505,7 @@ test("terminal hub never acknowledges input after its upstream closes", async ()
   server.emit("close");
 });
 
-test("GitHub Actions input waits for relay delivery before acknowledgement", async () => {
+test("GitHub Actions input waits for the correlated runner acknowledgement", async () => {
   const client = socket();
   const server = socket();
   const upstream = socket();
@@ -522,7 +541,8 @@ test("GitHub Actions input waits for relay delivery before acknowledgement", asy
   });
   await flushQueues();
 
-  assert.equal(new TextDecoder().decode(upstream.sent.at(-1) as Uint8Array), "steer\r");
+  const input = relayInput(upstream.sent.at(-1)!);
+  assert.equal(input.text, "steer\r");
   assert.equal(
     server.sent.some(
       (payload) =>
@@ -532,16 +552,7 @@ test("GitHub Actions input waits for relay delivery before acknowledgement", asy
     false,
   );
 
-  sendGitHubActionsRelayInputAcknowledgement(
-    {
-      readyState: WebSocket.OPEN,
-      send(message) {
-        upstream.emit("message", { data: message });
-      },
-      close() {},
-    },
-    true,
-  );
+  emitRelayAcknowledgement(upstream, input.inputId, true);
   await flushQueues();
   await flushQueues();
 
@@ -586,16 +597,8 @@ test("GitHub Actions relay rejection becomes a terminal input error", async () =
   });
   await flushQueues();
 
-  sendGitHubActionsRelayInputAcknowledgement(
-    {
-      readyState: WebSocket.OPEN,
-      send(message) {
-        upstream.emit("message", { data: message });
-      },
-      close() {},
-    },
-    false,
-  );
+  const input = relayInput(upstream.sent.at(-1)!);
+  emitRelayAcknowledgement(upstream, input.inputId, false);
   await flushQueues();
   await flushQueues();
 
@@ -616,7 +619,7 @@ test("GitHub Actions relay rejection becomes a terminal input error", async () =
   server.emit("close");
 });
 
-test("GitHub Actions input acknowledgements resolve overlapping payloads in FIFO order", async () => {
+test("GitHub Actions input acknowledgements correlate overlapping payloads out of order", async () => {
   const client = socket();
   const server = socket();
   const upstream = socket();
@@ -654,41 +657,70 @@ test("GitHub Actions input acknowledgements resolve overlapping payloads in FIFO
   });
   await waitForInputPayloads();
 
+  const inputs = upstream.sent.map(relayInput);
   assert.deepEqual(
-    upstream.sent.map((payload) => new TextDecoder().decode(payload as Uint8Array)),
+    inputs.map((input) => input.text),
     ["first", "second"],
   );
-  sendGitHubActionsRelayInputAcknowledgement(
-    {
-      readyState: WebSocket.OPEN,
-      send(message) {
-        upstream.emit("message", { data: message });
-      },
-      close() {},
-    },
-    true,
-  );
+  assert.notEqual(inputs[0]!.inputId, inputs[1]!.inputId);
+
+  emitRelayAcknowledgement(upstream, inputs[1]!.inputId, true);
+  emitRelayAcknowledgement(upstream, "stale-input-id", true);
   await flushQueues();
+  assert.equal(
+    server.sent
+      .map((payload) => frame(payload))
+      .filter((message) => message.type === TerminalMessageType.Output).length,
+    0,
+  );
   assert.notDeepEqual(decodeJsonPayload(frame(server.sent.at(-1)!).payload), {
     type: "input-accepted",
   });
 
-  sendGitHubActionsRelayInputAcknowledgement(
-    {
-      readyState: WebSocket.OPEN,
-      send(message) {
-        upstream.emit("message", { data: message });
-      },
-      close() {},
-    },
-    true,
-  );
+  emitRelayAcknowledgement(upstream, inputs[0]!.inputId, true);
   await flushQueues();
   await flushQueues();
 
   assert.deepEqual(decodeJsonPayload(frame(server.sent.at(-1)!).payload), {
     type: "input-accepted",
   });
+  server.emit("close");
+});
+
+test("GitHub Actions collision-shaped terminal text remains raw output", async () => {
+  const client = socket();
+  const server = socket();
+  const upstream = socket();
+  const hub = new TerminalHub(
+    dependencies(client, server, upstream, {
+      async readSession() {
+        return githubActionsSession;
+      },
+    }),
+  );
+  await hub.open(
+    new Request("https://fleet.example/api/terminal/ws", {
+      headers: { upgrade: "websocket" },
+    }),
+    user,
+  );
+  server.emit("message", {
+    data: encodeTerminalFrame({
+      type: TerminalMessageType.Subscribe,
+      sessionId: githubActionsSession.id,
+      payload: encodeSubscribePayload({ flags: 0, columns: 120, rows: 34 }),
+    }),
+  });
+  await flushQueues();
+  await flushQueues();
+
+  const collision = '{"type":"runner_waiting","inputId":"stale-input-id","accepted":true}';
+  upstream.emit("message", { data: collision });
+  await flushQueues();
+
+  const output = frame(server.sent.at(-1)!);
+  assert.equal(output.type, TerminalMessageType.Output);
+  assert.equal(new TextDecoder().decode(output.payload), collision);
   server.emit("close");
 });
 
@@ -736,21 +768,9 @@ test("GitHub Actions send failure removes only its own acknowledgement waiter", 
     }),
   });
   await waitForInputPayloads();
-  assert.deepEqual(
-    upstream.sent.map((payload) => new TextDecoder().decode(payload as Uint8Array)),
-    ["delivered"],
-  );
-
-  sendGitHubActionsRelayInputAcknowledgement(
-    {
-      readyState: WebSocket.OPEN,
-      send(message) {
-        upstream.emit("message", { data: message });
-      },
-      close() {},
-    },
-    true,
-  );
+  const input = relayInput(upstream.sent[0]!);
+  assert.equal(input.text, "delivered");
+  emitRelayAcknowledgement(upstream, input.inputId, true);
   await flushQueues();
   await flushQueues();
 

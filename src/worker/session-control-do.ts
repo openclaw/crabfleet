@@ -237,7 +237,7 @@ export class SessionControlDO extends DurableObject<RuntimeEnv> {
     } else {
       this.ctx.acceptWebSocket(server, ["github-actions-viewer"]);
       if (this.ctx.getWebSockets("github-actions-runner").length === 0) {
-        server.send(JSON.stringify({ type: "runner_waiting" }));
+        notifyGitHubActionsViewers([server], "runner_waiting");
       }
     }
     return new Response(null, { status: 101, webSocket: client });

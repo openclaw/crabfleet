@@ -14,8 +14,11 @@ import {
   sendOutputAcknowledgement,
 } from "@openclaw/libterminal/worker";
 import {
+  createGitHubActionsRelayInputId,
+  encodeGitHubActionsRelayInput,
   githubActionsRuntime,
   parseGitHubActionsRelayInputAcknowledgement,
+  parseGitHubActionsRelayEvent,
   type GitHubActionsRelayInputAcknowledgement,
 } from "../github-actions-runtime.ts";
 import { redactedAdapterMessage } from "../runtime-adapter.ts";
@@ -28,6 +31,7 @@ const terminalFrameLimits = { maxFrameBytes: 16 * 1024 * 1024 };
 const terminalInputAcknowledgementTimeoutMs = 5_000;
 
 type PendingTerminalInputAcknowledgement = {
+  inputId: string;
   promise: Promise<GitHubActionsRelayInputAcknowledgement>;
   resolve(result: GitHubActionsRelayInputAcknowledgement): void;
   timeout: ReturnType<typeof setTimeout>;
@@ -50,7 +54,7 @@ export type TerminalHubSubscription = {
   cols: number;
   rows: number;
   inputAcknowledgements: boolean;
-  pendingInputAcknowledgements: PendingTerminalInputAcknowledgement[];
+  pendingInputAcknowledgements: Map<string, PendingTerminalInputAcknowledgement>;
   outputAcknowledgements: boolean;
   outputAcknowledgementBytes: number;
 };
@@ -252,15 +256,21 @@ export class TerminalHub {
                 });
                 return;
               }
-              const acknowledgement = subscription.inputAcknowledgements
-                ? beginTerminalInputAcknowledgement(subscription)
+              const inputId = subscription.inputAcknowledgements
+                ? createGitHubActionsRelayInputId()
+                : null;
+              const acknowledgement = inputId
+                ? beginTerminalInputAcknowledgement(subscription, inputId)
                 : null;
               if (acknowledgement) acknowledgements.push(acknowledgement);
               try {
-                subscription.upstream.send(input);
+                subscription.upstream.send(
+                  inputId ? encodeGitHubActionsRelayInput(inputId, input) : input,
+                );
               } catch {
                 if (acknowledgement) {
-                  completeTerminalInputAcknowledgement(subscription, acknowledgement, {
+                  completeTerminalInputAcknowledgement(subscription, acknowledgement.inputId, {
+                    inputId: acknowledgement.inputId,
                     accepted: false,
                     error: "terminal upstream send failed",
                   });
@@ -461,7 +471,7 @@ export class TerminalHub {
         cols,
         rows,
         inputAcknowledgements: session.runtime === githubActionsRuntime,
-        pendingInputAcknowledgements: [],
+        pendingInputAcknowledgements: new Map(),
         outputAcknowledgements: outputAcknowledgements && upstreamConnection.outputAcknowledgements,
         outputAcknowledgementBytes: 0,
       };
@@ -504,16 +514,29 @@ export class TerminalHub {
           .then(async () => {
             const data = await normalizeWebSocketMessageData(raw);
             if (client.readyState !== WebSocket.OPEN || !viewGranted) return;
-            if (typeof data === "string") {
+            if (activeSubscription.inputAcknowledgements && typeof data !== "string") {
               const inputAcknowledgement = parseGitHubActionsRelayInputAcknowledgement(data);
               if (inputAcknowledgement) {
-                completeNextTerminalInputAcknowledgement(activeSubscription, inputAcknowledgement);
+                completeTerminalInputAcknowledgement(
+                  activeSubscription,
+                  inputAcknowledgement.inputId,
+                  inputAcknowledgement,
+                );
                 return;
               }
-              const parsed = parseTerminalControlMessage(data);
-              if (parsed) {
-                sendTerminalJson(client, TerminalMessageType.Event, id, parsed);
+              const relayEvent = parseGitHubActionsRelayEvent(data);
+              if (relayEvent) {
+                sendTerminalJson(client, TerminalMessageType.Event, id, relayEvent);
                 return;
+              }
+            }
+            if (typeof data === "string") {
+              if (!activeSubscription.inputAcknowledgements) {
+                const parsed = parseTerminalControlMessage(data);
+                if (parsed) {
+                  sendTerminalJson(client, TerminalMessageType.Event, id, parsed);
+                  return;
+                }
               }
               const output = encoder.encode(data);
               sendTerminalFrame(client, TerminalMessageType.Output, id, output);
@@ -596,12 +619,14 @@ export class TerminalHub {
 
 function beginTerminalInputAcknowledgement(
   subscription: TerminalHubSubscription,
+  inputId: string,
 ): PendingTerminalInputAcknowledgement {
   let resolve!: (result: GitHubActionsRelayInputAcknowledgement) => void;
   const promise = new Promise<GitHubActionsRelayInputAcknowledgement>((complete) => {
     resolve = complete;
   });
   const pending: PendingTerminalInputAcknowledgement = {
+    inputId,
     promise,
     resolve,
     timeout: setTimeout(() => {
@@ -618,39 +643,32 @@ function beginTerminalInputAcknowledgement(
       }
     }, terminalInputAcknowledgementTimeoutMs),
   };
-  subscription.pendingInputAcknowledgements.push(pending);
+  subscription.pendingInputAcknowledgements.set(inputId, pending);
   return pending;
 }
 
 function completeTerminalInputAcknowledgement(
   subscription: TerminalHubSubscription,
-  pending: PendingTerminalInputAcknowledgement,
+  inputId: string,
   result: GitHubActionsRelayInputAcknowledgement,
 ): boolean {
-  const index = subscription.pendingInputAcknowledgements.indexOf(pending);
-  if (index < 0) return false;
-  subscription.pendingInputAcknowledgements.splice(index, 1);
+  const pending = subscription.pendingInputAcknowledgements.get(inputId);
+  if (!pending) return false;
+  subscription.pendingInputAcknowledgements.delete(inputId);
   clearTimeout(pending.timeout);
   pending.resolve(result);
   return true;
 }
 
-function completeNextTerminalInputAcknowledgement(
-  subscription: TerminalHubSubscription,
-  result: GitHubActionsRelayInputAcknowledgement,
-): boolean {
-  const pending = subscription.pendingInputAcknowledgements[0];
-  return pending ? completeTerminalInputAcknowledgement(subscription, pending, result) : false;
-}
-
 function completeAllTerminalInputAcknowledgements(
   subscription: TerminalHubSubscription,
-  result: GitHubActionsRelayInputAcknowledgement,
+  result: Omit<GitHubActionsRelayInputAcknowledgement, "inputId">,
 ): number {
-  const pending = subscription.pendingInputAcknowledgements.splice(0);
+  const pending = [...subscription.pendingInputAcknowledgements.values()];
+  subscription.pendingInputAcknowledgements.clear();
   for (const acknowledgement of pending) {
     clearTimeout(acknowledgement.timeout);
-    acknowledgement.resolve(result);
+    acknowledgement.resolve({ inputId: acknowledgement.inputId, ...result });
   }
   return pending.length;
 }
