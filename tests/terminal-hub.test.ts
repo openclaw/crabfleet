@@ -964,12 +964,15 @@ test("terminal input queue rejects excess frames after earlier completions", asy
     .filter((message) => message.type === TerminalMessageType.Event)
     .map((message) => decodeJsonPayload(message.payload) as { type?: string; error?: string })
     .filter((message) => message.type === "input-accepted" || message.type === "input-rejected");
-  assert.equal(completions.length, 33);
+  assert.equal(completions.length, 128);
   assert.deepEqual(completions.slice(0, 32), Array(32).fill({ type: "input-accepted" }));
-  assert.deepEqual(completions[32], {
-    type: "input-rejected",
-    error: "terminal input backlog exceeded",
-  });
+  assert.deepEqual(
+    completions.slice(32),
+    Array(96).fill({
+      type: "input-rejected",
+      error: "terminal input backlog exceeded",
+    }),
+  );
   server.emit("close");
 });
 
@@ -1446,6 +1449,93 @@ test("GitHub Actions runner replacement rejects old input and accepts new input"
     completions.map((message) => message.type),
     ["input-rejected", "input-accepted"],
   );
+  assert.deepEqual(upstream.closed, []);
+  server.emit("close");
+});
+
+test("queued runner replacement rejects only acknowledgements sent to the old generation", async () => {
+  const client = socket();
+  const server = socket();
+  const upstream = socket();
+  let releaseBlockedOutput: ((output: ArrayBuffer) => void) | undefined;
+  const blockedOutput = new Promise<ArrayBuffer>((resolve) => {
+    releaseBlockedOutput = resolve;
+  });
+  const hub = new TerminalHub(
+    dependencies(client, server, upstream, {
+      async readSession() {
+        return githubActionsSession;
+      },
+      async inputPayloads() {
+        return [new TextEncoder().encode("old runner"), new TextEncoder().encode("new runner")];
+      },
+    }),
+  );
+  await hub.open(
+    new Request("https://fleet.example/api/terminal/ws", {
+      headers: { upgrade: "websocket" },
+    }),
+    user,
+  );
+  server.emit("message", {
+    data: encodeTerminalFrame({
+      type: TerminalMessageType.Subscribe,
+      sessionId: githubActionsSession.id,
+      payload: encodeSubscribePayload({ flags: 0, columns: 120, rows: 34 }),
+    }),
+  });
+  await flushQueues();
+  await flushQueues();
+
+  upstream.emit("message", { data: { arrayBuffer: () => blockedOutput } });
+  const send = upstream.send.bind(upstream);
+  upstream.send = (data) => {
+    send(data);
+    if (upstream.sent.length === 1) emitRelayEvent(upstream, "runner_connected");
+  };
+  server.emit("message", {
+    data: encodeTerminalFrame({
+      type: TerminalMessageType.Input,
+      sessionId: githubActionsSession.id,
+      payload: new TextEncoder().encode("split input"),
+    }),
+  });
+  await waitForInputPayloads();
+
+  assert.equal(upstream.sent.length, 2);
+  const oldInput = relayInput(upstream.sent[0]!);
+  const replacementInput = relayInput(upstream.sent[1]!);
+  releaseBlockedOutput?.(encodeGitHubActionsRelayOutput("blocked output"));
+  await flushQueues();
+  await flushQueues();
+  await flushQueues();
+
+  emitRelayAcknowledgement(upstream, oldInput.inputId, true);
+  await flushQueues();
+  assert.equal(
+    server.sent
+      .map((payload) => frame(payload))
+      .filter((message) => message.type === TerminalMessageType.Event)
+      .map((message) => decodeJsonPayload(message.payload) as { type?: string })
+      .some((message) => message.type === "input-accepted" || message.type === "input-rejected"),
+    false,
+  );
+
+  emitRelayAcknowledgement(upstream, replacementInput.inputId, true);
+  await flushQueues();
+  await flushQueues();
+
+  const completions = server.sent
+    .map((payload) => frame(payload))
+    .filter((message) => message.type === TerminalMessageType.Event)
+    .map((message) => decodeJsonPayload(message.payload) as { type?: string; error?: string })
+    .filter((message) => message.type === "input-accepted" || message.type === "input-rejected");
+  assert.deepEqual(completions, [
+    {
+      type: "input-rejected",
+      error: "GitHub Actions runner was replaced before accepting input",
+    },
+  ]);
   assert.deepEqual(upstream.closed, []);
   server.emit("close");
 });

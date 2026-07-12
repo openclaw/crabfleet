@@ -36,6 +36,7 @@ const terminalInputAcknowledgementTimeoutMs = 5_000;
 
 type PendingTerminalInputAcknowledgement = {
   inputId: string;
+  runnerGeneration: number;
   promise: Promise<GitHubActionsRelayInputAcknowledgement>;
   resolve(result: GitHubActionsRelayInputAcknowledgement): void;
   timeout: ReturnType<typeof setTimeout>;
@@ -62,8 +63,10 @@ export type TerminalHubSubscription = {
   inputQueue: Promise<void>;
   inputQueueBytes: number;
   inputQueueFrames: number;
+  inputQueueRejections: number;
   inputQueueRejectionScheduled: boolean;
   pendingInputAcknowledgements: Map<string, PendingTerminalInputAcknowledgement>;
+  runnerGeneration: number;
   outputAcknowledgements: boolean;
   outputAcknowledgementBytes: number;
 };
@@ -290,7 +293,11 @@ export class TerminalHub {
                       ? createGitHubActionsRelayInputId()
                       : null;
                     const acknowledgement = inputId
-                      ? beginTerminalInputAcknowledgement(subscription, inputId)
+                      ? beginTerminalInputAcknowledgement(
+                          subscription,
+                          inputId,
+                          subscription.runnerGeneration,
+                        )
                       : null;
                     if (acknowledgement) acknowledgements.push(acknowledgement);
                     try {
@@ -507,8 +514,10 @@ export class TerminalHub {
         inputQueue: Promise.resolve(),
         inputQueueBytes: 0,
         inputQueueFrames: 0,
+        inputQueueRejections: 0,
         inputQueueRejectionScheduled: false,
         pendingInputAcknowledgements: new Map(),
+        runnerGeneration: 0,
         outputAcknowledgements: outputAcknowledgements && upstreamConnection.outputAcknowledgements,
         outputAcknowledgementBytes: 0,
       };
@@ -546,6 +555,13 @@ export class TerminalHub {
       });
       upstream.addEventListener("message", (event) => {
         const raw = event.data;
+        const receivedRelayEvent = activeSubscription.inputAcknowledgements
+          ? parseSynchronousGitHubActionsRelayEvent(raw)
+          : null;
+        let runnerGenerationAtReceipt =
+          receivedRelayEvent?.type === "runner_connected"
+            ? ++activeSubscription.runnerGeneration
+            : activeSubscription.runnerGeneration;
         outputQueue = outputQueue
           .catch(() => undefined)
           .then(async () => {
@@ -561,7 +577,7 @@ export class TerminalHub {
                 );
                 return;
               }
-              const relayEvent = parseGitHubActionsRelayEvent(data);
+              const relayEvent = receivedRelayEvent ?? parseGitHubActionsRelayEvent(data);
               if (relayEvent) {
                 if (relayEvent.type === "runner_disconnected") {
                   completeAllTerminalInputAcknowledgements(activeSubscription, {
@@ -569,10 +585,17 @@ export class TerminalHub {
                     error: "GitHub Actions runner disconnected before accepting input",
                   });
                 } else if (relayEvent.type === "runner_connected") {
-                  completeAllTerminalInputAcknowledgements(activeSubscription, {
-                    accepted: false,
-                    error: "GitHub Actions runner was replaced before accepting input",
-                  });
+                  if (!receivedRelayEvent) {
+                    runnerGenerationAtReceipt = ++activeSubscription.runnerGeneration;
+                  }
+                  completeTerminalInputAcknowledgementsBeforeGeneration(
+                    activeSubscription,
+                    runnerGenerationAtReceipt,
+                    {
+                      accepted: false,
+                      error: "GitHub Actions runner was replaced before accepting input",
+                    },
+                  );
                 }
                 sendTerminalJson(client, TerminalMessageType.Event, id, relayEvent);
                 return;
@@ -678,6 +701,7 @@ export class TerminalHub {
 function beginTerminalInputAcknowledgement(
   subscription: TerminalHubSubscription,
   inputId: string,
+  runnerGeneration: number,
 ): PendingTerminalInputAcknowledgement {
   let resolve!: (result: GitHubActionsRelayInputAcknowledgement) => void;
   const promise = new Promise<GitHubActionsRelayInputAcknowledgement>((complete) => {
@@ -685,6 +709,7 @@ function beginTerminalInputAcknowledgement(
   });
   const pending: PendingTerminalInputAcknowledgement = {
     inputId,
+    runnerGeneration,
     promise,
     resolve,
     timeout: setTimeout(() => {
@@ -710,16 +735,21 @@ function scheduleTerminalInputBacklogRejection(
   subscription: TerminalHubSubscription,
   sessionId: string,
 ): void {
+  subscription.inputQueueRejections += 1;
   if (subscription.inputQueueRejectionScheduled) return;
   subscription.inputQueueRejectionScheduled = true;
   subscription.inputQueue = subscription.inputQueue
     .catch(() => undefined)
     .then(() => {
+      const rejections = subscription.inputQueueRejections;
+      subscription.inputQueueRejections = 0;
       subscription.inputQueueRejectionScheduled = false;
-      sendTerminalJson(socket, TerminalMessageType.Event, sessionId, {
-        type: "input-rejected",
-        error: "terminal input backlog exceeded",
-      });
+      for (let index = 0; index < rejections; index += 1) {
+        sendTerminalJson(socket, TerminalMessageType.Event, sessionId, {
+          type: "input-rejected",
+          error: "terminal input backlog exceeded",
+        });
+      }
     });
 }
 
@@ -740,13 +770,45 @@ function completeAllTerminalInputAcknowledgements(
   subscription: TerminalHubSubscription,
   result: Omit<GitHubActionsRelayInputAcknowledgement, "inputId">,
 ): number {
-  const pending = [...subscription.pendingInputAcknowledgements.values()];
-  subscription.pendingInputAcknowledgements.clear();
+  return completeTerminalInputAcknowledgements(subscription, () => true, result);
+}
+
+function completeTerminalInputAcknowledgementsBeforeGeneration(
+  subscription: TerminalHubSubscription,
+  runnerGeneration: number,
+  result: Omit<GitHubActionsRelayInputAcknowledgement, "inputId">,
+): number {
+  return completeTerminalInputAcknowledgements(
+    subscription,
+    (pending) => pending.runnerGeneration < runnerGeneration,
+    result,
+  );
+}
+
+function completeTerminalInputAcknowledgements(
+  subscription: TerminalHubSubscription,
+  matches: (pending: PendingTerminalInputAcknowledgement) => boolean,
+  result: Omit<GitHubActionsRelayInputAcknowledgement, "inputId">,
+): number {
+  const pending = [...subscription.pendingInputAcknowledgements.values()].filter(matches);
   for (const acknowledgement of pending) {
+    subscription.pendingInputAcknowledgements.delete(acknowledgement.inputId);
     clearTimeout(acknowledgement.timeout);
     acknowledgement.resolve({ inputId: acknowledgement.inputId, ...result });
   }
   return pending.length;
+}
+
+function parseSynchronousGitHubActionsRelayEvent(
+  data: unknown,
+): ReturnType<typeof parseGitHubActionsRelayEvent> {
+  if (typeof data === "string" || data instanceof ArrayBuffer) {
+    return parseGitHubActionsRelayEvent(data);
+  }
+  if (!ArrayBuffer.isView(data)) return null;
+  const copied = new Uint8Array(data.byteLength);
+  copied.set(new Uint8Array(data.buffer, data.byteOffset, data.byteLength));
+  return parseGitHubActionsRelayEvent(copied.buffer);
 }
 
 async function reportTerminalInputCompletion(
