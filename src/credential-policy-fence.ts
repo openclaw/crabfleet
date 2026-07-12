@@ -11,6 +11,11 @@ export type CredentialPolicyGenerationTombstone = {
   tombstonedAt: number;
 };
 
+export type CredentialPolicyRollbackRecord<T extends { sessionId: string }> = {
+  generation: string;
+  policy: T;
+};
+
 export function isCurrentCredentialPolicyGeneration(value: unknown): value is string {
   return (
     typeof value === "string" &&
@@ -18,6 +23,31 @@ export function isCurrentCredentialPolicyGeneration(value: unknown): value is st
     value.length > "generation:".length &&
     value.length <= 200
   );
+}
+
+export function credentialPolicyRollbackRecord<T extends { sessionId: string }>(
+  value: unknown,
+): CredentialPolicyRollbackRecord<T> | undefined {
+  if (!value || typeof value !== "object") return undefined;
+  const record = value as Partial<CredentialPolicyRollbackRecord<T>>;
+  if (
+    !isCurrentCredentialPolicyGeneration(record.generation) ||
+    !record.policy ||
+    typeof record.policy !== "object" ||
+    typeof record.policy.sessionId !== "string" ||
+    !record.policy.sessionId
+  ) {
+    return undefined;
+  }
+  return record as CredentialPolicyRollbackRecord<T>;
+}
+
+export function credentialPolicyRollbackExpiresAt(
+  replacedRegistrationExpiresAt: number,
+  now: number,
+  claimTtlMs: number,
+): number {
+  return Math.max(replacedRegistrationExpiresAt + 1, now + claimTtlMs);
 }
 
 export function credentialPolicyRegistrationAccepted<T extends { sessionId: string }>(

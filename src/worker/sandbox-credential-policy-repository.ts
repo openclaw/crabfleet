@@ -6,6 +6,7 @@ import {
   type SandboxCredentialPolicy,
   type SandboxCredentialPolicyRegistration,
 } from "./session-control-policy.ts";
+import type { SandboxCredentialPolicyRollbackRecord } from "./sandbox-credential-policy-rollback.ts";
 import { database, executeBatch, type CompilableQuery } from "./database.ts";
 import type { RuntimeEnv } from "./env.ts";
 import {
@@ -483,6 +484,7 @@ export function sandboxCredentialPolicyRegistrationQueries(
         registration_generation = excluded.registration_generation,
         registration_claim = excluded.registration_claim,
         registration_claim_expires_at = excluded.registration_claim_expires_at,
+        rollback_policies_json = NULL,
         last_error = NULL,
         cleanup_claim = NULL,
         cleanup_claim_expires_at = NULL,
@@ -582,6 +584,56 @@ export async function renewSandboxCredentialPolicyRegistration(
     .where(sandboxCredentialPolicyOwnerCondition(sessionId, sandboxId, ownershipFence, now))
     .executeTakeFirst();
   return Number(renewed.numUpdatedRows ?? 0n) === 1 ? registrationExpiresAt : null;
+}
+
+export async function recordSandboxCredentialPolicyRollback(
+  env: RuntimeEnv,
+  sessionId: string,
+  sandboxId: string,
+  registration: SandboxCredentialPolicyRegistration,
+  rollback: readonly SandboxCredentialPolicyRollbackRecord[],
+  ownershipFence: SandboxCredentialPolicyOwnershipFence,
+): Promise<boolean> {
+  const now = Date.now();
+  const recorded = await database(env)
+    .updateTable("interactive_session_credential_policy_registrations")
+    .set({
+      rollback_policies_json: JSON.stringify(rollback),
+      updated_at: now,
+    })
+    .where("session_id", "=", sessionId)
+    .where("sandbox_id", "=", sandboxId)
+    .where("state", "=", "registering")
+    .where("registration_generation", "=", registration.generation)
+    .where("registration_claim", "=", registration.claim)
+    .where("registration_claim_expires_at", ">", now)
+    .where(sandboxCredentialPolicyOwnerCondition(sessionId, sandboxId, ownershipFence, now))
+    .executeTakeFirst();
+  return Number(recorded.numUpdatedRows ?? 0n) === 1;
+}
+
+export async function deferSandboxCredentialPolicyRollback(
+  env: RuntimeEnv,
+  sessionId: string,
+  sandboxId: string,
+  registration: SandboxCredentialPolicyRegistration,
+  reason: string,
+): Promise<void> {
+  const now = Date.now();
+  await database(env)
+    .updateTable("interactive_session_credential_policy_registrations")
+    .set({
+      registration_claim_expires_at: now,
+      last_error: reason,
+      updated_at: now,
+    })
+    .where("session_id", "=", sessionId)
+    .where("sandbox_id", "=", sandboxId)
+    .where("state", "=", "registering")
+    .where("registration_generation", "=", registration.generation)
+    .where("registration_claim", "=", registration.claim)
+    .where("rollback_policies_json", "is not", null)
+    .execute();
 }
 
 export async function finishSandboxCredentialPolicyRegistration(

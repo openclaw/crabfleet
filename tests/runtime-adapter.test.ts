@@ -1041,6 +1041,10 @@ test("sandbox credential cleanup is durably staged and retried", async () => {
     new URL("../migrations/0034_credential_policy_registration_staging.sql", import.meta.url),
     "utf8",
   );
+  const registrationRollbackMigration = await readFile(
+    new URL("../migrations/0035_credential_policy_registration_rollback.sql", import.meta.url),
+    "utf8",
+  );
   const scanStart = scannerSource.indexOf("type CredentialPolicyScanRow");
   const scanSource = scannerSource.slice(scanStart);
   const batchStart = cleanupServiceSource.indexOf(
@@ -1202,6 +1206,18 @@ test("sandbox credential cleanup is durably staged and retried", async () => {
       ),
   );
   assert.ok(
+    registerSource.indexOf("captureSandboxCredentialPolicyRollback") <
+      registerSource.indexOf(
+        'stub.fetch("https://crabfleet.internal/api/session-control/register"',
+      ),
+  );
+  assert.ok(
+    registerSource.indexOf("recordSandboxCredentialPolicyRollback") <
+      registerSource.indexOf(
+        'stub.fetch("https://crabfleet.internal/api/session-control/register"',
+      ),
+  );
+  assert.ok(
     registerSource.indexOf("renewSandboxCredentialPolicyRegistration") <
       registerSource.indexOf(
         'stub.fetch("https://crabfleet.internal/api/session-control/register"',
@@ -1220,6 +1236,11 @@ test("sandbox credential cleanup is durably staged and retried", async () => {
     /DELETE FROM interactive_session_credential_policy_registrations/,
   );
   assert.match(registerSource, /abandonSandboxCredentialPolicyRegistration/);
+  assert.match(registerSource, /restoreSandboxCredentialPolicyRollback/);
+  assert.ok(
+    scanSource.indexOf("restoreRollback") <
+      scanSource.indexOf("abandonSandboxCredentialPolicyRegistration"),
+  );
   assert.match(
     abandonSource,
     /updateTable\("interactive_session_credential_policy_registrations"\)/,
@@ -1244,6 +1265,7 @@ test("sandbox credential cleanup is durably staged and retried", async () => {
     /CREATE TABLE IF NOT EXISTS interactive_session_credential_policy_registrations/,
   );
   assert.match(registrationStagingMigration, /state IN \('registering', 'cleanup_pending'\)/);
+  assert.match(registrationRollbackMigration, /ADD COLUMN rollback_policies_json TEXT/);
   assert.match(migration, /CREATE TABLE IF NOT EXISTS credential_policy_reconcile_state/);
   assert.match(migration, /scan_max_rowid INTEGER NOT NULL/);
   assert.match(migration, /group_max_session_id TEXT NOT NULL/);

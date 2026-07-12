@@ -1,0 +1,2 @@
+ALTER TABLE interactive_session_credential_policy_registrations
+  ADD COLUMN rollback_policies_json TEXT;

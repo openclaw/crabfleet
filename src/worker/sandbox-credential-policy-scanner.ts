@@ -68,6 +68,8 @@ type CredentialPolicyOwnershipRow = Pick<
 type StagedCredentialPolicyScanRow = CredentialPolicyOwnershipRow & {
   registration_generation: string;
   registration_claim: string;
+  registration_claim_expires_at: number;
+  rollback_policies_json: string | null;
 };
 
 export type SandboxCredentialPolicyExists = (
@@ -76,14 +78,29 @@ export type SandboxCredentialPolicyExists = (
   generation: string,
 ) => Promise<boolean>;
 
+export type RestoreSandboxCredentialPolicyRollback = (input: {
+  registration: SandboxCredentialPolicyRegistration;
+  registrationExpiresAt: number;
+  rollbackJson: string;
+  sessionId: string;
+}) => Promise<void>;
+
 export async function scanCredentialPolicyCleanupPage(
   env: RuntimeEnv,
   now: number,
   policyExists: SandboxCredentialPolicyExists,
   sessionId?: string,
+  restoreRollback?: RestoreSandboxCredentialPolicyRollback,
 ): Promise<void> {
   const db = database(env);
-  await scanStagedCredentialPolicyRegistrations(env, db, now, policyExists, sessionId);
+  await scanStagedCredentialPolicyRegistrations(
+    env,
+    db,
+    now,
+    policyExists,
+    sessionId,
+    restoreRollback,
+  );
   const state = sessionId
     ? null
     : await db
@@ -282,6 +299,7 @@ async function scanStagedCredentialPolicyRegistrations(
   now: number,
   policyExists: SandboxCredentialPolicyExists,
   sessionId?: string,
+  restoreRollback?: RestoreSandboxCredentialPolicyRollback,
 ): Promise<void> {
   const sessionFilter = sessionId ? sql`AND registration.session_id = ${sessionId}` : sql``;
   const result = await sql<StagedCredentialPolicyScanRow>`
@@ -290,6 +308,8 @@ async function scanStagedCredentialPolicyRegistrations(
       registration.sandbox_id,
       registration.registration_generation,
       registration.registration_claim,
+      registration.registration_claim_expires_at,
+      registration.rollback_policies_json,
       session.id AS matched_session_id,
       session.adapter AS session_adapter,
       session.lease_id AS session_lease_id,
@@ -331,6 +351,15 @@ async function scanStagedCredentialPolicyRegistrations(
         ))
       ) {
         continue;
+      }
+      if (row.rollback_policies_json !== null) {
+        if (!restoreRollback) throw new Error("sandbox credential policy rollback is unavailable");
+        await restoreRollback({
+          registration,
+          registrationExpiresAt: row.registration_claim_expires_at,
+          rollbackJson: row.rollback_policies_json,
+          sessionId: row.session_id,
+        });
       }
       await abandonSandboxCredentialPolicyRegistration(
         env,

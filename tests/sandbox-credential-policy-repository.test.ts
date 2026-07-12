@@ -9,6 +9,7 @@ import {
   currentSandboxCredentialPolicyGeneration,
   finishSandboxCredentialPolicyRegistration,
   recordSandboxCredentialPolicyRefs,
+  recordSandboxCredentialPolicyRollback,
   sandboxCredentialPolicyRegistrationQueries,
   sandboxLookupIds,
   type SandboxCredentialPolicyOwnershipFence,
@@ -128,6 +129,7 @@ function credentialPolicyDatabase(): DatabaseSync {
       last_error TEXT,
       cleanup_claim TEXT,
       cleanup_claim_expires_at INTEGER,
+      rollback_policies_json TEXT,
       created_at INTEGER NOT NULL,
       updated_at INTEGER NOT NULL,
       PRIMARY KEY (session_id, sandbox_id)
@@ -403,6 +405,28 @@ test("partial credential-policy rotation failure preserves the prior active gene
     "sandbox-1",
     ownershipFence,
   );
+  const rollback = ["sandbox-1", "do-1"].map((lookupId) => ({
+    generation: "generation:existing",
+    policy: {
+      allowedHosts: [],
+      githubCredentialSource: "none" as const,
+      githubRepo: "openclaw/crabfleet",
+      owner: "operator",
+      sandboxId: lookupId,
+      sessionId: "IS-42",
+    },
+  }));
+  assert.equal(
+    await recordSandboxCredentialPolicyRollback(
+      env,
+      "IS-42",
+      "sandbox-1",
+      staged,
+      rollback,
+      ownershipFence,
+    ),
+    true,
+  );
 
   assert.deepEqual(
     activeCredentialPolicyRows(sqlite).map((row) => row.registration_generation),
@@ -425,7 +449,12 @@ test("partial credential-policy rotation failure preserves the prior active gene
     {
       ...sqlite
         .prepare(`
-          SELECT state, registration_generation, registration_claim, last_error
+          SELECT
+            state,
+            registration_generation,
+            registration_claim,
+            rollback_policies_json,
+            last_error
           FROM interactive_session_credential_policy_registrations
           WHERE session_id = 'IS-42' AND sandbox_id = 'sandbox-1'
         `)
@@ -435,6 +464,7 @@ test("partial credential-policy rotation failure preserves the prior active gene
       state: "cleanup_pending",
       registration_generation: staged.generation,
       registration_claim: null,
+      rollback_policies_json: JSON.stringify(rollback),
       last_error: "simulated Durable Object registration failure",
     },
   );

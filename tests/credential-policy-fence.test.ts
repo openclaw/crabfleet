@@ -3,6 +3,7 @@ import test from "node:test";
 
 import {
   credentialPolicyCleanupMatches,
+  credentialPolicyRollbackExpiresAt,
   credentialPolicyRegistrationAccepted,
   credentialPolicySandboxIsExpected,
   type CredentialPolicyGenerationRecord,
@@ -148,6 +149,11 @@ test("delayed abandoned registration cannot replace a newer claim", () => {
   const abandoned = registration("generation-1", "claim-old", 300);
 
   assert.equal(credentialPolicyRegistrationAccepted(newer, undefined, abandoned, 200), false);
+});
+
+test("rollback claims advance beyond the generation they replace", () => {
+  assert.equal(credentialPolicyRollbackExpiresAt(500, 100, 200), 501);
+  assert.equal(credentialPolicyRollbackExpiresAt(200, 100, 200), 300);
 });
 
 test("live lease refresh fences both current and expected sandbox policies", () => {

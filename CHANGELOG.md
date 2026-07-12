@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-- Harden session lifecycle concurrency with atomic card claims and duplicate-first claim results, read-state-fenced GitHub Actions registration, revision-fenced lifecycle updates and grant revocation, monotonic Sandbox credential rotation, R2-clean reservation rollback, preserved Sandbox attachment state, and retained registration data for superseded runtime workspace cleanup.
+- Harden session lifecycle concurrency with atomic card claims and duplicate-first claim results, single-winner GitHub Actions credential rotation, terminal session-status fences, revision-fenced lifecycle updates and grant revocation, rollback-restored Sandbox credential rotation, R2-clean reservation rollback, preserved Sandbox attachment state, and retained registration data for superseded runtime workspace cleanup.
 - Make terminal input delivery durable across multiplex subscribers, negotiate bounded one-shot input acknowledgements across rolling upgrades without waiting on empty payloads, keep configured HTTP timeouts from canceling established sockets, and send attributed commands atomically to prevent interleaving.
 - Change the GitHub Actions runner PTY contract to correlated `CFR1` binary input and acknowledgement frames, emit success only after the runner accepts the input into its PTY, preserve unframed runner output, and reject legacy raw-input clients.
 - Preserve bounded opaque profile IDs for fixed runtime adapters while rejecting unroutable profile-routed identifiers, malformed encoded session routes, and lossy or invalid-Unicode JSON event values; also reconcile browser history drawers and focus on back/forward navigation.

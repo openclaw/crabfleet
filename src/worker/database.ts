@@ -313,6 +313,7 @@ export type InteractiveSessionCredentialPolicyRegistrationTable = {
   last_error: string | null;
   cleanup_claim: string | null;
   cleanup_claim_expires_at: number | null;
+  rollback_policies_json: Generated<string | null>;
   created_at: number;
   updated_at: number;
 };

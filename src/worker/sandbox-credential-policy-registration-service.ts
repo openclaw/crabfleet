@@ -2,15 +2,22 @@ import { fetchGithubRepoNodeId } from "./github.ts";
 import { sealSecret } from "./crypto.ts";
 import type { RuntimeEnv } from "./env.ts";
 import {
+  activeSandboxCredentialPolicyGeneration,
   abandonSandboxCredentialPolicyRegistration,
   beginSandboxCredentialPolicyRegistration,
+  deferSandboxCredentialPolicyRollback,
   existingSandboxCredentialPolicyGeneration,
   finishSandboxCredentialPolicyRegistration,
   recordSandboxCredentialPolicyRefs,
+  recordSandboxCredentialPolicyRollback,
   renewSandboxCredentialPolicyRegistration,
   standaloneSandboxPolicyExpiresAt,
   type SandboxCredentialPolicyOwnershipFence,
 } from "./sandbox-credential-policy-repository.ts";
+import {
+  captureSandboxCredentialPolicyRollback,
+  restoreSandboxCredentialPolicyRollback,
+} from "./sandbox-credential-policy-rollback.ts";
 import { sandboxCredentialPolicyExists } from "./sandbox-credential-policy-cleanup-service.ts";
 import {
   sandboxLeaseInfo,
@@ -46,7 +53,34 @@ export async function registerSandboxCredentialPolicy(
     sandboxId,
     ownershipFence,
   );
+  let latestRegistrationExpiresAt = 0;
+  let rollbackJson: string | null = null;
+  let registrationWriteStarted = false;
   try {
+    const activeGeneration = await activeSandboxCredentialPolicyGeneration(
+      env,
+      session.id,
+      sandboxId,
+    );
+    const rollback = await captureSandboxCredentialPolicyRollback(
+      stub,
+      registration.lookupIds,
+      activeGeneration,
+      session.id,
+    );
+    if (
+      !(await recordSandboxCredentialPolicyRollback(
+        env,
+        session.id,
+        sandboxId,
+        registration,
+        rollback,
+        ownershipFence,
+      ))
+    ) {
+      throw new Error("sandbox credential policy rollback snapshot was not recorded");
+    }
+    rollbackJson = JSON.stringify(rollback);
     const githubToken = "githubToken" in session ? session.githubToken : undefined;
     const githubTokenCiphertext = githubToken ? await sealSecret(env, githubToken) : null;
     if (githubToken && !githubTokenCiphertext) {
@@ -87,6 +121,8 @@ export async function registerSandboxCredentialPolicy(
       if (!registrationExpiresAt) {
         throw new Error("sandbox credential policy registration claim was revoked");
       }
+      latestRegistrationExpiresAt = registrationExpiresAt;
+      registrationWriteStarted = true;
       const response = await stub.fetch("https://crabfleet.internal/api/session-control/register", {
         method: "POST",
         body: JSON.stringify({
@@ -113,12 +149,37 @@ export async function registerSandboxCredentialPolicy(
       throw new Error("sandbox credential policy cleanup became pending during registration");
     }
   } catch (error) {
+    const message = clean(error instanceof Error ? error.message : String(error), 500);
+    if (registrationWriteStarted && rollbackJson) {
+      try {
+        await restoreSandboxCredentialPolicyRollback(
+          stub,
+          registration,
+          latestRegistrationExpiresAt,
+          rollbackJson,
+          session.id,
+        );
+      } catch (rollbackError) {
+        const rollbackMessage = clean(
+          rollbackError instanceof Error ? rollbackError.message : String(rollbackError),
+          500,
+        );
+        await deferSandboxCredentialPolicyRollback(
+          env,
+          session.id,
+          sandboxId,
+          registration,
+          `${message}; ${rollbackMessage}`,
+        ).catch(() => undefined);
+        throw new Error("sandbox credential policy rollback restore is pending", { cause: error });
+      }
+    }
     await abandonSandboxCredentialPolicyRegistration(
       env,
       session.id,
       sandboxId,
       registration,
-      clean(error instanceof Error ? error.message : String(error), 500),
+      message,
     ).catch(() => undefined);
     throw error;
   }

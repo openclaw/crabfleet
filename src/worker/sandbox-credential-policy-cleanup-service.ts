@@ -18,6 +18,7 @@ import {
   sandboxCredentialPolicyCleanupAuthorizedCondition,
   sandboxLookupIds,
 } from "./sandbox-credential-policy-repository.ts";
+import { restoreSandboxCredentialPolicyRollback } from "./sandbox-credential-policy-rollback.ts";
 import { scanCredentialPolicyCleanupPage } from "./sandbox-credential-policy-scanner.ts";
 import { isCurrentSandboxLease, sandboxLeaseInfo } from "./sandbox-lease.ts";
 import { isSandboxSessionAlreadyGone } from "./sandbox-session-errors.ts";
@@ -290,11 +291,25 @@ export async function reconcileSandboxCredentialPolicyCleanupBatch(
   await expireStandaloneSandboxProvisions(env, now, sessionId).catch((error) => {
     console.error("standalone Sandbox expiry failed", error);
   });
-  await scanCredentialPolicyCleanupPage(env, now, sandboxCredentialPolicyExists, sessionId).catch(
-    (error) => {
-      console.error("credential policy cleanup scan failed", error);
+  await scanCredentialPolicyCleanupPage(
+    env,
+    now,
+    sandboxCredentialPolicyExists,
+    sessionId,
+    async ({ registration, registrationExpiresAt, rollbackJson, sessionId: rollbackSessionId }) => {
+      const stub = sandboxControlStub(env);
+      if (!stub) throw serviceUnavailable("sandbox credential policy rollback is unavailable");
+      await restoreSandboxCredentialPolicyRollback(
+        stub,
+        registration,
+        registrationExpiresAt,
+        rollbackJson,
+        rollbackSessionId,
+      );
     },
-  );
+  ).catch((error) => {
+    console.error("credential policy cleanup scan failed", error);
+  });
   await reconcileStagedCredentialPolicyCleanup(env, now, sessionId).catch((error) => {
     console.error("staged credential policy cleanup failed", error);
   });
