@@ -432,6 +432,22 @@ export function sandboxCredentialPolicyOwnerCondition(
   )`;
 }
 
+function noLivePolicyTableRegistrationCondition(
+  sessionId: string,
+  sandboxId: string,
+  now: number,
+): RawBuilder<boolean> {
+  return sql<boolean>`NOT EXISTS (
+    SELECT 1
+    FROM interactive_session_credential_policies
+    WHERE session_id = ${sessionId}
+      AND sandbox_id = ${sandboxId}
+      AND state = 'registering'
+      AND registration_claim IS NOT NULL
+      AND registration_claim_expires_at > ${now}
+  )`;
+}
+
 export function sandboxCredentialPolicyRegistrationQueries(
   sessionId: string,
   sandboxId: string,
@@ -472,6 +488,7 @@ export function sandboxCredentialPolicyRegistrationQueries(
         ${now},
         ${now}
       WHERE ${sandboxCredentialPolicyOwnerCondition(sessionId, sandboxId, ownershipFence, now)}
+        AND ${noLivePolicyTableRegistrationCondition(sessionId, sandboxId, now)}
         AND NOT EXISTS (
           SELECT 1
           FROM interactive_session_credential_policies
@@ -495,6 +512,7 @@ export function sandboxCredentialPolicyRegistrationQueries(
           OR interactive_session_credential_policy_registrations.registration_claim_expires_at <= ${now}
         )
         AND ${sandboxCredentialPolicyOwnerCondition(sessionId, sandboxId, ownershipFence, now)}
+        AND ${noLivePolicyTableRegistrationCondition(sessionId, sandboxId, now)}
         AND NOT EXISTS (
           SELECT 1
           FROM interactive_session_credential_policies
@@ -761,6 +779,7 @@ export function sandboxCredentialPolicyPromotionQueries(
         AND registration_generation = ${registration.generation}
         AND registration_claim = ${registration.claim}
     )
+    AND ${noLivePolicyTableRegistrationCondition(sessionId, sandboxId, now)}
     AND NOT EXISTS (
       SELECT 1
       FROM interactive_session_credential_policies

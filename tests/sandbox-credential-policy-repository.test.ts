@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { DatabaseSync } from "node:sqlite";
 import test from "node:test";
 
@@ -119,23 +120,6 @@ function credentialPolicyDatabase(): DatabaseSync {
       updated_at INTEGER NOT NULL,
       PRIMARY KEY (session_id, sandbox_id, lookup_id)
     );
-    CREATE TABLE interactive_session_credential_policy_registrations (
-      session_id TEXT NOT NULL,
-      sandbox_id TEXT NOT NULL,
-      state TEXT NOT NULL,
-      registration_generation TEXT NOT NULL,
-      registration_claim TEXT,
-      registration_claim_expires_at INTEGER,
-      attempt_count INTEGER NOT NULL DEFAULT 0,
-      last_attempt_at INTEGER,
-      last_error TEXT,
-      cleanup_claim TEXT,
-      cleanup_claim_expires_at INTEGER,
-      rollback_policies_json TEXT,
-      created_at INTEGER NOT NULL,
-      updated_at INTEGER NOT NULL,
-      PRIMARY KEY (session_id, sandbox_id)
-    );
     INSERT INTO interactive_sessions (
       id,
       adapter,
@@ -165,6 +149,18 @@ function credentialPolicyDatabase(): DatabaseSync {
       ('IS-42', 'sandbox-1', 'sandbox-1', 'active', 'generation:existing', NULL, NULL, 1, 1),
       ('IS-42', 'sandbox-1', 'do-1', 'active', 'generation:existing', NULL, NULL, 1, 1);
   `);
+  db.exec(
+    readFileSync(
+      new URL("../migrations/0034_credential_policy_registration_staging.sql", import.meta.url),
+      "utf8",
+    ),
+  );
+  db.exec(
+    readFileSync(
+      new URL("../migrations/0035_credential_policy_registration_rollback.sql", import.meta.url),
+      "utf8",
+    ),
+  );
   return db;
 }
 
@@ -311,6 +307,8 @@ test("credential-policy registration SQL proves every supported ownership fence"
   assert.match(current.sql, /agent_token_hash is not null/i);
   assert.match(current.sql, /lease_id =/i);
   assert.match(current.sql, /sandbox_refresh_claim is null/i);
+  assert.match(current.sql, /state = 'registering'/i);
+  assert.match(current.sql, /registration_claim_expires_at >/i);
   assert.ok(current.parameters.includes("sandbox:sandbox-1:terminal-1:autostart-v4"));
   assert.doesNotMatch(current.sql, /1 = 1/);
 
@@ -396,6 +394,110 @@ test("credential-policy rotation always claims a fresh generation", async () => 
   assert.match(rotated.generation, /^generation:/);
   assert.notEqual(rotated.generation, "generation:existing");
   assert.equal(rotated.generation, generation);
+});
+
+test("post-migration legacy registration claims block new staged generations", async () => {
+  const sqlite = credentialPolicyDatabase();
+  sqlite
+    .prepare(`
+      UPDATE interactive_session_credential_policies
+      SET
+        state = 'registering',
+        registration_generation = 'generation:legacy-worker',
+        registration_claim = 'legacy-registration',
+        registration_claim_expires_at = ?
+      WHERE session_id = 'IS-42' AND sandbox_id = 'sandbox-1'
+    `)
+    .run(Number.MAX_SAFE_INTEGER);
+
+  await assert.rejects(
+    beginSandboxCredentialPolicyRegistration(
+      sqliteRuntimeEnv(sqlite),
+      "IS-42",
+      "sandbox-1",
+      ownershipFence,
+    ),
+    { message: "sandbox credential policy registration is unavailable" },
+  );
+
+  assert.equal(
+    sqlite
+      .prepare("SELECT count(*) AS count FROM interactive_session_credential_policy_registrations")
+      .get()?.count,
+    0,
+  );
+  assert.deepEqual(
+    activeCredentialPolicyRows(sqlite).map((row) => ({
+      generation: row.registration_generation,
+      state: row.state,
+      claim: row.registration_claim,
+    })),
+    [
+      {
+        generation: "generation:legacy-worker",
+        state: "registering",
+        claim: "legacy-registration",
+      },
+      {
+        generation: "generation:legacy-worker",
+        state: "registering",
+        claim: "legacy-registration",
+      },
+    ],
+  );
+});
+
+test("legacy claims created after staging block promotion without interleaving generations", async () => {
+  const sqlite = credentialPolicyDatabase();
+  const env = sqliteRuntimeEnv(sqlite);
+  const staged = await beginSandboxCredentialPolicyRegistration(
+    env,
+    "IS-42",
+    "sandbox-1",
+    ownershipFence,
+  );
+  sqlite
+    .prepare(`
+      UPDATE interactive_session_credential_policies
+      SET
+        state = 'registering',
+        registration_generation = 'generation:legacy-race',
+        registration_claim = 'legacy-race-claim',
+        registration_claim_expires_at = ?
+      WHERE session_id = 'IS-42' AND sandbox_id = 'sandbox-1'
+    `)
+    .run(Number.MAX_SAFE_INTEGER);
+
+  assert.equal(
+    await finishSandboxCredentialPolicyRegistration(
+      env,
+      "IS-42",
+      "sandbox-1",
+      staged,
+      ownershipFence,
+    ),
+    false,
+  );
+  assert.deepEqual(
+    activeCredentialPolicyRows(sqlite).map((row) => ({
+      generation: row.registration_generation,
+      state: row.state,
+    })),
+    [
+      { generation: "generation:legacy-race", state: "registering" },
+      { generation: "generation:legacy-race", state: "registering" },
+    ],
+  );
+  assert.equal(
+    sqlite
+      .prepare(`
+        SELECT registration_generation
+        FROM interactive_session_credential_policy_registrations
+        WHERE session_id = 'IS-42' AND sandbox_id = 'sandbox-1'
+      `)
+      .get()?.registration_generation,
+    staged.generation,
+  );
 });
 
 test("partial credential-policy rotation failure preserves the prior active generation", async () => {
