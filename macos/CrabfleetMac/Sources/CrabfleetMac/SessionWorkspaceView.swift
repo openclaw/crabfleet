@@ -89,6 +89,18 @@ private struct FocusToolbar: View {
       Spacer()
 
       if session.phase == .connected {
+        Button {
+          session.toggleAudioMuted()
+        } label: {
+          FocusControlPill(
+            icon: session.isAudioMuted ? "speaker.slash.fill" : "speaker.wave.2.fill",
+            title: session.isAudioMuted ? "Muted" : "Audio",
+            color: session.isAudioMuted ? .secondary : .mint
+          )
+        }
+        .buttonStyle(.plain)
+        .help(session.isAudioMuted ? "Unmute remote audio" : "Mute remote audio")
+
         if session.clipboardEnabled {
           Menu {
             Button("Send Mac Clipboard Now", systemImage: "arrow.up.doc.on.clipboard") {

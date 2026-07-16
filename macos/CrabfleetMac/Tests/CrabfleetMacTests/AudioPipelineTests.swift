@@ -53,3 +53,44 @@ struct AudioEncoderTests {
     encoder.invalidate()
   }
 }
+
+struct RemoteAudioJitterBufferTests {
+  @Test
+  func primesInsideTargetWindow() {
+    var buffer = RemoteAudioJitterBuffer(sampleRate: 48_000, targetDelayMs: 100)
+    for timestamp in [0, 21, 42, 63] as [UInt32] {
+      #expect(buffer.enqueue(packet(timestamp)) == .buffered)
+    }
+    #expect(buffer.enqueue(packet(84)) == .ready([
+      packet(0), packet(21), packet(42), packet(63), packet(84),
+    ]))
+    #expect(buffer.enqueue(packet(105)) == .ready([packet(105)]))
+  }
+
+  @Test
+  func dropsLatePackets() {
+    var buffer = RemoteAudioJitterBuffer(sampleRate: 48_000)
+    #expect(buffer.enqueue(packet(100)) == .buffered)
+    #expect(buffer.enqueue(packet(99)) == .droppedLate)
+    #expect(buffer.enqueue(packet(100)) == .droppedLate)
+  }
+
+  @Test
+  func resyncsAfterLongGap() {
+    var buffer = RemoteAudioJitterBuffer(sampleRate: 48_000)
+    #expect(buffer.enqueue(packet(100)) == .buffered)
+    #expect(buffer.enqueue(packet(700)) == .resynced)
+    #expect(buffer.enqueue(packet(721)) == .buffered)
+  }
+
+  @Test
+  func acceptsTimestampWrap() {
+    var buffer = RemoteAudioJitterBuffer(sampleRate: 48_000)
+    #expect(buffer.enqueue(packet(UInt32.max - 10)) == .buffered)
+    #expect(buffer.enqueue(packet(10)) == .buffered)
+  }
+
+  private func packet(_ timestampMs: UInt32) -> RemoteAudioJitterBuffer.Packet {
+    .init(timestampMs: timestampMs, payload: Data([UInt8(truncatingIfNeeded: timestampMs)]))
+  }
+}
