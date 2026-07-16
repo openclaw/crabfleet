@@ -373,31 +373,44 @@ final class MacScreenCapture: NSObject, @unchecked Sendable {
     guard !dirtyRects.isEmpty else { return 0 }
     guard let content = contentRect else { return 1 }
     guard content.width > 0, content.height > 0 else { return 1 }
-    let dirtyArea = dirtyRects.reduce(0.0) { area, rect in
-      let clipped = rect.intersection(content)
-      guard !clipped.isNull else { return area }
-      return area + clipped.width * clipped.height
-    }
+    let dirtyArea = unionArea(of: dirtyRects, within: content)
     return min(max(dirtyArea / (content.width * content.height), 0), 1)
   }
 
-  static func pixelContentRect(
+  static func clippedContentRect(
     _ contentRect: CGRect?,
-    scaleFactor: CGFloat?,
-    contentScale: CGFloat?,
     pixelWidth: Int,
     pixelHeight: Int
   ) -> CGRect {
     let pixelBounds = CGRect(x: 0, y: 0, width: pixelWidth, height: pixelHeight)
     guard let contentRect else { return pixelBounds }
-    let pointToPixelScale = max((scaleFactor ?? 1) * (contentScale ?? 1), 0)
-    let scaled = CGRect(
-      x: contentRect.origin.x * pointToPixelScale,
-      y: contentRect.origin.y * pointToPixelScale,
-      width: contentRect.width * pointToPixelScale,
-      height: contentRect.height * pointToPixelScale)
-    let clipped = scaled.intersection(pixelBounds)
+    let clipped = contentRect.intersection(pixelBounds)
     return clipped.isNull || clipped.isEmpty ? pixelBounds : clipped
+  }
+
+  private static func unionArea(of rects: [CGRect], within bounds: CGRect) -> Double {
+    let clipped = rects.map { $0.intersection(bounds) }.filter { !$0.isNull && !$0.isEmpty }
+    let xCoordinates = Set(clipped.flatMap { [$0.minX, $0.maxX] }).sorted()
+    return zip(xCoordinates, xCoordinates.dropFirst()).reduce(0) { area, edges in
+      let (minX, maxX) = edges
+      guard maxX > minX else { return area }
+      let intervals = clipped.filter { $0.minX < maxX && $0.maxX > minX }
+        .map { ($0.minY, $0.maxY) }
+        .sorted { $0.0 < $1.0 }
+      guard let first = intervals.first else { return area }
+      var coveredHeight = 0.0
+      var current = first
+      for interval in intervals.dropFirst() {
+        if interval.0 <= current.1 {
+          current.1 = max(current.1, interval.1)
+        } else {
+          coveredHeight += current.1 - current.0
+          current = interval
+        }
+      }
+      coveredHeight += current.1 - current.0
+      return area + (maxX - minX) * coveredHeight
+    }
   }
 
   static func shouldOfferVideoFrame(dirtyRects: [CGRect]?, keyframeOwed: Bool) -> Bool {
@@ -407,7 +420,7 @@ final class MacScreenCapture: NSObject, @unchecked Sendable {
   static func attachmentRect(_ value: Any?) -> CGRect? {
     if let rect = value as? CGRect { return rect }
     guard let dictionary = value as? NSDictionary else { return nil }
-    return CGRect(dictionaryRepresentation: dictionary)
+    return CGRect(dictionaryRepresentation: dictionary as CFDictionary)
   }
 
   static func attachmentRects(_ value: Any?) -> [CGRect]? {
@@ -415,10 +428,6 @@ final class MacScreenCapture: NSObject, @unchecked Sendable {
     guard let values = value as? [Any] else { return nil }
     let rects = values.compactMap(attachmentRect)
     return rects.count == values.count ? rects : nil
-  }
-
-  static func attachmentScale(_ value: Any?) -> CGFloat? {
-    (value as? NSNumber).map { CGFloat($0.doubleValue) }
   }
 
   private static func sourcePixelDimensions(
@@ -544,10 +553,8 @@ extension MacScreenCapture: SCStreamOutput, SCStreamDelegate {
     }
 
     let dirtyRects = Self.attachmentRects(attachments[.dirtyRects])
-    let contentRect = Self.pixelContentRect(
+    let contentRect = Self.clippedContentRect(
       Self.attachmentRect(attachments[.contentRect]),
-      scaleFactor: Self.attachmentScale(attachments[.scaleFactor]),
-      contentScale: Self.attachmentScale(attachments[.contentScale]),
       pixelWidth: CVPixelBufferGetWidth(pixelBuffer),
       pixelHeight: CVPixelBufferGetHeight(pixelBuffer))
     let source = VideoPixelSource(

@@ -201,18 +201,19 @@ struct VideoPipelineTests {
   }
 
   @Test
-  func dirtyAreaUsesPixelScaledContentBounds() {
-    let content = MacScreenCapture.pixelContentRect(
+  func dirtyAreaUsesOutputContentBoundsAndRectangleUnion() {
+    let content = MacScreenCapture.clippedContentRect(
       CGRect(x: 0, y: 0, width: 1_280, height: 800),
-      scaleFactor: 2,
-      contentScale: 1,
       pixelWidth: 2_560,
       pixelHeight: 1_600)
     let fraction = MacScreenCapture.dirtyAreaFraction(
-      dirtyRects: [CGRect(x: 2_400, y: 1_440, width: 160, height: 160)],
+      dirtyRects: [
+        CGRect(x: 1_200, y: 720, width: 80, height: 80),
+        CGRect(x: 1_240, y: 760, width: 40, height: 40),
+      ],
       contentRect: content)
 
-    #expect(content == CGRect(x: 0, y: 0, width: 2_560, height: 1_600))
+    #expect(content == CGRect(x: 0, y: 0, width: 1_280, height: 800))
     #expect(fraction == 0.00625)
     #expect(
       MacScreenCapture.dirtyAreaFraction(
