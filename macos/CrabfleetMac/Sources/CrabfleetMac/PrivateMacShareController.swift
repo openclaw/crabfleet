@@ -65,6 +65,16 @@ enum DesktopHostRegistrationPersistenceError: LocalizedError {
   }
 }
 
+struct DesktopHostPublication: Equatable, Sendable {
+  let hostID: String
+  let relayAccess: String?
+
+  init(hostID: String, _ relayAccess: String?) {
+    self.hostID = hostID
+    self.relayAccess = relayAccess
+  }
+}
+
 @MainActor
 final class UserDefaultsDesktopHostRegistrationStateStore:
   DesktopHostRegistrationStateStoring
@@ -228,7 +238,8 @@ final class DesktopHostRegistrationLifecycle {
     return !hasActiveState || hasDurableRecoveryState
   }
 
-  func publish(identity: TailnetIdentity, port: UInt16) async throws {
+  @discardableResult
+  func publish(identity: TailnetIdentity, port: UInt16) async throws -> DesktopHostPublication {
     try await loadStateIfNeeded()
     let hostID = CrabfleetDesktopRegistration.hostID(identity: identity)
     let existingTarget = uncertainRegistrations.first {
@@ -287,6 +298,7 @@ final class DesktopHostRegistrationLifecycle {
       usesLegacyCleanup: ownershipToken == nil
     )
     try persistState()
+    return DesktopHostPublication(hostID: hostID, ownershipToken)
   }
 
   func removePublishedIdentities() async throws {
@@ -509,6 +521,7 @@ final class PrivateMacShareController: ObservableObject {
   nonisolated static let viewOnlyDefaultsKey = "org.openclaw.crabfleet.share.view-only"
   nonisolated static let streamAudioDefaultsKey = "org.openclaw.crabfleet.share.audio"
   nonisolated static let qualityModeDefaultsKey = "org.openclaw.crabfleet.share.quality-mode"
+  nonisolated static let browserAccessDefaultsKey = "org.openclaw.crabfleet.share.browser-access"
 
   @Published private(set) var identity: TailnetIdentity?
   @Published private(set) var phase: Phase = .idle
@@ -540,6 +553,14 @@ final class PrivateMacShareController: ObservableObject {
     didSet {
       defaults.set(viewOnlyEnabled, forKey: Self.viewOnlyDefaultsKey)
       server?.setViewOnly(viewOnlyEnabled)
+      relayPublisher?.setViewOnly(viewOnlyEnabled)
+    }
+  }
+
+  @Published var browserAccessEnabled: Bool {
+    didSet {
+      defaults.set(browserAccessEnabled, forKey: Self.browserAccessDefaultsKey)
+      updateBrowserRelay()
     }
   }
 
@@ -547,6 +568,7 @@ final class PrivateMacShareController: ObservableObject {
     didSet {
       defaults.set(streamAudioEnabled, forKey: Self.streamAudioDefaultsKey)
       server?.setAudioEnabled(streamAudioEnabled)
+      relayPublisher?.setAudioEnabled(streamAudioEnabled)
     }
   }
 
@@ -568,18 +590,16 @@ final class PrivateMacShareController: ObservableObject {
       }
       let previousMode = confirmedQualityMode
       qualityModeChangePending = true
-      let accepted = server.setQualityMode(requestedMode) { [weak self] accepted in
-        Task { @MainActor in
-          self?.completeQualityModeChange(
-            requestedMode,
-            generation: generation,
-            accepted: accepted)
-        }
-      }
-      if !accepted {
-        qualityModeChangePending = false
-        qualityModeChangeGeneration = previousGeneration
-        revertQualityMode(to: previousMode)
+      Task { [weak self] in
+        guard let self else { return }
+        let accepted = await self.applyQualityMode(
+          requestedMode,
+          previousMode: previousMode,
+          server: server)
+        self.completeQualityModeChange(
+          requestedMode,
+          generation: generation,
+          accepted: accepted)
       }
     }
   }
@@ -587,6 +607,7 @@ final class PrivateMacShareController: ObservableObject {
   private let runner: (any TailscaleCommandRunning)?
   private let desktopRegistration: (any DesktopHostRegistering)?
   private let desktopRegistrationLifecycle: DesktopHostRegistrationLifecycle?
+  private let relayHostURL: ((String) -> URL?)?
   private let runnerInitializationError: Error?
   private let defaults: UserDefaults
   private var capture: MacScreenCapture?
@@ -595,7 +616,12 @@ final class PrivateMacShareController: ObservableObject {
   private var qualityModeChangePending = false
   private var qualityModeChangeGeneration: UInt64 = 0
   private var confirmedQualityMode: ShareQualityMode = .auto
+  private var relayPublisher: RelayHostPublisher?
+  private var relayPublication: DesktopHostPublication?
   private var clipboardBridge: HostClipboardBridge?
+  private var activeDescriptor: CapturedDisplayDescriptor?
+  private var activeInput: (any RemoteInputForwarding)?
+  private var sessionGate: RFBHostSessionGate?
   private var activeIdentity: TailnetIdentity?
   private var lifecycleGeneration: UInt64 = 0
   private var serverGeneration: UInt64?
@@ -626,6 +652,9 @@ final class PrivateMacShareController: ObservableObject {
           recoveryScopeProvider: recoveryScopeProvider
         )
       }
+    relayHostURL = (desktopRegistration as? any DesktopHostRelayEndpointProviding).map {
+      provider in { hostID in provider.relayHostURL(hostID: hostID) }
+    }
     self.defaults = defaults
     registryPhase = desktopRegistration == nil ? .notConfigured : .notPublished
     let savedDisplayID = defaults.object(forKey: Self.selectedDisplayDefaultsKey) as? Int
@@ -638,6 +667,8 @@ final class PrivateMacShareController: ObservableObject {
       .flatMap(ShareQualityMode.init(rawValue:)) ?? .auto
     qualityMode = savedQualityMode
     confirmedQualityMode = savedQualityMode
+    browserAccessEnabled =
+      defaults.object(forKey: Self.browserAccessDefaultsKey) as? Bool ?? true
     launchAtLoginEnabled = SMAppService.mainApp.status == .enabled
     if let runner {
       self.runner = runner
@@ -671,6 +702,41 @@ final class PrivateMacShareController: ObservableObject {
     }
     defaults.set(confirmedQualityMode.rawValue, forKey: Self.qualityModeDefaultsKey)
     revertQualityMode(to: confirmedQualityMode)
+  }
+
+  private func applyQualityMode(
+    _ requestedMode: ShareQualityMode,
+    previousMode: ShareQualityMode,
+    server: TailnetRFBServer
+  ) async -> Bool {
+    guard await setQualityMode(requestedMode, on: server) else { return false }
+    guard let relayPublisher else { return true }
+    guard await setQualityMode(requestedMode, on: relayPublisher) else {
+      _ = await setQualityMode(previousMode, on: server)
+      return false
+    }
+    return true
+  }
+
+  private func setQualityMode(_ mode: ShareQualityMode, on server: TailnetRFBServer) async -> Bool {
+    await withCheckedContinuation { continuation in
+      let accepted = server.setQualityMode(mode) { accepted in
+        continuation.resume(returning: accepted)
+      }
+      if !accepted { continuation.resume(returning: false) }
+    }
+  }
+
+  private func setQualityMode(
+    _ mode: ShareQualityMode,
+    on publisher: RelayHostPublisher
+  ) async -> Bool {
+    await withCheckedContinuation { continuation in
+      let accepted = publisher.setQualityMode(mode) { accepted in
+        continuation.resume(returning: accepted)
+      }
+      if !accepted { continuation.resume(returning: false) }
+    }
   }
 
   private func revertQualityMode(to previousMode: ShareQualityMode) {
@@ -808,6 +874,7 @@ final class PrivateMacShareController: ObservableObject {
       }
       let input = MacRemoteInputController(descriptor: descriptor)
       let bridge = clipboardSyncEnabled ? HostClipboardBridge() : nil
+      let sessionGate = RFBHostSessionGate()
       serverGeneration = generation
       let server = TailnetRFBServer(
         identity: identity,
@@ -817,6 +884,7 @@ final class PrivateMacShareController: ObservableObject {
         input: input,
         clipboard: bridge,
         port: Self.port,
+        sessionGate: sessionGate,
         eventHandler: { [weak self] event in
           Task { @MainActor in self?.handle(event, generation: generation) }
         }
@@ -828,6 +896,9 @@ final class PrivateMacShareController: ObservableObject {
       self.capture = capture
       self.server = server
       self.clipboardBridge = bridge
+      activeDescriptor = descriptor
+      activeInput = input
+      self.sessionGate = sessionGate
       activeIdentity = identity
     } catch {
       guard canContinueStarting(generation) else {
@@ -857,10 +928,16 @@ final class PrivateMacShareController: ObservableObject {
     let registrationTask = self.registrationTask
     self.registrationTask = nil
     serverGeneration = nil
+    relayPublisher?.stop()
+    relayPublisher = nil
+    relayPublication = nil
     server?.stop()
     server = nil
     clipboardBridge?.detach()
     clipboardBridge = nil
+    activeDescriptor = nil
+    activeInput = nil
+    sessionGate = nil
     let capture = capture
     self.capture = nil
     await capture?.stop()
@@ -987,10 +1064,16 @@ final class PrivateMacShareController: ObservableObject {
       audioActive = false
       notice = PrivateMacShareError.listenerFailed(message).localizedDescription
       serverGeneration = nil
+      relayPublisher?.stop()
+      relayPublisher = nil
+      relayPublication = nil
       server?.stop()
       server = nil
       clipboardBridge?.detach()
       clipboardBridge = nil
+      activeDescriptor = nil
+      activeInput = nil
+      sessionGate = nil
       let failedCapture = capture
       capture = nil
       Task { await failedCapture?.stop() }
@@ -1017,18 +1100,26 @@ final class PrivateMacShareController: ObservableObject {
     registrationTask = Task { [weak self] in
       do {
         await pendingOperation?.value
-        try await desktopRegistrationLifecycle.publish(identity: identity, port: Self.port)
+        let publication = try await desktopRegistrationLifecycle.publish(
+          identity: identity,
+          port: Self.port
+        )
         guard
           self?.isCurrentRegistryOperation(operationGeneration) == true,
           self?.serverGeneration == generation
         else { return }
         self?.registryPhase = .registered
+        self?.relayPublication = publication
+        self?.startRelayPublisherIfPossible(generation: generation)
       } catch {
         guard
           self?.isCurrentRegistryOperation(operationGeneration) == true,
           self?.serverGeneration == generation
         else { return }
         self?.registryPhase = .failed(error.localizedDescription)
+        self?.relayPublisher?.stop()
+        self?.relayPublisher = nil
+        self?.relayPublication = nil
       }
       if self?.publishingServerGeneration == generation {
         self?.publishingServerGeneration = nil
@@ -1038,6 +1129,9 @@ final class PrivateMacShareController: ObservableObject {
   }
 
   private func removeDesktopHost(after pendingRegistration: Task<Void, Never>?) {
+    relayPublisher?.stop()
+    relayPublisher = nil
+    relayPublication = nil
     guard let desktopRegistrationLifecycle else {
       registrationTask = nil
       registryPhase = desktopRegistration == nil ? .notConfigured : .notPublished
@@ -1058,6 +1152,50 @@ final class PrivateMacShareController: ObservableObject {
       }
       self?.finishRegistryOperation(operationGeneration)
     }
+  }
+
+  private func updateBrowserRelay() {
+    guard browserAccessEnabled else {
+      relayPublisher?.stop()
+      relayPublisher = nil
+      return
+    }
+    guard let generation = serverGeneration else { return }
+    startRelayPublisherIfPossible(generation: generation)
+  }
+
+  private func startRelayPublisherIfPossible(generation: UInt64) {
+    guard
+      browserAccessEnabled,
+      relayPublisher == nil,
+      serverGeneration == generation,
+      registryPhase == .registered,
+      let publication = relayPublication,
+      let relayAccess = publication.relayAccess,
+      let endpoint = relayHostURL?(publication.hostID),
+      let capture,
+      let activeDescriptor,
+      let activeInput,
+      let sessionGate
+    else { return }
+
+    let publisher = RelayHostPublisher(
+      endpoint: endpoint,
+      relayAccess: relayAccess,
+      capture: capture,
+      descriptor: activeDescriptor,
+      input: activeInput,
+      clipboard: clipboardBridge,
+      sessionGate: sessionGate,
+      eventHandler: { [weak self] event in
+        Task { @MainActor in self?.handle(event, generation: generation) }
+      }
+    )
+    publisher.setViewOnly(viewOnlyEnabled)
+    publisher.setAudioEnabled(streamAudioEnabled)
+    publisher.setQualityMode(qualityMode)
+    relayPublisher = publisher
+    publisher.start()
   }
 
   @discardableResult

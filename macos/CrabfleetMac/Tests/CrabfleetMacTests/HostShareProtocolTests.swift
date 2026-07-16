@@ -186,6 +186,7 @@ struct RFBHostSessionStreamTests {
       handshakeTimeout: .seconds(1),
       viewOnly: false,
       audioEnabled: true,
+      qualityMode: .auto,
       didAuthorize: {},
       eventHandler: { _ in },
       didFinish: { _ in finished.set() }

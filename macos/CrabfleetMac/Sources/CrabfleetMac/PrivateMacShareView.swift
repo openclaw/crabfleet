@@ -95,6 +95,13 @@ struct PrivateMacShareSheet: View {
         .help("Text copied on either Mac is available on the other while connected.")
 
         Toggle(
+          "Allow browser access via Crabfleet",
+          isOn: $controller.browserAccessEnabled
+        )
+        .disabled(controller.registryPhase == .notConfigured)
+        .help("Publishes an authenticated browser relay while this private share is running.")
+
+        Toggle(
           "View only (ignore remote input)",
           isOn: $controller.viewOnlyEnabled
         )

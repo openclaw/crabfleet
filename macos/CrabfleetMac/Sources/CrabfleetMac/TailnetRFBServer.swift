@@ -303,7 +303,7 @@ final class RFBHostSession: @unchecked Sendable {
   private let remoteAddressOverride: String?
   private let skipTailnetCheck: Bool
   private let desktopName: String
-  private let handshakeTimeout: Duration
+  private let handshakeTimeout: Duration?
   private let didAuthorize: @Sendable () -> Void
   private let queue = DispatchQueue(label: "org.openclaw.crabfleet.rfb-session")
   private let eventHandler: TailnetRFBServer.EventHandler
@@ -364,7 +364,7 @@ final class RFBHostSession: @unchecked Sendable {
     remoteAddressOverride: String? = nil,
     skipTailnetCheck: Bool = false,
     desktopName: String,
-    handshakeTimeout: Duration,
+    handshakeTimeout: Duration?,
     viewOnly: Bool,
     audioEnabled: Bool,
     qualityMode: ShareQualityMode,
@@ -640,6 +640,11 @@ final class RFBHostSession: @unchecked Sendable {
   }
 
   private func handshakeBeforeDeadline(io: any RFBByteStream) async throws {
+    guard let handshakeTimeout else {
+      try await handshake(io: io)
+      withLock { handshakeFinished = true }
+      return
+    }
     let deadlineTask = Task { [weak self, handshakeTimeout] in
       do {
         try await Task.sleep(for: handshakeTimeout)
