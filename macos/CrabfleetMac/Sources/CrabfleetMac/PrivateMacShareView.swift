@@ -79,6 +79,14 @@ struct PrivateMacShareSheet: View {
           )
         }
 
+        Picker("Quality", selection: $controller.qualityMode) {
+          ForEach(ShareQualityMode.allCases) { mode in
+            Text(mode.title).tag(mode)
+          }
+        }
+        .pickerStyle(.segmented)
+        .help("Auto balances detail and motion; Sharp favors text; Smooth favors motion.")
+
         Toggle(
           "Sync clipboard with the connected device",
           isOn: $controller.clipboardSyncEnabled
@@ -194,15 +202,13 @@ struct PrivateMacShareSheet: View {
 
   private var phaseDetail: String {
     if let stats = controller.streamStats, controller.phase == .connected {
-      let hardware = stats.codec == "H.264"
-        ? stats.hardwareAccelerated ? " (hardware)" : " (software)"
-        : ""
       let video = String(
-        format: "%@%@ · %.0f fps · %.1f Mbit/s",
-        stats.codec,
-        hardware,
+        format: "%@ · %.0f fps · %.1f Mbit/s · target %.1f · dirty %.0f%%",
+        stats.codecDetail,
         stats.framesPerSecond,
-        stats.megabitsPerSecond)
+        stats.megabitsPerSecond,
+        Double(stats.targetBitrate) / 1_000_000,
+        stats.dirtyAreaPercent)
       return controller.audioActive ? "\(video) · audio: AAC 48 kHz" : video
     }
     if let peer = controller.connectedPeer {

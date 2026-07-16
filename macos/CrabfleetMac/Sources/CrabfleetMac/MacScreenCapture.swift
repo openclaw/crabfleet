@@ -54,6 +54,19 @@ private actor CaptureConfigurationGate {
 struct VideoPixelSource: @unchecked Sendable {
   let pixelBuffer: CVPixelBuffer
   let presentationTime: CMTime
+  let dirtyRects: [CGRect]?
+  let contentRect: CGRect?
+
+  var dirtyAreaFraction: Double {
+    MacScreenCapture.dirtyAreaFraction(
+      dirtyRects: dirtyRects,
+      contentRect: contentRect
+        ?? CGRect(
+          x: 0,
+          y: 0,
+          width: CVPixelBufferGetWidth(pixelBuffer),
+          height: CVPixelBufferGetHeight(pixelBuffer)))
+  }
 }
 
 struct CapturedDisplayDescriptor: Equatable, Sendable {
@@ -94,9 +107,9 @@ final class MacScreenCapture: NSObject, @unchecked Sendable {
   private let configurationGate = CaptureConfigurationGate()
   private var sequence: UInt64 = 0
   private var consumerActive = false
-  private var videoFrameHandler: (@Sendable (CVPixelBuffer, CMTime) -> Void)?
+  private var videoFrameHandler: (@Sendable (VideoPixelSource) -> Void)?
   private var audioSampleHandler: (@Sendable (CMSampleBuffer) -> Void)?
-  private var latestVideoSource: (pixelBuffer: CVPixelBuffer, presentationTime: CMTime)?
+  private var latestVideoSource: VideoPixelSource?
   private var stream: SCStream?
   private var configuration: SCStreamConfiguration?
   private var contentFilter: SCContentFilter?
@@ -189,11 +202,15 @@ final class MacScreenCapture: NSObject, @unchecked Sendable {
     }
   }
 
-  func updateFrameInterval(framesPerSecond: Int) async throws {
+  func updateFrameInterval(
+    framesPerSecond: Int,
+    shouldApply: @escaping @Sendable () -> Bool = { true }
+  ) async throws {
     try await configurationGate.run { [self] in
       guard framesPerSecond > 0, let stream, let configuration else {
         throw PrivateMacShareError.captureUnavailable
       }
+      guard shouldApply() else { return }
       configuration.minimumFrameInterval = CMTime(
         value: 1, timescale: CMTimeScale(framesPerSecond))
       try await stream.updateConfiguration(configuration)
@@ -246,7 +263,7 @@ final class MacScreenCapture: NSObject, @unchecked Sendable {
   }
 
   func setVideoFrameHandler(
-    _ handler: (@Sendable (CVPixelBuffer, CMTime) -> Void)?
+    _ handler: (@Sendable (VideoPixelSource) -> Void)?
   ) {
     frameLock.lock()
     videoFrameHandler = handler
@@ -259,7 +276,7 @@ final class MacScreenCapture: NSObject, @unchecked Sendable {
     frameLock.unlock()
   }
 
-  func latestVideoFrame() -> (pixelBuffer: CVPixelBuffer, presentationTime: CMTime)? {
+  func latestVideoFrame() -> VideoPixelSource? {
     frameLock.lock()
     defer { frameLock.unlock() }
     return latestVideoSource
@@ -288,7 +305,7 @@ final class MacScreenCapture: NSObject, @unchecked Sendable {
   /// One-shot capture for when a frame is needed but the stream has nothing
   /// cached — a fresh session or resize on a static screen delivers no stream
   /// output until content changes.
-  func snapshotVideoFrame() async -> (pixelBuffer: CVPixelBuffer, presentationTime: CMTime)? {
+  func snapshotVideoFrame() async -> VideoPixelSource? {
     let source = try? await configurationGate.run { [self] in
       guard let contentFilter, let configuration else {
         throw PrivateMacShareError.captureUnavailable
@@ -301,11 +318,17 @@ final class MacScreenCapture: NSObject, @unchecked Sendable {
       }
       return VideoPixelSource(
         pixelBuffer: pixelBuffer,
-        presentationTime: sampleBuffer.presentationTimeStamp)
+        presentationTime: sampleBuffer.presentationTimeStamp,
+        dirtyRects: nil,
+        contentRect: CGRect(
+          x: 0,
+          y: 0,
+          width: CVPixelBufferGetWidth(pixelBuffer),
+          height: CVPixelBufferGetHeight(pixelBuffer)))
     }
     guard let source else { return nil }
-    retainVideoSource(source.pixelBuffer, presentationTime: source.presentationTime)
-    return (source.pixelBuffer, source.presentationTime)
+    retainVideoSource(source)
+    return source
   }
 
   static func captureDimensions(sourceWidth: Int, sourceHeight: Int) -> (
@@ -340,6 +363,71 @@ final class MacScreenCapture: NSObject, @unchecked Sendable {
     let width = max(2, Int((sourceWidth * scale).rounded(.down)) & ~1)
     let height = max(2, Int((sourceHeight * scale).rounded(.down)) & ~1)
     return (width, height)
+  }
+
+  static func dirtyAreaFraction(
+    dirtyRects: [CGRect]?,
+    contentRect: CGRect?
+  ) -> Double {
+    guard let dirtyRects else { return 1 }
+    guard !dirtyRects.isEmpty else { return 0 }
+    guard let content = contentRect else { return 1 }
+    guard content.width > 0, content.height > 0 else { return 1 }
+    let dirtyArea = unionArea(of: dirtyRects, within: content)
+    return min(max(dirtyArea / (content.width * content.height), 0), 1)
+  }
+
+  static func clippedContentRect(
+    _ contentRect: CGRect?,
+    pixelWidth: Int,
+    pixelHeight: Int
+  ) -> CGRect {
+    let pixelBounds = CGRect(x: 0, y: 0, width: pixelWidth, height: pixelHeight)
+    guard let contentRect else { return pixelBounds }
+    let clipped = contentRect.intersection(pixelBounds)
+    return clipped.isNull || clipped.isEmpty ? pixelBounds : clipped
+  }
+
+  private static func unionArea(of rects: [CGRect], within bounds: CGRect) -> Double {
+    let clipped = rects.map { $0.intersection(bounds) }.filter { !$0.isNull && !$0.isEmpty }
+    let xCoordinates = Set(clipped.flatMap { [$0.minX, $0.maxX] }).sorted()
+    return zip(xCoordinates, xCoordinates.dropFirst()).reduce(0) { area, edges in
+      let (minX, maxX) = edges
+      guard maxX > minX else { return area }
+      let intervals = clipped.filter { $0.minX < maxX && $0.maxX > minX }
+        .map { ($0.minY, $0.maxY) }
+        .sorted { $0.0 < $1.0 }
+      guard let first = intervals.first else { return area }
+      var coveredHeight = 0.0
+      var current = first
+      for interval in intervals.dropFirst() {
+        if interval.0 <= current.1 {
+          current.1 = max(current.1, interval.1)
+        } else {
+          coveredHeight += current.1 - current.0
+          current = interval
+        }
+      }
+      coveredHeight += current.1 - current.0
+      return area + (maxX - minX) * coveredHeight
+    }
+  }
+
+  static func shouldOfferVideoFrame(dirtyRects: [CGRect]?, keyframeOwed: Bool) -> Bool {
+    keyframeOwed || dirtyRects?.isEmpty != true
+  }
+
+  static func attachmentRect(_ value: Any?) -> CGRect? {
+    if let rect = value as? CGRect { return rect }
+    guard let dictionary = value as? NSDictionary else { return nil }
+    return CGRect(dictionaryRepresentation: dictionary as CFDictionary)
+  }
+
+  static func attachmentRects(_ value: Any?) -> [CGRect]? {
+    if let rects = value as? [CGRect] { return rects }
+    guard let values = value as? [Any] else { return nil }
+    let rects = values.compactMap(attachmentRect)
+    return rects.count == values.count ? rects : nil
   }
 
   private static func sourcePixelDimensions(
@@ -379,7 +467,7 @@ final class MacScreenCapture: NSObject, @unchecked Sendable {
     return consumerActive
   }
 
-  private func currentVideoFrameHandler() -> (@Sendable (CVPixelBuffer, CMTime) -> Void)? {
+  private func currentVideoFrameHandler() -> (@Sendable (VideoPixelSource) -> Void)? {
     frameLock.lock()
     defer { frameLock.unlock() }
     return videoFrameHandler
@@ -391,9 +479,9 @@ final class MacScreenCapture: NSObject, @unchecked Sendable {
     return audioSampleHandler
   }
 
-  private func retainVideoSource(_ pixelBuffer: CVPixelBuffer, presentationTime: CMTime) {
+  private func retainVideoSource(_ source: VideoPixelSource) {
     frameLock.lock()
-    latestVideoSource = (pixelBuffer, presentationTime)
+    latestVideoSource = source
     frameLock.unlock()
   }
 
@@ -464,10 +552,20 @@ extension MacScreenCapture: SCStreamOutput, SCStreamDelegate {
       return
     }
 
-    retainVideoSource(pixelBuffer, presentationTime: sampleBuffer.presentationTimeStamp)
+    let dirtyRects = Self.attachmentRects(attachments[.dirtyRects])
+    let contentRect = Self.clippedContentRect(
+      Self.attachmentRect(attachments[.contentRect]),
+      pixelWidth: CVPixelBufferGetWidth(pixelBuffer),
+      pixelHeight: CVPixelBufferGetHeight(pixelBuffer))
+    let source = VideoPixelSource(
+      pixelBuffer: pixelBuffer,
+      presentationTime: sampleBuffer.presentationTimeStamp,
+      dirtyRects: dirtyRects,
+      contentRect: contentRect)
+    retainVideoSource(source)
 
     if let handler = currentVideoFrameHandler() {
-      handler(pixelBuffer, sampleBuffer.presentationTimeStamp)
+      handler(source)
       return
     }
 

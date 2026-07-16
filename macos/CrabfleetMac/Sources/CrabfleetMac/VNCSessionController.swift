@@ -121,7 +121,7 @@ final class VNCSessionController: NSObject, ObservableObject {
       inputMode: .forwardKeyboardShortcutsIfNotInUseLocally,
       clipboardMode: clipboardEnabled ? .externallyManaged : .disabled,
       colorDepth: .depth24Bit,
-      frameEncodings: [.openH264, .tight, .hextile, .crabfleetAudio]
+      frameEncodings: [.crabfleetHEVC, .openH264, .tight, .hextile, .crabfleetAudio]
     )
     let connection = VNCConnection(settings: settings)
     connection.delegate = self

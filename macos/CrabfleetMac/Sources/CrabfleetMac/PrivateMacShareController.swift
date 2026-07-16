@@ -508,6 +508,7 @@ final class PrivateMacShareController: ObservableObject {
   nonisolated static let autoShareDefaultsKey = "org.openclaw.crabfleet.share.auto-share"
   nonisolated static let viewOnlyDefaultsKey = "org.openclaw.crabfleet.share.view-only"
   nonisolated static let streamAudioDefaultsKey = "org.openclaw.crabfleet.share.audio"
+  nonisolated static let qualityModeDefaultsKey = "org.openclaw.crabfleet.share.quality-mode"
 
   @Published private(set) var identity: TailnetIdentity?
   @Published private(set) var phase: Phase = .idle
@@ -549,6 +550,40 @@ final class PrivateMacShareController: ObservableObject {
     }
   }
 
+  @Published var qualityMode: ShareQualityMode {
+    didSet {
+      guard !isRevertingQualityMode else { return }
+      guard !qualityModeChangePending else {
+        revertQualityMode(to: oldValue)
+        return
+      }
+      let requestedMode = qualityMode
+      let previousGeneration = qualityModeChangeGeneration
+      let generation = previousGeneration &+ 1
+      qualityModeChangeGeneration = generation
+      guard let server else {
+        confirmedQualityMode = requestedMode
+        defaults.set(requestedMode.rawValue, forKey: Self.qualityModeDefaultsKey)
+        return
+      }
+      let previousMode = confirmedQualityMode
+      qualityModeChangePending = true
+      let accepted = server.setQualityMode(requestedMode) { [weak self] accepted in
+        Task { @MainActor in
+          self?.completeQualityModeChange(
+            requestedMode,
+            generation: generation,
+            accepted: accepted)
+        }
+      }
+      if !accepted {
+        qualityModeChangePending = false
+        qualityModeChangeGeneration = previousGeneration
+        revertQualityMode(to: previousMode)
+      }
+    }
+  }
+
   private let runner: (any TailscaleCommandRunning)?
   private let desktopRegistration: (any DesktopHostRegistering)?
   private let desktopRegistrationLifecycle: DesktopHostRegistrationLifecycle?
@@ -556,6 +591,10 @@ final class PrivateMacShareController: ObservableObject {
   private let defaults: UserDefaults
   private var capture: MacScreenCapture?
   private var server: TailnetRFBServer?
+  private var isRevertingQualityMode = false
+  private var qualityModeChangePending = false
+  private var qualityModeChangeGeneration: UInt64 = 0
+  private var confirmedQualityMode: ShareQualityMode = .auto
   private var clipboardBridge: HostClipboardBridge?
   private var activeIdentity: TailnetIdentity?
   private var lifecycleGeneration: UInt64 = 0
@@ -595,6 +634,10 @@ final class PrivateMacShareController: ObservableObject {
       defaults.object(forKey: Self.clipboardSyncDefaultsKey) as? Bool ?? true
     viewOnlyEnabled = defaults.object(forKey: Self.viewOnlyDefaultsKey) as? Bool ?? false
     streamAudioEnabled = defaults.object(forKey: Self.streamAudioDefaultsKey) as? Bool ?? true
+    let savedQualityMode = defaults.string(forKey: Self.qualityModeDefaultsKey)
+      .flatMap(ShareQualityMode.init(rawValue:)) ?? .auto
+    qualityMode = savedQualityMode
+    confirmedQualityMode = savedQualityMode
     launchAtLoginEnabled = SMAppService.mainApp.status == .enabled
     if let runner {
       self.runner = runner
@@ -612,6 +655,28 @@ final class PrivateMacShareController: ObservableObject {
 
   var connectionAddress: String? {
     identity?.vncAddress(port: Int(Self.port))
+  }
+
+  private func completeQualityModeChange(
+    _ requestedMode: ShareQualityMode,
+    generation: UInt64,
+    accepted: Bool
+  ) {
+    guard qualityModeChangeGeneration == generation, qualityMode == requestedMode else { return }
+    qualityModeChangePending = false
+    if accepted {
+      confirmedQualityMode = requestedMode
+      defaults.set(requestedMode.rawValue, forKey: Self.qualityModeDefaultsKey)
+      return
+    }
+    defaults.set(confirmedQualityMode.rawValue, forKey: Self.qualityModeDefaultsKey)
+    revertQualityMode(to: confirmedQualityMode)
+  }
+
+  private func revertQualityMode(to previousMode: ShareQualityMode) {
+    isRevertingQualityMode = true
+    qualityMode = previousMode
+    isRevertingQualityMode = false
   }
 
   var canStart: Bool {
@@ -758,6 +823,7 @@ final class PrivateMacShareController: ObservableObject {
       )
       server.setViewOnly(viewOnlyEnabled)
       server.setAudioEnabled(streamAudioEnabled)
+      server.setQualityMode(qualityMode)
       try server.start()
       self.capture = capture
       self.server = server
