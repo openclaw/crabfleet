@@ -143,9 +143,39 @@ final class TailnetRFBServer: @unchecked Sendable {
   }
 
   @discardableResult
-  func setQualityMode(_ mode: ShareQualityMode) -> Bool {
+  func setQualityMode(
+    _ mode: ShareQualityMode,
+    completion: (@Sendable (Bool) -> Void)? = nil
+  ) -> Bool {
     withLock {
-      guard session?.setQualityMode(mode) != false else { return false }
+      guard let activeSession = session else {
+        qualityMode = mode
+        if let completion { Task { completion(true) } }
+        return true
+      }
+      let previousMode = qualityMode
+      let accepted = activeSession.setQualityMode(
+        mode,
+        completion: { [weak self, weak activeSession] accepted in
+          guard let self else {
+            completion?(true)
+            return
+          }
+          var resolved = accepted
+          if !accepted {
+            self.withLock {
+              guard self.session === activeSession else {
+                resolved = true
+                return
+              }
+              if self.qualityMode == mode {
+                self.qualityMode = previousMode
+              }
+            }
+          }
+          completion?(resolved)
+        })
+      guard accepted else { return false }
       qualityMode = mode
       return true
     }
@@ -262,6 +292,8 @@ private final class RFBHostSession: @unchecked Sendable {
   private var audioPathBroken = false
   private var qualityMode: ShareQualityMode
   private var frameIntervalGeneration: UInt64 = 0
+  private var qualityModeRefreshRequested = false
+  private var qualityModeTransitionInProgress = false
   private var idleRefreshPolicy = VideoIdleRefreshPolicy(
     timestamp: ProcessInfo.processInfo.systemUptime)
 
@@ -340,14 +372,27 @@ private final class RFBHostSession: @unchecked Sendable {
   }
 
   @discardableResult
-  func setQualityMode(_ mode: ShareQualityMode) -> Bool {
-    let result = withLock { () -> (accepted: Bool, generation: UInt64?) in
+  func setQualityMode(
+    _ mode: ShareQualityMode,
+    completion: (@Sendable (Bool) -> Void)? = nil
+  ) -> Bool {
+    let result = withLock { () -> (
+      accepted: Bool,
+      generation: UInt64?,
+      previousMode: ShareQualityMode,
+      previousRateController: VideoRateController
+    ) in
+      guard !qualityModeTransitionInProgress else {
+        return (false, nil, qualityMode, rateController)
+      }
       let previousMaximumFrameQP = qualityMode.maximumFrameQP
       let previousRateController = rateController
       let previousMode = qualityMode
       qualityMode = mode
       let bitrate = rateController.setMode(mode)
-      guard let videoEncoder else { return (true, nil) }
+      guard let videoEncoder else {
+        return (true, nil, previousMode, previousRateController)
+      }
       videoEncoder.setAverageBitrate(bitrate)
       if previousMaximumFrameQP != mode.maximumFrameQP,
         videoEncoder.setMaximumFrameQP(mode.maximumFrameQP) != noErr
@@ -355,20 +400,71 @@ private final class RFBHostSession: @unchecked Sendable {
         qualityMode = previousMode
         rateController = previousRateController
         videoEncoder.setAverageBitrate(previousRateController.targetBitrate)
-        return (false, nil)
+        return (false, nil, previousMode, previousRateController)
       }
+      qualityModeTransitionInProgress = true
       frameIntervalGeneration &+= 1
-      return (true, frameIntervalGeneration)
+      return (true, frameIntervalGeneration, previousMode, previousRateController)
     }
     guard result.accepted else { return false }
-    guard let generation = result.generation else { return true }
-    Task { [weak self] in
-      guard let self else { return }
-      try? await capture.updateFrameInterval(
-        framesPerSecond: mode.framesPerSecond,
-        shouldApply: { [weak self] in
-          self?.isFrameIntervalGenerationCurrent(generation) == true
-        })
+    guard let generation = result.generation else {
+      if let completion { Task { completion(true) } }
+      return true
+    }
+    Task { [self] in
+      do {
+        try await capture.updateFrameInterval(
+          framesPerSecond: mode.framesPerSecond,
+          shouldApply: { [weak self] in
+            self?.isFrameIntervalGenerationCurrent(generation) == true
+          })
+        self.withLock {
+          if self.frameIntervalGeneration == generation {
+            self.qualityModeRefreshRequested = true
+          }
+          self.qualityModeTransitionInProgress = false
+        }
+        completion?(true)
+      } catch {
+        let rollback = self.withLock { () -> (generation: UInt64, qpStatus: OSStatus)? in
+          guard self.frameIntervalGeneration == generation else { return nil }
+          self.qualityMode = result.previousMode
+          self.rateController = result.previousRateController
+          var qpStatus = noErr
+          if let videoEncoder = self.videoEncoder {
+            videoEncoder.setAverageBitrate(result.previousRateController.targetBitrate)
+            qpStatus = videoEncoder.setMaximumFrameQP(result.previousMode.maximumFrameQP)
+          }
+          self.frameIntervalGeneration &+= 1
+          return (self.frameIntervalGeneration, qpStatus)
+        }
+        guard let rollback else {
+          self.withLock { self.qualityModeTransitionInProgress = false }
+          completion?(true)
+          return
+        }
+        guard rollback.qpStatus == noErr else {
+          self.withLock { self.qualityModeTransitionInProgress = false }
+          finish(
+            event: .sessionFailed(
+              "Quality mode QP rollback failed (\(rollback.qpStatus))."))
+          completion?(false)
+          return
+        }
+        do {
+          try await capture.updateFrameInterval(
+            framesPerSecond: result.previousMode.framesPerSecond,
+            shouldApply: { [weak self] in
+              self?.isFrameIntervalGenerationCurrent(rollback.generation) == true
+            })
+        } catch {
+          finish(
+            event: .sessionFailed(
+              "Quality mode frame-rate rollback failed: \(error.localizedDescription)"))
+        }
+        self.withLock { self.qualityModeTransitionInProgress = false }
+        completion?(false)
+      }
     }
     return true
   }
@@ -1239,6 +1335,13 @@ private final class RFBHostSession: @unchecked Sendable {
     withLock { forceNextKeyframe }
   }
 
+  private func consumeQualityModeRefreshRequest() -> Bool {
+    withLock {
+      defer { qualityModeRefreshRequested = false }
+      return qualityModeRefreshRequested
+    }
+  }
+
   private enum VideoUpdateOutcome {
     case frame(EncodedVideoFrame, dirtyAreaFraction: Double)
     case idle
@@ -1249,6 +1352,10 @@ private final class RFBHostSession: @unchecked Sendable {
   /// means the screen has not changed (and no keyframe is owed), `.failed`
   /// means the encoder produced no output for a submitted frame.
   private func nextVideoUpdate(encoder: MacVideoEncoder) async -> VideoUpdateOutcome {
+    if consumeQualityModeRefreshRequest() {
+      idleRefreshPolicy.rearmImmediately(timestamp: ProcessInfo.processInfo.systemUptime)
+      requestKeyframe()
+    }
     let mailboxes = withLock { (videoPixelMailbox, videoFrameMailbox) }
     guard let pixelMailbox = mailboxes.0, let encodedMailbox = mailboxes.1,
       !encodedMailbox.isFinished

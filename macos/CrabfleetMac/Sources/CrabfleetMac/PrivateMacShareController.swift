@@ -553,13 +553,34 @@ final class PrivateMacShareController: ObservableObject {
   @Published var qualityMode: ShareQualityMode {
     didSet {
       guard !isRevertingQualityMode else { return }
-      guard server?.setQualityMode(qualityMode) != false else {
-        isRevertingQualityMode = true
-        qualityMode = oldValue
-        isRevertingQualityMode = false
+      guard !qualityModeChangePending else {
+        revertQualityMode(to: oldValue)
         return
       }
-      defaults.set(qualityMode.rawValue, forKey: Self.qualityModeDefaultsKey)
+      let requestedMode = qualityMode
+      let previousGeneration = qualityModeChangeGeneration
+      let generation = previousGeneration &+ 1
+      qualityModeChangeGeneration = generation
+      guard let server else {
+        confirmedQualityMode = requestedMode
+        defaults.set(requestedMode.rawValue, forKey: Self.qualityModeDefaultsKey)
+        return
+      }
+      let previousMode = confirmedQualityMode
+      qualityModeChangePending = true
+      let accepted = server.setQualityMode(requestedMode) { [weak self] accepted in
+        Task { @MainActor in
+          self?.completeQualityModeChange(
+            requestedMode,
+            generation: generation,
+            accepted: accepted)
+        }
+      }
+      if !accepted {
+        qualityModeChangePending = false
+        qualityModeChangeGeneration = previousGeneration
+        revertQualityMode(to: previousMode)
+      }
     }
   }
 
@@ -571,6 +592,9 @@ final class PrivateMacShareController: ObservableObject {
   private var capture: MacScreenCapture?
   private var server: TailnetRFBServer?
   private var isRevertingQualityMode = false
+  private var qualityModeChangePending = false
+  private var qualityModeChangeGeneration: UInt64 = 0
+  private var confirmedQualityMode: ShareQualityMode = .auto
   private var clipboardBridge: HostClipboardBridge?
   private var activeIdentity: TailnetIdentity?
   private var lifecycleGeneration: UInt64 = 0
@@ -610,8 +634,10 @@ final class PrivateMacShareController: ObservableObject {
       defaults.object(forKey: Self.clipboardSyncDefaultsKey) as? Bool ?? true
     viewOnlyEnabled = defaults.object(forKey: Self.viewOnlyDefaultsKey) as? Bool ?? false
     streamAudioEnabled = defaults.object(forKey: Self.streamAudioDefaultsKey) as? Bool ?? true
-    qualityMode = defaults.string(forKey: Self.qualityModeDefaultsKey)
+    let savedQualityMode = defaults.string(forKey: Self.qualityModeDefaultsKey)
       .flatMap(ShareQualityMode.init(rawValue:)) ?? .auto
+    qualityMode = savedQualityMode
+    confirmedQualityMode = savedQualityMode
     launchAtLoginEnabled = SMAppService.mainApp.status == .enabled
     if let runner {
       self.runner = runner
@@ -629,6 +655,28 @@ final class PrivateMacShareController: ObservableObject {
 
   var connectionAddress: String? {
     identity?.vncAddress(port: Int(Self.port))
+  }
+
+  private func completeQualityModeChange(
+    _ requestedMode: ShareQualityMode,
+    generation: UInt64,
+    accepted: Bool
+  ) {
+    guard qualityModeChangeGeneration == generation, qualityMode == requestedMode else { return }
+    qualityModeChangePending = false
+    if accepted {
+      confirmedQualityMode = requestedMode
+      defaults.set(requestedMode.rawValue, forKey: Self.qualityModeDefaultsKey)
+      return
+    }
+    defaults.set(confirmedQualityMode.rawValue, forKey: Self.qualityModeDefaultsKey)
+    revertQualityMode(to: confirmedQualityMode)
+  }
+
+  private func revertQualityMode(to previousMode: ShareQualityMode) {
+    isRevertingQualityMode = true
+    qualityMode = previousMode
+    isRevertingQualityMode = false
   }
 
   var canStart: Bool {

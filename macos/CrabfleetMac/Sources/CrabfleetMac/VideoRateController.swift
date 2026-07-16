@@ -73,6 +73,11 @@ struct VideoIdleRefreshPolicy: Sendable {
   mutating func refreshFailed() {
     hasSentRefresh = false
   }
+
+  mutating func rearmImmediately(timestamp: Double) {
+    lastDirtyTimestamp = timestamp - 2
+    hasSentRefresh = false
+  }
 }
 
 struct VideoRateController: Sendable {
