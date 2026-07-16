@@ -11,10 +11,13 @@ sessions stay warm; only the focused desktop owns input and clipboard routing.
 See the design note for the remaining zero-copy live-mosaic work.
 
 `Share This Mac` adds the missing server half without using Apple's Screen
-Sharing service. ScreenCaptureKit captures the primary display, Crabfleet sends
-bounded Tight/JPEG RFB updates, and Accessibility-authorized CGEvents forward
-keyboard and pointer input when that optional permission is granted. Screen
-Recording alone starts a view-only share. The listener binds only to the Mac's verified
+Sharing service. ScreenCaptureKit captures a selected display and optional
+system audio, Crabfleet prefers hardware HEVC with H.264 and bounded Tight/JPEG
+fallbacks, and Accessibility-authorized CGEvents forward keyboard and pointer
+input when that optional permission is granted. Dirty rectangles avoid encoding
+unchanged frames, while persisted Auto, Sharp, and Smooth modes tune live
+frame-rate and bitrate bounds. Screen Recording alone starts a view-only share.
+The listener binds only to the Mac's verified
 Tailscale `100.64.0.0/10` address after confirming a valid identity on the active
 tailnet. Before the RFB handshake, `tailscale whois` must identify the peer as
 another authorized device owned by the same Tailscale user.
@@ -27,8 +30,8 @@ directly with a blank RFB password. Quick Connect with the displayed
 security type is intentional here: admission and encrypted transport belong to
 Tailscale, and the RFB socket is never bound to Wi-Fi, Ethernet, loopback, or a
 public address. Crabfleet must remain running on the host. The prototype allows
-one peer, captures the primary display at up to 1600×1000 and 15 fps, and does
-not forward host clipboard contents or audio.
+one peer and one selected display, resizes video up to 4096×2304, and streams
+Crabfleet-only AAC-LC system audio when enabled and negotiated.
 
 The first Screen Recording grant requires restarting the bundled app before
 macOS makes captured frames available. Ad-hoc development signatures can cause

@@ -28,9 +28,9 @@ app-owned private desktop host for Mac-to-Mac access.
   3.3 None and VNC-password authentication.
 - Client-side fit scaling and rendering use RoyalVNCKit's IOSurface/Metal path.
 - Share This Mac captures a selected display and optional system audio with
-  ScreenCaptureKit, then serves RFB 3.8 Open H.264 or Tight/JPEG frames plus
-  AAC-LC audio to Crabfleet viewers without enabling Apple's Screen Sharing
-  daemon.
+  ScreenCaptureKit, then serves private HEVC, Open H.264, or Tight/JPEG RFB 3.8
+  frames plus AAC-LC audio to Crabfleet viewers without enabling Apple's Screen
+  Sharing daemon.
 - The host binds port 5901 only to a verified Tailscale `100.64.0.0/10` address,
   requires a valid identity on the active tailnet, and admits only a
   Tailscale-authorized peer owned by that same user.
@@ -64,9 +64,10 @@ relay, Cloudflare, or the Crabfleet Worker.
 1. Tailscale status must report `BackendState=Running`, a valid active tailnet,
    an online signed-in user, and a CGNAT address in `100.64.0.0/10`.
 2. The app captures the selected display (default: main) at a bounded even
-   resolution no larger than 2560×1600. Open H.264 viewers receive up to 60
-   frames per second; other viewers receive at most 15 Tight/JPEG frames per
-   second. When the connected viewer requests a desktop size, the host
+   resolution no larger than 2560×1600. Video viewers receive up to 60 frames
+   per second in Auto or Smooth mode and 30 in Sharp mode; other viewers
+   receive at most 15 Tight/JPEG frames per second. When the connected viewer
+   requests a desktop size, the host
    re-targets the capture to aspect-fit that request up to the display's native
    pixel resolution and the active codec's cap, so the remote desktop follows
    the viewer window.
@@ -98,17 +99,30 @@ relay, Cloudflare, or the Crabfleet Worker.
 
 ### Video pipeline
 
-The viewer prefers the community RFB Open H.264 encoding (type 50). The host
-uses VideoToolbox's low-latency rate control with the constrained baseline
-profile the encoding prescribes, prepends SPS/PPS to IDR frames, and sends
-Annex-B video with explicit decoder resets on session start and resize. The
-viewer decodes every access unit in a rectangle (third-party servers may glue
-several frames together) and displays the last. Initial capture is capped at 2560×1600 at 60 fps; H.264 resize may
-reach 4096×2304 within the selected display's native pixel size. An AIMD
-controller adapts from 8 Mbit/s within a 1.5–30 Mbit/s range based on network
-send time. If H.264 setup or encoding fails, the session automatically returns
-to the negotiated 15 fps Tight/JPEG path. The share sheet reports codec,
-hardware acceleration, frame rate, and throughput while connected.
+Crabfleet endpoints prefer the private `HEV1` HEVC encoding (`0x48455631`), then
+the community Open H.264 encoding (type 50), then Tight/JPEG. Both video
+encodings use the same rectangle envelope: a 32-bit payload length, reset flags,
+and Annex-B access units. VideoToolbox encodes HEVC Main or H.264 Constrained
+Baseline in low-latency realtime mode without frame reordering; keyframes carry
+VPS/SPS/PPS for HEVC or SPS/PPS for H.264. The viewer keeps bounded
+per-geometry VideoToolbox decoder contexts, waits for a random-access picture
+after resets, decodes every access unit in a rectangle, and displays the last.
+Initial capture is capped at 2560×1600, and either video codec may resize up to
+4096×2304 within the selected display's native pixel size. HEVC setup or encode
+failure retries H.264 before the session falls back to the 15 fps Tight/JPEG
+path; third-party clients never offer the private HEVC number, and the Open
+H.264 wire format remains unchanged.
+
+ScreenCaptureKit dirty rectangles keep ordinary unchanged frames out of the
+latest-wins pixel mailbox. Auto and Sharp send one doubled-bitrate keyframe
+after two static seconds so text settles, then return to zero encode work;
+Smooth omits that refresh. The persisted quality picker applies live without a
+session restart: Auto uses 1.5–30 Mbit/s at up to 60 fps, Sharp 8–40 Mbit/s at
+up to 30 fps, and Smooth 1.5–20 Mbit/s at up to 60 fps. The controller tracks
+EWMA link throughput and send latency, reduces toward 80% of measured
+throughput above 50 ms, and recovers by at most 1 Mbit/s per clear second scaled
+by changed screen area. The share sheet reports codec and hardware detail,
+frame rate, throughput, target bitrate, and dirty-area percentage.
 
 ### Audio pipeline
 
@@ -190,8 +204,9 @@ no longer bundles or builds the modified D3DES source.
 - Password authentication uses per-call CommonCrypto DES and is safe for
   concurrent sessions.
 - App-owned hosting shares one selected display at a time to a single client.
-  Open H.264 reaches 60 fps at an initial 2560×1600 cap and resizes up to
-  4096×2304; Tight/JPEG fallback remains capped at 15 fps and 2560×1600.
+  HEVC and Open H.264 reach 60 fps at an initial 2560×1600 cap and resize up to
+  4096×2304; Sharp mode caps video at 30 fps, and Tight/JPEG fallback remains
+  capped at 15 fps and 2560×1600.
 - Audio is host-to-viewer system audio only. Microphone, reverse audio,
   per-application capture, browser playback, and non-AAC codecs are unsupported.
 - A connecting peer must be another device owned by the same Tailscale user.
