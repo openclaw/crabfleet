@@ -124,8 +124,10 @@ listener and capture stream.
 
 ## License boundary
 
-The macOS artifact links only a repo-local RoyalVNCKit source fork and its
-permissively licensed dependency. The fork is based on pinned upstream commit
+The macOS artifact links only a repo-local RoyalVNCKit source fork, which has no
+third-party dependencies. Crypto uses the operating system's CommonCrypto and
+CryptoKit plus a small in-fork big-integer implementation for Apple Remote
+Desktop Diffie-Hellman. The fork is based on pinned upstream commit
 `337197afdb32020d3dfdb7d058989115b740cdc4`, preserves the MIT license, and
 records provenance beside its source. It adds remote-input size limits and
 restricts decoders/authentication to reviewed paths. The app does not copy,

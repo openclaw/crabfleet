@@ -3,9 +3,7 @@ import FoundationEssentials
 #else
 import Foundation
 #endif
-
-//@_implementationOnly import libtomcrypt
-import CryptoSwift
+import CryptoKit
 
 extension Data {
 	mutating func append(_ uint32: UInt32,
@@ -58,59 +56,9 @@ extension Data {
 		self.append(contentsOf: uint8Values)
 	}
 
-    // CryptoSwift Implementation
     func md5Hash() -> Data {
-        .init(Digest.md5(byteArray))
+        Data(Insecure.MD5.hash(data: self))
     }
-
-    // libtomcrypt Implementation
-//	func md5Hash() -> Data {
-//        var hashState = hash_state()
-//
-//        // Initialize the MD5 context
-//        let initResult = md5_init(&hashState)
-//
-//        guard initResult == CRYPT_OK else {
-//            fatalError("MD5 init failed: \(initResult)")
-//        }
-//
-//        // Process the input data
-//        let processResult = self.withUnsafeBytes {
-//            guard let ptrAddr = $0.baseAddress else {
-//                return CRYPT_ERROR
-//            }
-//
-//            let ret = md5_process(&hashState,
-//                                  ptrAddr,
-//                                  .init(self.count))
-//
-//            return .init(ret)
-//        }
-//
-//        guard processResult == CRYPT_OK else {
-//            fatalError("MD5 process failed: \(processResult)")
-//        }
-//
-//        var hashData = Data(count: 16)
-//
-//        // Finalize the hash and retrieve the result
-//        let doneResult = hashData.withUnsafeMutableBytes {
-//            guard let ptrAddr = $0.baseAddress else {
-//                return CRYPT_ERROR
-//            }
-//
-//            let ret = md5_done(&hashState,
-//                               ptrAddr)
-//
-//            return .init(ret)
-//        }
-//
-//        guard doneResult == CRYPT_OK else {
-//            fatalError("MD5 done failed: \(doneResult)")
-//        }
-//
-//		return hashData
-//	}
 
 	func aes128ECBEncrypted(withKey key: Data) -> Data? {
 		AES128ECBEncryption.encrypt(data: self,
