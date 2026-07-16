@@ -15,6 +15,7 @@ import { SessionsDrawer } from "./session-workspace.jsx";
 import { useTerminalHubState } from "./terminal-state.js";
 import { sessionItems } from "./utils.js";
 import { CardDrawer, InteractiveDrawer, RunDrawer } from "./work-drawers.jsx";
+import { DesktopViewer, desktopViewerHostID } from "./desktop-viewer.jsx";
 
 function App() {
   const initialSessionLink = useMemo(() => {
@@ -178,6 +179,10 @@ function App() {
 }
 
 function CrabfleetApp(props) {
+  const desktopHostID = desktopViewerHostID();
+  const desktopHost = (props.state.fleet?.desktopHosts || []).find(
+    (host) => host.id === desktopHostID,
+  );
   useEffect(() => {
     const onKeyDown = (event) => handleAppEscape(event, props);
     document.addEventListener("keydown", onKeyDown);
@@ -195,7 +200,11 @@ function CrabfleetApp(props) {
         onToken={props.tokenLogin}
         onDevIdentity={props.devIdentityLogin}
       />
-      <AppShell {...props} />
+      {desktopHostID && props.signedIn ? (
+        <DesktopViewer host={desktopHost} onExit={() => location.assign("/app/fleet")} />
+      ) : (
+        <AppShell {...props} />
+      )}
       <CardDrawer {...props} />
       <InteractiveDrawer {...props} />
       <RunDrawer {...props} />

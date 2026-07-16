@@ -152,6 +152,7 @@ export default {
         url.pathname === "/app/fleet/" ||
         url.pathname === "/app/board" ||
         url.pathname === "/app/board/" ||
+        url.pathname.startsWith("/app/desktops/") ||
         url.pathname === "/sessions" ||
         url.pathname === "/sessions/" ||
         url.pathname.startsWith("/sessions/") ||

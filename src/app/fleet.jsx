@@ -101,6 +101,8 @@ export function FleetPage(props) {
         />
       </div>
 
+      <DesktopHosts hosts={fleet?.desktopHosts || []} />
+
       <section class="fleet-roster">
         <header class="fleet-roster-head">
           <div>
@@ -159,6 +161,42 @@ export function FleetPage(props) {
           </div>
         )}
       </section>
+    </section>
+  );
+}
+
+function DesktopHosts({ hosts }) {
+  if (!hosts.length) return null;
+  return (
+    <section class="desktop-hosts" aria-label="Shared Macs">
+      <header>
+        <div>
+          <div class="section-kicker">PRIVATE DESKTOPS</div>
+          <h2>Share This Mac</h2>
+        </div>
+        <span>{hosts.length} registered</span>
+      </header>
+      <div class="desktop-host-grid">
+        {hosts.map((host) => (
+          <article class="desktop-host-card" key={host.id}>
+            <span class="desktop-host-mark" aria-hidden="true">
+              MAC
+            </span>
+            <div>
+              <strong>{host.name}</strong>
+              <span>
+                {host.address}:{host.port}
+              </span>
+            </div>
+            <button
+              class="primary"
+              onClick={() => location.assign(`/app/desktops/${encodeURIComponent(host.id)}`)}
+            >
+              Open in browser
+            </button>
+          </article>
+        ))}
+      </div>
     </section>
   );
 }
