@@ -188,12 +188,16 @@ function DesktopHosts({ hosts }) {
                 {host.address}:{host.port}
               </span>
             </div>
-            <button
-              class="primary"
-              onClick={() => location.assign(`/app/desktops/${encodeURIComponent(host.id)}`)}
-            >
-              Open in browser
-            </button>
+            {host.relayCapable ? (
+              <button
+                class="primary"
+                onClick={() => location.assign(`/app/desktops/${encodeURIComponent(host.id)}`)}
+              >
+                Open in browser
+              </button>
+            ) : (
+              <span class="desktop-host-relay-unavailable">Re-share Mac for browser access</span>
+            )}
           </article>
         ))}
       </div>

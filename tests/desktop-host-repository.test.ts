@@ -374,6 +374,35 @@ test("legacy desktop host writes and cleanup preserve legacy rows", async () => 
   assert.equal(sqlite.prepare("SELECT count(*) AS count FROM desktop_hosts").get()?.count, 0);
 });
 
+test("desktop relay lookup excludes tokenless registrations", async () => {
+  const sqlite = new DatabaseSync(":memory:");
+  for (const migration of [
+    "0030_desktop_hosts.sql",
+    "0033_desktop_host_ownership.sql",
+    "0038_desktop_host_publication_identity.sql",
+    "0041_desktop_host_ownership_errors.sql",
+  ]) {
+    sqlite.exec(readFileSync(new URL(`../migrations/${migration}`, import.meta.url), "utf8"));
+  }
+  sqlite.exec(`
+    INSERT INTO desktop_hosts (
+      owner_subject, id, owner, name, address, port, ownership_token, publication_id,
+      created_at, updated_at
+    ) VALUES
+      ('github:1', 'legacy', 'alice', 'Legacy', '100.64.1.2', 5901, '', '', 1, 1),
+      ('github:1', 'current', 'alice', 'Current', '100.64.1.3', 5902,
+       'current-token', 'current-publication', 1, 1)
+  `);
+  const repository = new DesktopHostRepository(sqliteRuntimeEnv(sqlite));
+
+  assert.equal(await repository.findOwnedTokenRegistration("github:1", "legacy"), null);
+  assert.deepEqual(await repository.findOwnedTokenRegistration("github:1", "current"), {
+    ownerSubject: "github:1",
+    id: "current",
+  });
+  assert.equal(await repository.findOwnedTokenRegistration("github:2", "current"), null);
+});
+
 test("desktop host publication recovery matches only the current publication", async () => {
   const sqlite = new DatabaseSync(":memory:");
   for (const migration of [

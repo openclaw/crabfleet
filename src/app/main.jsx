@@ -181,7 +181,7 @@ function App() {
 function CrabfleetApp(props) {
   const desktopHostID = desktopViewerHostID();
   const desktopHost = (props.state.fleet?.desktopHosts || []).find(
-    (host) => host.id === desktopHostID,
+    (host) => host.id === desktopHostID && host.relayCapable === true,
   );
   useEffect(() => {
     const onKeyDown = (event) => handleAppEscape(event, props);

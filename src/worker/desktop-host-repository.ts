@@ -29,7 +29,10 @@ export interface DesktopHostStore {
 }
 
 export interface DesktopRelayRegistrationStore {
-  findOwned(ownerSubject: string, id: string): Promise<DesktopRelayRegistration | null>;
+  findOwnedTokenRegistration(
+    ownerSubject: string,
+    id: string,
+  ): Promise<DesktopRelayRegistration | null>;
   findTokenRegistration(
     id: string,
     ownershipToken: string,
@@ -67,12 +70,16 @@ export class DesktopHostRepository implements DesktopHostStore, DesktopRelayRegi
     }));
   }
 
-  async findOwned(ownerSubject: string, id: string): Promise<DesktopRelayRegistration | null> {
+  async findOwnedTokenRegistration(
+    ownerSubject: string,
+    id: string,
+  ): Promise<DesktopRelayRegistration | null> {
     const row = await database(this.env)
       .selectFrom("desktop_hosts")
       .select(["owner_subject", "id"])
       .where("owner_subject", "=", ownerSubject)
       .where("id", "=", id)
+      .where("ownership_token", "<>", "")
       .executeTakeFirst();
     return row ? { ownerSubject: row.owner_subject, id: row.id } : null;
   }

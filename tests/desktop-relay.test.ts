@@ -53,7 +53,10 @@ const registration: DesktopHostRow = {
 };
 
 class MemoryRegistrations implements DesktopRelayRegistrationStore {
-  async findOwned(ownerSubject: string, id: string): Promise<DesktopRelayRegistration | null> {
+  async findOwnedTokenRegistration(
+    ownerSubject: string,
+    id: string,
+  ): Promise<DesktopRelayRegistration | null> {
     return ownerSubject === registration.ownerSubject && id === registration.id
       ? registration
       : null;

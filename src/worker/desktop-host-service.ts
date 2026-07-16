@@ -15,6 +15,7 @@ export type DesktopHost = {
   name: string;
   address: string;
   port: number;
+  relayCapable: boolean;
   createdAt: number;
   updatedAt: number;
 };
@@ -120,6 +121,7 @@ function presentDesktopHost(row: DesktopHostRow): DesktopHost {
     name: row.name,
     address: row.address,
     port: row.port,
+    relayCapable: row.ownershipToken.length > 0,
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
   };

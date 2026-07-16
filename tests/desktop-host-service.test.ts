@@ -84,6 +84,7 @@ test("desktop hosts are canonicalized and isolated to their stable owner", async
     name: "Peter's Mac Studio",
     address: "100.68.201.40",
     port: 5901,
+    relayCapable: true,
     createdAt: 42,
     updatedAt: 42,
   });
@@ -256,6 +257,7 @@ test("token ownership requires a valid publication before minting or persistence
 
   const legacy = await service.register(alice, "studio", input, "legacy", "ignored publication");
   assert.equal(legacy.ownershipToken, undefined);
+  assert.equal(legacy.host.relayCapable, false);
   assert.equal(store.rows.get(`${alice.subject}:studio`)?.publicationID, "");
 });
 

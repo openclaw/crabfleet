@@ -36,7 +36,7 @@ export class DesktopRelayService {
     validateTerminalWebSocketOrigin(request, this.env, false);
     const hostID = desktopHostID(rawHostID);
     const ownerSubject = tenantSubject(user);
-    const registration = await this.registrations.findOwned(ownerSubject, hostID);
+    const registration = await this.registrations.findOwnedTokenRegistration(ownerSubject, hostID);
     if (!registration) throw notFound("desktop host not found");
     return this.openRelay(request, ownerSubject, hostID, "viewer");
   }
