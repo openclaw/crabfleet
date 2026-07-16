@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Add preferred hardware HEVC sharing with H.264 and Tight/JPEG fallback, Annex-B VPS/SPS/PPS decoding, ScreenCaptureKit dirty-rectangle idle suppression, persisted live Auto/Sharp/Smooth quality modes with one-shot static-text settling refreshes, throughput- and latency-aware bitrate control, and codec, target-bitrate, and changed-area stream diagnostics.
 - Add negotiated system-audio streaming to Share This Mac with opt-in ScreenCaptureKit capture, AAC-LC at 48 kHz, serialized bounded `CAF1` RFB messages, native jitter-buffered playback, live host audio control, and focus-aware viewer muting while leaving third-party VNC clients video-only.
 - Drop the RoyalVNCKit fork's last third-party crypto dependency, CryptoSwift: use CryptoKit for MD5, CommonCrypto for AES-128-ECB, and an in-fork constant-free pure-Swift big integer with `SecRandomCopyBytes` key generation and Miller-Rabin safe-prime checks for Apple Remote Desktop Diffie-Hellman, with known-answer coverage.
 - Replace the vendored D3DES implementation carrying unlicensed 1998 VNC modifications with a per-call CommonCrypto DES shim implementing the VNC bit-reversed-key variant, remove the process-global key schedule so concurrent VNC password authentication is safe, drop the d3des build target, and add known-answer coverage.
