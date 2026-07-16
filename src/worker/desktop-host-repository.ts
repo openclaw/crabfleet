@@ -28,7 +28,17 @@ export interface DesktopHostStore {
   remove(ownerSubject: string, id: string, ownershipToken: string | null): Promise<void>;
 }
 
-export class DesktopHostRepository implements DesktopHostStore {
+export interface DesktopRelayRegistrationStore {
+  findOwned(ownerSubject: string, id: string): Promise<DesktopRelayRegistration | null>;
+  findTokenRegistration(
+    id: string,
+    ownershipToken: string,
+  ): Promise<DesktopRelayRegistration | null>;
+}
+
+export type DesktopRelayRegistration = Pick<DesktopHostRow, "ownerSubject" | "id">;
+
+export class DesktopHostRepository implements DesktopHostStore, DesktopRelayRegistrationStore {
   private readonly env: RuntimeEnv;
 
   constructor(env: RuntimeEnv) {
@@ -55,6 +65,30 @@ export class DesktopHostRepository implements DesktopHostStore {
       createdAt: row.created_at,
       updatedAt: row.updated_at,
     }));
+  }
+
+  async findOwned(ownerSubject: string, id: string): Promise<DesktopRelayRegistration | null> {
+    const row = await database(this.env)
+      .selectFrom("desktop_hosts")
+      .select(["owner_subject", "id"])
+      .where("owner_subject", "=", ownerSubject)
+      .where("id", "=", id)
+      .executeTakeFirst();
+    return row ? { ownerSubject: row.owner_subject, id: row.id } : null;
+  }
+
+  async findTokenRegistration(
+    id: string,
+    ownershipToken: string,
+  ): Promise<DesktopRelayRegistration | null> {
+    const row = await database(this.env)
+      .selectFrom("desktop_hosts")
+      .select(["owner_subject", "id"])
+      .where("id", "=", id)
+      .where("ownership_token", "=", ownershipToken)
+      .where("ownership_token", "<>", "")
+      .executeTakeFirst();
+    return row ? { ownerSubject: row.owner_subject, id: row.id } : null;
   }
 
   async upsert(host: DesktopHostWrite): Promise<DesktopHostRow> {

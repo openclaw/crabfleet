@@ -6,6 +6,7 @@ export type RuntimeEnv = Env & {
   SESSION_LOGS?: R2Bucket;
   SANDBOX?: DurableObjectNamespace<CloudflareSandbox>;
   SESSION_CONTROL?: DurableObjectNamespace;
+  DESKTOP_RELAY?: DurableObjectNamespace;
   CRABBOX_BOOTSTRAP_TOKEN?: string;
   GITHUB_CLIENT_ID?: string;
   GITHUB_CLIENT_SECRET?: string;

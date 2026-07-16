@@ -28,6 +28,8 @@ import { sandboxPlaceholderOpenAIKey } from "./worker/sandbox-outbound";
 import { sandboxOutbound } from "./worker/sandbox-outbound-service";
 import { WorkerApplication } from "./worker/worker-application";
 import { handleNativeLink } from "./worker/native-link";
+import { DesktopHostRepository } from "./worker/desktop-host-repository";
+import { DesktopRelayService, matchDesktopRelayRoute } from "./worker/desktop-relay-service";
 
 type SandboxClassWithOutbound = {
   outbound?: typeof sandboxOutbound;
@@ -52,6 +54,7 @@ export class Sandbox extends CloudflareSandboxBase<RuntimeEnv> {
 
 export { ContainerProxy };
 export { SessionControlDO } from "./worker/session-control-do";
+export { DesktopRelayDO } from "./worker/desktop-relay-do";
 
 export default {
   async fetch(request: Request, env: RuntimeEnv, context: ExecutionContext): Promise<Response> {
@@ -185,6 +188,14 @@ async function api(
   application: WorkerApplication,
 ): Promise<Response> {
   const url = new URL(request.url);
+  const desktopRelayRoute = matchDesktopRelayRoute(url);
+
+  if (desktopRelayRoute?.role === "host") {
+    return new DesktopRelayService(env, new DesktopHostRepository(env)).openHost(
+      request,
+      desktopRelayRoute.hostID,
+    );
+  }
 
   const provisioningResponse = await handleProvisioningRoute(
     request,
@@ -223,6 +234,14 @@ async function api(
   if (nativeResponse) return nativeResponse;
 
   const user = await requireUser(request, env, requestAuth);
+
+  if (desktopRelayRoute?.role === "viewer") {
+    return new DesktopRelayService(env, new DesktopHostRepository(env)).openViewer(
+      request,
+      user,
+      desktopRelayRoute.hostID,
+    );
+  }
 
   const sessionAuthResponse = handleSessionAuthRoute(request, url, user, {
     sessionState: (authRequest, authenticatedUser) =>

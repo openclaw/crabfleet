@@ -125,7 +125,7 @@ function presentDesktopHost(row: DesktopHostRow): DesktopHost {
   };
 }
 
-function desktopHostID(value: string): string {
+export function desktopHostID(value: string): string {
   const normalized = value.trim().toLowerCase();
   if (!/^[a-z0-9](?:[a-z0-9._-]{0,78}[a-z0-9])?$/.test(normalized)) {
     throw badRequest(
