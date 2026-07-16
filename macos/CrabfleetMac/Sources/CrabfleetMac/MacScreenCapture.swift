@@ -58,7 +58,14 @@ struct VideoPixelSource: @unchecked Sendable {
   let contentRect: CGRect?
 
   var dirtyAreaFraction: Double {
-    MacScreenCapture.dirtyAreaFraction(dirtyRects: dirtyRects, contentRect: contentRect)
+    MacScreenCapture.dirtyAreaFraction(
+      dirtyRects: dirtyRects,
+      contentRect: contentRect
+        ?? CGRect(
+          x: 0,
+          y: 0,
+          width: CVPixelBufferGetWidth(pixelBuffer),
+          height: CVPixelBufferGetHeight(pixelBuffer)))
   }
 }
 
@@ -364,7 +371,7 @@ final class MacScreenCapture: NSObject, @unchecked Sendable {
   ) -> Double {
     guard let dirtyRects else { return 1 }
     guard !dirtyRects.isEmpty else { return 0 }
-    let content = contentRect ?? dirtyRects.reduce(.null) { $0.union($1) }
+    guard let content = contentRect else { return 1 }
     guard content.width > 0, content.height > 0 else { return 1 }
     let dirtyArea = dirtyRects.reduce(0.0) { area, rect in
       let clipped = rect.intersection(content)
@@ -372,6 +379,25 @@ final class MacScreenCapture: NSObject, @unchecked Sendable {
       return area + clipped.width * clipped.height
     }
     return min(max(dirtyArea / (content.width * content.height), 0), 1)
+  }
+
+  static func pixelContentRect(
+    _ contentRect: CGRect?,
+    scaleFactor: CGFloat?,
+    contentScale: CGFloat?,
+    pixelWidth: Int,
+    pixelHeight: Int
+  ) -> CGRect {
+    let pixelBounds = CGRect(x: 0, y: 0, width: pixelWidth, height: pixelHeight)
+    guard let contentRect else { return pixelBounds }
+    let pointToPixelScale = max((scaleFactor ?? 1) * (contentScale ?? 1), 0)
+    let scaled = CGRect(
+      x: contentRect.origin.x * pointToPixelScale,
+      y: contentRect.origin.y * pointToPixelScale,
+      width: contentRect.width * pointToPixelScale,
+      height: contentRect.height * pointToPixelScale)
+    let clipped = scaled.intersection(pixelBounds)
+    return clipped.isNull || clipped.isEmpty ? pixelBounds : clipped
   }
 
   static func shouldOfferVideoFrame(dirtyRects: [CGRect]?, keyframeOwed: Bool) -> Bool {
@@ -389,6 +415,10 @@ final class MacScreenCapture: NSObject, @unchecked Sendable {
     guard let values = value as? [Any] else { return nil }
     let rects = values.compactMap(attachmentRect)
     return rects.count == values.count ? rects : nil
+  }
+
+  static func attachmentScale(_ value: Any?) -> CGFloat? {
+    (value as? NSNumber).map { CGFloat($0.doubleValue) }
   }
 
   private static func sourcePixelDimensions(
@@ -513,11 +543,18 @@ extension MacScreenCapture: SCStreamOutput, SCStreamDelegate {
       return
     }
 
+    let dirtyRects = Self.attachmentRects(attachments[.dirtyRects])
+    let contentRect = Self.pixelContentRect(
+      Self.attachmentRect(attachments[.contentRect]),
+      scaleFactor: Self.attachmentScale(attachments[.scaleFactor]),
+      contentScale: Self.attachmentScale(attachments[.contentScale]),
+      pixelWidth: CVPixelBufferGetWidth(pixelBuffer),
+      pixelHeight: CVPixelBufferGetHeight(pixelBuffer))
     let source = VideoPixelSource(
       pixelBuffer: pixelBuffer,
       presentationTime: sampleBuffer.presentationTimeStamp,
-      dirtyRects: Self.attachmentRects(attachments[.dirtyRects]),
-      contentRect: Self.attachmentRect(attachments[.contentRect]))
+      dirtyRects: dirtyRects,
+      contentRect: contentRect)
     retainVideoSource(source)
 
     if let handler = currentVideoFrameHandler() {

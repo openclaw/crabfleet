@@ -326,15 +326,15 @@ private final class RFBHostSession: @unchecked Sendable {
   }
 
   func setQualityMode(_ mode: ShareQualityMode) {
-    let values = withLock { () -> (MacVideoEncoder?, Int, UInt64?) in
+    let generation = withLock { () -> UInt64? in
       qualityMode = mode
       let bitrate = rateController.setMode(mode)
-      guard let videoEncoder else { return (nil, bitrate, nil) }
+      guard let videoEncoder else { return nil }
+      videoEncoder.setAverageBitrate(bitrate)
       frameIntervalGeneration &+= 1
-      return (videoEncoder, bitrate, frameIntervalGeneration)
+      return frameIntervalGeneration
     }
-    values.0?.setAverageBitrate(values.1)
-    guard let generation = values.2 else { return }
+    guard let generation else { return }
     Task { [weak self] in
       guard let self else { return }
       try? await capture.updateFrameInterval(
@@ -961,8 +961,7 @@ private final class RFBHostSession: @unchecked Sendable {
     _ = replaceVideoEncoder(with: encoder)
     withLock { videoPixelMailbox = pixelMailbox }
     startVideoFrameConsumer(for: encoder)
-    let frameInterval = beginVideoFrameInterval()
-    encoder.setAverageBitrate(frameInterval.targetBitrate)
+    let frameInterval = beginVideoFrameInterval(for: encoder)
     lastStatsTimestamp = ProcessInfo.processInfo.systemUptime
     idleRefreshPolicy = VideoIdleRefreshPolicy(timestamp: lastStatsTimestamp)
     needsContextReset = true
@@ -1105,7 +1104,7 @@ private final class RFBHostSession: @unchecked Sendable {
     }
   }
 
-  private func beginVideoFrameInterval() -> (
+  private func beginVideoFrameInterval(for encoder: MacVideoEncoder) -> (
     mode: ShareQualityMode,
     targetBitrate: Int,
     generation: UInt64
@@ -1113,7 +1112,23 @@ private final class RFBHostSession: @unchecked Sendable {
     withLock {
       rateController = VideoRateController(mode: qualityMode)
       frameIntervalGeneration &+= 1
+      if videoEncoder === encoder {
+        encoder.setAverageBitrate(rateController.targetBitrate)
+      }
       return (qualityMode, rateController.targetBitrate, frameIntervalGeneration)
+    }
+  }
+
+  private func applyCurrentTargetBitrate(
+    to encoder: MacVideoEncoder,
+    multiplier: Int = 1,
+    requiresIdleRefreshMode: Bool = false
+  ) {
+    withLock {
+      guard videoEncoder === encoder,
+        !requiresIdleRefreshMode || qualityMode != .smooth
+      else { return }
+      encoder.setAverageBitrate(rateController.targetBitrate * multiplier)
     }
   }
 
@@ -1216,7 +1231,7 @@ private final class RFBHostSession: @unchecked Sendable {
 
     let forceKeyframe = consumeForceNextKeyframe() || needsContextReset
     if isIdleRefresh {
-      encoder.setAverageBitrate(withLock { rateController.targetBitrate * 2 })
+      applyCurrentTargetBitrate(to: encoder, multiplier: 2, requiresIdleRefreshMode: true)
     }
     guard
       encoder.encode(
@@ -1225,7 +1240,7 @@ private final class RFBHostSession: @unchecked Sendable {
         forceKeyframe: forceKeyframe)
     else {
       if isIdleRefresh {
-        encoder.setAverageBitrate(withLock { rateController.targetBitrate })
+        applyCurrentTargetBitrate(to: encoder)
         idleRefreshPolicy.refreshFailed()
       }
       // Rejected input (for example a timestamp raced behind a synthetic
@@ -1239,12 +1254,12 @@ private final class RFBHostSession: @unchecked Sendable {
         frame.width <= currentWidth + 15, frame.height <= currentHeight + 15
       else { continue }
       if isIdleRefresh {
-        encoder.setAverageBitrate(withLock { rateController.targetBitrate })
+        applyCurrentTargetBitrate(to: encoder)
       }
       return .frame(frame, dirtyAreaFraction: source.dirtyAreaFraction)
     }
     if isIdleRefresh {
-      encoder.setAverageBitrate(withLock { rateController.targetBitrate })
+      applyCurrentTargetBitrate(to: encoder)
       idleRefreshPolicy.refreshFailed()
     }
     return .failed
@@ -1296,16 +1311,15 @@ private final class RFBHostSession: @unchecked Sendable {
     dirtyAreaFraction: Double
   ) {
     let now = ProcessInfo.processInfo.systemUptime
-    let bitrate = withLock {
-      rateController.recordFrame(
+    withLock {
+      let bitrate = rateController.recordFrame(
         byteCount: byteCount,
         sendSeconds: sendSeconds,
         dirtyAreaFraction: dirtyAreaFraction,
         timestamp: now)
-    }
-    if let bitrate
-    {
-      encoder?.setAverageBitrate(bitrate)
+      if let bitrate, let encoder, videoEncoder === encoder {
+        encoder.setAverageBitrate(bitrate)
+      }
     }
     emitStatsIfDue(codec: codec, hardwareAccelerated: hardwareAccelerated, now: now)
   }
