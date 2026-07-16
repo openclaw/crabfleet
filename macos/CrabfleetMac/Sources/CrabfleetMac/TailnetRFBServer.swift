@@ -799,7 +799,7 @@ private final class RFBHostSession: @unchecked Sendable {
             sentConfiguration = configuration
 
           case .packet(let packet):
-            guard ProcessInfo.processInfo.systemUptime - packet.createdAt <= 0.2 else { continue }
+            guard Self.audioSendDeadline(createdAt: packet.createdAt) != nil else { continue }
             if sentConfiguration != packet.configuration {
               try await io.send(
                 RFBWire.audioConfig(
@@ -810,14 +810,17 @@ private final class RFBHostSession: @unchecked Sendable {
               sentConfiguration = packet.configuration
             }
             guard isCurrentAudioGeneration(generation) else { return }
+            guard let deadline = Self.audioSendDeadline(createdAt: packet.createdAt) else { continue }
             try await io.send(
               RFBWire.audioPacket(timestampMs: packet.timestampMs, payload: packet.data),
-              timeout: .milliseconds(250))
+              deadline: deadline)
 
           case .failed:
             handleAudioFailure(generation: generation)
             return
           }
+        } catch is RFBSendExpiredError {
+          continue
         } catch {
           if error is RFBSendTimeoutError {
             finish(event: .sessionFailed(error.localizedDescription))
@@ -878,6 +881,13 @@ private final class RFBHostSession: @unchecked Sendable {
 
   private func isCurrentAudioGeneration(_ generation: UInt64) -> Bool {
     withLock { audioGeneration == generation && !finished }
+  }
+
+  private static func audioSendDeadline(createdAt: TimeInterval) -> ContinuousClock.Instant? {
+    let remaining = 0.2 - (ProcessInfo.processInfo.systemUptime - createdAt)
+    guard remaining > 0 else { return nil }
+    let duration = Duration.nanoseconds(max(1, Int64(remaining * 1_000_000_000)))
+    return ContinuousClock().now.advanced(by: duration)
   }
 
   private func handleAudioFailure(generation: UInt64) {
@@ -1288,7 +1298,12 @@ private struct RFBConnectionIO: Sendable {
   }
 
   func send(_ data: Data, timeout: Duration? = nil) async throws {
-    try await sendQueue.send(data, timeout: timeout)
+    let deadline = timeout.map { ContinuousClock().now.advanced(by: $0) }
+    try await sendQueue.send(data, deadline: deadline)
+  }
+
+  func send(_ data: Data, deadline: ContinuousClock.Instant) async throws {
+    try await sendQueue.send(data, deadline: deadline)
   }
 
   private func receive(maximumLength: Int) async throws -> Data {
@@ -1319,24 +1334,29 @@ private actor RFBSendQueue {
     self.connection = connection
   }
 
-  func send(_ data: Data, timeout: Duration?) async throws {
+  func send(_ data: Data, deadline: ContinuousClock.Instant?) async throws {
     let predecessor = tail
     let connection = connection
+    let waiter = deadline.map { QueuedSendWaiter(deadline: $0) }
     let operation = Task<Result<Void, Error>, Never> {
       _ = await predecessor.value
+      guard waiter?.beginSending() != false else { return .success(()) }
+      let result: Result<Void, Error>
       do {
         try await Self.send(data, connection: connection)
-        return .success(())
+        result = .success(())
       } catch {
-        return .failure(error)
+        result = .failure(error)
       }
+      waiter?.complete(result)
+      return result
     }
     tail = operation
-    guard let timeout else {
+    guard let waiter else {
       try await operation.value.get()
       return
     }
-    try await SendWaiter.wait(for: operation, timeout: timeout)
+    try await waiter.wait()
   }
 
   private static func send(_ data: Data, connection: NWConnection) async throws {
@@ -1353,46 +1373,99 @@ private actor RFBSendQueue {
   }
 }
 
-private final class SendWaiter: @unchecked Sendable {
+private final class QueuedSendWaiter: @unchecked Sendable {
   private let lock = NSLock()
+  private let deadline: ContinuousClock.Instant
   private var continuation: CheckedContinuation<Void, Error>?
+  private var resolution: Result<Void, Error>?
+  private var startedSending = false
 
-  static func wait(
-    for operation: Task<Result<Void, Error>, Never>,
-    timeout: Duration
-  ) async throws {
-    let waiter = SendWaiter()
+  init(deadline: ContinuousClock.Instant) {
+    self.deadline = deadline
+  }
+
+  func wait() async throws {
     try await withCheckedThrowingContinuation {
       (continuation: CheckedContinuation<Void, Error>) in
-      waiter.install(continuation)
-      Task {
-        let result = await operation.value
-        waiter.resolve(result)
-      }
-      Task {
-        try? await Task.sleep(for: timeout)
-        waiter.resolve(.failure(RFBSendTimeoutError()))
+      if install(continuation) {
+        Task { [self] in
+          try? await ContinuousClock().sleep(until: deadline)
+          expire()
+        }
       }
     }
   }
 
-  private func install(_ continuation: CheckedContinuation<Void, Error>) {
+  func beginSending() -> Bool {
     lock.lock()
-    self.continuation = continuation
+    guard resolution == nil else {
+      lock.unlock()
+      return false
+    }
+    if ContinuousClock().now >= deadline {
+      resolution = .failure(RFBSendExpiredError())
+      let continuation = continuation
+      self.continuation = nil
+      lock.unlock()
+      continuation?.resume(throwing: RFBSendExpiredError())
+      return false
+    }
+    startedSending = true
     lock.unlock()
+    return true
   }
 
-  private func resolve(_ result: Result<Void, Error>) {
+  func complete(_ result: Result<Void, Error>) {
     lock.lock()
+    guard resolution == nil else {
+      lock.unlock()
+      return
+    }
+    let resolution: Result<Void, Error> = if ContinuousClock().now >= deadline {
+      .failure(startedSending ? RFBSendTimeoutError() : RFBSendExpiredError())
+    } else {
+      result
+    }
+    self.resolution = resolution
     let continuation = continuation
     self.continuation = nil
     lock.unlock()
-    continuation?.resume(with: result)
+    continuation?.resume(with: resolution)
+  }
+
+  private func install(_ continuation: CheckedContinuation<Void, Error>) -> Bool {
+    lock.lock()
+    if let resolution {
+      lock.unlock()
+      continuation.resume(with: resolution)
+      return false
+    }
+    self.continuation = continuation
+    lock.unlock()
+    return true
+  }
+
+  private func expire() {
+    lock.lock()
+    guard resolution == nil else {
+      lock.unlock()
+      return
+    }
+    let error: Error = startedSending ? RFBSendTimeoutError() : RFBSendExpiredError()
+    resolution = .failure(error)
+    let continuation = continuation
+    self.continuation = nil
+    lock.unlock()
+    continuation?.resume(throwing: error)
   }
 }
 
 private struct RFBSendTimeoutError: LocalizedError {
   var errorDescription: String? { "RFB send timed out" }
+}
+
+private struct RFBSendExpiredError: LocalizedError {
+  var errorDescription: String? { "RFB send expired before transmission" }
 }
 
 private actor AudioPipelineGate {

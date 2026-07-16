@@ -210,9 +210,17 @@ final class MacScreenCapture: NSObject, @unchecked Sendable {
       }
       guard audioOutputAvailable else { return }
       guard configuration.capturesAudio != enabled else { return }
+      let previousCapturesAudio = configuration.capturesAudio
+      let previousExcludesCurrentProcessAudio = configuration.excludesCurrentProcessAudio
       configuration.capturesAudio = enabled
       configuration.excludesCurrentProcessAudio = true
-      try await stream.updateConfiguration(configuration)
+      do {
+        try await stream.updateConfiguration(configuration)
+      } catch {
+        configuration.capturesAudio = previousCapturesAudio
+        configuration.excludesCurrentProcessAudio = previousExcludesCurrentProcessAudio
+        throw error
+      }
     }
   }
 
