@@ -117,12 +117,16 @@ ScreenCaptureKit dirty rectangles keep ordinary unchanged frames out of the
 latest-wins pixel mailbox. Auto and Sharp send one doubled-bitrate keyframe
 after two static seconds so text settles, then return to zero encode work;
 Smooth omits that refresh. The persisted quality picker applies live without a
-session restart: Auto uses 1.5–30 Mbit/s at up to 60 fps, Sharp 8–40 Mbit/s at
-up to 30 fps, and Smooth 1.5–20 Mbit/s at up to 60 fps. The controller tracks
+session restart: Auto uses 1.5–30 Mbit/s at up to 60 fps with a maximum frame
+QP of 40, Sharp uses 8–40 Mbit/s at up to 30 fps with a maximum frame QP of 30
+to preserve readable text even when VideoToolbox must sacrifice frames, and
+Smooth uses 1.5–20 Mbit/s at up to 60 fps without a QP cap. The controller tracks
 EWMA link throughput and send latency, reduces toward 80% of measured
 throughput above 50 ms, and recovers by at most 1 Mbit/s per clear second scaled
 by changed screen area. The share sheet reports codec and hardware detail,
-frame rate, throughput, target bitrate, and dirty-area percentage.
+frame rate, throughput, target bitrate, and dirty-area percentage. If a
+VideoToolbox encoder does not support the optional QP property, video remains
+active without the cap and the codec detail reports `QP cap unavailable`.
 
 ### Audio pipeline
 

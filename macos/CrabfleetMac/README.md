@@ -16,7 +16,8 @@ system audio, Crabfleet prefers hardware HEVC with H.264 and bounded Tight/JPEG
 fallbacks, and Accessibility-authorized CGEvents forward keyboard and pointer
 input when that optional permission is granted. Dirty rectangles avoid encoding
 unchanged frames, while persisted Auto, Sharp, and Smooth modes tune live
-frame-rate and bitrate bounds. Screen Recording alone starts a view-only share.
+frame-rate, bitrate bounds, and VideoToolbox text-sharpness QP caps. Screen
+Recording alone starts a view-only share.
 The listener binds only to the Mac's verified
 Tailscale `100.64.0.0/10` address after confirming a valid identity on the active
 tailnet. Before the RFB handshake, `tailscale whois` must identify the peer as
