@@ -30,6 +30,7 @@ enum MacVideoCodec: Equatable, Sendable {
 
 enum MacVideoEncoderError: Error {
   case creationFailed(OSStatus)
+  case propertyRejected(OSStatus)
   case invalidSample
   case malformedNALUnits
 }
@@ -73,8 +74,19 @@ final class MacVideoEncoder: @unchecked Sendable {
   private var invalidated = false
   private var keyframePolicy = VideoKeyframePolicy()
   private var lastPresentationTime: CMTime?
+  private var configuredMaximumFrameQP: Int?
+  private var maximumFrameQPUnavailable = false
 
-  init(width: Int, height: Int, codec: MacVideoCodec = .h264) throws {
+  var isMaximumFrameQPAvailable: Bool {
+    withLock { !maximumFrameQPUnavailable }
+  }
+
+  init(
+    width: Int,
+    height: Int,
+    codec: MacVideoCodec = .h264,
+    maximumFrameQP: Int? = 40
+  ) throws {
     let stream = AsyncStream<EncodedVideoFrame>.makeStream(
       bufferingPolicy: .bufferingNewest(2))
     frames = stream.stream
@@ -156,6 +168,22 @@ final class MacVideoEncoder: @unchecked Sendable {
       createdSession, key: kVTCompressionPropertyKey_ExpectedFrameRate, value: 60)
     Self.setProperty(
       createdSession, key: kVTCompressionPropertyKey_AverageBitRate, value: 8_000_000)
+    if let maximumFrameQP {
+      let qpStatus = VTSessionSetProperty(
+        createdSession,
+        key: kVTCompressionPropertyKey_MaxAllowedFrameQP,
+        value: NSNumber(value: maximumFrameQP))
+      if qpStatus == kVTPropertyNotSupportedErr {
+        maximumFrameQPUnavailable = true
+      } else if qpStatus != noErr {
+        session = nil
+        VTCompressionSessionInvalidate(createdSession)
+        stream.continuation.finish()
+        throw MacVideoEncoderError.propertyRejected(qpStatus)
+      } else {
+        configuredMaximumFrameQP = maximumFrameQP
+      }
+    }
     _ = VTCompressionSessionPrepareToEncodeFrames(createdSession)
 
     var hardwareValuePointer: UnsafeRawPointer?
@@ -225,6 +253,25 @@ final class MacVideoEncoder: @unchecked Sendable {
       activeSession,
       key: kVTCompressionPropertyKey_AverageBitRate,
       value: bitsPerSecond)
+  }
+
+  func setMaximumFrameQP(_ maximum: Int?) -> OSStatus {
+    withLock {
+      guard !invalidated, let activeSession = session else { return kVTInvalidSessionErr }
+      guard configuredMaximumFrameQP != maximum else { return noErr }
+      if maximumFrameQPUnavailable { return noErr }
+      let value: CFTypeRef? = maximum.map { NSNumber(value: $0) }
+      let status = VTSessionSetProperty(
+        activeSession,
+        key: kVTCompressionPropertyKey_MaxAllowedFrameQP,
+        value: value)
+      if status == kVTPropertyNotSupportedErr, configuredMaximumFrameQP == nil {
+        maximumFrameQPUnavailable = true
+        return noErr
+      }
+      if status == noErr { configuredMaximumFrameQP = maximum }
+      return status
+    }
   }
 
   func invalidate() {

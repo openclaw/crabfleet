@@ -37,6 +37,14 @@ enum ShareQualityMode: String, CaseIterable, Identifiable, Sendable {
     }
   }
 
+  var maximumFrameQP: Int? {
+    switch self {
+    case .auto: 40
+    case .sharp: 30
+    case .smooth: nil
+    }
+  }
+
   var settlesStaticContent: Bool { self != .smooth }
 }
 

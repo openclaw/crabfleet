@@ -173,6 +173,25 @@ struct VideoPipelineTests {
   }
 
   @Test
+  func qualityModesSelectTextSharpnessQPCaps() {
+    #expect(ShareQualityMode.sharp.maximumFrameQP == 30)
+    #expect(ShareQualityMode.auto.maximumFrameQP == 40)
+    #expect(ShareQualityMode.smooth.maximumFrameQP == nil)
+    #expect(
+      TailnetStreamStats.codecDetail(
+        codec: "HEVC",
+        hardwareAccelerated: true,
+        maximumFrameQPAvailable: false,
+        maximumFrameQPRequested: true) == "HEVC hw · QP cap unavailable")
+    #expect(
+      TailnetStreamStats.codecDetail(
+        codec: "HEVC",
+        hardwareAccelerated: true,
+        maximumFrameQPAvailable: false,
+        maximumFrameQPRequested: false) == "HEVC hw")
+  }
+
+  @Test
   func rateControllerReportsTwoSecondWindow() {
     var controller = VideoRateController()
     for timestamp in [0.5, 1.0, 2.0, 2.5] {

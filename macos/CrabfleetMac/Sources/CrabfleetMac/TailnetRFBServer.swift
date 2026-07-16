@@ -22,6 +22,19 @@ struct TailnetStreamStats: Equatable, Sendable {
   let dirtyAreaPercent: Double
   let framesPerSecond: Double
   let megabitsPerSecond: Double
+
+  static func codecDetail(
+    codec: String,
+    hardwareAccelerated: Bool,
+    maximumFrameQPAvailable: Bool,
+    maximumFrameQPRequested: Bool
+  ) -> String {
+    var detail = codec + (codec == "JPEG" ? "" : hardwareAccelerated ? " hw" : " sw")
+    if !maximumFrameQPAvailable, maximumFrameQPRequested {
+      detail += " · QP cap unavailable"
+    }
+    return detail
+  }
 }
 
 final class TailnetRFBServer: @unchecked Sendable {
@@ -129,12 +142,13 @@ final class TailnetRFBServer: @unchecked Sendable {
     activeSession?.setAudioEnabled(enabled)
   }
 
-  func setQualityMode(_ mode: ShareQualityMode) {
-    let activeSession = withLock { () -> RFBHostSession? in
+  @discardableResult
+  func setQualityMode(_ mode: ShareQualityMode) -> Bool {
+    withLock {
+      guard session?.setQualityMode(mode) != false else { return false }
       qualityMode = mode
-      return session
+      return true
     }
-    activeSession?.setQualityMode(mode)
   }
 
   private func accept(_ connection: NWConnection) {
@@ -325,16 +339,29 @@ private final class RFBHostSession: @unchecked Sendable {
     }
   }
 
-  func setQualityMode(_ mode: ShareQualityMode) {
-    let generation = withLock { () -> UInt64? in
+  @discardableResult
+  func setQualityMode(_ mode: ShareQualityMode) -> Bool {
+    let result = withLock { () -> (accepted: Bool, generation: UInt64?) in
+      let previousMaximumFrameQP = qualityMode.maximumFrameQP
+      let previousRateController = rateController
+      let previousMode = qualityMode
       qualityMode = mode
       let bitrate = rateController.setMode(mode)
-      guard let videoEncoder else { return nil }
+      guard let videoEncoder else { return (true, nil) }
       videoEncoder.setAverageBitrate(bitrate)
+      if previousMaximumFrameQP != mode.maximumFrameQP,
+        videoEncoder.setMaximumFrameQP(mode.maximumFrameQP) != noErr
+      {
+        qualityMode = previousMode
+        rateController = previousRateController
+        videoEncoder.setAverageBitrate(previousRateController.targetBitrate)
+        return (false, nil)
+      }
       frameIntervalGeneration &+= 1
-      return frameIntervalGeneration
+      return (true, frameIntervalGeneration)
     }
-    guard let generation else { return }
+    guard result.accepted else { return false }
+    guard let generation = result.generation else { return true }
     Task { [weak self] in
       guard let self else { return }
       try? await capture.updateFrameInterval(
@@ -343,6 +370,7 @@ private final class RFBHostSession: @unchecked Sendable {
           self?.isFrameIntervalGenerationCurrent(generation) == true
         })
     }
+    return true
   }
 
   private func beginProtocolIfNeeded() {
@@ -561,7 +589,8 @@ private final class RFBHostSession: @unchecked Sendable {
               try await io.send(RFBWire.emptyUpdate())
               emitStatsIfDue(
                 codec: codec == .hevc ? "HEVC" : "H.264",
-                hardwareAccelerated: encoder.isHardwareAccelerated)
+                hardwareAccelerated: encoder.isHardwareAccelerated,
+                maximumFrameQPAvailable: encoder.isMaximumFrameQPAvailable)
               continue protocolLoop
             case .failed:
               await stopVideoPath(markBroken: codec)
@@ -956,12 +985,17 @@ private final class RFBHostSession: @unchecked Sendable {
   /// the inter-frame reference chain stays intact and stale frames are dropped
   /// before they cost encoder time.
   private func startVideoPath(codec: MacVideoCodec) async throws {
-    let encoder = try MacVideoEncoder(width: currentWidth, height: currentHeight, codec: codec)
+    let maximumFrameQP = withLock { qualityMode.maximumFrameQP }
+    let encoder = try MacVideoEncoder(
+      width: currentWidth,
+      height: currentHeight,
+      codec: codec,
+      maximumFrameQP: maximumFrameQP)
     let pixelMailbox = VideoMailbox<VideoPixelSource>()
     _ = replaceVideoEncoder(with: encoder)
     withLock { videoPixelMailbox = pixelMailbox }
     startVideoFrameConsumer(for: encoder)
-    let frameInterval = beginVideoFrameInterval(for: encoder)
+    let frameInterval = try beginVideoFrameInterval(for: encoder)
     lastStatsTimestamp = ProcessInfo.processInfo.systemUptime
     idleRefreshPolicy = VideoIdleRefreshPolicy(timestamp: lastStatsTimestamp)
     needsContextReset = true
@@ -1104,19 +1138,34 @@ private final class RFBHostSession: @unchecked Sendable {
     }
   }
 
-  private func beginVideoFrameInterval(for encoder: MacVideoEncoder) -> (
+  private func beginVideoFrameInterval(for encoder: MacVideoEncoder) throws -> (
     mode: ShareQualityMode,
     targetBitrate: Int,
     generation: UInt64
   ) {
-    withLock {
+    let result = withLock { () -> (
+      mode: ShareQualityMode,
+      targetBitrate: Int,
+      generation: UInt64,
+      qpStatus: OSStatus
+    ) in
       rateController = VideoRateController(mode: qualityMode)
       frameIntervalGeneration &+= 1
+      var qpStatus = noErr
       if videoEncoder === encoder {
         encoder.setAverageBitrate(rateController.targetBitrate)
+        qpStatus = encoder.setMaximumFrameQP(qualityMode.maximumFrameQP)
       }
-      return (qualityMode, rateController.targetBitrate, frameIntervalGeneration)
+      return (
+        qualityMode,
+        rateController.targetBitrate,
+        frameIntervalGeneration,
+        qpStatus)
     }
+    guard result.qpStatus == noErr else {
+      throw MacVideoEncoderError.propertyRejected(result.qpStatus)
+    }
+    return (result.mode, result.targetBitrate, result.generation)
   }
 
   private func applyCurrentTargetBitrate(
@@ -1321,12 +1370,17 @@ private final class RFBHostSession: @unchecked Sendable {
         encoder.setAverageBitrate(bitrate)
       }
     }
-    emitStatsIfDue(codec: codec, hardwareAccelerated: hardwareAccelerated, now: now)
+    emitStatsIfDue(
+      codec: codec,
+      hardwareAccelerated: hardwareAccelerated,
+      maximumFrameQPAvailable: encoder?.isMaximumFrameQPAvailable ?? true,
+      now: now)
   }
 
   private func emitStatsIfDue(
     codec: String,
     hardwareAccelerated: Bool,
+    maximumFrameQPAvailable: Bool = true,
     now: Double = ProcessInfo.processInfo.systemUptime
   ) {
     guard now - lastStatsTimestamp >= 2 else { return }
@@ -1334,7 +1388,11 @@ private final class RFBHostSession: @unchecked Sendable {
     let (snapshot, targetBitrate) = withLock {
       (rateController.statsSnapshot(now: now), rateController.targetBitrate)
     }
-    let codecDetail = codec + (codec == "JPEG" ? "" : hardwareAccelerated ? " hw" : " sw")
+    let codecDetail = TailnetStreamStats.codecDetail(
+      codec: codec,
+      hardwareAccelerated: hardwareAccelerated,
+      maximumFrameQPAvailable: maximumFrameQPAvailable,
+      maximumFrameQPRequested: withLock { qualityMode.maximumFrameQP != nil })
     eventHandler(
       .streaming(
         TailnetStreamStats(

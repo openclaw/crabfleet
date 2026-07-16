@@ -552,8 +552,14 @@ final class PrivateMacShareController: ObservableObject {
 
   @Published var qualityMode: ShareQualityMode {
     didSet {
+      guard !isRevertingQualityMode else { return }
+      guard server?.setQualityMode(qualityMode) != false else {
+        isRevertingQualityMode = true
+        qualityMode = oldValue
+        isRevertingQualityMode = false
+        return
+      }
       defaults.set(qualityMode.rawValue, forKey: Self.qualityModeDefaultsKey)
-      server?.setQualityMode(qualityMode)
     }
   }
 
@@ -564,6 +570,7 @@ final class PrivateMacShareController: ObservableObject {
   private let defaults: UserDefaults
   private var capture: MacScreenCapture?
   private var server: TailnetRFBServer?
+  private var isRevertingQualityMode = false
   private var clipboardBridge: HostClipboardBridge?
   private var activeIdentity: TailnetIdentity?
   private var lifecycleGeneration: UInt64 = 0
