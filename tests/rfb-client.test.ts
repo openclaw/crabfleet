@@ -50,6 +50,61 @@ test("RFB 3.8 handshake records exact client bytes and paces empty updates", asy
   assert.deepEqual(transport.sent[6], framebufferRequest(true, 1280, 720));
 });
 
+test("H.264 decode failure renegotiates Tight and requests a full JPEG frame", async () => {
+  const name = new TextEncoder().encode("Studio");
+  const transcript = bytes(
+    new TextEncoder().encode("RFB 003.008\n"),
+    [1, 1],
+    uint32(0),
+    uint16(800),
+    uint16(600),
+    new Uint8Array(16),
+    uint32(name.byteLength),
+    name,
+    [0, 0, 0, 1],
+    uint16(0),
+    uint16(0),
+    uint16(800),
+    uint16(600),
+    uint32(RFB_ENCODINGS.openH264),
+    uint32(3),
+    uint32(0),
+    [0, 0, 1],
+    [0, 0, 0, 1],
+    uint16(0),
+    uint16(0),
+    uint16(800),
+    uint16(600),
+    uint32(RFB_ENCODINGS.tight),
+    [0x90, 2, 0xff, 0xd8],
+  );
+  const transport = new ScriptedTransport(transcript);
+  const frames: string[] = [];
+  const states: string[] = [];
+  const client = new RFBClient(transport, {
+    h264: true,
+    onState: (state) => states.push(state),
+    onFrame: (frame) => {
+      frames.push(frame.encoding);
+      if (frame.encoding === "h264") throw new Error("profile unsupported");
+    },
+  });
+
+  await assert.rejects(client.start(), /scripted server ended/);
+  assert.deepEqual(frames, ["h264", "jpeg"]);
+  assert.ok(states.includes("H.264 unavailable; switching to JPEG / Tight"));
+  assert.deepEqual(
+    transport.sent[6],
+    encodeSetEncodings([
+      RFB_ENCODINGS.tight,
+      RFB_ENCODINGS.extendedDesktopSize,
+      RFB_ENCODINGS.extendedClipboard,
+    ]),
+  );
+  assert.deepEqual(transport.sent[7], framebufferRequest(false, 800, 600));
+  assert.deepEqual(transport.sent[8], framebufferRequest(true, 800, 600));
+});
+
 test("Tight compact lengths round-trip at every byte boundary", async () => {
   for (const length of [0, 1, 0x7f, 0x80, 0x3fff, 0x4000, (1 << 22) - 1]) {
     const encoded = encodeTightCompactLength(length);
@@ -118,6 +173,13 @@ test("extended clipboard inflation aborts before materializing oversized output"
     },
   });
   await assert.rejects(readBoundedStream(readable, 10), /exceeds 1 MiB/);
+});
+
+test("legacy clipboard fallback rejects text over 1 MiB", async () => {
+  const transport = new ScriptedTransport(new Uint8Array());
+  const client = new RFBClient(transport, { h264: false });
+  await assert.rejects(client.sendClipboardText("x".repeat(1_048_577)), /exceeds 1 MiB/);
+  assert.equal(transport.sent.length, 0);
 });
 
 test("extended clipboard Request receives Provide regardless of unsolicited maximum", async () => {

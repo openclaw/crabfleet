@@ -63,10 +63,12 @@ export class RFBClient {
   #serverClipboardMaximum = 0;
   #screenLayout: RFBScreenLayout | null = null;
   #pendingResize: { width: number; height: number } | null = null;
+  #h264Enabled: boolean;
 
   constructor(transport: RFBTransport, options: RFBClientOptions) {
     this.transport = transport;
     this.#options = options;
+    this.#h264Enabled = options.h264;
     this.codec = options.h264 ? "H.264" : "JPEG";
   }
 
@@ -140,6 +142,7 @@ export class RFBClient {
 
   async sendClipboardText(text: string): Promise<void> {
     const utf8 = new TextEncoder().encode(normalizeClipboardText(text));
+    if (utf8.byteLength > maximumClipboardBytes) throw new Error("clipboard text exceeds 1 MiB");
     const canCompress = typeof CompressionStream !== "undefined";
     if (
       this.#serverClipboardActions & clipboardProvide &&
@@ -184,7 +187,7 @@ export class RFBClient {
       codec: this.codec,
     });
 
-    const encodings = this.#options.h264
+    const encodings = this.#h264Enabled
       ? [
           RFB_ENCODINGS.openH264,
           RFB_ENCODINGS.tight,
@@ -221,6 +224,7 @@ export class RFBClient {
   async #readFramebufferUpdate(): Promise<void> {
     const header = await this.transport.readExactly(3);
     const rectangleCount = readUint16(header, 1);
+    let forceFullRefresh = false;
     for (let index = 0; index < rectangleCount; index += 1) {
       const rectangle = await this.transport.readExactly(12);
       const x = readUint16(rectangle, 0);
@@ -236,15 +240,30 @@ export class RFBClient {
         const length = readUint32(frameHeader, 0);
         if (length > 16 * 1_024 * 1_024) throw new Error("H.264 frame exceeds 16 MiB");
         const payload = await this.transport.readExactly(length);
-        this.codec = "H.264";
         this.#options.onTraffic?.(length);
-        await this.#options.onFrame?.({
-          encoding: "h264",
-          width,
-          height,
-          payload,
-          flags: readUint32(frameHeader, 4),
-        });
+        try {
+          await this.#options.onFrame?.({
+            encoding: "h264",
+            width,
+            height,
+            payload,
+            flags: readUint32(frameHeader, 4),
+          });
+          this.codec = "H.264";
+        } catch (error) {
+          if (!this.#h264Enabled) throw error;
+          this.#h264Enabled = false;
+          this.codec = "JPEG";
+          forceFullRefresh = true;
+          this.transport.send(
+            encodeSetEncodings([
+              RFB_ENCODINGS.tight,
+              RFB_ENCODINGS.extendedDesktopSize,
+              RFB_ENCODINGS.extendedClipboard,
+            ]),
+          );
+          this.#options.onState?.("H.264 unavailable; switching to JPEG / Tight");
+        }
       } else if (encoding === RFB_ENCODINGS.tight) {
         if (x !== 0 || y !== 0)
           throw new Error("Crabfleet Tight updates must cover the full framebuffer");
@@ -278,7 +297,7 @@ export class RFBClient {
         throw new Error(`unsupported RFB encoding ${encoding}`);
       }
     }
-    if (this.#running) this.requestFramebuffer(true);
+    if (this.#running) this.requestFramebuffer(!forceFullRefresh);
   }
 
   async #readServerCutText(): Promise<void> {
@@ -324,6 +343,9 @@ export class RFBClient {
   }
 
   async #sendClipboardProvide(text: string): Promise<void> {
+    const utf8 = new TextEncoder().encode(normalizeClipboardText(text));
+    if (utf8.byteLength + 1 > maximumClipboardBytes)
+      throw new Error("clipboard text exceeds 1 MiB");
     if (typeof CompressionStream === "undefined") {
       const latin1 = encodeLatin1(text);
       if (latin1) {
