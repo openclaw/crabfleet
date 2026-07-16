@@ -92,6 +92,9 @@ struct PrivateMacShareSheet: View {
         )
         .help("Applies immediately and keeps remote keyboard and pointer events from reaching this Mac.")
 
+        Toggle("Stream audio", isOn: $controller.streamAudioEnabled)
+          .help("Streams system audio as AAC when the connected Crabfleet viewer supports it.")
+
         Toggle(
           "Start sharing when I log in",
           isOn: Binding(
@@ -194,12 +197,13 @@ struct PrivateMacShareSheet: View {
       let hardware = stats.codec == "H.264"
         ? stats.hardwareAccelerated ? " (hardware)" : " (software)"
         : ""
-      return String(
+      let video = String(
         format: "%@%@ · %.0f fps · %.1f Mbit/s",
         stats.codec,
         hardware,
         stats.framesPerSecond,
         stats.megabitsPerSecond)
+      return controller.audioActive ? "\(video) · audio: AAC 48 kHz" : video
     }
     if let peer = controller.connectedPeer {
       return "\(controller.phase.title) · \(peer)"

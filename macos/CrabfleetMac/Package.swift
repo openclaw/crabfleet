@@ -26,6 +26,8 @@ let package = Package(
         .linkedFramework("Security"),
         .linkedFramework("VideoToolbox"),
         .linkedFramework("CoreMedia"),
+        .linkedFramework("AVFoundation"),
+        .linkedFramework("AudioToolbox"),
       ]
     ),
     .testTarget(

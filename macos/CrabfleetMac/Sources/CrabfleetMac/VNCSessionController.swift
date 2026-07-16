@@ -68,6 +68,7 @@ final class VNCSessionController: NSObject, ObservableObject {
   @Published private(set) var endpointDescription: String?
   @Published private(set) var thumbnail: NSImage?
   @Published private(set) var clipboardEnabled = false
+  @Published private(set) var isAudioMuted = false
   private(set) var framebufferUpdateCount: UInt64 = 0
 
   private let targetID: String
@@ -82,6 +83,7 @@ final class VNCSessionController: NSObject, ObservableObject {
   private var isPresentingLiveSurface = false
   private var isFocused = false
   private var isApplicationActive = true
+  private let audioPlayer = RemoteAudioPlayer()
 
   init(
     targetID: String = UUID().uuidString,
@@ -119,11 +121,12 @@ final class VNCSessionController: NSObject, ObservableObject {
       inputMode: .forwardKeyboardShortcutsIfNotInUseLocally,
       clipboardMode: clipboardEnabled ? .externallyManaged : .disabled,
       colorDepth: .depth24Bit,
-      frameEncodings: [.openH264, .tight, .hextile]
+      frameEncodings: [.openH264, .tight, .hextile, .crabfleetAudio]
     )
     let connection = VNCConnection(settings: settings)
     connection.delegate = self
     connection.clipboardDelegate = self
+    connection.audioDelegate = self
     applyFramebufferUpdatePolicy(to: connection)
     self.connection = connection
     setCredentials(username: username, password: password, for: connection)
@@ -159,7 +162,9 @@ final class VNCSessionController: NSObject, ObservableObject {
   private func tearDownConnection() {
     connection?.delegate = nil
     connection?.clipboardDelegate = nil
+    connection?.audioDelegate = nil
     connection?.disconnect()
+    audioPlayer.stop()
     connection = nil
     framebuffer = nil
     framebufferRevision += 1
@@ -201,6 +206,7 @@ final class VNCSessionController: NSObject, ObservableObject {
 
   func setFocused(_ isFocused: Bool) {
     self.isFocused = isFocused
+    applyAudioMutePolicy()
     if let connection {
       applyFramebufferUpdatePolicy(to: connection)
     }
@@ -208,6 +214,7 @@ final class VNCSessionController: NSObject, ObservableObject {
 
   func setApplicationActive(_ isActive: Bool) {
     isApplicationActive = isActive
+    applyAudioMutePolicy()
     if let connection {
       applyFramebufferUpdatePolicy(to: connection)
     }
@@ -226,6 +233,15 @@ final class VNCSessionController: NSObject, ObservableObject {
     } else {
       connection.setFramebufferUpdatePolicy(.maximumFPS(4))
     }
+  }
+
+  func toggleAudioMuted() {
+    isAudioMuted.toggle()
+    applyAudioMutePolicy()
+  }
+
+  private func applyAudioMutePolicy() {
+    audioPlayer.setMuted(isAudioMuted || !isFocused || !isApplicationActive)
   }
 
   private func scheduleThumbnailCapture(delay: TimeInterval = 0.35) {
@@ -261,7 +277,9 @@ final class VNCSessionController: NSObject, ObservableObject {
     thumbnailWorkItem?.cancel()
     connection?.delegate = nil
     connection?.clipboardDelegate = nil
+    connection?.audioDelegate = nil
     connection?.disconnect()
+    audioPlayer.stop()
   }
 }
 
@@ -281,6 +299,7 @@ extension VNCSessionController: VNCConnectionDelegate {
     case .disconnected:
       framebuffer = nil
       self.connection = nil
+      audioPlayer.stop()
       clearCredentials()
       cancelThumbnailCapture()
       if let error = connectionState.error {
@@ -362,6 +381,13 @@ extension VNCSessionController: VNCClipboardDelegate {
   func connection(_ connection: VNCConnection, didReceiveClipboardText text: String) {
     guard self.connection === connection else { return }
     clipboardCoordinator?.receiveRemoteText(text, from: targetID)
+  }
+}
+
+extension VNCSessionController: VNCAudioDelegate {
+  func connection(_ connection: VNCConnection, didReceiveAudio message: VNCAudioMessage) {
+    guard self.connection === connection else { return }
+    audioPlayer.receive(message)
   }
 }
 

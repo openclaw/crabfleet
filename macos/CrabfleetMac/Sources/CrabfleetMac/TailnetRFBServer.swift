@@ -8,6 +8,7 @@ enum TailnetRFBServerEvent: Equatable, Sendable {
   case authorizing(String)
   case connected(String)
   case streaming(TailnetStreamStats)
+  case audioActive(Bool)
   case disconnected
   case listenerFailed(String)
   case sessionFailed(String)
@@ -38,6 +39,7 @@ final class TailnetRFBServer: @unchecked Sendable {
   private var listener: NWListener?
   private var session: RFBHostSession?
   private var viewOnly = false
+  private var audioEnabled = true
 
   init(
     identity: TailnetIdentity,
@@ -115,6 +117,14 @@ final class TailnetRFBServer: @unchecked Sendable {
     activeSession?.setViewOnly(enabled)
   }
 
+  func setAudioEnabled(_ enabled: Bool) {
+    let activeSession = withLock { () -> RFBHostSession? in
+      audioEnabled = enabled
+      return session
+    }
+    activeSession?.setAudioEnabled(enabled)
+  }
+
   private func accept(_ connection: NWConnection) {
     let hasActiveSession = withLock { self.session != nil }
     guard !hasActiveSession else {
@@ -139,6 +149,7 @@ final class TailnetRFBServer: @unchecked Sendable {
       desktopName: "Crabfleet — \(identity.hostName)",
       handshakeTimeout: handshakeTimeout,
       viewOnly: false,
+      audioEnabled: false,
       didAuthorize: { [weak capture] in capture?.setConsumerActive(true) },
       eventHandler: eventHandler,
       didFinish: { [weak self] finishedSession in
@@ -148,6 +159,7 @@ final class TailnetRFBServer: @unchecked Sendable {
     withLock {
       self.session = newSession
       newSession.setViewOnly(viewOnly)
+      newSession.setAudioEnabled(audioEnabled)
     }
     newSession.start()
   }
@@ -196,6 +208,7 @@ private final class RFBHostSession: @unchecked Sendable {
   private var supportsOpenH264 = false
   private var supportsExtendedDesktopSize = false
   private var supportsExtendedClipboard = false
+  private var supportsCrabfleetAudio = false
   private var sentServerClipboardCaps = false
   private var needsDesktopSizeAnnounce = false
   private var clientClipboardCaps: VNCExtendedClipboardCaps?
@@ -210,6 +223,13 @@ private final class RFBHostSession: @unchecked Sendable {
   private var forceNextKeyframe = false
   private var rateController = VideoRateController()
   private var lastStatsTimestamp = ProcessInfo.processInfo.systemUptime
+  private let audioPipelineGate = AudioPipelineGate()
+  private var audioEnabled: Bool
+  private var audioEncoder: MacAudioEncoder?
+  private var audioConsumer: Task<Void, Never>?
+  private var audioGeneration: UInt64 = 0
+  private var audioIsActive = false
+  private var audioPathBroken = false
 
   init(
     connection: NWConnection,
@@ -222,6 +242,7 @@ private final class RFBHostSession: @unchecked Sendable {
     desktopName: String,
     handshakeTimeout: Duration,
     viewOnly: Bool,
+    audioEnabled: Bool,
     didAuthorize: @escaping @Sendable () -> Void,
     eventHandler: @escaping TailnetRFBServer.EventHandler,
     didFinish: @escaping @Sendable (RFBHostSession) -> Void
@@ -232,6 +253,7 @@ private final class RFBHostSession: @unchecked Sendable {
     self.descriptor = descriptor
     self.input = input
     inputGate = RemoteInputSessionGate(input: input, viewOnly: viewOnly)
+    self.audioEnabled = audioEnabled
     self.clipboard = clipboard
     self.requiredLocalAddress = requiredLocalAddress
     self.desktopName = desktopName
@@ -262,12 +284,23 @@ private final class RFBHostSession: @unchecked Sendable {
 
   func stop() {
     task?.cancel()
-    connection.cancel()
     finish(event: .disconnected)
   }
 
   func setViewOnly(_ enabled: Bool) {
     inputGate.setViewOnly(enabled)
+  }
+
+  func setAudioEnabled(_ enabled: Bool) {
+    let io = withLock { () -> RFBConnectionIO? in
+      audioEnabled = enabled
+      if enabled { audioPathBroken = false }
+      return pushIO
+    }
+    guard let io else { return }
+    Task { [weak self] in
+      await self?.reconcileAudioPath(io: io)
+    }
   }
 
   private func beginProtocolIfNeeded() {
@@ -427,12 +460,14 @@ private final class RFBHostSession: @unchecked Sendable {
         }
         withLock {
           supportsExtendedClipboard = encodings.contains(RFBWire.extendedClipboardEncoding)
+          supportsCrabfleetAudio = encodings.contains(RFBWire.crabfleetAudioEncoding)
         }
         if !supportsOpenH264 {
           if activeVideoEncoder != nil { await stopVideoPath(markBroken: false) }
           if supportsTightEncoding { try await prepareTightFallback(io: io) }
         }
         try await sendServerClipboardCapsIfNeeded(io: io)
+        await reconcileAudioPath(io: io)
 
       case 3:  // FramebufferUpdateRequest
         let payload = try await io.readExactly(9)
@@ -719,6 +754,143 @@ private final class RFBHostSession: @unchecked Sendable {
         width: currentWidth,
         height: currentHeight
       ))
+  }
+
+  // MARK: - Audio
+
+  private func reconcileAudioPath(io: RFBConnectionIO) async {
+    await audioPipelineGate.run { [weak self] in
+      guard let self else { return }
+      let shouldStream = self.withLock {
+        self.audioEnabled && self.supportsCrabfleetAudio && !self.audioPathBroken
+          && !self.finished
+      }
+      if shouldStream {
+        if self.withLock({ self.audioEncoder == nil }) {
+          await self.startAudioPath(io: io)
+        }
+      } else {
+        await self.stopAudioPathNow(sendStop: true, io: io)
+      }
+    }
+  }
+
+  private func startAudioPath(io: RFBConnectionIO) async {
+    let encoder = MacAudioEncoder()
+    let generation = withLock { () -> UInt64 in
+      audioGeneration &+= 1
+      audioEncoder = encoder
+      audioIsActive = true
+      return audioGeneration
+    }
+    let consumer = Task { [weak self] in
+      var sentConfiguration: AudioStreamConfiguration?
+      for await event in encoder.events {
+        guard let self, isCurrentAudioGeneration(generation) else { return }
+        do {
+          switch event {
+          case .config(let configuration):
+            try await io.send(
+              RFBWire.audioConfig(
+                channels: configuration.channels,
+                sampleRate: configuration.sampleRate,
+                magicCookie: configuration.magicCookie),
+              timeout: .milliseconds(250))
+            sentConfiguration = configuration
+
+          case .packet(let packet):
+            guard Self.audioSendDeadline(createdAt: packet.createdAt) != nil else { continue }
+            if sentConfiguration != packet.configuration {
+              try await io.send(
+                RFBWire.audioConfig(
+                  channels: packet.configuration.channels,
+                  sampleRate: packet.configuration.sampleRate,
+                  magicCookie: packet.configuration.magicCookie),
+                timeout: .milliseconds(250))
+              sentConfiguration = packet.configuration
+            }
+            guard isCurrentAudioGeneration(generation) else { return }
+            guard let deadline = Self.audioSendDeadline(createdAt: packet.createdAt) else { continue }
+            try await io.send(
+              RFBWire.audioPacket(timestampMs: packet.timestampMs, payload: packet.data),
+              deadline: deadline)
+
+          case .failed:
+            handleAudioFailure(generation: generation)
+            return
+          }
+        } catch is RFBSendExpiredError {
+          continue
+        } catch {
+          handleAudioFailure(generation: generation)
+          return
+        }
+      }
+    }
+    withLock { audioConsumer = consumer }
+    capture.setAudioSampleHandler { sampleBuffer in
+      encoder.submit(sampleBuffer)
+    }
+    do {
+      try await capture.setAudioCaptureEnabled(true)
+      eventHandler(.audioActive(true))
+    } catch {
+      withLock { audioPathBroken = true }
+      await stopAudioPathNow(sendStop: false, io: io)
+    }
+  }
+
+  private func stopAudioPath(sendStop: Bool) async {
+    await audioPipelineGate.run { [weak self] in
+      guard let self else { return }
+      await self.stopAudioPathNow(
+        sendStop: sendStop,
+        io: self.withLock { self.pushIO })
+    }
+  }
+
+  private func stopAudioPathNow(sendStop: Bool, io: RFBConnectionIO?) async {
+    let previous = withLock { () -> (MacAudioEncoder?, Task<Void, Never>?, Bool) in
+      defer {
+        audioEncoder = nil
+        audioConsumer = nil
+        audioIsActive = false
+        audioGeneration &+= 1
+      }
+      return (audioEncoder, audioConsumer, audioIsActive)
+    }
+    guard previous.0 != nil || previous.2 else { return }
+    capture.setAudioSampleHandler(nil)
+    previous.1?.cancel()
+    previous.0?.invalidate()
+    await previous.1?.value
+    if sendStop, let io {
+      try? await io.send(RFBWire.audioStop(), timeout: .milliseconds(250))
+    }
+    try? await capture.setAudioCaptureEnabled(false)
+    eventHandler(.audioActive(false))
+  }
+
+  private func isCurrentAudioGeneration(_ generation: UInt64) -> Bool {
+    withLock { audioGeneration == generation && !finished }
+  }
+
+  private static func audioSendDeadline(createdAt: TimeInterval) -> ContinuousClock.Instant? {
+    let remaining = 0.2 - (ProcessInfo.processInfo.systemUptime - createdAt)
+    guard remaining > 0 else { return nil }
+    let duration = Duration.nanoseconds(max(1, Int64(remaining * 1_000_000_000)))
+    return ContinuousClock().now.advanced(by: duration)
+  }
+
+  private func handleAudioFailure(generation: UInt64) {
+    Task { [weak self] in
+      guard let self else { return }
+      await self.audioPipelineGate.run { [weak self] in
+        guard let self, self.isCurrentAudioGeneration(generation) else { return }
+        self.withLock { self.audioPathBroken = true }
+        await self.stopAudioPathNow(sendStop: true, io: self.withLock { self.pushIO })
+      }
+    }
   }
 
   // MARK: - Video
@@ -1018,6 +1190,7 @@ private final class RFBHostSession: @unchecked Sendable {
       return
     }
     finished = true
+    let audioIO = pushIO
     pushIO = nil
     lock.unlock()
     capture.setVideoFrameHandler(nil)
@@ -1027,13 +1200,14 @@ private final class RFBHostSession: @unchecked Sendable {
     encoder?.invalidate()
     inputGate.finish()
     clipboard?.detach()
-    connection.cancel()
-    guard encoder != nil else {
-      completeFinish(event: event)
-      return
-    }
     Task { [self] in
-      try? await capture.updateFrameInterval(framesPerSecond: 15)
+      await audioPipelineGate.run { [self] in
+        await stopAudioPathNow(sendStop: true, io: audioIO)
+      }
+      connection.cancel()
+      if encoder != nil {
+        try? await capture.updateFrameInterval(framesPerSecond: 15)
+      }
       completeFinish(event: event)
     }
   }
@@ -1086,6 +1260,12 @@ extension RFBWire {
 
 private struct RFBConnectionIO: Sendable {
   let connection: NWConnection
+  private let sendQueue: RFBSendQueue
+
+  init(connection: NWConnection) {
+    self.connection = connection
+    sendQueue = RFBSendQueue(connection: connection)
+  }
 
   func readUInt8() async throws -> UInt8 {
     try await readExactly(1)[0]
@@ -1109,19 +1289,13 @@ private struct RFBConnectionIO: Sendable {
     return result
   }
 
-  func send(_ data: Data) async throws {
-    try await withCheckedThrowingContinuation {
-      (continuation: CheckedContinuation<Void, Error>) in
-      connection.send(
-        content: data,
-        completion: .contentProcessed { error in
-          if let error {
-            continuation.resume(throwing: error)
-          } else {
-            continuation.resume(returning: ())
-          }
-        })
-    }
+  func send(_ data: Data, timeout: Duration? = nil) async throws {
+    let deadline = timeout.map { ContinuousClock().now.advanced(by: $0) }
+    try await sendQueue.send(data, deadline: deadline)
+  }
+
+  func send(_ data: Data, deadline: ContinuousClock.Instant) async throws {
+    try await sendQueue.send(data, deadline: deadline)
   }
 
   private func receive(maximumLength: Int) async throws -> Data {
@@ -1141,5 +1315,172 @@ private struct RFBConnectionIO: Sendable {
         }
       }
     }
+  }
+}
+
+actor RFBSendQueue {
+  private static let maximumPendingDeadlineSends = 2
+  private let sendData: @Sendable (Data) async throws -> Void
+  private var tail = Task<Result<Void, Error>, Never> { .success(()) }
+  private(set) var pendingDeadlineSendCount = 0
+
+  init(connection: NWConnection) {
+    sendData = { data in try await Self.send(data, connection: connection) }
+  }
+
+  init(sendData: @escaping @Sendable (Data) async throws -> Void) {
+    self.sendData = sendData
+  }
+
+  func send(_ data: Data, deadline: ContinuousClock.Instant?) async throws {
+    if deadline != nil {
+      guard pendingDeadlineSendCount < Self.maximumPendingDeadlineSends else {
+        throw RFBSendExpiredError()
+      }
+      pendingDeadlineSendCount += 1
+    }
+    let predecessor = tail
+    let sendData = sendData
+    let waiter = deadline.map { QueuedSendWaiter(deadline: $0) }
+    let operation = Task<Result<Void, Error>, Never> {
+      defer {
+        if waiter != nil {
+          pendingDeadlineSendCount -= 1
+        }
+      }
+      _ = await predecessor.value
+      guard waiter?.beginSending() != false else { return .success(()) }
+      let result: Result<Void, Error>
+      do {
+        try await sendData(data)
+        result = .success(())
+      } catch {
+        result = .failure(error)
+      }
+      waiter?.complete(result)
+      return result
+    }
+    tail = operation
+    guard let waiter else {
+      try await operation.value.get()
+      return
+    }
+    try await waiter.wait()
+  }
+
+  private static func send(_ data: Data, connection: NWConnection) async throws {
+    try await withCheckedThrowingContinuation {
+      (continuation: CheckedContinuation<Void, Error>) in
+      connection.send(content: data, completion: .contentProcessed { error in
+        if let error {
+          continuation.resume(throwing: error)
+        } else {
+          continuation.resume()
+        }
+      })
+    }
+  }
+}
+
+final class QueuedSendWaiter: @unchecked Sendable {
+  private let lock = NSLock()
+  private let deadline: ContinuousClock.Instant
+  private let now: @Sendable () -> ContinuousClock.Instant
+  private var continuation: CheckedContinuation<Void, Error>?
+  private var resolution: Result<Void, Error>?
+
+  init(
+    deadline: ContinuousClock.Instant,
+    now: @escaping @Sendable () -> ContinuousClock.Instant = { ContinuousClock().now }
+  ) {
+    self.deadline = deadline
+    self.now = now
+  }
+
+  func wait() async throws {
+    try await withCheckedThrowingContinuation {
+      (continuation: CheckedContinuation<Void, Error>) in
+      if install(continuation) {
+        Task { [self] in
+          try? await ContinuousClock().sleep(until: deadline)
+          expire()
+        }
+      }
+    }
+  }
+
+  func beginSending() -> Bool {
+    lock.lock()
+    guard resolution == nil else {
+      lock.unlock()
+      return false
+    }
+    if now() >= deadline {
+      resolution = .failure(RFBSendExpiredError())
+      let continuation = continuation
+      self.continuation = nil
+      lock.unlock()
+      continuation?.resume(throwing: RFBSendExpiredError())
+      return false
+    }
+    lock.unlock()
+    return true
+  }
+
+  func complete(_ result: Result<Void, Error>) {
+    lock.lock()
+    guard resolution == nil else {
+      lock.unlock()
+      return
+    }
+    resolution = result
+    let continuation = continuation
+    self.continuation = nil
+    lock.unlock()
+    continuation?.resume(with: result)
+  }
+
+  private func install(_ continuation: CheckedContinuation<Void, Error>) -> Bool {
+    lock.lock()
+    if let resolution {
+      lock.unlock()
+      continuation.resume(with: resolution)
+      return false
+    }
+    self.continuation = continuation
+    lock.unlock()
+    return true
+  }
+
+  func expire() {
+    lock.lock()
+    guard resolution == nil else {
+      lock.unlock()
+      return
+    }
+    let error = RFBSendExpiredError()
+    resolution = .failure(error)
+    let continuation = continuation
+    self.continuation = nil
+    lock.unlock()
+    continuation?.resume(throwing: error)
+  }
+}
+
+struct RFBSendExpiredError: LocalizedError {
+  var errorDescription: String? { "RFB send expired before transmission" }
+}
+
+private actor AudioPipelineGate {
+  private var tail = Task<Void, Never> {}
+
+  func run(_ operation: @escaping @Sendable () async -> Void) async {
+    let predecessor = tail
+    let task = Task {
+      await predecessor.value
+      await operation()
+    }
+    tail = task
+    await task.value
   }
 }

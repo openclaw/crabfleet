@@ -7,6 +7,45 @@ import Testing
 
 struct HostShareWireTests {
   @Test
+  func audioMessagesMatchWireFormat() throws {
+    #expect(
+      try RFBWire.audioConfig(
+        channels: 2,
+        sampleRate: 48_000,
+        magicCookie: Data([0x11, 0x90]))
+        == Data([200, 1, 1, 2, 0, 0, 0xBB, 0x80, 0, 0, 0, 2, 0x11, 0x90]))
+    #expect(
+      try RFBWire.audioPacket(timestampMs: 0xFFFF_FFFE, payload: Data([0xAA, 0xBB]))
+        == Data([200, 2, 0, 0, 0xFF, 0xFF, 0xFF, 0xFE, 0, 0, 0, 2, 0xAA, 0xBB]))
+    #expect(RFBWire.audioStop() == Data([200, 3, 0, 0]))
+  }
+
+  @Test
+  func audioWireRejectsInvalidBounds() {
+    #expect(throws: (any Error).self) {
+      _ = try RFBWire.audioConfig(channels: 0, sampleRate: 48_000, magicCookie: Data())
+    }
+    #expect(throws: (any Error).self) {
+      _ = try RFBWire.audioPacket(timestampMs: 0, payload: Data())
+    }
+    #expect(throws: (any Error).self) {
+      _ = try RFBWire.audioPacket(
+        timestampMs: 0,
+        payload: Data(count: RFBWire.maximumAudioPayloadBytes + 1))
+    }
+  }
+
+  @Test
+  func audioNegotiationRequiresToggleAndCAF1() {
+    #expect(
+      RFBWire.shouldStreamAudio(
+        hostEnabled: true,
+        encodings: [RFBWire.crabfleetAudioEncoding]))
+    #expect(!RFBWire.shouldStreamAudio(hostEnabled: false, encodings: [RFBWire.crabfleetAudioEncoding]))
+    #expect(!RFBWire.shouldStreamAudio(hostEnabled: true, encodings: [RFBWire.openH264Encoding]))
+  }
+
+  @Test
   func extendedDesktopSizeUpdateEncodesOneScreen() throws {
     let update = try RFBWire.extendedDesktopSizeUpdate(
       reason: 1,

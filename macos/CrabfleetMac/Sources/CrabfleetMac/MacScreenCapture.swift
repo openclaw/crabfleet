@@ -83,6 +83,10 @@ final class MacScreenCapture: NSObject, @unchecked Sendable {
     label: "org.openclaw.crabfleet.screen-capture",
     qos: .userInteractive
   )
+  private let audioCaptureQueue = DispatchQueue(
+    label: "org.openclaw.crabfleet.audio-capture",
+    qos: .userInteractive
+  )
   private let imageContext = CIContext(options: [
     .cacheIntermediates: false
   ])
@@ -91,10 +95,12 @@ final class MacScreenCapture: NSObject, @unchecked Sendable {
   private var sequence: UInt64 = 0
   private var consumerActive = false
   private var videoFrameHandler: (@Sendable (CVPixelBuffer, CMTime) -> Void)?
+  private var audioSampleHandler: (@Sendable (CMSampleBuffer) -> Void)?
   private var latestVideoSource: (pixelBuffer: CVPixelBuffer, presentationTime: CMTime)?
   private var stream: SCStream?
   private var configuration: SCStreamConfiguration?
   private var contentFilter: SCContentFilter?
+  private var audioOutputAvailable = false
 
   static func availableDisplays() async -> [ShareableDisplayOption] {
     guard let shareableContent = try? await SCShareableContent.current else { return [] }
@@ -140,16 +146,25 @@ final class MacScreenCapture: NSObject, @unchecked Sendable {
     configuration.queueDepth = 3
     configuration.showsCursor = true
     configuration.capturesAudio = false
+    configuration.excludesCurrentProcessAudio = true
     configuration.colorSpaceName = CGColorSpace.sRGB
 
     let filter = SCContentFilter(display: display, excludingWindows: [])
     let stream = SCStream(filter: filter, configuration: configuration, delegate: self)
     try stream.addStreamOutput(self, type: .screen, sampleHandlerQueue: captureQueue)
+    let audioOutputAvailable: Bool
+    do {
+      try stream.addStreamOutput(self, type: .audio, sampleHandlerQueue: audioCaptureQueue)
+      audioOutputAvailable = true
+    } catch {
+      audioOutputAvailable = false
+    }
     try await stream.startCapture()
     try await configurationGate.run { [self] in
       self.stream = stream
       self.configuration = configuration
       self.contentFilter = filter
+      self.audioOutputAvailable = audioOutputAvailable
     }
 
     return CapturedDisplayDescriptor(
@@ -185,12 +200,37 @@ final class MacScreenCapture: NSObject, @unchecked Sendable {
     }
   }
 
+  func setAudioCaptureEnabled(_ enabled: Bool) async throws {
+    try await configurationGate.run { [self] in
+      guard let stream, let configuration else {
+        throw PrivateMacShareError.captureUnavailable
+      }
+      if enabled, !audioOutputAvailable {
+        throw PrivateMacShareError.captureUnavailable
+      }
+      guard audioOutputAvailable else { return }
+      guard configuration.capturesAudio != enabled else { return }
+      let previousCapturesAudio = configuration.capturesAudio
+      let previousExcludesCurrentProcessAudio = configuration.excludesCurrentProcessAudio
+      configuration.capturesAudio = enabled
+      configuration.excludesCurrentProcessAudio = true
+      do {
+        try await stream.updateConfiguration(configuration)
+      } catch {
+        configuration.capturesAudio = previousCapturesAudio
+        configuration.excludesCurrentProcessAudio = previousExcludesCurrentProcessAudio
+        throw error
+      }
+    }
+  }
+
   func stop() async {
     let stopped = try? await configurationGate.run { [self] in
       guard let stream else { return false }
       self.stream = nil
       self.configuration = nil
       self.contentFilter = nil
+      self.audioOutputAvailable = false
       try? await stream.stopCapture()
       return true
     }
@@ -210,6 +250,12 @@ final class MacScreenCapture: NSObject, @unchecked Sendable {
   ) {
     frameLock.lock()
     videoFrameHandler = handler
+    frameLock.unlock()
+  }
+
+  func setAudioSampleHandler(_ handler: (@Sendable (CMSampleBuffer) -> Void)?) {
+    frameLock.lock()
+    audioSampleHandler = handler
     frameLock.unlock()
   }
 
@@ -339,6 +385,12 @@ final class MacScreenCapture: NSObject, @unchecked Sendable {
     return videoFrameHandler
   }
 
+  private func currentAudioSampleHandler() -> (@Sendable (CMSampleBuffer) -> Void)? {
+    frameLock.lock()
+    defer { frameLock.unlock() }
+    return audioSampleHandler
+  }
+
   private func retainVideoSource(_ pixelBuffer: CVPixelBuffer, presentationTime: CMTime) {
     frameLock.lock()
     latestVideoSource = (pixelBuffer, presentationTime)
@@ -391,6 +443,11 @@ extension MacScreenCapture: SCStreamOutput, SCStreamDelegate {
     didOutputSampleBuffer sampleBuffer: CMSampleBuffer,
     of outputType: SCStreamOutputType
   ) {
+    if outputType == .audio {
+      guard sampleBuffer.isValid, let handler = currentAudioSampleHandler() else { return }
+      handler(sampleBuffer)
+      return
+    }
     guard
       outputType == .screen,
       sampleBuffer.isValid,

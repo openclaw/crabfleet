@@ -58,6 +58,9 @@ private extension VNCConnection {
 			case VNCProtocol.ServerFence.messageType:
 				try await handleServerFenceMessage()
 
+			case VNCProtocol.CrabfleetAudio.messageType:
+				try await handleCrabfleetAudioMessage()
+
 			default:
 				throw VNCError.protocol(.unsupportedServerToClientMessage(messageType: messageType))
 		}
@@ -202,6 +205,11 @@ private extension VNCConnection {
 	func handleServerFenceMessage() async throws {
 		let fence = try await VNCProtocol.ServerFence.receive(connection: connection)
 		try handleServerFence(fence)
+	}
+
+	func handleCrabfleetAudioMessage() async throws {
+		let message = try await VNCProtocol.CrabfleetAudio.receive(connection: connection).message
+		await notifyAudioDelegateAboutMessage(message)
 	}
 }
 
