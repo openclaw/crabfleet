@@ -166,6 +166,24 @@ test("desktop relay tears down pairings retained during closing handshakes", () 
   assert.equal(desktopRelayShouldPropagateClose(closedHost), true);
 });
 
+test("desktop relay drops queued messages from superseded pairings", () => {
+  const oldHost = socket();
+  attachDesktopRelayPeer(oldHost, "host");
+  replaceDesktopRelayPeer([oldHost], "host");
+  const newViewer = socket();
+  attachDesktopRelayPeer(newViewer, "viewer");
+  assert.equal(relayDesktopMessage(oldHost, new ArrayBuffer(1), [newViewer]), 0);
+  assert.deepEqual(newViewer.sent, []);
+
+  const oldViewer = socket();
+  attachDesktopRelayPeer(oldViewer, "viewer");
+  closeDesktopRelayPeers([oldViewer], "host");
+  const newHost = socket();
+  attachDesktopRelayPeer(newHost, "host");
+  assert.equal(relayDesktopMessage(oldViewer, new ArrayBuffer(1), [newHost]), 0);
+  assert.deepEqual(newHost.sent, []);
+});
+
 test("desktop relay passes binary messages verbatim in either direction", () => {
   const host = socket();
   const viewer = socket();

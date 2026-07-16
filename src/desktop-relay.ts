@@ -49,6 +49,7 @@ export function relayDesktopMessage(
   message: string | ArrayBuffer,
   targets: readonly DesktopRelaySocket[],
 ): number {
+  if (!desktopRelayShouldPropagateClose(sender)) return 0;
   if (typeof message === "string") {
     sender.close(1003, "binary messages required");
     return 0;
