@@ -27,9 +27,10 @@ app-owned private desktop host for Mac-to-Mac access.
 - RFB 3.3, 3.7, and 3.8 framing is supported, including server-selected RFB
   3.3 None and VNC-password authentication.
 - Client-side fit scaling and rendering use RoyalVNCKit's IOSurface/Metal path.
-- Share This Mac captures a selected display with ScreenCaptureKit and serves
-  RFB 3.8 Open H.264 or Tight/JPEG frames without enabling Apple's Screen
-  Sharing daemon.
+- Share This Mac captures a selected display and optional system audio with
+  ScreenCaptureKit, then serves RFB 3.8 Open H.264 or Tight/JPEG frames plus
+  AAC-LC audio to Crabfleet viewers without enabling Apple's Screen Sharing
+  daemon.
 - The host binds port 5901 only to a verified Tailscale `100.64.0.0/10` address,
   requires a valid identity on the active tailnet, and admits only a
   Tailscale-authorized peer owned by that same user.
@@ -87,7 +88,10 @@ relay, Cloudflare, or the Crabfleet Worker.
    through Extended Clipboard UTF-8 when the viewer negotiates it, with
    ISO-8859-1 cut text as the fallback; text that cannot be represented is
    dropped rather than mangled.
-7. "Start sharing when I log in" registers the bundled app as a login item and
+7. System audio streaming is on by default and can be toggled while sharing.
+   Audio capture starts only after a viewer negotiates the Crabfleet audio
+   extension; other VNC clients keep the existing video-only session.
+8. "Start sharing when I log in" registers the bundled app as a login item and
    persists an auto-share preference, so the Mac comes back reachable after a
    reboot without manual setup (the equivalent of `--share-this-mac` for
    unattended hosts).
@@ -105,6 +109,25 @@ controller adapts from 8 Mbit/s within a 1.5–30 Mbit/s range based on network
 send time. If H.264 setup or encoding fails, the session automatically returns
 to the negotiated 15 fps Tight/JPEG path. The share sheet reports codec,
 hardware acceleration, frame rate, and throughput while connected.
+
+### Audio pipeline
+
+The native viewer advertises the Crabfleet `CAF1` pseudo-encoding. Only after
+that negotiation, and while the host's Stream audio toggle is on, the host
+enables ScreenCaptureKit system-audio capture with its own process excluded.
+The host converts PCM to mono or stereo AAC-LC at 48 kHz and 128 kbit/s and
+sends a configuration record followed by timestamped access units through the
+same serialized RFB connection writer as other server pushes. A bounded latest
+window drops audio older than 200 ms so audio cannot delay video. Disabling
+audio or ending the session sends an explicit stop record.
+
+The viewer rebuilds its decoder whenever configuration changes, buffers about
+100 ms before playback, drops late packets, and resets playback after gaps over
+500 ms. Queued input and scheduled PCM are bounded. The desktop toolbar is
+unmuted by default and provides a mute control; background desktops and all
+sessions while the app is inactive are muted automatically. Third-party VNC
+clients never receive the private audio message because they do not advertise
+`CAF1`.
 
 After the first Screen Recording grant, restart the bundled app before starting
 the share. Ad-hoc development signatures do not provide a stable TCC identity,
@@ -169,7 +192,8 @@ no longer bundles or builds the modified D3DES source.
 - App-owned hosting shares one selected display at a time to a single client.
   Open H.264 reaches 60 fps at an initial 2560×1600 cap and resizes up to
   4096×2304; Tight/JPEG fallback remains capped at 15 fps and 2560×1600.
-- Audio is not implemented.
+- Audio is host-to-viewer system audio only. Microphone, reverse audio,
+  per-application capture, browser playback, and non-AAC codecs are unsupported.
 - A connecting peer must be another device owned by the same Tailscale user.
   Team-wide or named-user sharing is intentionally unsupported.
 
