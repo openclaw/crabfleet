@@ -507,6 +507,7 @@ final class PrivateMacShareController: ObservableObject {
   nonisolated static let clipboardSyncDefaultsKey = "org.openclaw.crabfleet.share.clipboard"
   nonisolated static let autoShareDefaultsKey = "org.openclaw.crabfleet.share.auto-share"
   nonisolated static let viewOnlyDefaultsKey = "org.openclaw.crabfleet.share.view-only"
+  nonisolated static let streamAudioDefaultsKey = "org.openclaw.crabfleet.share.audio"
 
   @Published private(set) var identity: TailnetIdentity?
   @Published private(set) var phase: Phase = .idle
@@ -520,6 +521,7 @@ final class PrivateMacShareController: ObservableObject {
   @Published private(set) var availableDisplays: [ShareableDisplayOption] = []
   @Published private(set) var launchAtLoginEnabled = false
   @Published private(set) var streamStats: TailnetStreamStats?
+  @Published private(set) var audioActive = false
 
   @Published var selectedDisplayID: CGDirectDisplayID {
     didSet {
@@ -537,6 +539,13 @@ final class PrivateMacShareController: ObservableObject {
     didSet {
       defaults.set(viewOnlyEnabled, forKey: Self.viewOnlyDefaultsKey)
       server?.setViewOnly(viewOnlyEnabled)
+    }
+  }
+
+  @Published var streamAudioEnabled: Bool {
+    didSet {
+      defaults.set(streamAudioEnabled, forKey: Self.streamAudioDefaultsKey)
+      server?.setAudioEnabled(streamAudioEnabled)
     }
   }
 
@@ -585,6 +594,7 @@ final class PrivateMacShareController: ObservableObject {
     clipboardSyncEnabled =
       defaults.object(forKey: Self.clipboardSyncDefaultsKey) as? Bool ?? true
     viewOnlyEnabled = defaults.object(forKey: Self.viewOnlyDefaultsKey) as? Bool ?? false
+    streamAudioEnabled = defaults.object(forKey: Self.streamAudioDefaultsKey) as? Bool ?? true
     launchAtLoginEnabled = SMAppService.mainApp.status == .enabled
     if let runner {
       self.runner = runner
@@ -688,6 +698,7 @@ final class PrivateMacShareController: ObservableObject {
     notice = nil
     connectedPeer = nil
     streamStats = nil
+    audioActive = false
     registryPhase = desktopRegistration == nil ? .notConfigured : .registering
     await waitForRefreshCompletion()
     guard canContinueStarting(generation) else { return }
@@ -746,6 +757,7 @@ final class PrivateMacShareController: ObservableObject {
         }
       )
       server.setViewOnly(viewOnlyEnabled)
+      server.setAudioEnabled(streamAudioEnabled)
       try server.start()
       self.capture = capture
       self.server = server
@@ -775,6 +787,7 @@ final class PrivateMacShareController: ObservableObject {
     phase = .stopping
     connectedPeer = nil
     streamStats = nil
+    audioActive = false
     let registrationTask = self.registrationTask
     self.registrationTask = nil
     serverGeneration = nil
@@ -893,15 +906,19 @@ final class PrivateMacShareController: ObservableObject {
       notice = nil
     case .streaming(let stats):
       streamStats = stats
+    case .audioActive(let isActive):
+      audioActive = isActive
     case .disconnected:
       phase = .sharing
       connectedPeer = nil
       streamStats = nil
+      audioActive = false
     case .listenerFailed(let message):
       let pendingRegistration = registrationTask
       phase = .failed
       connectedPeer = nil
       streamStats = nil
+      audioActive = false
       notice = PrivateMacShareError.listenerFailed(message).localizedDescription
       serverGeneration = nil
       server?.stop()
@@ -916,6 +933,7 @@ final class PrivateMacShareController: ObservableObject {
       phase = .sharing
       connectedPeer = nil
       streamStats = nil
+      audioActive = false
       notice = message
     }
   }
