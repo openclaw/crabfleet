@@ -160,6 +160,44 @@ struct RFBHostSessionStreamTests {
   }
 
   @Test
+  func directStreamClaimsTheSharedGateOnlyAfterClientBytesArrive() async throws {
+    let gate = RFBHostSessionGate()
+    let acquired = ThreadSafeFlag()
+    let released = ThreadSafeFlag()
+    let stream = DirectSessionClaimingRFBByteStream(
+      base: InMemoryRFBByteStream(incoming: Data([1, 2])),
+      gate: gate,
+      onAcquire: { acquired.set() },
+      onRelease: { released.set() }
+    )
+
+    let idleClaim = try #require(gate.acquire())
+    #expect(!acquired.value)
+    gate.release(idleClaim)
+
+    #expect(try await stream.readExactly(2) == Data([1, 2]))
+    #expect(acquired.value)
+    #expect(gate.acquire() == nil)
+    stream.finishClaim()
+    #expect(released.value)
+    let finalClaim = try #require(gate.acquire())
+    gate.release(finalClaim)
+
+    let competingClaim = try #require(gate.acquire())
+    let losingStream = DirectSessionClaimingRFBByteStream(
+      base: InMemoryRFBByteStream(incoming: Data([3])),
+      gate: gate,
+      onAcquire: { acquired.set() },
+      onRelease: { released.set() }
+    )
+    await #expect(throws: (any Error).self) {
+      _ = try await losingStream.readExactly(1)
+    }
+    #expect(!losingStream.hasClaim)
+    gate.release(competingClaim)
+  }
+
+  @Test
   func completesAFull38HandshakeOverAnInMemoryByteStream() async throws {
     var clientHandshake = RFBVersion.serverBanner
     clientHandshake.append(1)  // None security

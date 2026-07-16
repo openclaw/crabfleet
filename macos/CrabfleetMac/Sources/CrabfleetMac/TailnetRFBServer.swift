@@ -79,6 +79,77 @@ final class RFBHostSessionGate: @unchecked Sendable {
     if activeClaim == claim { activeClaim = nil }
     lock.unlock()
   }
+
+  var isClaimed: Bool {
+    lock.lock()
+    defer { lock.unlock() }
+    return activeClaim != nil
+  }
+}
+
+final class DirectSessionClaimingRFBByteStream: RFBByteStream, @unchecked Sendable {
+  private let base: any RFBByteStream
+  private let gate: RFBHostSessionGate
+  private let onAcquire: @Sendable () -> Void
+  private let onRelease: @Sendable () -> Void
+  private let lock = NSLock()
+  private var claim: UUID?
+
+  init(
+    base: any RFBByteStream,
+    gate: RFBHostSessionGate,
+    onAcquire: @escaping @Sendable () -> Void,
+    onRelease: @escaping @Sendable () -> Void
+  ) {
+    self.base = base
+    self.gate = gate
+    self.onAcquire = onAcquire
+    self.onRelease = onRelease
+  }
+
+  var hasClaim: Bool { withLock { claim != nil } }
+
+  func readExactly(_ count: Int) async throws -> Data {
+    guard count >= 0 else { return try await base.readExactly(count) }
+    guard count > 0 else { return Data() }
+    guard !hasClaim else { return try await base.readExactly(count) }
+
+    var result = try await base.readExactly(1)
+    guard let acquired = gate.acquire() else {
+      throw PrivateMacShareError.protocolError("another desktop viewer is active")
+    }
+    withLock { claim = acquired }
+    onAcquire()
+    if count > 1 {
+      result.append(try await base.readExactly(count - 1))
+    }
+    return result
+  }
+
+  func send(_ data: Data) async throws {
+    try await base.send(data)
+  }
+
+  func send(_ data: Data, deadline: ContinuousClock.Instant?) async throws {
+    try await base.send(data, deadline: deadline)
+  }
+
+  func finishClaim() {
+    let released = withLock { () -> UUID? in
+      defer { claim = nil }
+      return claim
+    }
+    if let released {
+      onRelease()
+      gate.release(released)
+    }
+  }
+
+  private func withLock<T>(_ body: () -> T) -> T {
+    lock.lock()
+    defer { lock.unlock() }
+    return body()
+  }
 }
 
 final class TailnetRFBServer: @unchecked Sendable {
@@ -99,6 +170,7 @@ final class TailnetRFBServer: @unchecked Sendable {
   private let eventHandler: EventHandler
   private var listener: NWListener?
   private var session: RFBHostSession?
+  private var directConnectionReserved = false
   private var viewOnly = false
   private var audioEnabled = true
   private var qualityMode: ShareQualityMode = .auto
@@ -165,12 +237,12 @@ final class TailnetRFBServer: @unchecked Sendable {
       defer {
         listener = nil
         session = nil
+        directConnectionReserved = false
       }
       return (listener, session)
     }
     values.0?.cancel()
     values.1?.stop()
-    capture.setConsumerActive(false)
   }
 
   func setViewOnly(_ enabled: Bool) {
@@ -229,11 +301,22 @@ final class TailnetRFBServer: @unchecked Sendable {
   }
 
   private func accept(_ connection: NWConnection) {
-    guard let sessionClaim = sessionGate.acquire() else {
+    let reserved = withLock { () -> Bool in
+      guard !directConnectionReserved else { return false }
+      directConnectionReserved = true
+      return true
+    }
+    guard reserved else {
       connection.cancel()
       return
     }
 
+    let stream = DirectSessionClaimingRFBByteStream(
+      base: RFBConnectionIO(connection: connection),
+      gate: sessionGate,
+      onAcquire: { [weak capture] in capture?.setConsumerActive(true) },
+      onRelease: { [weak capture] in capture?.setConsumerActive(false) }
+    )
     let authorizer =
       peerAuthorizer
       ?? TailnetPeerAuthorizer(
@@ -241,7 +324,7 @@ final class TailnetRFBServer: @unchecked Sendable {
         expectedIdentity: identity
       )
     let newSession = RFBHostSession(
-      byteStream: RFBConnectionIO(connection: connection),
+      byteStream: stream,
       connection: connection,
       authorizer: authorizer,
       capture: capture,
@@ -254,14 +337,15 @@ final class TailnetRFBServer: @unchecked Sendable {
       viewOnly: false,
       audioEnabled: false,
       qualityMode: .auto,
-      didAuthorize: { [weak capture] in capture?.setConsumerActive(true) },
-      eventHandler: eventHandler,
-      didFinish: { [weak self, sessionGate] finishedSession in
-        guard let self else {
-          sessionGate.release(sessionClaim)
-          return
+      didAuthorize: {},
+      eventHandler: { [eventHandler, sessionGate] event in
+        if stream.hasClaim || !sessionGate.isClaimed {
+          eventHandler(event)
         }
-        self.clear(finishedSession, claim: sessionClaim)
+      },
+      didFinish: { [weak self] finishedSession in
+        stream.finishClaim()
+        self?.clear(finishedSession)
       }
     )
     withLock {
@@ -273,14 +357,13 @@ final class TailnetRFBServer: @unchecked Sendable {
     newSession.start()
   }
 
-  private func clear(_ finishedSession: RFBHostSession, claim: UUID) {
+  private func clear(_ finishedSession: RFBHostSession) {
     withLock {
       if session === finishedSession {
         session = nil
-        capture.setConsumerActive(false)
+        directConnectionReserved = false
       }
     }
-    sessionGate.release(claim)
   }
 
   private func withLock<T>(_ body: () -> T) -> T {
