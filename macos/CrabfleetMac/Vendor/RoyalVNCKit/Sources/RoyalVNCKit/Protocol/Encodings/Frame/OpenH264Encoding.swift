@@ -33,7 +33,15 @@ enum VideoAnnexBCodec: Equatable {
 	func isIDR(_ type: UInt8) -> Bool {
 		switch self {
 			case .h264: type == 5
-			case .hevc: (16...21).contains(type)
+			case .hevc: type == 19 || type == 20
+		}
+	}
+
+	func isAccessUnitSuffix(_ type: UInt8) -> Bool {
+		guard self == .hevc else { return false }
+		switch type {
+			case 36...38, 40, 45...47, 56...63: return true
+			default: return false
 		}
 	}
 }
@@ -131,7 +139,7 @@ struct OpenH264AnnexB {
 	/// Groups NAL units into access units: an Open H.264 rectangle may carry
 	/// several whole frames glued together, and each must be decoded in order.
 	/// A slice with first_mb_in_slice == 0 begins a new primary picture, while
-	/// non-VCL units (SPS/PPS/SEI/AUD) after a slice belong to the next one.
+	/// prefix non-VCL units after a slice belong to the next picture.
 	static func accessUnits(
 		from nalUnits: [Data],
 		codec: VideoAnnexBCodec = .h264
@@ -142,8 +150,10 @@ struct OpenH264AnnexB {
 		for nalUnit in nalUnits {
 			let nalType = codec.nalType(nalUnit)
 			let isSlice = codec.isSlice(nalType)
-			let beginsNewUnit = currentHasSlice
-				&& (!isSlice || firstSliceIsZero(nalUnit, codec: codec))
+			let beginsNewUnit = currentHasSlice && (
+				isSlice
+					? firstSliceIsZero(nalUnit, codec: codec)
+					: !codec.isAccessUnitSuffix(nalType))
 			if beginsNewUnit {
 				units.append(current)
 				current = []

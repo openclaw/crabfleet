@@ -29,12 +29,13 @@ struct OpenH264EncodingTests {
 	}
 
 	@Test
-	func extractsHEVCParameterSetsAndWaitsForIDR() {
+	func extractsHEVCParameterSetsAndGatesOnTrueIDR() {
 		let vps = Data([32 << 1, 1, 0])
 		let sps = Data([33 << 1, 1, 0])
 		let pps = Data([34 << 1, 1, 0])
 		let inter = Data([1 << 1, 1, 0x80])
-		let idr = Data([19 << 1, 1, 0x80])
+		let idrWithRADL = Data([19 << 1, 1, 0x80])
+		let idrWithoutLeadingPictures = Data([20 << 1, 1, 0x80])
 		let cra = Data([21 << 1, 1, 0x80])
 		let sets = OpenH264AnnexB.videoParameterSets(
 			in: [vps, sps, pps, inter], codec: .hevc)
@@ -46,9 +47,12 @@ struct OpenH264EncodingTests {
 		var decision = gate.shouldDecode([inter])
 		#expect(!decision)
 		decision = gate.shouldDecode([cra])
+		#expect(!decision)
+		#expect(gate.waitingForIDR)
+		decision = gate.shouldDecode([idrWithRADL])
 		#expect(decision)
 		gate.reset()
-		decision = gate.shouldDecode([idr])
+		decision = gate.shouldDecode([idrWithoutLeadingPictures])
 		#expect(decision)
 	}
 
@@ -61,6 +65,22 @@ struct OpenH264EncodingTests {
 			from: [firstSlice, continuation, nextFrame], codec: .hevc)
 
 		#expect(units == [[firstSlice, continuation], [nextFrame]])
+	}
+
+	@Test
+	func keepsHEVCSuffixNALUnitsWithTheirPicture() {
+		let firstSlice = Data([19 << 1, 1, 0x80])
+		let suffixSEI = Data([40 << 1, 1, 0])
+		let reservedSuffix = Data([45 << 1, 1, 0])
+		let unspecifiedSuffix = Data([56 << 1, 1, 0])
+		let nextFrame = Data([1 << 1, 1, 0x80])
+		let units = OpenH264AnnexB.accessUnits(
+			from: [firstSlice, suffixSEI, reservedSuffix, unspecifiedSuffix, nextFrame],
+			codec: .hevc)
+
+		#expect(units == [
+			[firstSlice, suffixSEI, reservedSuffix, unspecifiedSuffix], [nextFrame],
+		])
 	}
 
 	@Test
