@@ -102,9 +102,11 @@ struct RFBPixelFormat: Equatable, Sendable {
 enum RFBWire {
   static let tightEncoding: Int32 = 7
   static let openH264Encoding: Int32 = 50
+  static let crabfleetAudioEncoding: Int32 = 0x4341_4631
   static let extendedDesktopSizeEncoding: Int32 = -308
   static let extendedClipboardEncoding = Int32(bitPattern: 0xc0a1_e5ce)
   static let maximumClipboardBytes = 1 * 1_024 * 1_024
+  static let maximumAudioPayloadBytes = 64 * 1_024
 
   enum FrameEncodingSelection: Equatable, Sendable {
     case openH264
@@ -142,6 +144,47 @@ enum RFBWire {
     if !videoPathBroken, encodings.contains(openH264Encoding) { return .openH264 }
     if encodings.contains(tightEncoding) { return .tight }
     return nil
+  }
+
+  static func shouldStreamAudio(hostEnabled: Bool, encodings: [Int32]) -> Bool {
+    hostEnabled && encodings.contains(crabfleetAudioEncoding)
+  }
+
+  static func audioConfig(channels: UInt8, sampleRate: UInt32, magicCookie: Data) throws -> Data {
+    guard (1...2).contains(channels), (8_000...192_000).contains(sampleRate),
+      magicCookie.count <= maximumAudioPayloadBytes
+    else {
+      throw PrivateMacShareError.protocolError("invalid audio configuration")
+    }
+
+    var data = Data(capacity: 12 + magicCookie.count)
+    data.append(200)
+    data.append(1)
+    data.append(1)  // AAC-LC
+    data.append(channels)
+    data.appendBigEndian(sampleRate)
+    data.appendBigEndian(UInt32(magicCookie.count))
+    data.append(magicCookie)
+    return data
+  }
+
+  static func audioPacket(timestampMs: UInt32, payload: Data) throws -> Data {
+    guard !payload.isEmpty, payload.count <= maximumAudioPayloadBytes else {
+      throw PrivateMacShareError.protocolError("invalid audio packet")
+    }
+
+    var data = Data(capacity: 12 + payload.count)
+    data.append(200)
+    data.append(2)
+    data.append(contentsOf: [0, 0])
+    data.appendBigEndian(timestampMs)
+    data.appendBigEndian(UInt32(payload.count))
+    data.append(payload)
+    return data
+  }
+
+  static func audioStop() -> Data {
+    Data([200, 3, 0, 0])
   }
 
   static func tightJPEGUpdate(frame: CapturedDesktopFrame) throws -> Data {

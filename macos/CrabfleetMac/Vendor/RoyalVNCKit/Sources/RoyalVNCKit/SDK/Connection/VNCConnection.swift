@@ -51,6 +51,19 @@ public final class VNCConnection: NSObjectOrAnyObject, @unchecked Sendable {
 		}
 	}
 
+	public var audioDelegate: VNCAudioDelegate? {
+		get {
+			audioDelegateLock.lock()
+			defer { audioDelegateLock.unlock() }
+			return _audioDelegate
+		}
+		set {
+			audioDelegateLock.lock()
+			defer { audioDelegateLock.unlock() }
+			_audioDelegate = newValue
+		}
+	}
+
 #if canImport(ObjectiveC)
 	@objc
 #endif
@@ -95,8 +108,10 @@ public final class VNCConnection: NSObjectOrAnyObject, @unchecked Sendable {
 	// MARK: - Private Properties
 	private let delegateLock = NSLock()
 	private weak var _delegate: VNCConnectionDelegate?
-	private let clipboardDelegateLock = NSLock()
-	private weak var _clipboardDelegate: VNCClipboardDelegate?
+		private let clipboardDelegateLock = NSLock()
+		private weak var _clipboardDelegate: VNCClipboardDelegate?
+		private let audioDelegateLock = NSLock()
+		private weak var _audioDelegate: VNCAudioDelegate?
 	private let framebufferLock = NSLock()
 	private var _framebuffer: VNCFramebuffer?
 	let framebufferDeliveryLock = NSLock()
