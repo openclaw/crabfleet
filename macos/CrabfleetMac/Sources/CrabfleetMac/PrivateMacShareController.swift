@@ -508,6 +508,7 @@ final class PrivateMacShareController: ObservableObject {
   nonisolated static let autoShareDefaultsKey = "org.openclaw.crabfleet.share.auto-share"
   nonisolated static let viewOnlyDefaultsKey = "org.openclaw.crabfleet.share.view-only"
   nonisolated static let streamAudioDefaultsKey = "org.openclaw.crabfleet.share.audio"
+  nonisolated static let qualityModeDefaultsKey = "org.openclaw.crabfleet.share.quality-mode"
 
   @Published private(set) var identity: TailnetIdentity?
   @Published private(set) var phase: Phase = .idle
@@ -546,6 +547,13 @@ final class PrivateMacShareController: ObservableObject {
     didSet {
       defaults.set(streamAudioEnabled, forKey: Self.streamAudioDefaultsKey)
       server?.setAudioEnabled(streamAudioEnabled)
+    }
+  }
+
+  @Published var qualityMode: ShareQualityMode {
+    didSet {
+      defaults.set(qualityMode.rawValue, forKey: Self.qualityModeDefaultsKey)
+      server?.setQualityMode(qualityMode)
     }
   }
 
@@ -595,6 +603,8 @@ final class PrivateMacShareController: ObservableObject {
       defaults.object(forKey: Self.clipboardSyncDefaultsKey) as? Bool ?? true
     viewOnlyEnabled = defaults.object(forKey: Self.viewOnlyDefaultsKey) as? Bool ?? false
     streamAudioEnabled = defaults.object(forKey: Self.streamAudioDefaultsKey) as? Bool ?? true
+    qualityMode = defaults.string(forKey: Self.qualityModeDefaultsKey)
+      .flatMap(ShareQualityMode.init(rawValue:)) ?? .auto
     launchAtLoginEnabled = SMAppService.mainApp.status == .enabled
     if let runner {
       self.runner = runner
@@ -758,6 +768,7 @@ final class PrivateMacShareController: ObservableObject {
       )
       server.setViewOnly(viewOnlyEnabled)
       server.setAudioEnabled(streamAudioEnabled)
+      server.setQualityMode(qualityMode)
       try server.start()
       self.capture = capture
       self.server = server

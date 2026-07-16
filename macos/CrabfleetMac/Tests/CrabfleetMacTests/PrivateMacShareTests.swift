@@ -784,6 +784,26 @@ struct PrivateMacShareTests {
   }
 
   @Test @MainActor
+  func shareQualityModePersistsAcrossControllers() throws {
+    let defaults = try #require(
+      UserDefaults(suiteName: "CrabfleetMacTests.\(UUID().uuidString)")
+    )
+    let first = PrivateMacShareController(
+      runner: StaticTailscaleRunner(output: statusJSON()),
+      desktopRegistration: nil,
+      defaults: defaults)
+    #expect(first.qualityMode == .auto)
+
+    first.qualityMode = .sharp
+    let second = PrivateMacShareController(
+      runner: StaticTailscaleRunner(output: statusJSON()),
+      desktopRegistration: nil,
+      defaults: defaults)
+
+    #expect(second.qualityMode == .sharp)
+  }
+
+  @Test @MainActor
   func applicationTerminationCancelsPendingAutoShareStartup() async throws {
     let runner = CountingTailscaleRunner(output: statusJSON())
     let defaults = try #require(

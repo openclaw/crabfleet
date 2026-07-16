@@ -17,6 +17,9 @@ enum TailnetRFBServerEvent: Equatable, Sendable {
 struct TailnetStreamStats: Equatable, Sendable {
   let codec: String
   let hardwareAccelerated: Bool
+  let codecDetail: String
+  let targetBitrate: Int
+  let dirtyAreaPercent: Double
   let framesPerSecond: Double
   let megabitsPerSecond: Double
 }
@@ -40,6 +43,7 @@ final class TailnetRFBServer: @unchecked Sendable {
   private var session: RFBHostSession?
   private var viewOnly = false
   private var audioEnabled = true
+  private var qualityMode: ShareQualityMode = .auto
 
   init(
     identity: TailnetIdentity,
@@ -125,6 +129,14 @@ final class TailnetRFBServer: @unchecked Sendable {
     activeSession?.setAudioEnabled(enabled)
   }
 
+  func setQualityMode(_ mode: ShareQualityMode) {
+    let activeSession = withLock { () -> RFBHostSession? in
+      qualityMode = mode
+      return session
+    }
+    activeSession?.setQualityMode(mode)
+  }
+
   private func accept(_ connection: NWConnection) {
     let hasActiveSession = withLock { self.session != nil }
     guard !hasActiveSession else {
@@ -150,6 +162,7 @@ final class TailnetRFBServer: @unchecked Sendable {
       handshakeTimeout: handshakeTimeout,
       viewOnly: false,
       audioEnabled: false,
+      qualityMode: .auto,
       didAuthorize: { [weak capture] in capture?.setConsumerActive(true) },
       eventHandler: eventHandler,
       didFinish: { [weak self] finishedSession in
@@ -160,6 +173,7 @@ final class TailnetRFBServer: @unchecked Sendable {
       self.session = newSession
       newSession.setViewOnly(viewOnly)
       newSession.setAudioEnabled(audioEnabled)
+      newSession.setQualityMode(qualityMode)
     }
     newSession.start()
   }
@@ -232,6 +246,10 @@ private final class RFBHostSession: @unchecked Sendable {
   private var audioGeneration: UInt64 = 0
   private var audioIsActive = false
   private var audioPathBroken = false
+  private var qualityMode: ShareQualityMode
+  private var frameIntervalGeneration: UInt64 = 0
+  private var idleRefreshPolicy = VideoIdleRefreshPolicy(
+    timestamp: ProcessInfo.processInfo.systemUptime)
 
   init(
     connection: NWConnection,
@@ -245,6 +263,7 @@ private final class RFBHostSession: @unchecked Sendable {
     handshakeTimeout: Duration,
     viewOnly: Bool,
     audioEnabled: Bool,
+    qualityMode: ShareQualityMode,
     didAuthorize: @escaping @Sendable () -> Void,
     eventHandler: @escaping TailnetRFBServer.EventHandler,
     didFinish: @escaping @Sendable (RFBHostSession) -> Void
@@ -260,6 +279,7 @@ private final class RFBHostSession: @unchecked Sendable {
     self.requiredLocalAddress = requiredLocalAddress
     self.desktopName = desktopName
     self.handshakeTimeout = handshakeTimeout
+    self.qualityMode = qualityMode
     self.didAuthorize = didAuthorize
     self.eventHandler = eventHandler
     self.didFinish = didFinish
@@ -302,6 +322,26 @@ private final class RFBHostSession: @unchecked Sendable {
     guard let io else { return }
     Task { [weak self] in
       await self?.reconcileAudioPath(io: io)
+    }
+  }
+
+  func setQualityMode(_ mode: ShareQualityMode) {
+    let values = withLock { () -> (MacVideoEncoder?, Int, UInt64?) in
+      qualityMode = mode
+      let bitrate = rateController.setMode(mode)
+      guard let videoEncoder else { return (nil, bitrate, nil) }
+      frameIntervalGeneration &+= 1
+      return (videoEncoder, bitrate, frameIntervalGeneration)
+    }
+    values.0?.setAverageBitrate(values.1)
+    guard let generation = values.2 else { return }
+    Task { [weak self] in
+      guard let self else { return }
+      try? await capture.updateFrameInterval(
+        framesPerSecond: mode.framesPerSecond,
+        shouldApply: { [weak self] in
+          self?.isFrameIntervalGenerationCurrent(generation) == true
+        })
     }
   }
 
@@ -354,7 +394,7 @@ private final class RFBHostSession: @unchecked Sendable {
     withLock { pushIO = io }
     attachClipboard()
     eventHandler(.connected(remoteAddress))
-    rateController = VideoRateController()
+    resetRateController()
     lastStatsTimestamp = ProcessInfo.processInfo.systemUptime
     try await messageLoop(io: io)
   }
@@ -502,7 +542,7 @@ private final class RFBHostSession: @unchecked Sendable {
           if let encoder = activeVideoEncoder {
             if !incremental { requestKeyframe() }
             switch await nextVideoUpdate(encoder: encoder) {
-            case .frame(let frame):
+            case .frame(let frame, let dirtyAreaFraction):
               let flags: UInt32 = needsContextReset ? 0x2 : 0
               let update = try videoUpdate(frame: frame, codec: codec, flags: flags)
               let sendSeconds = try await timedSend(update, io: io)
@@ -512,7 +552,8 @@ private final class RFBHostSession: @unchecked Sendable {
                 sendSeconds: sendSeconds,
                 codec: codec == .hevc ? "HEVC" : "H.264",
                 hardwareAccelerated: encoder.isHardwareAccelerated,
-                encoder: encoder)
+                encoder: encoder,
+                dirtyAreaFraction: dirtyAreaFraction)
               continue protocolLoop
             case .idle:
               // Nothing changed on screen; answer the request anyway so the
@@ -545,12 +586,13 @@ private final class RFBHostSession: @unchecked Sendable {
         }
         let update = try RFBWire.tightJPEGUpdate(frame: frame)
         let sendSeconds = try await timedSend(update, io: io)
-        recordFrameStats(
-          byteCount: frame.jpegData.count,
-          sendSeconds: sendSeconds,
-          codec: "JPEG",
-          hardwareAccelerated: false,
-          encoder: nil)
+      recordFrameStats(
+        byteCount: frame.jpegData.count,
+        sendSeconds: sendSeconds,
+        codec: "JPEG",
+        hardwareAccelerated: false,
+        encoder: nil,
+        dirtyAreaFraction: 1)
         lastSentJPEGSequence = frame.sequence
         hasSentJPEGFrame = true
 
@@ -919,16 +961,26 @@ private final class RFBHostSession: @unchecked Sendable {
     _ = replaceVideoEncoder(with: encoder)
     withLock { videoPixelMailbox = pixelMailbox }
     startVideoFrameConsumer(for: encoder)
-    rateController = VideoRateController()
+    let frameInterval = beginVideoFrameInterval()
+    encoder.setAverageBitrate(frameInterval.targetBitrate)
     lastStatsTimestamp = ProcessInfo.processInfo.systemUptime
+    idleRefreshPolicy = VideoIdleRefreshPolicy(timestamp: lastStatsTimestamp)
     needsContextReset = true
     requestKeyframe()
-    capture.setVideoFrameHandler { pixelBuffer, presentationTime in
-      pixelMailbox.offer(
-        VideoPixelSource(pixelBuffer: pixelBuffer, presentationTime: presentationTime))
+    capture.setVideoFrameHandler { [weak self] source in
+      guard let self,
+        MacScreenCapture.shouldOfferVideoFrame(
+          dirtyRects: source.dirtyRects,
+          keyframeOwed: pendingKeyframeRequested())
+      else { return }
+      pixelMailbox.offer(source)
     }
     do {
-      try await capture.updateFrameInterval(framesPerSecond: 60)
+      try await capture.updateFrameInterval(
+        framesPerSecond: frameInterval.mode.framesPerSecond,
+        shouldApply: { [weak self] in
+          self?.isFrameIntervalGenerationCurrent(frameInterval.generation) == true
+        })
     } catch {
       capture.setVideoFrameHandler(nil)
       stopVideoFrameConsumer()
@@ -959,8 +1011,9 @@ private final class RFBHostSession: @unchecked Sendable {
     replaceVideoEncoder(with: nil)?.invalidate()
     needsContextReset = false
     withLock { forceNextKeyframe = false }
-    rateController = VideoRateController()
+    resetRateController()
     lastStatsTimestamp = ProcessInfo.processInfo.systemUptime
+    invalidateFrameIntervalUpdates()
     try? await capture.updateFrameInterval(framesPerSecond: 15)
   }
 
@@ -1044,6 +1097,40 @@ private final class RFBHostSession: @unchecked Sendable {
     withLock { forceNextKeyframe = true }
   }
 
+  @discardableResult
+  private func resetRateController() -> ShareQualityMode {
+    withLock {
+      rateController = VideoRateController(mode: qualityMode)
+      return qualityMode
+    }
+  }
+
+  private func beginVideoFrameInterval() -> (
+    mode: ShareQualityMode,
+    targetBitrate: Int,
+    generation: UInt64
+  ) {
+    withLock {
+      rateController = VideoRateController(mode: qualityMode)
+      frameIntervalGeneration &+= 1
+      return (qualityMode, rateController.targetBitrate, frameIntervalGeneration)
+    }
+  }
+
+  private func shouldSendIdleRefresh(
+    now: Double = ProcessInfo.processInfo.systemUptime
+  ) -> Bool {
+    idleRefreshPolicy.shouldRefresh(mode: withLock { qualityMode }, timestamp: now)
+  }
+
+  private func isFrameIntervalGenerationCurrent(_ generation: UInt64) -> Bool {
+    withLock { frameIntervalGeneration == generation }
+  }
+
+  private func invalidateFrameIntervalUpdates() {
+    withLock { frameIntervalGeneration &+= 1 }
+  }
+
   private func startVideoFrameConsumer(for encoder: MacVideoEncoder) {
     let mailbox = VideoMailbox<EncodedVideoFrame>()
     let consumer = Task { [weak self] in
@@ -1089,7 +1176,7 @@ private final class RFBHostSession: @unchecked Sendable {
   }
 
   private enum VideoUpdateOutcome {
-    case frame(EncodedVideoFrame)
+    case frame(EncodedVideoFrame, dirtyAreaFraction: Double)
     case idle
     case failed
   }
@@ -1109,18 +1196,38 @@ private final class RFBHostSession: @unchecked Sendable {
     if let candidate = source, !matchesCurrentSize(candidate.pixelBuffer) {
       source = nil  // stale capture output from before a resize
     }
-    if source == nil, needsContextReset || pendingKeyframeRequested() {
-      source = await keyframeSource()
+    if let source, source.dirtyAreaFraction > 0 {
+      idleRefreshPolicy.recordDirtyArea(
+        source.dirtyAreaFraction,
+        timestamp: ProcessInfo.processInfo.systemUptime)
     }
-    guard let source else { return .idle }
+    var isIdleRefresh = false
+    if source == nil {
+      isIdleRefresh = shouldSendIdleRefresh()
+      if isIdleRefresh { requestKeyframe() }
+    }
+    if source == nil, needsContextReset || pendingKeyframeRequested() {
+      source = await keyframeSource(idleRefresh: isIdleRefresh)
+    }
+    guard let source else {
+      if isIdleRefresh { idleRefreshPolicy.refreshFailed() }
+      return .idle
+    }
 
     let forceKeyframe = consumeForceNextKeyframe() || needsContextReset
+    if isIdleRefresh {
+      encoder.setAverageBitrate(withLock { rateController.targetBitrate * 2 })
+    }
     guard
       encoder.encode(
         source.pixelBuffer,
         presentationTime: source.presentationTime,
         forceKeyframe: forceKeyframe)
     else {
+      if isIdleRefresh {
+        encoder.setAverageBitrate(withLock { rateController.targetBitrate })
+        idleRefreshPolicy.refreshFailed()
+      }
       // Rejected input (for example a timestamp raced behind a synthetic
       // keyframe stamp) produces no output; try again on the next request.
       if forceKeyframe { requestKeyframe() }
@@ -1131,7 +1238,14 @@ private final class RFBHostSession: @unchecked Sendable {
       guard frame.width >= currentWidth, frame.height >= currentHeight,
         frame.width <= currentWidth + 15, frame.height <= currentHeight + 15
       else { continue }
-      return .frame(frame)
+      if isIdleRefresh {
+        encoder.setAverageBitrate(withLock { rateController.targetBitrate })
+      }
+      return .frame(frame, dirtyAreaFraction: source.dirtyAreaFraction)
+    }
+    if isIdleRefresh {
+      encoder.setAverageBitrate(withLock { rateController.targetBitrate })
+      idleRefreshPolicy.refreshFailed()
     }
     return .failed
   }
@@ -1139,11 +1253,13 @@ private final class RFBHostSession: @unchecked Sendable {
   /// A source for keyframes owed while the screen is idle: the last streamed
   /// buffer if it still matches, otherwise a one-shot screenshot. Re-encoded
   /// buffers get a fresh host-clock stamp to stay monotonic.
-  private func keyframeSource() async -> VideoPixelSource? {
+  private func keyframeSource(idleRefresh: Bool) async -> VideoPixelSource? {
     if let cached = capture.latestVideoFrame(), matchesCurrentSize(cached.pixelBuffer) {
       return VideoPixelSource(
         pixelBuffer: cached.pixelBuffer,
-        presentationTime: CMClockGetTime(CMClockGetHostTimeClock()))
+        presentationTime: CMClockGetTime(CMClockGetHostTimeClock()),
+        dirtyRects: idleRefresh ? [] : nil,
+        contentRect: cached.contentRect)
     }
     guard let snapshot = await capture.snapshotVideoFrame(),
       matchesCurrentSize(snapshot.pixelBuffer)
@@ -1152,7 +1268,9 @@ private final class RFBHostSession: @unchecked Sendable {
     }
     return VideoPixelSource(
       pixelBuffer: snapshot.pixelBuffer,
-      presentationTime: CMClockGetTime(CMClockGetHostTimeClock()))
+      presentationTime: CMClockGetTime(CMClockGetHostTimeClock()),
+      dirtyRects: idleRefresh ? [] : nil,
+      contentRect: snapshot.contentRect)
   }
 
   private func matchesCurrentSize(_ pixelBuffer: CVPixelBuffer) -> Bool {
@@ -1174,13 +1292,18 @@ private final class RFBHostSession: @unchecked Sendable {
     sendSeconds: Double,
     codec: String,
     hardwareAccelerated: Bool,
-    encoder: MacVideoEncoder?
+    encoder: MacVideoEncoder?,
+    dirtyAreaFraction: Double
   ) {
     let now = ProcessInfo.processInfo.systemUptime
-    if let bitrate = rateController.recordFrame(
-      byteCount: byteCount,
-      sendSeconds: sendSeconds,
-      timestamp: now)
+    let bitrate = withLock {
+      rateController.recordFrame(
+        byteCount: byteCount,
+        sendSeconds: sendSeconds,
+        dirtyAreaFraction: dirtyAreaFraction,
+        timestamp: now)
+    }
+    if let bitrate
     {
       encoder?.setAverageBitrate(bitrate)
     }
@@ -1194,12 +1317,18 @@ private final class RFBHostSession: @unchecked Sendable {
   ) {
     guard now - lastStatsTimestamp >= 2 else { return }
     lastStatsTimestamp = now
-    let snapshot = rateController.statsSnapshot(now: now)
+    let (snapshot, targetBitrate) = withLock {
+      (rateController.statsSnapshot(now: now), rateController.targetBitrate)
+    }
+    let codecDetail = codec + (codec == "JPEG" ? "" : hardwareAccelerated ? " hw" : " sw")
     eventHandler(
       .streaming(
         TailnetStreamStats(
           codec: codec,
           hardwareAccelerated: hardwareAccelerated,
+          codecDetail: codecDetail,
+          targetBitrate: targetBitrate,
+          dirtyAreaPercent: snapshot.dirtyAreaPercent,
           framesPerSecond: snapshot.fps,
           megabitsPerSecond: snapshot.megabitsPerSecond)))
   }
@@ -1238,6 +1367,7 @@ private final class RFBHostSession: @unchecked Sendable {
     pushIO = nil
     lock.unlock()
     capture.setVideoFrameHandler(nil)
+    invalidateFrameIntervalUpdates()
     stopVideoFrameConsumer()
     finishPixelMailbox()
     let encoder = replaceVideoEncoder(with: nil)

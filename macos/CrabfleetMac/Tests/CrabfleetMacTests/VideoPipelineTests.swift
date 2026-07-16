@@ -1,3 +1,4 @@
+import CoreMedia
 import Foundation
 import Testing
 
@@ -85,6 +86,26 @@ struct VideoPipelineTests {
   }
 
   @Test
+  func hevcKeyframeConversionPrependsVpsSpsPps() throws {
+    let parameterSets = [
+      Data([0x40, 0x01]),
+      Data([0x42, 0x01]),
+      Data([0x44, 0x01]),
+    ]
+    let output = try MacVideoEncoder.annexBData(
+      lengthPrefixedData: Data([0, 2, 0x26, 0x01]),
+      nalUnitHeaderLength: 2,
+      parameterSets: parameterSets,
+      isKeyframe: true)
+
+    #expect(output == parameterSets.reduce(into: Data()) { result, set in
+      result.append(contentsOf: [0, 0, 0, 1])
+      result.append(set)
+    } + Data([0, 0, 0, 1, 0x26, 0x01]))
+    #expect(MacVideoCodec.hevc.videoToolboxType == kCMVideoCodecType_HEVC)
+  }
+
+  @Test
   func keyframePolicyRecoversDropsAndForcesPeriodicIDRs() {
     var recovery = VideoKeyframePolicy()
     var decision = recovery.shouldForceKeyframe(
@@ -113,39 +134,42 @@ struct VideoPipelineTests {
   }
 
   @Test
-  func rateControllerDecreasesWithCooldownAndFloor() {
+  func rateControllerCongestionTracksMeasuredThroughput() {
     var controller = VideoRateController()
-    #expect(controller.recordFrame(byteCount: 1, sendSeconds: 0.09, timestamp: 0) == 5_600_000)
-    #expect(controller.recordFrame(byteCount: 1, sendSeconds: 0.09, timestamp: 0.5) == nil)
-    #expect(controller.recordFrame(byteCount: 1, sendSeconds: 0.09, timestamp: 1) == 3_920_000)
-    _ = controller.recordFrame(byteCount: 1, sendSeconds: 0.09, timestamp: 2)
-    _ = controller.recordFrame(byteCount: 1, sendSeconds: 0.09, timestamp: 3)
-    #expect(controller.recordFrame(byteCount: 1, sendSeconds: 0.09, timestamp: 4) == 1_500_000)
-    #expect(controller.recordFrame(byteCount: 1, sendSeconds: 0.09, timestamp: 5) == nil)
-    #expect(controller.averageBitrate == 1_500_000)
+    let first = controller.recordFrame(
+      byteCount: 100_000, sendSeconds: 0.1, timestamp: 0)
+    #expect(first == 6_400_000)
+    #expect(controller.recordFrame(
+      byteCount: 50_000, sendSeconds: 0.1, timestamp: 0.5) == nil)
+    let second = controller.recordFrame(
+      byteCount: 50_000, sendSeconds: 0.1, timestamp: 1)
+    #expect(second == 5_248_000)
   }
 
   @Test
-  func rateControllerIncreasesAfterSixtyFastFramesAndCaps() {
+  func rateControllerRecoveryIsAdditiveAndDirtyScaled() {
     var controller = VideoRateController()
-    var change: Int?
-    for frame in 0..<60 {
-      change = controller.recordFrame(
-        byteCount: 1,
-        sendSeconds: 0.01,
-        timestamp: Double(frame) / 60)
-    }
-    #expect(change == 8_800_000)
+    #expect(controller.recordFrame(
+      byteCount: 1, sendSeconds: 0.01, dirtyAreaFraction: 1, timestamp: 0) == nil)
+    #expect(controller.recordFrame(
+      byteCount: 1, sendSeconds: 0.01, dirtyAreaFraction: 1, timestamp: 1) == 9_000_000)
+    #expect(controller.recordFrame(
+      byteCount: 1, sendSeconds: 0.01, dirtyAreaFraction: 0, timestamp: 2) == 9_800_000)
+  }
 
-    for cycle in 1...20 {
-      for frame in 0..<60 {
-        _ = controller.recordFrame(
-          byteCount: 1,
-          sendSeconds: 0.01,
-          timestamp: Double(cycle) + Double(frame) / 60)
-      }
+  @Test
+  func rateControllerRespectsQualityModeBounds() {
+    var controller = VideoRateController(mode: .sharp)
+    #expect(controller.averageBitrate == 8_000_000)
+    #expect(controller.recordFrame(
+      byteCount: 1, sendSeconds: 0.1, timestamp: 0) == nil)
+    for second in 1...25 {
+      _ = controller.recordFrame(
+        byteCount: 1, sendSeconds: 0.01, timestamp: Double(second))
     }
-    #expect(controller.averageBitrate == 30_000_000)
+    #expect(controller.averageBitrate <= 40_000_000)
+    #expect(controller.setMode(.smooth) == 20_000_000)
+    #expect(controller.mode.framesPerSecond == 60)
   }
 
   @Test
@@ -160,6 +184,51 @@ struct VideoPipelineTests {
     let stats = controller.statsSnapshot(now: 2.5)
     #expect(stats.fps == 2)
     #expect(stats.megabitsPerSecond == 4)
+    #expect(stats.dirtyAreaPercent == 100)
+  }
+
+  @Test
+  func dirtyRectPolicySkipsStaticFramesUnlessKeyframeIsOwed() {
+    let content = CGRect(x: 0, y: 0, width: 100, height: 100)
+    let fraction = MacScreenCapture.dirtyAreaFraction(
+      dirtyRects: [CGRect(x: 0, y: 0, width: 25, height: 20)],
+      contentRect: content)
+    #expect(fraction == 0.05)
+    #expect(MacScreenCapture.dirtyAreaFraction(dirtyRects: [], contentRect: content) == 0)
+    #expect(!MacScreenCapture.shouldOfferVideoFrame(dirtyRects: [], keyframeOwed: false))
+    #expect(MacScreenCapture.shouldOfferVideoFrame(dirtyRects: [], keyframeOwed: true))
+    #expect(MacScreenCapture.shouldOfferVideoFrame(dirtyRects: nil, keyframeOwed: false))
+  }
+
+  @Test
+  func screenCaptureRectAttachmentsDecodeDictionaryRepresentations() {
+    let first = CGRect(x: 1, y: 2, width: 30, height: 40)
+    let second = CGRect(x: 4, y: 5, width: 6, height: 7)
+    let firstDictionary = first.dictionaryRepresentation
+    let secondDictionary = second.dictionaryRepresentation
+
+    #expect(MacScreenCapture.attachmentRect(firstDictionary) == first)
+    #expect(
+      MacScreenCapture.attachmentRects([firstDictionary, secondDictionary]) == [first, second])
+  }
+
+  @Test
+  func idleRefreshFiresOnceAfterTwoStaticSeconds() {
+    var policy = VideoIdleRefreshPolicy(timestamp: 0)
+    var decision = policy.shouldRefresh(mode: .auto, timestamp: 1.99)
+    #expect(!decision)
+    decision = policy.shouldRefresh(mode: .auto, timestamp: 2)
+    #expect(decision)
+    decision = policy.shouldRefresh(mode: .auto, timestamp: 4)
+    #expect(!decision)
+    policy.recordDirtyArea(0.01, timestamp: 5)
+    decision = policy.shouldRefresh(mode: .sharp, timestamp: 6)
+    #expect(!decision)
+    decision = policy.shouldRefresh(mode: .sharp, timestamp: 7)
+    #expect(decision)
+    policy.recordDirtyArea(1, timestamp: 8)
+    decision = policy.shouldRefresh(mode: .smooth, timestamp: 20)
+    #expect(!decision)
   }
 
   @Test
