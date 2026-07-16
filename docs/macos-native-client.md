@@ -58,8 +58,9 @@ unsupported text is rejected instead of silently becoming empty data.
 ## Share This Mac
 
 The host path is deliberately app-owned. It does not start, configure, proxy,
-or depend on `screensharingd`, Remote Management, a VNC password, a public
-relay, Cloudflare, or the Crabfleet Worker.
+or depend on `screensharingd`, Remote Management, or a VNC password. The direct
+Mac-to-Mac path remains on Tailscale; a registered share can additionally use
+an owner-scoped Crabfleet Worker relay for first-party browser access.
 
 1. Tailscale status must report `BackendState=Running`, a valid active tailnet,
    an online signed-in user, and a CGNAT address in `100.64.0.0/10`.
@@ -84,18 +85,31 @@ relay, Cloudflare, or the Crabfleet Worker.
    stable endpoint in the signed-in user's private Fleet registry. The receiving
    app discovers and directly connects that card with no VNC password. Quick
    Connect with the displayed `vnc://100.x.y.z:5901` address remains a fallback.
-6. Clipboard sync with the connected peer is on by default and can be disabled
+6. A token-owned registration enables the persisted "Allow browser access via
+   Crabfleet" toggle, which defaults on. The host opens an authenticated
+   WebSocket to its per-registration `DesktopRelayDO`; a signed-in owner opens
+   the matching browser viewer from Fleet. The relay treats binary messages as
+   one opaque RFB byte stream, caps each WebSocket message at 512 KiB, and
+   replaces prior sockets for the same role. The publisher chunks host writes
+   at 256 KiB, waits without timing out while no viewer is paired, and reconnects
+   with bounded backoff after transport loss. Legacy tokenless registrations
+   cannot publish a browser relay.
+7. Direct and browser transports share one session gate. The first viewer to
+   begin the client side of the server-first RFB handshake wins; the other path
+   is rejected. Closing either relay socket closes its peer, so every relay
+   connection carries exactly one RFB session.
+8. Clipboard sync with the connected peer is on by default and can be disabled
    before starting the share. Text copied on either Mac lands on the other
    through Extended Clipboard UTF-8 when the viewer negotiates it, with
    ISO-8859-1 cut text as the fallback; text that cannot be represented is
    dropped rather than mangled.
-7. System audio streaming is on by default and can be toggled while sharing.
+9. System audio streaming is on by default and can be toggled while sharing.
    Audio capture starts only after a viewer negotiates the Crabfleet audio
    extension; other VNC clients keep the existing video-only session.
-8. "Start sharing when I log in" registers the bundled app as a login item and
-   persists an auto-share preference, so the Mac comes back reachable after a
-   reboot without manual setup (the equivalent of `--share-this-mac` for
-   unattended hosts).
+10. "Start sharing when I log in" registers the bundled app as a login item and
+    persists an auto-share preference, so the Mac comes back reachable after a
+    reboot without manual setup (the equivalent of `--share-this-mac` for
+    unattended hosts).
 
 ### Video pipeline
 
@@ -159,9 +173,31 @@ remote keyboard and pointer events live even when Accessibility is available.
 
 Tailscale supplies the encrypted, ACL-controlled transport and peer identity;
 RFB None authentication is accepted only inside that already-authenticated
-channel. The listener is not reachable on Wi-Fi, Ethernet, loopback, or a public
-address. The host app must remain running, and stopping the share cancels the
-listener and capture stream.
+direct channel. Browser sessions use RFB None only after the Worker has
+authenticated the ownership-token host and the registration owner's browser
+session.
+The relay never stores the registration token or RFB bytes. The direct listener
+is not reachable on Wi-Fi, Ethernet, loopback, or a public address. The host app
+must remain running, and stopping the share cancels the listener, relay
+publisher, and capture stream.
+
+### Browser viewer
+
+Fleet lists each owned registration with an **Open in browser** action. The
+fullscreen Preact viewer speaks RFB 3.8 over the owner-authenticated relay,
+offers Open H.264 plus Tight/JPEG fallback, and never changes the host's default
+BGRA pixel format. WebCodecs H.264 is feature-detected; unsupported browsers
+offer Tight only. Framebuffer requests are paced one at a time after the prior
+frame is presented, including empty updates, and ExtendedDesktopSize requests
+are debounced until the host announces its screen layout.
+
+The viewer renders aspect-fit at device pixel ratio, forwards bounded pointer
+and keyboard input, shows codec/frame-rate/throughput state, and synchronizes
+text clipboard through the same Extended Clipboard dialect as the native
+client. Remote clipboard reads use only the snapshot last approved with **Send
+to Mac**; loading or editing clipboard text never exposes it by itself. Reading
+the browser's system clipboard requires the user to press **Load system
+clipboard** before explicitly approving that snapshot.
 
 ## License boundary
 
@@ -312,8 +348,9 @@ evicting, or losing the VNC session terminates that helper and tunnel. The VNC
 password remains in process memory and never enters argv, a URL, defaults, or a
 file. Manual entry remains the fallback for non-Crabbox targets.
 
-Share This Mac does not use this Worker/runtime-adapter boundary. It is a local
-Mac-to-Mac path whose only network dependency is the local Tailscale client.
+Share This Mac does not use the runtime-adapter boundary. Its direct Mac-to-Mac
+path depends only on the local Tailscale client; registered token-owned shares
+may also publish the optional owner-scoped browser relay described above.
 
 ## Build
 
