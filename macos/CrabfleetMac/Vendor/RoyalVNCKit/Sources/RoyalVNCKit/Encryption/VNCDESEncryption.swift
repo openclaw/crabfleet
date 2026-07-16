@@ -4,76 +4,74 @@ import FoundationEssentials
 import Foundation
 #endif
 
-import d3des
-
-enum D3DESLock {
-	static let shared = NSLock()
-}
+import CommonCrypto
 
 struct VNCDESEncryption {
 	static func encrypt(data: Data,
 						key: String) -> Data? {
-		var data = data
-		guard var paddedKey = paddedKey(key) else { return nil }
+		guard let paddedKey = paddedKey(key) else { return nil }
+		return encryptBlocks(data, keyBytes: paddedKey)
+	}
 
-		D3DESLock.shared.lock()
-		defer { D3DESLock.shared.unlock() }
-		let success = encrypt(data: &data,
-							  paddedKey: &paddedKey)
-
-		guard success else {
+	static func encryptBlocks(_ data: Data,
+							  keyBytes: [UInt8]) -> Data? {
+		guard keyBytes.count == kCCKeySizeDES,
+			  data.count.isMultiple(of: kCCBlockSizeDES) else {
 			return nil
 		}
+		guard !data.isEmpty else { return Data() }
 
-		return data
+		// VNC reverses each key byte before standard DES.
+		let key = keyBytes.map(reverseBits)
+		var output = Data(count: data.count)
+		var moved = 0
+		let outputCapacity = output.count
+		let status = key.withUnsafeBytes { keyBuffer in
+			data.withUnsafeBytes { inputBuffer in
+				output.withUnsafeMutableBytes { outputBuffer in
+					CCCrypt(
+						CCOperation(kCCEncrypt),
+						CCAlgorithm(kCCAlgorithmDES),
+						CCOptions(kCCOptionECBMode),
+						keyBuffer.baseAddress,
+						kCCKeySizeDES,
+						nil,
+						inputBuffer.baseAddress,
+						data.count,
+						outputBuffer.baseAddress,
+						outputCapacity,
+						&moved
+					)
+				}
+			}
+		}
+
+		guard status == kCCSuccess, moved == data.count else { return nil }
+		return output
 	}
 }
 
 private extension VNCDESEncryption {
-	static func encrypt(data: inout Data,
-						paddedKey: inout Data) -> Bool {
-		let success = data.withUnsafeMutableBytes { encryptedDataPtr in
-			guard let encryptedDataBytes = encryptedDataPtr.baseAddress?.assumingMemoryBound(to: UInt8.self) else {
-				return false
-			}
-
-			return paddedKey.withUnsafeMutableBytes { paddedKeyPtr in
-				guard let paddedKeyBytes = paddedKeyPtr.baseAddress?.assumingMemoryBound(to: UInt8.self) else {
-					return false
-				}
-
-				encrypt(dataBytes: encryptedDataBytes,
-						paddedKeyBytes: paddedKeyBytes)
-
-				return true
-			}
-		}
-
-		return success
-	}
-
-	static func paddedKey(_ key: String) -> Data? {
-		let maxKeyLength = 8
+	static func paddedKey(_ key: String) -> [UInt8]? {
+		let maxKeyLength = kCCKeySizeDES
 		guard let encodedKey = key.data(using: .isoLatin1, allowLossyConversion: false) else {
 			return nil
 		}
-		var paddedKey = Data(count: maxKeyLength)
+
+		var paddedKey = [UInt8](repeating: 0, count: maxKeyLength)
 		for (index, byte) in encodedKey.prefix(maxKeyLength).enumerated() {
 			paddedKey[index] = byte
 		}
 		return paddedKey
 	}
 
-	static func encrypt(dataBytes: UnsafeMutablePointer<UInt8>,
-						paddedKeyBytes: UnsafeMutablePointer<UInt8>) {
-		let challengeSize = 16
-
-		deskey(paddedKeyBytes, EN0)
-
-		for challengeIdx in stride(from: 0, to: challengeSize, by: 8) {
-			let bytesAtOffset = dataBytes.advanced(by: challengeIdx)
-
-			des(bytesAtOffset, bytesAtOffset)
+	static func reverseBits(_ byte: UInt8) -> UInt8 {
+		var source = byte
+		var reversed: UInt8 = 0
+		for _ in 0..<8 {
+			reversed = (reversed << 1) | (source & 1)
+			source >>= 1
 		}
+		return reversed
 	}
 }

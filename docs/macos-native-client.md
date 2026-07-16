@@ -137,12 +137,9 @@ and modification obligations still apply to that server or image. A container
 is packaging, not a license boundary. OSPO or counsel must approve the final
 organizational and distribution model.
 
-RoyalVNCKit also bundles a modified D3DES implementation. Its header identifies
-the original implementation as public domain but does not contain an explicit
-permission grant for the separately copyrighted VNC changes. Before distributing
-the native client, either replace that implementation with a reviewed system
-crypto implementation, remove VNC-password authentication and exclude D3DES
-from the build, or obtain written provenance approval.
+VNC password authentication uses the operating system's CommonCrypto DES with
+the VNC bit-reversed-key variant implemented in the fork's Swift shim. The fork
+no longer bundles or builds the modified D3DES source.
 
 ## Current viewer limits
 
@@ -165,8 +162,8 @@ from the build, or obtain written provenance approval.
   probabilistic safe-prime group and nonzero public/shared results, but ARD,
   UltraVNC MS Logon II, Tight security, and TLS remain disabled in the app until
   their complete interoperability surfaces are enabled and tested.
-- Password authentication uses a process-global DES key schedule. The fork
-  serializes that path; replace it before concurrent password-auth sessions.
+- Password authentication uses per-call CommonCrypto DES and is safe for
+  concurrent sessions.
 - App-owned hosting shares one selected display at a time to a single client.
   Open H.264 reaches 60 fps at an initial 2560×1600 cap and resizes up to
   4096×2304; Tight/JPEG fallback remains capped at 15 fps and 2560×1600.
@@ -183,8 +180,6 @@ Keep further changes narrow and upstreamable:
 2. Public read-only framebuffer IOSurface plus update notifications so one
    Metal compositor can render all fleet previews without one drawable and
    command queue per card.
-3. Replace or isolate the process-global D3DES key schedule before concurrent
-   password authentication.
 
 ## Integration boundary
 

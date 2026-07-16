@@ -154,7 +154,7 @@ TurboVNC, TigerVNC, or other GPL components. A separately deployed GPL server
 or external viewer remains a separate distribution and needs its own legal
 review and source-offer compliance.
 
-This is not yet distribution-cleared. RoyalVNCKit's modified D3DES source has
-ambiguous provenance for its VNC-specific changes; replace or clear that code
-with OSPO before shipping. See [`docs/macos-native-client.md`](../../docs/macos-native-client.md)
+The fork no longer bundles the modified D3DES source; VNC password
+authentication uses the operating system's CommonCrypto DES instead. See
+[`docs/macos-native-client.md`](../../docs/macos-native-client.md)
 for the complete boundary and product limitations.
