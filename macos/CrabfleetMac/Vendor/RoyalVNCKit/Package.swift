@@ -18,11 +18,10 @@ let package = Package(
     )
   ],
   targets: [
-    .target(name: "d3des"),
     .target(name: "Z", linkerSettings: [.linkedLibrary("z")]),
     .target(
       name: "RoyalVNCKit",
-      dependencies: ["d3des", "Z", "CryptoSwift"],
+      dependencies: ["Z", "CryptoSwift"],
       exclude: ["SDK/CSDK"],
       swiftSettings: [.swiftLanguageMode(.v5)],
       linkerSettings: [

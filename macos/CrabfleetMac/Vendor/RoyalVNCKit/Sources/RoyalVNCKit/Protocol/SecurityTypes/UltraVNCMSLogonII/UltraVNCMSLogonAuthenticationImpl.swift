@@ -4,8 +4,6 @@ import FoundationEssentials
 import Foundation
 #endif
 
-import d3des
-
 extension VNCProtocol.UltraVNCMSLogonIIAuthentication {
 	struct Authentication {
         let encryptedCredential: Data
@@ -83,71 +81,53 @@ private extension VNCProtocol.UltraVNCMSLogonIIAuthentication.Authentication {
 			return nil
 		}
 
-		var mutableKey = key
-
-		D3DESLock.shared.lock()
-		defer { D3DESLock.shared.unlock() }
-		let success = mutableKey.withUnsafeMutableBytes { keyBufferPtr in
-			guard let keyPtr = keyBufferPtr.baseAddress?.assumingMemoryBound(to: UInt8.self) else {
-				return false
-			}
-
-			let encryptSuccess = stringData.withUnsafeMutableBytes { stringDataBufferPtr in
-				guard let stringDataPtr = stringDataBufferPtr.baseAddress?.assumingMemoryBound(to: UInt8.self) else {
-					return false
-				}
-
-				encryptD3DES(target: stringDataPtr,
+		let keyBytes = Array(key.prefix(8))
+		guard keyBytes.count == 8,
+			  encryptBlocks(target: &stringData,
 							 length: length,
-							 key: keyPtr)
-
-				return true
-			}
-
-			return encryptSuccess
-		}
-
-		guard success else {
+							 key: keyBytes) else {
 			return nil
 		}
 
 		return stringData
 	}
 
-	static func encryptD3DES(target: UnsafeMutablePointer<UInt8>,
+	static func encryptBlocks(target: inout Data,
 							 length: Int,
-							 key: UnsafeMutablePointer<UInt8>) {
+							 key: [UInt8]) -> Bool {
 		for idx in 0..<8 {
 			target[idx] ^= key[idx]
 		}
 
-		encryptDES(target: target,
-				   key: key,
-				   source: target,
-				   sourceLength: 8)
+		guard encryptDES(target: &target,
+						 offset: 0,
+						 key: key) else {
+			return false
+		}
 
 		for idx in stride(from: 8, to: length, by: 8) {
 			for idxJ in 0..<8 {
 				target[idx + idxJ] ^= target[idx + idxJ - 8]
 			}
 
-			encryptDES(target: target + idx,
-					   key: key,
-					   source: target + idx,
-					   sourceLength: 8)
+			guard encryptDES(target: &target,
+							 offset: idx,
+							 key: key) else {
+				return false
+			}
 		}
+
+		return true
 	}
 
-	static func encryptDES(target: UnsafeMutablePointer<UInt8>,
-						   key: UnsafeMutablePointer<UInt8>,
-						   source: UnsafeMutablePointer<UInt8>,
-						   sourceLength: Int) {
-		deskey(key, EN0)
-
-		let eightByteBlocks = sourceLength / 8
-
-		for idx in 0..<eightByteBlocks {
-			des(source + idx * 8, target + idx * 8)
+	static func encryptDES(target: inout Data,
+						   offset: Int,
+						   key: [UInt8]) -> Bool {
+		let range = offset..<(offset + 8)
+		guard let encrypted = VNCDESEncryption.encryptBlocks(Data(target[range]), keyBytes: key) else {
+			return false
 		}
+		target.replaceSubrange(range, with: encrypted)
+		return true
 	}
 }
