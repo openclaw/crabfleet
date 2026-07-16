@@ -108,10 +108,10 @@ public final class VNCConnection: NSObjectOrAnyObject, @unchecked Sendable {
 	// MARK: - Private Properties
 	private let delegateLock = NSLock()
 	private weak var _delegate: VNCConnectionDelegate?
-		private let clipboardDelegateLock = NSLock()
-		private weak var _clipboardDelegate: VNCClipboardDelegate?
-		private let audioDelegateLock = NSLock()
-		private weak var _audioDelegate: VNCAudioDelegate?
+	private let clipboardDelegateLock = NSLock()
+	private weak var _clipboardDelegate: VNCClipboardDelegate?
+	private let audioDelegateLock = NSLock()
+	private weak var _audioDelegate: VNCAudioDelegate?
 	private let framebufferLock = NSLock()
 	private var _framebuffer: VNCFramebuffer?
 	let framebufferDeliveryLock = NSLock()
