@@ -37,6 +37,17 @@ enum VideoAnnexBCodec: Equatable {
 		}
 	}
 
+	func isIRAP(_ type: UInt8) -> Bool {
+		switch self {
+			case .h264: isIDR(type)
+			case .hevc: (16...21).contains(type)
+		}
+	}
+
+	func isRASL(_ type: UInt8) -> Bool {
+		self == .hevc && (type == 8 || type == 9)
+	}
+
 	func isAccessUnitSuffix(_ type: UInt8) -> Bool {
 		guard self == .hevc else { return false }
 		switch type {
@@ -128,14 +139,6 @@ struct OpenH264AnnexB {
 		return counts.reduce(0, +) <= maximumParameterSetBytes
 	}
 
-	static func containsIDR(_ nalUnits: [Data]) -> Bool {
-		nalUnits.contains { ($0.first ?? 0) & 0x1f == 5 }
-	}
-
-	static func containsIDR(_ nalUnits: [Data], codec: VideoAnnexBCodec) -> Bool {
-		nalUnits.contains { codec.isIDR(codec.nalType($0)) }
-	}
-
 	/// Groups NAL units into access units: an Open H.264 rectangle may carry
 	/// several whole frames glued together, and each must be decoded in order.
 	/// A slice with first_mb_in_slice == 0 begins a new primary picture, while
@@ -198,25 +201,37 @@ struct OpenH264AnnexB {
 
 struct OpenH264DecodeGate {
 	let codec: VideoAnnexBCodec
-	private(set) var waitingForIDR = true
+	private(set) var waitingForRandomAccess = true
+	private(set) var suppressingRASL = false
 
 	init(codec: VideoAnnexBCodec = .h264) {
 		self.codec = codec
 	}
 
 	mutating func reset() {
-		waitingForIDR = true
+		waitingForRandomAccess = true
+		suppressingRASL = false
 	}
 
 	mutating func shouldDecode(_ nalUnits: [Data]) -> Bool {
-		guard waitingForIDR else { return true }
-		guard OpenH264AnnexB.containsIDR(nalUnits, codec: codec) else { return false }
-		waitingForIDR = false
+		let nalTypes = nalUnits.map { codec.nalType($0) }
+		if waitingForRandomAccess {
+			guard nalTypes.contains(where: { codec.isIRAP($0) }) else { return false }
+			waitingForRandomAccess = false
+			suppressingRASL = codec == .hevc
+				&& !nalTypes.contains(where: { codec.isIDR($0) })
+			return true
+		}
+		guard suppressingRASL else { return true }
+		let sliceTypes = nalTypes.filter { codec.isSlice($0) }
+		guard !sliceTypes.contains(where: { codec.isRASL($0) }) else { return false }
+		// Any non-RASL VCL ends this recovery window, including RADL.
+		if !sliceTypes.isEmpty { suppressingRASL = false }
 		return true
 	}
 
 	mutating func decodeFailed() {
-		waitingForIDR = true
+		reset()
 	}
 }
 
