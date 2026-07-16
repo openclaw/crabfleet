@@ -188,9 +188,9 @@ export class H264Decoder {
 
   #configure(): void {
     if (!this.#sps || !this.#pps) throw new Error("H.264 frame arrived before SPS/PPS");
-    const hex = [...this.#sps.slice(1, 4)]
-      .map((byte) => byte.toString(16).padStart(2, "0"))
-      .join("");
+    const hex = Array.from(this.#sps.slice(1, 4), (byte) =>
+      byte.toString(16).padStart(2, "0"),
+    ).join("");
     this.#decoder!.configure({
       codec: `avc1.${hex}`,
       description: avcDescription(this.#sps, this.#pps),
