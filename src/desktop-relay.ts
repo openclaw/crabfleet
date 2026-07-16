@@ -12,6 +12,7 @@ export const desktopRelayMaximumMessageBytes = 512 * 1_024;
 export const desktopRelayMaximumBufferedBytes = 8 * 1_024;
 
 const webSocketOpen = 1;
+const webSocketClosed = 3;
 
 type DesktopRelayAttachment = {
   pending: ArrayBuffer[];
@@ -35,9 +36,9 @@ export function replaceDesktopRelayPeer(
 ): number {
   let replaced = 0;
   for (const peer of peers) {
-    if (peer.readyState > webSocketOpen) continue;
+    if (peer.readyState === webSocketClosed) continue;
     setDesktopRelayClosePropagation(peer, false);
-    peer.close(1000, `${role} replaced`);
+    if (peer.readyState <= webSocketOpen) peer.close(1000, `${role} replaced`);
     replaced += 1;
   }
   return replaced;
@@ -77,9 +78,9 @@ export function closeDesktopRelayPeers(
 ): number {
   let closed = 0;
   for (const peer of peers) {
-    if (peer.readyState > webSocketOpen) continue;
+    if (peer.readyState === webSocketClosed) continue;
     setDesktopRelayClosePropagation(peer, false);
-    peer.close(1000, `${role} disconnected`);
+    if (peer.readyState <= webSocketOpen) peer.close(1000, `${role} disconnected`);
     closed += 1;
   }
   return closed;

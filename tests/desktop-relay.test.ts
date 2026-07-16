@@ -147,6 +147,25 @@ test("desktop relay replaces one peer per role and closes the other role on disc
   assert.equal(desktopRelayRole([]), null);
 });
 
+test("desktop relay tears down pairings retained during closing handshakes", () => {
+  const closingHost = socket(2);
+  attachDesktopRelayPeer(closingHost, "host");
+  assert.equal(replaceDesktopRelayPeer([closingHost], "host"), 1);
+  assert.deepEqual(closingHost.closed, []);
+  assert.equal(desktopRelayShouldPropagateClose(closingHost), false);
+
+  const closingViewer = socket(2);
+  attachDesktopRelayPeer(closingViewer, "viewer");
+  assert.equal(closeDesktopRelayPeers([closingViewer], "host"), 1);
+  assert.deepEqual(closingViewer.closed, []);
+  assert.equal(desktopRelayShouldPropagateClose(closingViewer), false);
+
+  const closedHost = socket(3);
+  attachDesktopRelayPeer(closedHost, "host");
+  assert.equal(replaceDesktopRelayPeer([closedHost], "host"), 0);
+  assert.equal(desktopRelayShouldPropagateClose(closedHost), true);
+});
+
 test("desktop relay passes binary messages verbatim in either direction", () => {
   const host = socket();
   const viewer = socket();
