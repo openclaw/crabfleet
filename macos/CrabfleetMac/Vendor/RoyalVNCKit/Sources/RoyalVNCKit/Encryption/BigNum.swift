@@ -1,170 +1,75 @@
 #if canImport(FoundationEssentials)
-import FoundationEssentials
+  import FoundationEssentials
 #else
-import Foundation
+  import Foundation
 #endif
 
-// MARK: - CryptoSwift Implementation
-import CryptoSwift
-
 final class BigNum {
-    private var bigInt: BigUInteger
+  private var bigInt: VNCBigUInt
 
-    init() {
-        self.bigInt = .init()
-    }
+  init() {
+    self.bigInt = VNCBigUInt()
+  }
 
-    init?(data: Data) {
-        self.bigInt = .init(data)
-    }
+  init?(data: Data) {
+    self.bigInt = VNCBigUInt(bigEndianData: data)
+  }
+
+  private init(_ value: VNCBigUInt) {
+    self.bigInt = value
+  }
 }
 
 extension BigNum {
-    var isGreaterThanOne: Bool {
-        self.bigInt > 1
-    }
+  var isGreaterThanOne: Bool {
+    bigInt > VNCBigUInt(1)
+  }
 
-    func isValidDiffieHellmanElement(modulus: BigNum) -> Bool {
-        guard modulus.bigInt > 2 else { return false }
-        return self.bigInt > 1 && self.bigInt < modulus.bigInt - 1
-    }
+  func isValidDiffieHellmanElement(modulus: BigNum) -> Bool {
+    guard modulus.bigInt > VNCBigUInt(2) else { return false }
+    return bigInt > VNCBigUInt(1) && bigInt < modulus.bigInt - VNCBigUInt(1)
+  }
 
-    var isZero: Bool {
-        let isIt = self.bigInt == 0
+  var isZero: Bool {
+    bigInt.isZero
+  }
 
-        return isIt
-    }
+  var bytesCount: Int32 {
+    Int32(bigInt.bigEndianData.count)
+  }
 
-    var bytesCount: Int32 {
-        let count = self.bigInt.serialize().count
+  var bitsCount: Int32 {
+    Int32(bigInt.bitWidth)
+  }
 
-        return .init(count)
-    }
+  func rand(range: BigNum) -> Bool {
+    guard let random = VNCBigUInt.random(lessThan: range.bigInt) else { return false }
+    bigInt = random
+    return true
+  }
 
-    var bitsCount: Int32 {
-        let count = self.bigInt.bitWidth
+  static func modExp(
+    y: BigNum,
+    g: BigNum,
+    x: BigNum,
+    p: BigNum
+  ) -> Bool {
+    // Montgomery reduction requires an odd modulus; fail instead of trapping.
+    guard !p.bigInt.isZero, p.bigInt.isOdd else { return false }
+    y.bigInt = VNCBigUInt.modPow(base: g.bigInt, exponent: x.bigInt, modulus: p.bigInt)
+    return true
+  }
 
-        return .init(count)
-    }
+  func isProbablePrime(rounds: Int) -> Bool {
+    bigInt.isProbablePrime(rounds: rounds)
+  }
 
-    func rand(range: BigNum) -> Bool {
-        self.bigInt = CS.BigUInt.randomInteger(lessThan: range.bigInt)
+  var halvedPredecessor: BigNum? {
+    guard !bigInt.isZero else { return nil }
+    return BigNum((bigInt - VNCBigUInt(1)).shiftedRight(1))
+  }
 
-        return true
-    }
-
-    static func modExp(y: BigNum,
-                       g: BigNum,
-                       x: BigNum,
-                       p: BigNum) -> Bool {
-        y.bigInt = g.bigInt.power(x.bigInt, modulus: p.bigInt)
-
-        return true
-    }
-
-    func bigEndianData() -> Data? {
-        let data = self.bigInt.serialize()
-
-        return data
-    }
+  func bigEndianData() -> Data? {
+    bigInt.bigEndianData
+  }
 }
-
-
-// MARK: - libtommath Implementation
-//@_implementationOnly import libtommath
-//
-//final class BigNum {
-//	private let num: UnsafeMutablePointer<BIGNUM>
-//	private let backingDataPointer: UnsafeMutablePointer<UInt8>?
-//
-//	init() {
-//		self.num = BN_new()
-//		self.backingDataPointer = nil
-//	}
-//
-//	init?(data: Data) {
-//		let dataLength = data.count
-//
-//		let backingDataPtr = UnsafeMutablePointer<UInt8>.allocate(capacity: dataLength)
-//		data.copyBytes(to: backingDataPtr, count: dataLength)
-//
-//		guard let num = BN_bin2bn(backingDataPtr, .init(dataLength), nil) else {
-//			backingDataPtr.deallocate()
-//
-//			return nil
-//		}
-//
-//		self.num = num
-//		self.backingDataPointer = backingDataPtr
-//	}
-//
-//	deinit {
-//		backingDataPointer?.deallocate()
-//
-//		BN_free(num)
-//	}
-//}
-//
-//extension BigNum {
-//	var isZero: Bool {
-//		let isItNum = BN_is_zero(num)
-//		let isIt = isItNum != 0
-//
-//		return isIt
-//	}
-//
-//	var bytesCount: Int32 {
-//		let count = BN_num_bytes(num)
-//
-//		return count
-//	}
-//
-//	var bitsCount: Int32 {
-//		let count = BN_num_bits(num)
-//
-//		return count
-//	}
-//
-//	func rand(range: BigNum) -> Bool {
-//		let successNum = BN_rand_range(num, range.num)
-//		let success = successNum != 0
-//
-//		return success
-//	}
-//
-//	static func modExp(y: BigNum,
-//					   g: BigNum,
-//					   x: BigNum,
-//					   p: BigNum) -> Bool {
-//		let successNum = BN_mod_exp(y.num,
-//									g.num,
-//									x.num,
-//									p.num)
-//
-//		let success = successNum != 0
-//
-//		return success
-//	}
-//
-//	func bigEndianData() -> Data? {
-//		let expectedLength = bytesCount
-//
-//		var data = Data(count: .init(expectedLength))
-//
-//		let actualLength = data.withUnsafeMutableBytes { dataBufferPtr in
-//			guard let dataPtr = dataBufferPtr.baseAddress?.assumingMemoryBound(to: UInt8.self) else {
-//				return 0
-//			}
-//
-//			let convertedLength = BN_bn2bin(num, dataPtr)
-//
-//			return .init(convertedLength)
-//		}
-//
-//		guard actualLength == expectedLength else {
-//			return nil
-//		}
-//
-//		return data
-//	}
-//}

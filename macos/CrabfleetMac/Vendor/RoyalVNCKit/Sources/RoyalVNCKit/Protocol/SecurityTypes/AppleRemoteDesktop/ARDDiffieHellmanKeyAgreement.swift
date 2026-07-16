@@ -3,7 +3,6 @@ import FoundationEssentials
 #else
 import Foundation
 #endif
-import CryptoSwift
 
 extension VNCProtocol.ARDAuthentication {
 	struct DiffieHellmanKeyAgreement {
@@ -126,8 +125,9 @@ private extension VNCProtocol.ARDAuthentication.DiffieHellmanKeyAgreement {
 		safePrimeValidations.insert(data)
 		safePrimeCondition.unlock()
 
-		let prime = CS.BigUInt(data)
-		let valid = prime.isPrime(rounds: 16) && ((prime - 1) >> 1).isPrime(rounds: 16)
+		let prime = BigNum(data: data)
+		let valid = prime?.isProbablePrime(rounds: 16) == true
+			&& prime?.halvedPredecessor?.isProbablePrime(rounds: 16) == true
 
 		safePrimeCondition.lock()
 		safePrimeValidations.remove(data)

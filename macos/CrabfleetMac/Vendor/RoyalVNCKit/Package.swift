@@ -11,17 +11,11 @@ let package = Package(
   products: [
     .library(name: "RoyalVNCKit", type: .dynamic, targets: ["RoyalVNCKit"])
   ],
-  dependencies: [
-    .package(
-      url: "https://github.com/royalapplications/CryptoSwift.git",
-      revision: "a59b4d91ebb22011656c830f874fe7152e183a57"
-    )
-  ],
   targets: [
     .target(name: "Z", linkerSettings: [.linkedLibrary("z")]),
     .target(
       name: "RoyalVNCKit",
-      dependencies: ["Z", "CryptoSwift"],
+      dependencies: ["Z"],
       exclude: ["SDK/CSDK"],
       swiftSettings: [.swiftLanguageMode(.v5)],
       linkerSettings: [
