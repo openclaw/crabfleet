@@ -94,3 +94,59 @@ struct RemoteAudioJitterBufferTests {
     .init(timestampMs: timestampMs, payload: Data([UInt8(truncatingIfNeeded: timestampMs)]))
   }
 }
+
+struct AudioSendDeadlineTests {
+  @Test
+  func queuedExpiredSendNeverStarts() async {
+    let waiter = QueuedSendWaiter(deadline: ContinuousClock().now)
+
+    #expect(!waiter.beginSending())
+    await #expect(throws: RFBSendExpiredError.self) {
+      try await waiter.wait()
+    }
+  }
+
+  @Test
+  func lateSuccessfulSendDoesNotBecomeSessionFailure() async throws {
+    let clock = AudioDeadlineTestClock()
+    let waiter = QueuedSendWaiter(
+      deadline: clock.now.advanced(by: .milliseconds(10)),
+      now: { clock.now })
+
+    #expect(waiter.beginSending())
+    clock.advance(by: .milliseconds(20))
+    waiter.complete(.success(()))
+
+    try await waiter.wait()
+  }
+
+  @Test
+  func expiryWhileSendIsInFlightIsANonfatalDrop() async {
+    let waiter = QueuedSendWaiter(
+      deadline: ContinuousClock().now.advanced(by: .seconds(1)))
+
+    #expect(waiter.beginSending())
+    waiter.expire()
+    await #expect(throws: RFBSendExpiredError.self) {
+      try await waiter.wait()
+    }
+
+    waiter.complete(.success(()))
+    await #expect(throws: RFBSendExpiredError.self) {
+      try await waiter.wait()
+    }
+  }
+}
+
+private final class AudioDeadlineTestClock: @unchecked Sendable {
+  private let lock = NSLock()
+  private var value = ContinuousClock().now
+
+  var now: ContinuousClock.Instant {
+    lock.withLock { value }
+  }
+
+  func advance(by duration: Duration) {
+    lock.withLock { value = value.advanced(by: duration) }
+  }
+}
