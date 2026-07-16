@@ -1318,24 +1318,41 @@ private struct RFBConnectionIO: Sendable {
   }
 }
 
-private actor RFBSendQueue {
-  private let connection: NWConnection
+actor RFBSendQueue {
+  private static let maximumPendingDeadlineSends = 2
+  private let sendData: @Sendable (Data) async throws -> Void
   private var tail = Task<Result<Void, Error>, Never> { .success(()) }
+  private(set) var pendingDeadlineSendCount = 0
 
   init(connection: NWConnection) {
-    self.connection = connection
+    sendData = { data in try await Self.send(data, connection: connection) }
+  }
+
+  init(sendData: @escaping @Sendable (Data) async throws -> Void) {
+    self.sendData = sendData
   }
 
   func send(_ data: Data, deadline: ContinuousClock.Instant?) async throws {
+    if deadline != nil {
+      guard pendingDeadlineSendCount < Self.maximumPendingDeadlineSends else {
+        throw RFBSendExpiredError()
+      }
+      pendingDeadlineSendCount += 1
+    }
     let predecessor = tail
-    let connection = connection
+    let sendData = sendData
     let waiter = deadline.map { QueuedSendWaiter(deadline: $0) }
     let operation = Task<Result<Void, Error>, Never> {
+      defer {
+        if waiter != nil {
+          pendingDeadlineSendCount -= 1
+        }
+      }
       _ = await predecessor.value
       guard waiter?.beginSending() != false else { return .success(()) }
       let result: Result<Void, Error>
       do {
-        try await Self.send(data, connection: connection)
+        try await sendData(data)
         result = .success(())
       } catch {
         result = .failure(error)

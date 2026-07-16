@@ -66,10 +66,11 @@ final class RemoteAudioPlayer: @unchecked Sendable {
     let magicCookie: Data
   }
 
-  private let queue = DispatchQueue(label: "org.openclaw.crabfleet.remote-audio")
+  private let queue: DispatchQueue
   private let inputLock = NSLock()
+  private let muteLock = NSLock()
   private let engine = AVAudioEngine()
-  private let player = AVAudioPlayerNode()
+  private let player: AVAudioPlayerNode
   private var engineConfigurationObserver: NSObjectProtocol?
   private var pendingMessages: [VNCAudioMessage] = []
   private var isDrainingMessages = false
@@ -83,7 +84,12 @@ final class RemoteAudioPlayer: @unchecked Sendable {
   private var playbackGeneration: UInt64 = 0
   private var isEngineGraphDirty = false
 
-  init() {
+  init(
+    player: AVAudioPlayerNode = AVAudioPlayerNode(),
+    queue: DispatchQueue = DispatchQueue(label: "org.openclaw.crabfleet.remote-audio")
+  ) {
+    self.player = player
+    self.queue = queue
     engine.attach(player)
     engineConfigurationObserver = NotificationCenter.default.addObserver(
       forName: .AVAudioEngineConfigurationChange,
@@ -122,9 +128,9 @@ final class RemoteAudioPlayer: @unchecked Sendable {
   }
 
   func setMuted(_ muted: Bool) {
-    queue.async { [weak self] in
-      self?.isMuted = muted
-      self?.player.volume = muted ? 0 : 1
+    muteLock.withLock {
+      isMuted = muted
+      player.volume = muted ? 0 : 1
     }
   }
 
@@ -191,7 +197,7 @@ final class RemoteAudioPlayer: @unchecked Sendable {
       stopNow()
       return
     }
-    player.volume = isMuted ? 0 : 1
+    applyMuteState()
     jitterBuffer = RemoteAudioJitterBuffer(sampleRate: configuration.sampleRate)
   }
 
@@ -274,11 +280,15 @@ final class RemoteAudioPlayer: @unchecked Sendable {
     do {
       try engine.start()
       isEngineGraphDirty = false
-      player.volume = isMuted ? 0 : 1
+      applyMuteState()
       return true
     } catch {
       return false
     }
+  }
+
+  private func applyMuteState() {
+    muteLock.withLock { player.volume = isMuted ? 0 : 1 }
   }
 
   private func resetPlaybackQueue() {
