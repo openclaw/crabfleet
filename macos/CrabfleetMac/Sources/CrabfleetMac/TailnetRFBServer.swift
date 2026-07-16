@@ -274,7 +274,7 @@ private final class RFBHostSession: @unchecked Sendable {
   private var currentWidth: Int
   private var currentHeight: Int
   private var videoEncoder: MacVideoEncoder?
-  private var videoFrameMailbox: VideoMailbox<EncodedVideoFrame>?
+  private var videoFrameMailbox: VideoMailbox<MacVideoEncoderOutput>?
   private var videoPixelMailbox: VideoMailbox<VideoPixelSource>?
   private var videoFrameConsumer: Task<Void, Never>?
   private var hevcPathBroken = false
@@ -1292,16 +1292,16 @@ private final class RFBHostSession: @unchecked Sendable {
   }
 
   private func startVideoFrameConsumer(for encoder: MacVideoEncoder) {
-    let mailbox = VideoMailbox<EncodedVideoFrame>()
+    let mailbox = VideoMailbox<MacVideoEncoderOutput>()
     let consumer = Task { [weak self] in
-      for await frame in encoder.frames {
-        // With one frame in flight a drop cannot happen; if it ever does the
-        // client missed pixels, so resync with a keyframe.
-        mailbox.offer(frame, onDrop: { self?.requestKeyframe() })
+      for await output in encoder.frames {
+        // Mailbox overflow is distinct from VideoToolbox's explicit dropped
+        // output: either way the next encoded frame must resynchronize.
+        mailbox.offer(output, onDrop: { self?.requestKeyframe() })
       }
       mailbox.finish()
     }
-    let previous = withLock { () -> (Task<Void, Never>?, VideoMailbox<EncodedVideoFrame>?) in
+    let previous = withLock { () -> (Task<Void, Never>?, VideoMailbox<MacVideoEncoderOutput>?) in
       defer {
         videoFrameConsumer = consumer
         videoFrameMailbox = mailbox
@@ -1313,7 +1313,7 @@ private final class RFBHostSession: @unchecked Sendable {
   }
 
   private func stopVideoFrameConsumer() {
-    let previous = withLock { () -> (Task<Void, Never>?, VideoMailbox<EncodedVideoFrame>?) in
+    let previous = withLock { () -> (Task<Void, Never>?, VideoMailbox<MacVideoEncoderOutput>?) in
       defer {
         videoFrameConsumer = nil
         videoFrameMailbox = nil
@@ -1405,7 +1405,15 @@ private final class RFBHostSession: @unchecked Sendable {
       return .idle
     }
 
-    while let frame = await encodedMailbox.next(timeout: .seconds(1)) {
+    while let output = await encodedMailbox.next(timeout: .seconds(1)) {
+      guard case .frame(let frame) = output else {
+        requestKeyframe()
+        if isIdleRefresh {
+          applyCurrentTargetBitrate(to: encoder)
+          idleRefreshPolicy.refreshFailed()
+        }
+        return .idle
+      }
       guard frame.width >= currentWidth, frame.height >= currentHeight,
         frame.width <= currentWidth + 15, frame.height <= currentHeight + 15
       else { continue }

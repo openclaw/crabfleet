@@ -189,6 +189,7 @@ struct VideoPipelineTests {
         hardwareAccelerated: true,
         maximumFrameQPAvailable: false,
         maximumFrameQPRequested: false) == "HEVC hw")
+    #expect(MacVideoEncoderOutput.dropped.requiresKeyframeRecovery)
   }
 
   @Test

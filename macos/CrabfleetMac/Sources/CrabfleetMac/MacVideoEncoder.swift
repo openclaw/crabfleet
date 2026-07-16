@@ -9,6 +9,16 @@ struct EncodedVideoFrame: Sendable {
   let height: Int
 }
 
+enum MacVideoEncoderOutput: Sendable {
+  case frame(EncodedVideoFrame)
+  case dropped
+
+  var requiresKeyframeRecovery: Bool {
+    if case .dropped = self { return true }
+    return false
+  }
+}
+
 enum MacVideoCodec: Equatable, Sendable {
   case h264
   case hevc
@@ -63,10 +73,10 @@ struct VideoKeyframePolicy: Sendable {
 final class MacVideoEncoder: @unchecked Sendable {
   let codec: MacVideoCodec
   let isHardwareAccelerated: Bool
-  let frames: AsyncStream<EncodedVideoFrame>
+  let frames: AsyncStream<MacVideoEncoderOutput>
 
   private let lock = NSLock()
-  private let continuation: AsyncStream<EncodedVideoFrame>.Continuation
+  private let continuation: AsyncStream<MacVideoEncoderOutput>.Continuation
   private let callbackContext: CallbackContext
   private let configuredWidth: Int
   private let configuredHeight: Int
@@ -87,7 +97,7 @@ final class MacVideoEncoder: @unchecked Sendable {
     codec: MacVideoCodec = .h264,
     maximumFrameQP: Int? = 40
   ) throws {
-    let stream = AsyncStream<EncodedVideoFrame>.makeStream(
+    let stream = AsyncStream<MacVideoEncoderOutput>.makeStream(
       bufferingPolicy: .bufferingNewest(2))
     frames = stream.stream
     continuation = stream.continuation
@@ -333,34 +343,40 @@ final class MacVideoEncoder: @unchecked Sendable {
       context.continuation.finish()
       return
     }
-    guard !infoFlags.contains(.frameDropped), let sampleBuffer else { return }
+    if infoFlags.contains(.frameDropped) {
+      context.yield(.dropped)
+      return
+    }
+    guard let sampleBuffer else { return }
     do {
       let frame = try MacVideoEncoder.encodedFrame(from: sampleBuffer, codec: context.codec)
-      context.yield(frame)
+      context.yield(.frame(frame))
     } catch {
       context.continuation.finish()
     }
   }
 
   private final class CallbackContext: @unchecked Sendable {
-    let continuation: AsyncStream<EncodedVideoFrame>.Continuation
+    let continuation: AsyncStream<MacVideoEncoderOutput>.Continuation
     let codec: MacVideoCodec
     private let lock = NSLock()
     private var needsKeyframe = false
 
     init(
-      continuation: AsyncStream<EncodedVideoFrame>.Continuation,
+      continuation: AsyncStream<MacVideoEncoderOutput>.Continuation,
       codec: MacVideoCodec
     ) {
       self.continuation = continuation
       self.codec = codec
     }
 
-    func yield(_ frame: EncodedVideoFrame) {
+    func yield(_ output: MacVideoEncoderOutput) {
       lock.lock()
       defer { lock.unlock() }
-      switch continuation.yield(frame) {
-      case .enqueued, .terminated:
+      switch continuation.yield(output) {
+      case .enqueued:
+        if output.requiresKeyframeRecovery { needsKeyframe = true }
+      case .terminated:
         break
       case .dropped:
         // The consumer never saw this frame, so later deltas would reference
