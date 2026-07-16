@@ -4,6 +4,7 @@ import test from "node:test";
 import {
   RFBClient,
   RFB_ENCODINGS,
+  decodeClipboardProvide,
   encodeSetEncodings,
   encodeTightCompactLength,
   readBoundedStream,
@@ -182,10 +183,10 @@ test("legacy clipboard fallback rejects text over 1 MiB", async () => {
   assert.equal(transport.sent.length, 0);
 });
 
-test("extended clipboard Request receives Provide regardless of unsolicited maximum", async () => {
+test("remote clipboard reads expose only snapshots approved by explicit sends", async () => {
   const name = new TextEncoder().encode("Studio");
-  const requestBody = uint32((1 << 25) | 1);
-  const transcript = bytes(
+  const transport = new InteractiveTransport();
+  transport.append(
     new TextEncoder().encode("RFB 003.008\n"),
     [1, 1],
     uint32(0),
@@ -194,24 +195,40 @@ test("extended clipboard Request receives Provide regardless of unsolicited maxi
     new Uint8Array(16),
     uint32(name.byteLength),
     name,
-    [3, 0, 0, 0],
-    uint32(-requestBody.byteLength),
-    requestBody,
   );
-  const transport = new ScriptedTransport(transcript);
-  const client = new RFBClient(transport, {
-    h264: false,
-    readClipboard: async () => "hello 🦀",
-  });
-  await assert.rejects(client.start(), /scripted server ended/);
-  const response = transport.sent.filter((message) => message[0] === 6).at(-1);
-  assert.ok(response);
-  const view = new DataView(response.buffer, response.byteOffset, response.byteLength);
-  assert.ok(view.getInt32(4) < 0);
-  assert.equal(view.getUint32(8), (1 << 28) | 1);
+  const client = new RFBClient(transport, { h264: false });
+  const running = client.start();
+  await waitForSent(transport, 6);
+
+  transport.append(serverClipboardAction((1 << 25) | 1));
+  await waitForSent(transport, 7);
+  assert.equal(await clipboardResponseText(transport.sent[6]!), "");
+
+  transport.append(serverClipboardAction(1 << 26));
+  await waitForSent(transport, 8);
+  assert.equal(clipboardNotifyHasText(transport.sent[7]!), false);
+
+  let draft = "approved text";
+  await client.sendClipboardText(draft);
+  draft = "edited but not sent";
+  transport.append(serverClipboardAction((1 << 25) | 1));
+  await waitForSent(transport, 10);
+  assert.equal(await clipboardResponseText(transport.sent[9]!), "approved text");
+
+  transport.append(serverClipboardAction(1 << 26));
+  await waitForSent(transport, 11);
+  assert.equal(clipboardNotifyHasText(transport.sent[10]!), true);
+
+  await client.sendClipboardText(draft);
+  transport.append(serverClipboardAction((1 << 25) | 1));
+  await waitForSent(transport, 13);
+  assert.equal(await clipboardResponseText(transport.sent[12]!), "edited but not sent");
+
+  transport.end();
+  await assert.rejects(running, /scripted server ended/);
 });
 
-test("clipboard transfer errors do not terminate framebuffer processing", async () => {
+test("rejected clipboard text is not approved for later remote requests", async () => {
   const name = new TextEncoder().encode("Studio");
   const requestBody = uint32((1 << 25) | 1);
   const transcript = bytes(
@@ -232,11 +249,14 @@ test("clipboard transfer errors do not terminate framebuffer processing", async 
   const clipboardErrors: string[] = [];
   const client = new RFBClient(transport, {
     h264: false,
-    readClipboard: async () => "x".repeat(1_048_576),
     onClipboardError: (message) => clipboardErrors.push(message),
   });
+  await assert.rejects(client.sendClipboardText("x".repeat(1_048_577)), /exceeds 1 MiB/);
   await assert.rejects(client.start(), /scripted server ended/);
-  assert.deepEqual(clipboardErrors, ["clipboard text exceeds 1 MiB"]);
+  const response = transport.sent.filter((message) => message[0] === 6).at(-1);
+  assert.ok(response);
+  assert.equal(await clipboardResponseText(response), "");
+  assert.deepEqual(clipboardErrors, []);
   assert.deepEqual(transport.sent.at(-1), framebufferRequest(true, 800, 600));
 });
 
@@ -261,6 +281,91 @@ class ScriptedTransport implements RFBTransport {
   }
 
   close(): void {}
+}
+
+class InteractiveTransport implements RFBTransport {
+  readonly sent: Uint8Array[] = [];
+  #incoming = new Uint8Array();
+  #ended = false;
+  #pending:
+    | {
+        count: number;
+        resolve: (value: Uint8Array) => void;
+        reject: (error: Error) => void;
+      }
+    | undefined;
+
+  append(...parts: Array<Uint8Array | number[]>): void {
+    this.#incoming = bytes(this.#incoming, ...parts);
+    this.#drain();
+  }
+
+  end(): void {
+    this.#ended = true;
+    this.#drain();
+  }
+
+  readExactly(count: number): Promise<Uint8Array> {
+    assert.equal(this.#pending, undefined);
+    return new Promise((resolve, reject) => {
+      this.#pending = { count, resolve, reject };
+      this.#drain();
+    });
+  }
+
+  send(data: Uint8Array): void {
+    this.sent.push(data.slice());
+  }
+
+  close(): void {
+    this.end();
+  }
+
+  #drain(): void {
+    const pending = this.#pending;
+    if (!pending) return;
+    if (this.#incoming.byteLength >= pending.count) {
+      const result = this.#incoming.slice(0, pending.count);
+      this.#incoming = this.#incoming.slice(pending.count);
+      this.#pending = undefined;
+      pending.resolve(result);
+    } else if (this.#ended) {
+      this.#pending = undefined;
+      pending.reject(new Error("scripted server ended"));
+    }
+  }
+}
+
+function serverClipboardAction(flags: number): Uint8Array {
+  const body = uint32(flags);
+  return bytes([3, 0, 0, 0], uint32(-body.byteLength), body);
+}
+
+async function clipboardResponseText(frame: Uint8Array): Promise<string | null> {
+  const view = new DataView(frame.buffer, frame.byteOffset, frame.byteLength);
+  const length = view.getInt32(4);
+  if (length >= 0) return new TextDecoder("latin1").decode(frame.subarray(8, 8 + length));
+  const body = frame.subarray(8, 8 - length);
+  assert.equal(
+    new DataView(body.buffer, body.byteOffset, body.byteLength).getUint32(0),
+    (1 << 28) | 1,
+  );
+  return await decodeClipboardProvide(body.subarray(4));
+}
+
+function clipboardNotifyHasText(frame: Uint8Array): boolean {
+  const view = new DataView(frame.buffer, frame.byteOffset, frame.byteLength);
+  assert.equal(view.getInt32(4), -4);
+  const flags = view.getUint32(8);
+  assert.equal(flags & 0xff000000, 1 << 27);
+  return Boolean(flags & 1);
+}
+
+async function waitForSent(transport: InteractiveTransport, count: number): Promise<void> {
+  for (let attempt = 0; attempt < 100 && transport.sent.length < count; attempt += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  }
+  assert.equal(transport.sent.length, count);
 }
 
 function framebufferRequest(incremental: boolean, width: number, height: number): Uint8Array {

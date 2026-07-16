@@ -28,7 +28,6 @@ export function DesktopViewer({ host, onExit }) {
   const pressedKeysRef = useRef(new Map());
   const pointerRef = useRef({ x: 0, y: 0, buttonsDown: false });
   const pendingResizeRef = useRef(null);
-  const clipboardRef = useRef("");
   const [connectionState, setConnectionState] = useState("Preparing decoder");
   const [serverName, setServerName] = useState(host?.name || host?.id || "Desktop");
   const [codec, setCodec] = useState("Detecting");
@@ -132,7 +131,6 @@ export function DesktopViewer({ host, onExit }) {
           setCodec(frame.encoding === "h264" ? "H.264 / WebCodecs" : "JPEG / Tight");
         },
         onClipboard: async (text) => {
-          clipboardRef.current = text;
           setManualClipboard(text);
           try {
             await navigator.clipboard.writeText(text);
@@ -142,9 +140,6 @@ export function DesktopViewer({ host, onExit }) {
           }
         },
         onClipboardError: setClipboardNotice,
-        readClipboard: async () => {
-          return clipboardRef.current;
-        },
       });
       sessionRef.current = client;
       try {
@@ -233,7 +228,6 @@ export function DesktopViewer({ host, onExit }) {
   const pasteSystemClipboard = async () => {
     try {
       const text = await navigator.clipboard.readText();
-      clipboardRef.current = text;
       setManualClipboard(text);
       setClipboardNotice("System clipboard loaded; press Send to share it");
     } catch {
@@ -371,10 +365,7 @@ export function DesktopViewer({ host, onExit }) {
           id="desktop-clipboard-text"
           value={manualClipboard}
           placeholder="Paste text here when browser clipboard permission is unavailable"
-          onInput={(event) => {
-            clipboardRef.current = event.currentTarget.value;
-            setManualClipboard(event.currentTarget.value);
-          }}
+          onInput={(event) => setManualClipboard(event.currentTarget.value)}
         />
         <button onClick={sendClipboard}>Send to Mac</button>
         <button onClick={pasteSystemClipboard}>Load system clipboard</button>

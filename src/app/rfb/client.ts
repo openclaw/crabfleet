@@ -43,7 +43,6 @@ export interface RFBClientOptions {
   onResize?: (width: number, height: number) => void;
   onClipboard?: (text: string) => void;
   onClipboardError?: (message: string) => void;
-  readClipboard?: () => Promise<string>;
   onTraffic?: (bytes: number) => void;
 }
 
@@ -64,6 +63,7 @@ export class RFBClient {
   #screenLayout: RFBScreenLayout | null = null;
   #pendingResize: { width: number; height: number } | null = null;
   #h264Enabled: boolean;
+  #approvedClipboardText: string | null = null;
 
   constructor(transport: RFBTransport, options: RFBClientOptions) {
     this.transport = transport;
@@ -150,13 +150,14 @@ export class RFBClient {
       canCompress
     ) {
       await this.#sendClipboardProvide(text);
-      return;
+    } else {
+      const latin1 = encodeLatin1(text);
+      if (latin1) this.transport.send(cutTextFrame(6, latin1, false));
+      else if (this.#serverClipboardActions & clipboardNotify && canCompress)
+        this.transport.send(cutTextFrame(6, encodeClipboardNotify(true)));
+      else throw new Error("this browser cannot encode the remote clipboard text");
     }
-    const latin1 = encodeLatin1(text);
-    if (latin1) this.transport.send(cutTextFrame(6, latin1, false));
-    else if (this.#serverClipboardActions & clipboardNotify && canCompress)
-      this.transport.send(cutTextFrame(6, encodeClipboardNotify(true)));
-    else throw new Error("this browser cannot encode the remote clipboard text");
+    this.#approvedClipboardText = text;
   }
 
   async #handshake(): Promise<void> {
@@ -331,11 +332,11 @@ export class RFBClient {
     } else if (action === clipboardNotify && hasText) {
       this.transport.send(cutTextFrame(6, encodeClipboardRequest()));
     } else if (action === clipboardRequest && hasText) {
-      const text = (await this.#options.readClipboard?.()) ?? "";
-      await this.#sendClipboardProvide(text);
+      await this.#sendClipboardProvide(this.#approvedClipboardText ?? "");
     } else if (action === clipboardPeek) {
-      const text = (await this.#options.readClipboard?.()) ?? "";
-      this.transport.send(cutTextFrame(6, encodeClipboardNotify(Boolean(text))));
+      this.transport.send(
+        cutTextFrame(6, encodeClipboardNotify(Boolean(this.#approvedClipboardText))),
+      );
     } else if (action === clipboardProvide && hasText) {
       const text = await decodeClipboardProvide(body.subarray(4));
       if (text !== null) this.#options.onClipboard?.(text);
@@ -417,7 +418,7 @@ async function encodeClipboardProvide(text: string): Promise<Uint8Array> {
   return concat(uint32(clipboardProvide | clipboardText), compressed);
 }
 
-async function decodeClipboardProvide(compressed: Uint8Array): Promise<string | null> {
+export async function decodeClipboardProvide(compressed: Uint8Array): Promise<string | null> {
   if (typeof DecompressionStream === "undefined") return null;
   const bytes = await transformBytes(
     compressed,
