@@ -142,7 +142,10 @@ export class RFBClient {
 
   async sendClipboardText(text: string): Promise<void> {
     const utf8 = new TextEncoder().encode(normalizeClipboardText(text));
-    if (utf8.byteLength > maximumClipboardBytes) throw new Error("clipboard text exceeds 1 MiB");
+    // Extended Clipboard appends a NUL terminator; bound on the wire size so the
+    // notify fallback cannot report success for text a later provide must reject.
+    if (utf8.byteLength + 1 > maximumClipboardBytes)
+      throw new Error("clipboard text exceeds 1 MiB");
     const canCompress = typeof CompressionStream !== "undefined";
     if (
       this.#serverClipboardActions & clipboardProvide &&

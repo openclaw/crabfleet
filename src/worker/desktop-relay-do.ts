@@ -42,7 +42,11 @@ export class DesktopRelayDO extends DurableObject<RuntimeEnv> {
 
   override webSocketError(socket: WebSocket): void {
     const role = desktopRelayRole(this.ctx.getTags(socket));
-    if (role) closeDesktopRelayPeers(this.ctx.getWebSockets(this.oppositeTag(role)), role);
+    // A replaced peer can error after its suppressed close; without the
+    // propagation check that late error would tear down the new pairing.
+    if (role && desktopRelayShouldPropagateClose(socket)) {
+      closeDesktopRelayPeers(this.ctx.getWebSockets(this.oppositeTag(role)), role);
+    }
     socket.close(1011, "relay peer error");
   }
 
