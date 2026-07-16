@@ -40,6 +40,21 @@ struct VideoPipelineTests {
   }
 
   @Test
+  func crabfleetHEVCUpdateMatchesVideoWireFormat() throws {
+    let payload = Data([0, 0, 0, 1, 0x26, 0x01, 0xAA])
+    let update = try RFBWire.crabfleetHEVCUpdate(
+      width: 1_280,
+      height: 720,
+      payload: payload,
+      flags: 0x2)
+
+    #expect(update.readInt32(at: 12) == RFBWire.crabfleetHEVCEncoding)
+    #expect(update.readUInt32(at: 16) == UInt32(payload.count))
+    #expect(update.readUInt32(at: 20) == 0x2)
+    #expect(update.suffix(payload.count) == payload)
+  }
+
+  @Test
   func convertsLengthPrefixedNALUnitsToAnnexB() throws {
     let input = Data([0, 0, 0, 2, 0x41, 0x01, 0, 0, 0, 3, 0x65, 0x02, 0x03])
     let output = try MacVideoEncoder.annexBData(
@@ -190,14 +205,23 @@ struct VideoPipelineTests {
   }
 
   @Test
-  func openH264NegotiationPrefersVideoAndFallsBackToTight() {
+  func videoNegotiationPrefersHEVCThenH264ThenTight() {
+    let offered = [
+      RFBWire.tightEncoding,
+      RFBWire.openH264Encoding,
+      RFBWire.crabfleetHEVCEncoding,
+    ]
+    #expect(
+      RFBWire.preferredFrameEncoding(from: offered) == .crabfleetHEVC)
     #expect(
       RFBWire.preferredFrameEncoding(
-        from: [RFBWire.tightEncoding, RFBWire.openH264Encoding]) == .openH264)
+        from: offered,
+        hevcPathBroken: true) == .openH264)
     #expect(
       RFBWire.preferredFrameEncoding(
-        from: [RFBWire.tightEncoding, RFBWire.openH264Encoding],
-        videoPathBroken: true) == .tight)
+        from: offered,
+        hevcPathBroken: true,
+        h264PathBroken: true) == .tight)
     #expect(RFBWire.preferredFrameEncoding(from: [RFBWire.tightEncoding]) == .tight)
     #expect(RFBWire.preferredFrameEncoding(from: [5]) == nil)
   }

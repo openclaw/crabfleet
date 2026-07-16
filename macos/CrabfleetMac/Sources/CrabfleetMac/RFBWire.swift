@@ -103,12 +103,14 @@ enum RFBWire {
   static let tightEncoding: Int32 = 7
   static let openH264Encoding: Int32 = 50
   static let crabfleetAudioEncoding: Int32 = 0x4341_4631
+  static let crabfleetHEVCEncoding: Int32 = 0x4845_5631
   static let extendedDesktopSizeEncoding: Int32 = -308
   static let extendedClipboardEncoding = Int32(bitPattern: 0xc0a1_e5ce)
   static let maximumClipboardBytes = 1 * 1_024 * 1_024
   static let maximumAudioPayloadBytes = 64 * 1_024
 
   enum FrameEncodingSelection: Equatable, Sendable {
+    case crabfleetHEVC
     case openH264
     case tight
   }
@@ -139,9 +141,11 @@ enum RFBWire {
 
   static func preferredFrameEncoding(
     from encodings: [Int32],
-    videoPathBroken: Bool = false
+    hevcPathBroken: Bool = false,
+    h264PathBroken: Bool = false
   ) -> FrameEncodingSelection? {
-    if !videoPathBroken, encodings.contains(openH264Encoding) { return .openH264 }
+    if !hevcPathBroken, encodings.contains(crabfleetHEVCEncoding) { return .crabfleetHEVC }
+    if !h264PathBroken, encodings.contains(openH264Encoding) { return .openH264 }
     if encodings.contains(tightEncoding) { return .tight }
     return nil
   }
@@ -225,13 +229,45 @@ enum RFBWire {
     payload: Data,
     flags: UInt32
   ) throws -> Data {
+    try videoUpdate(
+      width: width,
+      height: height,
+      payload: payload,
+      flags: flags,
+      encoding: openH264Encoding,
+      errorDescription: "invalid Open H.264 frame")
+  }
+
+  static func crabfleetHEVCUpdate(
+    width: Int,
+    height: Int,
+    payload: Data,
+    flags: UInt32
+  ) throws -> Data {
+    try videoUpdate(
+      width: width,
+      height: height,
+      payload: payload,
+      flags: flags,
+      encoding: crabfleetHEVCEncoding,
+      errorDescription: "invalid Crabfleet HEVC frame")
+  }
+
+  private static func videoUpdate(
+    width: Int,
+    height: Int,
+    payload: Data,
+    flags: UInt32,
+    encoding: Int32,
+    errorDescription: String
+  ) throws -> Data {
     guard
       (1...Int(UInt16.max)).contains(width),
       (1...Int(UInt16.max)).contains(height),
       !payload.isEmpty,
       payload.count < 16 * 1_024 * 1_024
     else {
-      throw PrivateMacShareError.protocolError("invalid Open H.264 frame")
+      throw PrivateMacShareError.protocolError(errorDescription)
     }
 
     var data = Data(capacity: payload.count + 24)
@@ -242,7 +278,7 @@ enum RFBWire {
     data.appendBigEndian(UInt16(0))
     data.appendBigEndian(UInt16(width))
     data.appendBigEndian(UInt16(height))
-    data.appendBigEndian(openH264Encoding)
+    data.appendBigEndian(encoding)
     data.appendBigEndian(UInt32(payload.count))
     data.appendBigEndian(flags)
     data.append(payload)

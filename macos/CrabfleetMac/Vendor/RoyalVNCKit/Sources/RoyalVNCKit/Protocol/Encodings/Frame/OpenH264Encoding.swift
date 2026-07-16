@@ -4,6 +4,40 @@ import FoundationEssentials
 import Foundation
 #endif
 
+enum VideoAnnexBCodec: Equatable {
+	case h264
+	case hevc
+
+	var encodingType: VNCEncodingType {
+		switch self {
+			case .h264: VNCFrameEncodingType.openH264.rawValue
+			case .hevc: VNCFrameEncodingType.crabfleetHEVC.rawValue
+		}
+	}
+
+	func nalType(_ unit: Data) -> UInt8 {
+		guard let first = unit.first else { return 0xff }
+		switch self {
+			case .h264: return first & 0x1f
+			case .hevc: return (first >> 1) & 0x3f
+		}
+	}
+
+	func isSlice(_ type: UInt8) -> Bool {
+		switch self {
+			case .h264: (1...5).contains(type)
+			case .hevc: type <= 31
+		}
+	}
+
+	func isIDR(_ type: UInt8) -> Bool {
+		switch self {
+			case .h264: type == 5
+			case .hevc: (16...21).contains(type)
+		}
+	}
+}
+
 struct OpenH264AnnexB {
 	static let maximumNALUnitCount = 4_096
 	static let maximumParameterSetBytes = 64 * 1_024
@@ -54,6 +88,24 @@ struct OpenH264AnnexB {
 		return (sps, pps)
 	}
 
+	static func videoParameterSets(
+		in nalUnits: [Data],
+		codec: VideoAnnexBCodec
+	) -> (vps: Data?, sps: Data?, pps: Data?) {
+		var vps: Data?
+		var sps: Data?
+		var pps: Data?
+		for unit in nalUnits {
+			switch (codec, codec.nalType(unit)) {
+				case (.h264, 7), (.hevc, 33): sps = unit
+				case (.h264, 8), (.hevc, 34): pps = unit
+				case (.hevc, 32): vps = unit
+				default: break
+			}
+		}
+		return (vps, sps, pps)
+	}
+
 	static func parameterSetsFitLimit(sps: Data?, pps: Data?) -> Bool {
 		let spsCount = sps?.count ?? 0
 		let ppsCount = pps?.count ?? 0
@@ -62,23 +114,36 @@ struct OpenH264AnnexB {
 		return spsCount <= maximumParameterSetBytes - ppsCount
 	}
 
+	static func parameterSetsFitLimit(vps: Data?, sps: Data?, pps: Data?) -> Bool {
+		let counts = [vps, sps, pps].map { $0?.count ?? 0 }
+		guard counts.allSatisfy({ $0 <= maximumParameterSetBytes }) else { return false }
+		return counts.reduce(0, +) <= maximumParameterSetBytes
+	}
+
 	static func containsIDR(_ nalUnits: [Data]) -> Bool {
 		nalUnits.contains { ($0.first ?? 0) & 0x1f == 5 }
+	}
+
+	static func containsIDR(_ nalUnits: [Data], codec: VideoAnnexBCodec) -> Bool {
+		nalUnits.contains { codec.isIDR(codec.nalType($0)) }
 	}
 
 	/// Groups NAL units into access units: an Open H.264 rectangle may carry
 	/// several whole frames glued together, and each must be decoded in order.
 	/// A slice with first_mb_in_slice == 0 begins a new primary picture, while
 	/// non-VCL units (SPS/PPS/SEI/AUD) after a slice belong to the next one.
-	static func accessUnits(from nalUnits: [Data]) -> [[Data]] {
+	static func accessUnits(
+		from nalUnits: [Data],
+		codec: VideoAnnexBCodec = .h264
+	) -> [[Data]] {
 		var units: [[Data]] = []
 		var current: [Data] = []
 		var currentHasSlice = false
 		for nalUnit in nalUnits {
-			let nalType = (nalUnit.first ?? 0) & 0x1f
-			let isSlice = nalType >= 1 && nalType <= 5
+			let nalType = codec.nalType(nalUnit)
+			let isSlice = codec.isSlice(nalType)
 			let beginsNewUnit = currentHasSlice
-				&& (!isSlice || firstMacroblockInSliceIsZero(nalUnit))
+				&& (!isSlice || firstSliceIsZero(nalUnit, codec: codec))
 			if beginsNewUnit {
 				units.append(current)
 				current = []
@@ -99,6 +164,15 @@ struct OpenH264AnnexB {
 		return nalUnit[nalUnit.index(after: nalUnit.startIndex)] & 0x80 != 0
 	}
 
+	static func firstSliceIsZero(_ nalUnit: Data, codec: VideoAnnexBCodec) -> Bool {
+		switch codec {
+			case .h264: return firstMacroblockInSliceIsZero(nalUnit)
+			case .hevc:
+				guard nalUnit.count >= 3 else { return true }
+				return nalUnit[nalUnit.index(nalUnit.startIndex, offsetBy: 2)] & 0x80 != 0
+		}
+	}
+
 	static func avccData(from nalUnits: [Data]) -> Data? {
 		guard !nalUnits.isEmpty else { return nil }
 		var data = Data()
@@ -113,7 +187,12 @@ struct OpenH264AnnexB {
 }
 
 struct OpenH264DecodeGate {
+	let codec: VideoAnnexBCodec
 	private(set) var waitingForIDR = true
+
+	init(codec: VideoAnnexBCodec = .h264) {
+		self.codec = codec
+	}
 
 	mutating func reset() {
 		waitingForIDR = true
@@ -121,7 +200,7 @@ struct OpenH264DecodeGate {
 
 	mutating func shouldDecode(_ nalUnits: [Data]) -> Bool {
 		guard waitingForIDR else { return true }
-		guard OpenH264AnnexB.containsIDR(nalUnits) else { return false }
+		guard OpenH264AnnexB.containsIDR(nalUnits, codec: codec) else { return false }
 		waitingForIDR = false
 		return true
 	}
@@ -138,7 +217,13 @@ import VideoToolbox
 
 extension VNCProtocol {
 	final class OpenH264Encoding: VNCFrameEncoding {
-		let encodingType = VNCFrameEncodingType.openH264.rawValue
+		let encodingType: VNCEncodingType
+		let codec: VideoAnnexBCodec
+
+		init(codec: VideoAnnexBCodec = .h264) {
+			self.codec = codec
+			encodingType = codec.encodingType
+		}
 
 		private struct Geometry: Hashable {
 			let x: UInt16
@@ -150,10 +235,15 @@ extension VNCProtocol {
 		private final class DecoderContext {
 			var decoderSession: VTDecompressionSession?
 			var formatDescription: CMVideoFormatDescription?
+			var vps: Data?
 			var sps: Data?
 			var pps: Data?
-			var decodeGate = OpenH264DecodeGate()
+			var decodeGate: OpenH264DecodeGate
 			var codedByteCount = 0
+
+			init(codec: VideoAnnexBCodec) {
+				decodeGate = OpenH264DecodeGate(codec: codec)
+			}
 		}
 
 		private var contexts: [Geometry: DecoderContext] = [:]
@@ -198,14 +288,14 @@ extension VNCProtocol {
 			}
 			let context = context(for: newGeometry)
 			guard !nalUnits.isEmpty else {
-				logger.logError("Open H.264 frame has no Annex-B NAL units")
+				logger.logError("Video frame has no Annex-B NAL units")
 				context.decodeGate.decodeFailed()
 				return
 			}
 			// A rectangle may contain several whole frames; decode all of them
 			// in order to keep the decoder's reference state, display the last.
 			var lastImageBuffer: CVPixelBuffer?
-			for accessUnit in OpenH264AnnexB.accessUnits(from: nalUnits) {
+			for accessUnit in OpenH264AnnexB.accessUnits(from: nalUnits, codec: codec) {
 				guard updateParameterSets(in: accessUnit, context: context, logger: logger) else {
 					return
 				}
@@ -241,7 +331,7 @@ extension VNCProtocol {
 						data: avccData, formatDescription: formatDescription)
 					lastImageBuffer = try decode(sampleBuffer, with: decoderSession)
 				} catch {
-					logger.logError("Open H.264 decode failed: \(error.localizedDescription)")
+					logger.logError("VideoToolbox decode failed: \(error.localizedDescription)")
 					context.decodeGate.decodeFailed()
 					invalidateDecoder(context)
 					break
@@ -257,13 +347,13 @@ extension VNCProtocol {
 				framebuffer.update(region: rectangle.region, data: &pixels)
 				framebuffer.didUpdate(region: rectangle.region)
 			} catch {
-				logger.logError("Open H.264 blit failed: \(error.localizedDescription)")
+				logger.logError("VideoToolbox blit failed: \(error.localizedDescription)")
 				context.decodeGate.decodeFailed()
 				invalidateDecoder(context)
 			}
 		}
 
-		/// Applies SPS/PPS carried by one access unit, resetting the decoder
+		/// Applies codec parameter sets carried by one access unit, resetting the decoder
 		/// on change. Returns false when resource limits are exceeded and the
 		/// rest of the rectangle payload should be dropped.
 		private func updateParameterSets(
@@ -271,20 +361,27 @@ extension VNCProtocol {
 			context: DecoderContext,
 			logger: VNCLogger
 		) -> Bool {
-			let parameterSets = OpenH264AnnexB.parameterSets(in: accessUnit)
+			let parameterSets = OpenH264AnnexB.videoParameterSets(in: accessUnit, codec: codec)
+			let candidateVPS = parameterSets.vps ?? context.vps
 			let candidateSPS = parameterSets.sps ?? context.sps
 			let candidatePPS = parameterSets.pps ?? context.pps
 			guard OpenH264AnnexB.parameterSetsFitLimit(
+				vps: candidateVPS,
 				sps: candidateSPS,
 				pps: candidatePPS) else {
-				logger.logError("Open H.264 parameter sets exceed the resource limit")
+				logger.logError("Video parameter sets exceed the resource limit")
 				context.decodeGate.decodeFailed()
 				invalidateDecoder(context)
+				context.vps = nil
 				context.sps = nil
 				context.pps = nil
 				return false
 			}
 			var needsReset = false
+			if let newVPS = parameterSets.vps, newVPS != context.vps {
+				context.vps = newVPS
+				needsReset = true
+			}
 			if let newSPS = parameterSets.sps, newSPS != context.sps {
 				context.sps = newSPS
 				needsReset = true
@@ -327,7 +424,7 @@ extension VNCProtocol {
 				contextOrder.removeFirst()
 				invalidateDecoder(oldestContext)
 			}
-			let context = DecoderContext()
+			let context = DecoderContext(codec: codec)
 			contexts[geometry] = context
 			contextOrder.append(geometry)
 			return context
@@ -337,6 +434,12 @@ extension VNCProtocol {
 			-> CMVideoFormatDescription {
 			guard let sps = context.sps, let pps = context.pps else {
 				throw OpenH264DecodeError.missingParameterSets
+			}
+			if codec == .hevc {
+				guard let vps = context.vps else {
+					throw OpenH264DecodeError.missingParameterSets
+				}
+				return try makeHEVCFormatDescription(vps: vps, sps: sps, pps: pps)
 			}
 			return try sps.withUnsafeBytes { spsBytes in
 				try pps.withUnsafeBytes { ppsBytes in
@@ -358,6 +461,36 @@ extension VNCProtocol {
 						throw OpenH264DecodeError.videoToolbox(status)
 					}
 					return description
+				}
+			}
+		}
+
+		private func makeHEVCFormatDescription(vps: Data, sps: Data, pps: Data) throws
+			-> CMVideoFormatDescription {
+			try vps.withUnsafeBytes { vpsBytes in
+				try sps.withUnsafeBytes { spsBytes in
+					try pps.withUnsafeBytes { ppsBytes in
+						guard let vpsBase = vpsBytes.bindMemory(to: UInt8.self).baseAddress,
+							  let spsBase = spsBytes.bindMemory(to: UInt8.self).baseAddress,
+							  let ppsBase = ppsBytes.bindMemory(to: UInt8.self).baseAddress else {
+							throw OpenH264DecodeError.invalidParameterSets
+						}
+						var pointers: [UnsafePointer<UInt8>] = [vpsBase, spsBase, ppsBase]
+						var sizes = [vps.count, sps.count, pps.count]
+						var description: CMFormatDescription?
+						let status = CMVideoFormatDescriptionCreateFromHEVCParameterSets(
+							allocator: kCFAllocatorDefault,
+							parameterSetCount: 3,
+							parameterSetPointers: &pointers,
+							parameterSetSizes: &sizes,
+							nalUnitHeaderLength: 4,
+							extensions: nil,
+							formatDescriptionOut: &description)
+						guard status == noErr, let description else {
+							throw OpenH264DecodeError.videoToolbox(status)
+						}
+						return description
+					}
 				}
 			}
 		}
@@ -539,7 +672,11 @@ private final class DecodeOutputBox: @unchecked Sendable {
 #else
 extension VNCProtocol {
 	final class OpenH264Encoding: VNCFrameEncoding {
-		let encodingType = VNCFrameEncodingType.openH264.rawValue
+		let encodingType: VNCEncodingType
+
+		init(codec: VideoAnnexBCodec = .h264) {
+			encodingType = codec.encodingType
+		}
 
 		static func supportsPixelFormat(_ pixelFormat: VNCProtocol.PixelFormat) -> Bool {
 			false

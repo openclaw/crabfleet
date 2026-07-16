@@ -19,6 +19,7 @@ public enum _ObjC_VNCFrameEncodingType: Int64 {
 	case zrle = 16
 	case openH264 = 50
 	case crabfleetAudio = 0x43414631
+	case crabfleetHEVC = 0x48455631
 }
 
 public enum VNCFrameEncodingType: VNCEncodingType {
@@ -32,6 +33,7 @@ public enum VNCFrameEncodingType: VNCEncodingType {
 	case zrle = 16
 	case openH264 = 50
 	case crabfleetAudio = 0x43414631
+	case crabfleetHEVC = 0x48455631
 }
 
 extension VNCFrameEncodingType: CustomStringConvertible {
@@ -57,6 +59,8 @@ extension VNCFrameEncodingType: CustomStringConvertible {
 				"Open H.264"
 			case .crabfleetAudio:
 				"Crabfleet Audio"
+			case .crabfleetHEVC:
+				"Crabfleet HEVC"
 		}
 	}
 }
@@ -146,6 +150,8 @@ extension VNCFrameEncodingType {
 				.openH264
 			case .crabfleetAudio:
 				.crabfleetAudio
+			case .crabfleetHEVC:
+				.crabfleetHEVC
 		}
 	}
 }

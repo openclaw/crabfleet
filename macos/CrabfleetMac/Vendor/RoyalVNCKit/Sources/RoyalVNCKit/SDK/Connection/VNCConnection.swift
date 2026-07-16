@@ -229,6 +229,7 @@ public final class VNCConnection: NSObjectOrAnyObject, @unchecked Sendable {
 		]
 #if canImport(VideoToolbox)
 		encs[VNCFrameEncodingType.openH264.rawValue] = VNCProtocol.OpenH264Encoding()
+		encs[VNCFrameEncodingType.crabfleetHEVC.rawValue] = VNCProtocol.OpenH264Encoding(codec: .hevc)
 #endif
 		let requestedFrameEncodings = Set(settings.frameEncodings.map(\.rawValue))
 		let mandatoryFrameEncodings: Set<VNCEncodingType> = [
@@ -283,8 +284,14 @@ public final class VNCConnection: NSObjectOrAnyObject, @unchecked Sendable {
 		   !VNCProtocol.OpenH264Encoding.supportsPixelFormat(pixelFormat) {
 			customizedFrameEncodings.removeAll(where: { $0 == VNCFrameEncodingType.openH264.rawValue })
 		}
+		if let pixelFormat = negotiatedPixelFormat,
+		   customizedFrameEncodings.contains(VNCFrameEncodingType.crabfleetHEVC.rawValue),
+		   !VNCProtocol.OpenH264Encoding.supportsPixelFormat(pixelFormat) {
+			customizedFrameEncodings.removeAll(where: { $0 == VNCFrameEncodingType.crabfleetHEVC.rawValue })
+		}
 #else
 		customizedFrameEncodings.removeAll(where: { $0 == VNCFrameEncodingType.openH264.rawValue })
+		customizedFrameEncodings.removeAll(where: { $0 == VNCFrameEncodingType.crabfleetHEVC.rawValue })
 #endif
 
 		let usesTightEncoding = customizedFrameEncodings.contains(VNCFrameEncodingType.tight.rawValue)

@@ -205,6 +205,7 @@ private final class RFBHostSession: @unchecked Sendable {
 
   // Negotiated per-connection state; only the protocol task mutates it.
   private var supportsTightEncoding = false
+  private var supportsCrabfleetHEVC = false
   private var supportsOpenH264 = false
   private var supportsExtendedDesktopSize = false
   private var supportsExtendedClipboard = false
@@ -218,7 +219,8 @@ private final class RFBHostSession: @unchecked Sendable {
   private var videoFrameMailbox: VideoMailbox<EncodedVideoFrame>?
   private var videoPixelMailbox: VideoMailbox<VideoPixelSource>?
   private var videoFrameConsumer: Task<Void, Never>?
-  private var videoPathBroken = false
+  private var hevcPathBroken = false
+  private var h264PathBroken = false
   private var needsContextReset = false
   private var forceNextKeyframe = false
   private var rateController = VideoRateController()
@@ -432,7 +434,7 @@ private final class RFBHostSession: @unchecked Sendable {
     var hasSentJPEGFrame = false
     var lastSentJPEGSequence: UInt64 = 0
 
-    while !Task.isCancelled {
+    protocolLoop: while !Task.isCancelled {
       let messageType = try await io.readUInt8()
       switch messageType {
       case 0:  // SetPixelFormat
@@ -451,6 +453,7 @@ private final class RFBHostSession: @unchecked Sendable {
         let encodingData = try await io.readExactly(count * 4)
         let encodings = (0..<count).map { encodingData.readInt32(at: $0 * 4) }
         supportsTightEncoding = encodings.contains(RFBWire.tightEncoding)
+        supportsCrabfleetHEVC = encodings.contains(RFBWire.crabfleetHEVCEncoding)
         supportsOpenH264 = encodings.contains(RFBWire.openH264Encoding)
         if encodings.contains(RFBWire.extendedDesktopSizeEncoding),
           !supportsExtendedDesktopSize
@@ -462,8 +465,10 @@ private final class RFBHostSession: @unchecked Sendable {
           supportsExtendedClipboard = encodings.contains(RFBWire.extendedClipboardEncoding)
           supportsCrabfleetAudio = encodings.contains(RFBWire.crabfleetAudioEncoding)
         }
-        if !supportsOpenH264 {
-          if activeVideoEncoder != nil { await stopVideoPath(markBroken: false) }
+        if let activeCodec = activeVideoEncoder?.codec, activeCodec != selectedVideoCodec {
+          await stopVideoPath(markBroken: nil)
+        }
+        if !supportsCrabfleetHEVC, !supportsOpenH264 {
           if supportsTightEncoding { try await prepareTightFallback(io: io) }
         }
         try await sendServerClipboardCapsIfNeeded(io: io)
@@ -485,15 +490,13 @@ private final class RFBHostSession: @unchecked Sendable {
               height: currentHeight
             ))
         }
-        if selectedFrameEncoding == .openH264 {
+        while let codec = selectedVideoCodec {
           if activeVideoEncoder == nil {
             do {
-              try await startVideoPath()
+              try await startVideoPath(codec: codec)
             } catch {
-              await stopVideoPath(markBroken: true)
-              if supportsTightEncoding {
-                try await prepareTightFallback(io: io)
-              }
+              await stopVideoPath(markBroken: codec)
+              continue
             }
           }
           if let encoder = activeVideoEncoder {
@@ -501,37 +504,35 @@ private final class RFBHostSession: @unchecked Sendable {
             switch await nextVideoUpdate(encoder: encoder) {
             case .frame(let frame):
               let flags: UInt32 = needsContextReset ? 0x2 : 0
-              let update = try RFBWire.openH264Update(
-                width: currentWidth,
-                height: currentHeight,
-                payload: frame.data,
-                flags: flags)
+              let update = try videoUpdate(frame: frame, codec: codec, flags: flags)
               let sendSeconds = try await timedSend(update, io: io)
               needsContextReset = false
               recordFrameStats(
                 byteCount: frame.data.count,
                 sendSeconds: sendSeconds,
-                codec: "H.264",
+                codec: codec == .hevc ? "HEVC" : "H.264",
                 hardwareAccelerated: encoder.isHardwareAccelerated,
                 encoder: encoder)
-              continue
+              continue protocolLoop
             case .idle:
               // Nothing changed on screen; answer the request anyway so the
               // client's request loop and input keep flowing.
               try await io.send(RFBWire.emptyUpdate())
-              emitStatsIfDue(codec: "H.264", hardwareAccelerated: encoder.isHardwareAccelerated)
-              continue
+              emitStatsIfDue(
+                codec: codec == .hevc ? "HEVC" : "H.264",
+                hardwareAccelerated: encoder.isHardwareAccelerated)
+              continue protocolLoop
             case .failed:
-              await stopVideoPath(markBroken: true)
-              if supportsTightEncoding {
-                try await prepareTightFallback(io: io)
-              }
+              await stopVideoPath(markBroken: codec)
             }
           }
         }
 
+        if supportsTightEncoding { try await prepareTightFallback(io: io) }
+
         guard selectedFrameEncoding == .tight else {
-          throw PrivateMacShareError.protocolError("the Open H.264 encoder failed and Tight was not offered")
+          throw PrivateMacShareError.protocolError(
+            "the HEVC and Open H.264 encoders failed and Tight was not offered")
         }
         if hasSentJPEGFrame { try await Task.sleep(for: .milliseconds(66)) }
         let frame = try await waitForMatchingFrame()
@@ -687,14 +688,14 @@ private final class RFBHostSession: @unchecked Sendable {
     }
 
     let videoWasActive = activeVideoEncoder != nil
-    let isUsingH264 = selectedFrameEncoding == .openH264
+    let isUsingVideo = selectedVideoCodec != nil
     let target = MacScreenCapture.resizedDimensions(
       requestedWidth: requestedWidth,
       requestedHeight: requestedHeight,
       sourcePixelWidth: descriptor.sourcePixelWidth,
       sourcePixelHeight: descriptor.sourcePixelHeight,
-      maximumWidth: isUsingH264 ? 4_096 : 2_560,
-      maximumHeight: isUsingH264 ? 2_304 : 1_600
+      maximumWidth: isUsingVideo ? 4_096 : 2_560,
+      maximumHeight: isUsingVideo ? 2_304 : 1_600
     )
 
     if target.width == currentWidth, target.height == currentHeight {
@@ -727,23 +728,36 @@ private final class RFBHostSession: @unchecked Sendable {
     input.updateFrameSize(width: target.width, height: target.height)
     if videoWasActive {
       do {
-        try await restartVideoPath()
-      } catch {
-        await stopVideoPath(markBroken: true)
-        guard supportsTightEncoding else {
-          throw PrivateMacShareError.protocolError(
-            "the Open H.264 encoder failed after resize and Tight was not offered")
+        guard let codec = selectedVideoCodec else {
+          throw PrivateMacShareError.protocolError("video encoding is unavailable")
         }
-        let tightTarget = MacScreenCapture.resizedDimensions(
-          requestedWidth: requestedWidth,
-          requestedHeight: requestedHeight,
-          sourcePixelWidth: descriptor.sourcePixelWidth,
-          sourcePixelHeight: descriptor.sourcePixelHeight)
-        if tightTarget.width != currentWidth || tightTarget.height != currentHeight {
-          try await capture.updateOutputSize(width: tightTarget.width, height: tightTarget.height)
-          currentWidth = tightTarget.width
-          currentHeight = tightTarget.height
-          input.updateFrameSize(width: currentWidth, height: currentHeight)
+        try await restartVideoPath(codec: codec)
+      } catch {
+        let failedCodec = activeVideoEncoder?.codec ?? selectedVideoCodec
+        await stopVideoPath(markBroken: failedCodec)
+        if let fallbackCodec = selectedVideoCodec {
+          do {
+            try await startVideoPath(codec: fallbackCodec)
+          } catch {
+            await stopVideoPath(markBroken: fallbackCodec)
+          }
+        }
+        if activeVideoEncoder == nil {
+          guard supportsTightEncoding else {
+            throw PrivateMacShareError.protocolError(
+              "the video encoder failed after resize and Tight was not offered")
+          }
+          let tightTarget = MacScreenCapture.resizedDimensions(
+            requestedWidth: requestedWidth,
+            requestedHeight: requestedHeight,
+            sourcePixelWidth: descriptor.sourcePixelWidth,
+            sourcePixelHeight: descriptor.sourcePixelHeight)
+          if tightTarget.width != currentWidth || tightTarget.height != currentHeight {
+            try await capture.updateOutputSize(width: tightTarget.width, height: tightTarget.height)
+            currentWidth = tightTarget.width
+            currentHeight = tightTarget.height
+            input.updateFrameSize(width: currentWidth, height: currentHeight)
+          }
         }
       }
     }
@@ -897,10 +911,10 @@ private final class RFBHostSession: @unchecked Sendable {
 
   /// Captured pixel buffers flow into a latest-wins mailbox and are encoded
   /// one at a time as the connection drains: every encoded frame is sent, so
-  /// the H.264 reference chain stays intact and stale frames are dropped
+  /// the inter-frame reference chain stays intact and stale frames are dropped
   /// before they cost encoder time.
-  private func startVideoPath() async throws {
-    let encoder = try MacVideoEncoder(width: currentWidth, height: currentHeight)
+  private func startVideoPath(codec: MacVideoCodec) async throws {
+    let encoder = try MacVideoEncoder(width: currentWidth, height: currentHeight, codec: codec)
     let pixelMailbox = VideoMailbox<VideoPixelSource>()
     _ = replaceVideoEncoder(with: encoder)
     withLock { videoPixelMailbox = pixelMailbox }
@@ -925,16 +939,20 @@ private final class RFBHostSession: @unchecked Sendable {
     }
   }
 
-  private func restartVideoPath() async throws {
+  private func restartVideoPath(codec: MacVideoCodec) async throws {
     capture.setVideoFrameHandler(nil)
     stopVideoFrameConsumer()
     finishPixelMailbox()
     replaceVideoEncoder(with: nil)?.invalidate()
-    try await startVideoPath()
+    try await startVideoPath(codec: codec)
   }
 
-  private func stopVideoPath(markBroken: Bool) async {
-    if markBroken { videoPathBroken = true }
+  private func stopVideoPath(markBroken codec: MacVideoCodec?) async {
+    switch codec {
+    case .hevc: hevcPathBroken = true
+    case .h264: h264PathBroken = true
+    case nil: break
+    }
     capture.setVideoFrameHandler(nil)
     stopVideoFrameConsumer()
     finishPixelMailbox()
@@ -978,10 +996,36 @@ private final class RFBHostSession: @unchecked Sendable {
 
   private var selectedFrameEncoding: RFBWire.FrameEncodingSelection? {
     var encodings: [Int32] = []
+    if supportsCrabfleetHEVC { encodings.append(RFBWire.crabfleetHEVCEncoding) }
     if supportsOpenH264 { encodings.append(RFBWire.openH264Encoding) }
     if supportsTightEncoding { encodings.append(RFBWire.tightEncoding) }
     return RFBWire.preferredFrameEncoding(
-      from: encodings, videoPathBroken: videoPathBroken)
+      from: encodings,
+      hevcPathBroken: hevcPathBroken,
+      h264PathBroken: h264PathBroken)
+  }
+
+  private var selectedVideoCodec: MacVideoCodec? {
+    switch selectedFrameEncoding {
+    case .crabfleetHEVC: .hevc
+    case .openH264: .h264
+    case .tight, nil: nil
+    }
+  }
+
+  private func videoUpdate(
+    frame: EncodedVideoFrame,
+    codec: MacVideoCodec,
+    flags: UInt32
+  ) throws -> Data {
+    switch codec {
+    case .h264:
+      try RFBWire.openH264Update(
+        width: currentWidth, height: currentHeight, payload: frame.data, flags: flags)
+    case .hevc:
+      try RFBWire.crabfleetHEVCUpdate(
+        width: currentWidth, height: currentHeight, payload: frame.data, flags: flags)
+    }
   }
 
   private var activeVideoEncoder: MacVideoEncoder? {

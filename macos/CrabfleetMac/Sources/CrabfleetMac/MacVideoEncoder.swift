@@ -9,6 +9,25 @@ struct EncodedVideoFrame: Sendable {
   let height: Int
 }
 
+enum MacVideoCodec: Equatable, Sendable {
+  case h264
+  case hevc
+
+  var videoToolboxType: CMVideoCodecType {
+    switch self {
+    case .h264: kCMVideoCodecType_H264
+    case .hevc: kCMVideoCodecType_HEVC
+    }
+  }
+
+  var profileLevel: CFString {
+    switch self {
+    case .h264: kVTProfileLevel_H264_ConstrainedBaseline_AutoLevel
+    case .hevc: kVTProfileLevel_HEVC_Main_AutoLevel
+    }
+  }
+}
+
 enum MacVideoEncoderError: Error {
   case creationFailed(OSStatus)
   case invalidSample
@@ -41,6 +60,7 @@ struct VideoKeyframePolicy: Sendable {
 }
 
 final class MacVideoEncoder: @unchecked Sendable {
+  let codec: MacVideoCodec
   let isHardwareAccelerated: Bool
   let frames: AsyncStream<EncodedVideoFrame>
 
@@ -54,12 +74,13 @@ final class MacVideoEncoder: @unchecked Sendable {
   private var keyframePolicy = VideoKeyframePolicy()
   private var lastPresentationTime: CMTime?
 
-  init(width: Int, height: Int) throws {
+  init(width: Int, height: Int, codec: MacVideoCodec = .h264) throws {
     let stream = AsyncStream<EncodedVideoFrame>.makeStream(
       bufferingPolicy: .bufferingNewest(2))
     frames = stream.stream
     continuation = stream.continuation
-    callbackContext = CallbackContext(continuation: stream.continuation)
+    self.codec = codec
+    callbackContext = CallbackContext(continuation: stream.continuation, codec: codec)
     configuredWidth = width
     configuredHeight = height
 
@@ -76,7 +97,7 @@ final class MacVideoEncoder: @unchecked Sendable {
       allocator: kCFAllocatorDefault,
       width: Int32(width),
       height: Int32(height),
-      codecType: kCMVideoCodecType_H264,
+      codecType: codec.videoToolboxType,
       encoderSpecification: lowLatencySpecification,
       imageBufferAttributes: nil,
       compressedDataAllocator: nil,
@@ -91,7 +112,7 @@ final class MacVideoEncoder: @unchecked Sendable {
         allocator: kCFAllocatorDefault,
         width: Int32(width),
         height: Int32(height),
-        codecType: kCMVideoCodecType_H264,
+        codecType: codec.videoToolboxType,
         encoderSpecification: hardwareSpecification,
         imageBufferAttributes: nil,
         compressedDataAllocator: nil,
@@ -105,7 +126,7 @@ final class MacVideoEncoder: @unchecked Sendable {
         allocator: kCFAllocatorDefault,
         width: Int32(width),
         height: Int32(height),
-        codecType: kCMVideoCodecType_H264,
+        codecType: codec.videoToolboxType,
         encoderSpecification: nil,
         imageBufferAttributes: nil,
         compressedDataAllocator: nil,
@@ -121,12 +142,10 @@ final class MacVideoEncoder: @unchecked Sendable {
 
     session = createdSession
     Self.setProperty(createdSession, key: kVTCompressionPropertyKey_RealTime, value: true)
-    // The Open H.264 RFB encoding prescribes the baseline profile; third-party
-    // viewers may not decode anything richer.
     Self.setProperty(
       createdSession,
       key: kVTCompressionPropertyKey_ProfileLevel,
-      value: kVTProfileLevel_H264_ConstrainedBaseline_AutoLevel)
+      value: codec.profileLevel)
     Self.setProperty(
       createdSession, key: kVTCompressionPropertyKey_AllowFrameReordering, value: false)
     Self.setProperty(
@@ -269,7 +288,7 @@ final class MacVideoEncoder: @unchecked Sendable {
     }
     guard !infoFlags.contains(.frameDropped), let sampleBuffer else { return }
     do {
-      let frame = try MacVideoEncoder.encodedFrame(from: sampleBuffer)
+      let frame = try MacVideoEncoder.encodedFrame(from: sampleBuffer, codec: context.codec)
       context.yield(frame)
     } catch {
       context.continuation.finish()
@@ -278,11 +297,16 @@ final class MacVideoEncoder: @unchecked Sendable {
 
   private final class CallbackContext: @unchecked Sendable {
     let continuation: AsyncStream<EncodedVideoFrame>.Continuation
+    let codec: MacVideoCodec
     private let lock = NSLock()
     private var needsKeyframe = false
 
-    init(continuation: AsyncStream<EncodedVideoFrame>.Continuation) {
+    init(
+      continuation: AsyncStream<EncodedVideoFrame>.Continuation,
+      codec: MacVideoCodec
+    ) {
       self.continuation = continuation
+      self.codec = codec
     }
 
     func yield(_ frame: EncodedVideoFrame) {
@@ -308,7 +332,10 @@ final class MacVideoEncoder: @unchecked Sendable {
     }
   }
 
-  private static func encodedFrame(from sampleBuffer: CMSampleBuffer) throws
+  private static func encodedFrame(
+    from sampleBuffer: CMSampleBuffer,
+    codec: MacVideoCodec
+  ) throws
     -> EncodedVideoFrame
   {
     guard CMSampleBufferDataIsReady(sampleBuffer),
@@ -335,7 +362,7 @@ final class MacVideoEncoder: @unchecked Sendable {
     let attachments = CMSampleBufferGetSampleAttachmentsArray(
       sampleBuffer, createIfNecessary: false) as? [[CFString: Any]]
     let isKeyframe = !(attachments?.first?[kCMSampleAttachmentKey_NotSync] as? Bool ?? false)
-    let parameterSetInfo = try h264ParameterSets(from: formatDescription)
+    let parameterSetInfo = try parameterSets(from: formatDescription, codec: codec)
     let data = try annexBData(
       lengthPrefixedData: lengthPrefixedData,
       nalUnitHeaderLength: parameterSetInfo.nalUnitHeaderLength,
@@ -347,6 +374,18 @@ final class MacVideoEncoder: @unchecked Sendable {
       isKeyframe: isKeyframe,
       width: Int(dimensions.width),
       height: Int(dimensions.height))
+  }
+
+  private static func parameterSets(
+    from formatDescription: CMFormatDescription,
+    codec: MacVideoCodec
+  ) throws -> (parameterSets: [Data], nalUnitHeaderLength: Int) {
+    switch codec {
+    case .h264:
+      try h264ParameterSets(from: formatDescription)
+    case .hevc:
+      try hevcParameterSets(from: formatDescription)
+    }
   }
 
   private static func h264ParameterSets(from formatDescription: CMFormatDescription) throws
@@ -382,6 +421,42 @@ final class MacVideoEncoder: @unchecked Sendable {
       parameterSets.append(Data(bytes: pointer, count: size))
     }
     return (parameterSets, Int(nalUnitHeaderLength))
+  }
+
+  private static func hevcParameterSets(from formatDescription: CMFormatDescription) throws
+    -> (parameterSets: [Data], nalUnitHeaderLength: Int)
+  {
+    var parameterSetCount = 0
+    var nalUnitHeaderLength: Int32 = 0
+    var pointer: UnsafePointer<UInt8>?
+    var size = 0
+    let firstStatus = CMVideoFormatDescriptionGetHEVCParameterSetAtIndex(
+      formatDescription,
+      parameterSetIndex: 0,
+      parameterSetPointerOut: &pointer,
+      parameterSetSizeOut: &size,
+      parameterSetCountOut: &parameterSetCount,
+      nalUnitHeaderLengthOut: &nalUnitHeaderLength)
+    guard firstStatus == noErr else { throw MacVideoEncoderError.invalidSample }
+
+    var parameterSets: [Data] = []
+    for index in 0..<parameterSetCount {
+      pointer = nil
+      size = 0
+      let status = CMVideoFormatDescriptionGetHEVCParameterSetAtIndex(
+        formatDescription,
+        parameterSetIndex: index,
+        parameterSetPointerOut: &pointer,
+        parameterSetSizeOut: &size,
+        parameterSetCountOut: nil,
+        nalUnitHeaderLengthOut: nil)
+      guard status == noErr, let pointer, size > 0 else {
+        throw MacVideoEncoderError.invalidSample
+      }
+      parameterSets.append(Data(bytes: pointer, count: size))
+    }
+    guard parameterSets.count >= 3 else { throw MacVideoEncoderError.invalidSample }
+    return (Array(parameterSets.prefix(3)), Int(nalUnitHeaderLength))
   }
 
   private func fail() {

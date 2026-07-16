@@ -29,6 +29,41 @@ struct OpenH264EncodingTests {
 	}
 
 	@Test
+	func extractsHEVCParameterSetsAndWaitsForIDR() {
+		let vps = Data([32 << 1, 1, 0])
+		let sps = Data([33 << 1, 1, 0])
+		let pps = Data([34 << 1, 1, 0])
+		let inter = Data([1 << 1, 1, 0x80])
+		let idr = Data([19 << 1, 1, 0x80])
+		let cra = Data([21 << 1, 1, 0x80])
+		let sets = OpenH264AnnexB.videoParameterSets(
+			in: [vps, sps, pps, inter], codec: .hevc)
+
+		#expect(sets.vps == vps)
+		#expect(sets.sps == sps)
+		#expect(sets.pps == pps)
+		var gate = OpenH264DecodeGate(codec: .hevc)
+		var decision = gate.shouldDecode([inter])
+		#expect(!decision)
+		decision = gate.shouldDecode([cra])
+		#expect(decision)
+		gate.reset()
+		decision = gate.shouldDecode([idr])
+		#expect(decision)
+	}
+
+	@Test
+	func groupsHEVCAccessUnitsByFirstSliceFlag() {
+		let firstSlice = Data([19 << 1, 1, 0x80])
+		let continuation = Data([19 << 1, 1, 0x00])
+		let nextFrame = Data([1 << 1, 1, 0x80])
+		let units = OpenH264AnnexB.accessUnits(
+			from: [firstSlice, continuation, nextFrame], codec: .hevc)
+
+		#expect(units == [[firstSlice, continuation], [nextFrame]])
+	}
+
+	@Test
 	func boundsRetainedParameterSets() {
 		let maximum = OpenH264AnnexB.maximumParameterSetBytes
 		#expect(OpenH264AnnexB.parameterSetsFitLimit(
