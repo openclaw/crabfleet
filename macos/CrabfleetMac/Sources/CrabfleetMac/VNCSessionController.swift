@@ -1,5 +1,6 @@
 import AppKit
 import Combine
+import Network
 import RoyalVNCKit
 import SwiftUI
 
@@ -30,6 +31,13 @@ struct VNCViewportSize: Equatable {
 
 @MainActor
 final class VNCSessionController: NSObject, ObservableObject {
+  private struct TCPFallbackRetryState {
+    let id: UUID
+    let request: VNCConnectionRequest
+    var retriesRemaining: Int
+    var attempt: Int
+  }
+
   nonisolated static func preferredFrameEncodings(
     supportsHEVC444: Bool
   ) -> [VNCFrameEncodingType] {
@@ -77,6 +85,7 @@ final class VNCSessionController: NSObject, ObservableObject {
   @Published private(set) var framebufferRevision = 0
   @Published private(set) var errorMessage: String?
   @Published private(set) var endpointDescription: String?
+  @Published private(set) var transport: DirectRFBTransport?
   @Published private(set) var thumbnail: NSImage?
   @Published private(set) var clipboardEnabled = false
   @Published private(set) var isAudioMuted = false
@@ -102,6 +111,12 @@ final class VNCSessionController: NSObject, ObservableObject {
   private var isPresentingLiveSurface = false
   private var isFocused = false
   private var isApplicationActive = true
+  private var quicFallbackTask: Task<Void, Never>?
+  private var pendingQUICStream: NWConnection?
+  private var quicAttemptID: UUID?
+  private var pendingTCPFallbackRequest: VNCConnectionRequest?
+  private var tcpFallbackRetryState: TCPFallbackRetryState?
+  private var tcpFallbackRetryTask: Task<Void, Never>?
   private let audioPlayer = RemoteAudioPlayer()
 
   init(
@@ -124,7 +139,8 @@ final class VNCSessionController: NSObject, ObservableObject {
     port: UInt16,
     username: String,
     password: String,
-    clipboardEnabled: Bool = true
+    clipboardEnabled: Bool = true,
+    quic: QUICConnectionConfiguration? = nil
   ) {
     tearDownConnection()
 
@@ -136,27 +152,190 @@ final class VNCSessionController: NSObject, ObservableObject {
     phase = .connecting
     clipboardCoordinator?.sessionStateDidChange(self, targetID: targetID)
 
+    let request = VNCConnectionRequest(
+      host: host,
+      port: Int(port),
+      username: username,
+      password: password,
+      clipboardEnabled: clipboardEnabled,
+      quic: quic)
+    if let quic {
+      do {
+        guard let quicPort = NWEndpoint.Port(rawValue: UInt16(quic.port)) else {
+          throw QUICTransportError.invalidPin
+        }
+        let endpoint = NWEndpoint.hostPort(host: NWEndpoint.Host(host), port: quicPort)
+        let networkConnection = NWConnection(
+          to: endpoint,
+          using: try QUICParameters.client(expectedCertHash: quic.certHash))
+        let attemptID = UUID()
+        pendingTCPFallbackRequest = request
+        quicAttemptID = attemptID
+        startQUICStream(networkConnection, request: request, attemptID: attemptID)
+        scheduleTCPFallback(attemptID: attemptID)
+        return
+      } catch {
+        quicAttemptID = nil
+        pendingTCPFallbackRequest = nil
+      }
+    }
+    startConnection(request: request, transport: .tcp)
+  }
+
+  private func startConnection(
+    request: VNCConnectionRequest,
+    transport: DirectRFBTransport,
+    networkConnection: NWConnection? = nil,
+    clientProtocolVersionAlreadySent: Bool = false,
+    networkConnectionAlreadyStarted: Bool = false
+  ) {
     let settings = VNCConnection.Settings(
       isDebugLoggingEnabled: false,
-      hostname: host,
-      port: port,
+      hostname: request.host,
+      port: UInt16(clamping: request.port),
       isShared: true,
       isScalingEnabled: true,
       useDisplayLink: false,
       inputMode: .forwardKeyboardShortcutsIfNotInUseLocally,
-      clipboardMode: clipboardEnabled ? .externallyManaged : .disabled,
+      clipboardMode: request.clipboardEnabled ? .externallyManaged : .disabled,
       colorDepth: .depth24Bit,
       frameEncodings: Self.preferredFrameEncodings(
         supportsHEVC444: VNCHEVC444Capability.isSupported)
     )
-    let connection = VNCConnection(settings: settings)
+    let connection = if let networkConnection {
+      VNCConnection(
+        settings: settings,
+        networkConnection: networkConnection,
+        clientProtocolVersionAlreadySent: clientProtocolVersionAlreadySent,
+        networkConnectionAlreadyStarted: networkConnectionAlreadyStarted)
+    } else {
+      VNCConnection(settings: settings)
+    }
     connection.delegate = self
     connection.clipboardDelegate = self
     connection.audioDelegate = self
     applyFramebufferUpdatePolicy(to: connection)
     self.connection = connection
-    setCredentials(username: username, password: password, for: connection)
+    self.transport = transport
+    setCredentials(username: request.username, password: request.password, for: connection)
     connection.connect()
+  }
+
+  private func startQUICStream(
+    _ networkConnection: NWConnection,
+    request: VNCConnectionRequest,
+    attemptID: UUID
+  ) {
+    guard quicAttemptID == attemptID, connection == nil else { return }
+    pendingQUICStream = networkConnection
+    networkConnection.stateUpdateHandler = { [weak self, weak networkConnection] state in
+      guard let self, let networkConnection else { return }
+      Task { @MainActor in
+        guard self.quicAttemptID == attemptID, self.pendingQUICStream === networkConnection else {
+          return
+        }
+        switch state {
+        case .failed, .cancelled:
+          self.fallbackToTCP(attemptID: attemptID)
+        default:
+          break
+        }
+      }
+    }
+    networkConnection.start(queue: .global(qos: .userInitiated))
+    networkConnection.send(
+      content: Data("RFB 003.008\n".utf8),
+      completion: .contentProcessed { [weak self, weak networkConnection] error in
+        guard let self, let networkConnection else { return }
+        Task { @MainActor in
+          guard self.quicAttemptID == attemptID,
+            self.pendingQUICStream === networkConnection
+          else { return }
+          guard error == nil else {
+            self.fallbackToTCP(attemptID: attemptID)
+            return
+          }
+          networkConnection.stateUpdateHandler = nil
+          self.pendingQUICStream = nil
+          self.startConnection(
+            request: request,
+            transport: .quic,
+            networkConnection: networkConnection,
+            clientProtocolVersionAlreadySent: true,
+            networkConnectionAlreadyStarted: true)
+        }
+      })
+  }
+
+  private func scheduleTCPFallback(attemptID: UUID) {
+    quicFallbackTask?.cancel()
+    quicFallbackTask = Task { [weak self] in
+      try? await Task.sleep(for: .seconds(2))
+      guard !Task.isCancelled, let self else { return }
+      self.fallbackToTCP(attemptID: attemptID)
+    }
+  }
+
+  private func fallbackToTCP(attemptID: UUID) {
+    guard quicAttemptID == attemptID, let request = pendingTCPFallbackRequest else { return }
+    quicAttemptID = nil
+    pendingTCPFallbackRequest = nil
+    quicFallbackTask?.cancel()
+    quicFallbackTask = nil
+    connection?.delegate = nil
+    connection?.clipboardDelegate = nil
+    connection?.audioDelegate = nil
+    connection?.disconnect()
+    pendingQUICStream?.stateUpdateHandler = nil
+    pendingQUICStream?.cancel()
+    pendingQUICStream = nil
+    connection = nil
+    clearCredentials()
+    phase = .connecting
+    errorMessage = nil
+    tcpFallbackRetryState = TCPFallbackRetryState(
+      id: UUID(),
+      request: request,
+      retriesRemaining: 3,
+      attempt: 0)
+    startConnection(request: request, transport: .tcp)
+  }
+
+  private func scheduleTCPFallbackRetry(after connection: VNCConnection) -> Bool {
+    guard self.connection === connection, transport == .tcp,
+      var state = tcpFallbackRetryState, state.retriesRemaining > 0
+    else {
+      clearTCPFallbackRetry()
+      return false
+    }
+    state.retriesRemaining -= 1
+    state.attempt += 1
+    tcpFallbackRetryState = state
+    connection.delegate = nil
+    connection.clipboardDelegate = nil
+    connection.audioDelegate = nil
+    self.connection = nil
+    clearCredentials()
+    phase = .connecting
+    errorMessage = nil
+
+    tcpFallbackRetryTask?.cancel()
+    tcpFallbackRetryTask = Task { [weak self] in
+      try? await Task.sleep(for: .milliseconds(200 * state.attempt))
+      guard !Task.isCancelled, let self,
+        self.tcpFallbackRetryState?.id == state.id,
+        self.connection == nil
+      else { return }
+      self.tcpFallbackRetryTask = nil
+      self.startConnection(request: state.request, transport: .tcp)
+    }
+    return true
+  }
+
+  private func clearTCPFallbackRetry() {
+    tcpFallbackRetryTask?.cancel()
+    tcpFallbackRetryTask = nil
+    tcpFallbackRetryState = nil
   }
 
   func beginConnecting(endpoint: String) {
@@ -177,8 +356,17 @@ final class VNCSessionController: NSObject, ObservableObject {
   }
 
   func disconnect() {
+    clearTCPFallbackRetry()
+    quicFallbackTask?.cancel()
+    quicFallbackTask = nil
+    quicAttemptID = nil
+    pendingTCPFallbackRequest = nil
+    pendingQUICStream?.stateUpdateHandler = nil
+    pendingQUICStream?.cancel()
+    pendingQUICStream = nil
     guard let connection else {
       phase = .idle
+      transport = nil
       return
     }
     phase = .disconnecting
@@ -186,12 +374,21 @@ final class VNCSessionController: NSObject, ObservableObject {
   }
 
   private func tearDownConnection() {
+    clearTCPFallbackRetry()
+    quicFallbackTask?.cancel()
+    quicFallbackTask = nil
+    quicAttemptID = nil
+    pendingTCPFallbackRequest = nil
+    pendingQUICStream?.stateUpdateHandler = nil
+    pendingQUICStream?.cancel()
+    pendingQUICStream = nil
     connection?.delegate = nil
     connection?.clipboardDelegate = nil
     connection?.audioDelegate = nil
     connection?.disconnect()
     audioPlayer.stop()
     connection = nil
+    transport = nil
     framebuffer = nil
     framebufferRevision += 1
     clearCredentials()
@@ -300,6 +497,10 @@ final class VNCSessionController: NSObject, ObservableObject {
   }
 
   deinit {
+    quicFallbackTask?.cancel()
+    tcpFallbackRetryTask?.cancel()
+    pendingQUICStream?.stateUpdateHandler = nil
+    pendingQUICStream?.cancel()
     thumbnailWorkItem?.cancel()
     connection?.delegate = nil
     connection?.clipboardDelegate = nil
@@ -319,11 +520,24 @@ extension VNCSessionController: VNCConnectionDelegate {
     case .connecting:
       phase = .connecting
     case .connected:
+      quicFallbackTask?.cancel()
+      quicFallbackTask = nil
+      quicAttemptID = nil
+      pendingTCPFallbackRequest = nil
+      clearTCPFallbackRetry()
       phase = .connected
       _ = connection.setQualityMode(qualityMode.vncQualityMode)
     case .disconnecting:
-      phase = .disconnecting
+      phase = pendingTCPFallbackRequest == nil ? .disconnecting : .connecting
     case .disconnected:
+      if pendingTCPFallbackRequest != nil, transport == .quic {
+        if let quicAttemptID { fallbackToTCP(attemptID: quicAttemptID) }
+        return
+      }
+      if scheduleTCPFallbackRetry(after: connection) {
+        clipboardCoordinator?.sessionStateDidChange(self, targetID: targetID)
+        return
+      }
       framebuffer = nil
       self.connection = nil
       audioPlayer.stop()

@@ -1423,6 +1423,9 @@ struct PrivateMacShareTests {
     let request = try registration.registrationRequest(
       identity: identity,
       port: 5901,
+      quicPort: 5911,
+      quicCertHash: String(repeating: "A", count: 43),
+      webtransport: false,
       publicationID: "publication-id"
     )
     #expect(request.url?.absoluteString == "https://fleet.example/api/desktop-hosts/workstation-1")
@@ -1441,6 +1444,16 @@ struct PrivateMacShareTests {
     #expect(json["name"] as? String == "Workstation")
     #expect(json["address"] as? String == "100.64.12.34")
     #expect(json["port"] as? Int == 5901)
+    #expect(json["quicPort"] as? Int == 5911)
+    #expect(json["quicCertHash"] as? String == String(repeating: "A", count: 43))
+    #expect(json["webtransport"] as? Bool == false)
+    #expect(throws: DesktopHostRegistrationError.invalidResponse) {
+      try registration.registrationRequest(
+        identity: identity,
+        port: 5901,
+        quicPort: 5911,
+        publicationID: "publication-id")
+    }
 
     let removal = try registration.removalRequest(
       identity: identity,

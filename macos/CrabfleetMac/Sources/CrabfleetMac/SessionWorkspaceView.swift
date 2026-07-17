@@ -354,6 +354,11 @@ private struct FocusStatusBar: View {
         Text("·")
         Text(endpoint).font(.system(.caption, design: .monospaced))
       }
+      if let transport = session.transport {
+        Text("·")
+        Text(transport.label)
+          .font(.system(.caption, design: .monospaced).weight(.semibold))
+      }
       Spacer()
       if target.source == .crabfleet, let owner = target.owner {
         Text(owner)

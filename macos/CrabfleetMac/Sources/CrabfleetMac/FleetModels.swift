@@ -74,6 +74,9 @@ struct FleetAPIDesktopHost: Decodable {
   let name: String
   let address: String
   let port: Int
+  let quicPort: Int?
+  let quicCertHash: String?
+  let webtransport: Bool?
   let createdAt: Double
   let updatedAt: Double
 
@@ -84,6 +87,9 @@ struct FleetAPIDesktopHost: Decodable {
       name: name,
       address: address,
       port: port,
+      quicPort: quicPort,
+      quicCertHash: quicCertHash,
+      webtransport: webtransport ?? false,
       createdAt: Date(timeIntervalSince1970: createdAt / 1_000),
       updatedAt: Date(timeIntervalSince1970: updatedAt / 1_000)
     )
@@ -96,6 +102,9 @@ struct RegisteredDesktopHost: Identifiable, Hashable {
   let name: String
   let address: String
   let port: Int
+  let quicPort: Int?
+  let quicCertHash: String?
+  let webtransport: Bool
   let createdAt: Date
   let updatedAt: Date
 }

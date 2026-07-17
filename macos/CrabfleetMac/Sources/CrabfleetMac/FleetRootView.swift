@@ -192,7 +192,8 @@ struct FleetRootView: View {
           port: endpoint.port,
           username: endpoint.username,
           password: "",
-          clipboardEnabled: false
+          clipboardEnabled: false,
+          quic: target.quic
         )
       )
     } else {

@@ -39,8 +39,11 @@ private extension VNCConnection {
 				throw VNCError.protocol(.invalidData)
 			}
 
-			try await VNCProtocol.ProtocolVersion.send(connection: connection,
-													   protocolVersion: clientProtocolVersion)
+			if !clientProtocolVersionAlreadySent {
+				try await VNCProtocol.ProtocolVersion.send(
+					connection: connection,
+					protocolVersion: clientProtocolVersion)
+			}
 
 			logger.logDebug("Sent Client Protocol Version: \(clientProtocolVersion.protocolVersion)")
 

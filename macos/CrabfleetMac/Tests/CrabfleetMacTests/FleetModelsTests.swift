@@ -327,6 +327,9 @@ struct FleetModelsTests {
             "name": "Mac Studio",
             "address": "100.68.201.40",
             "port": 5901,
+            "quicPort": 5911,
+            "quicCertHash": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+            "webtransport": false,
             "createdAt": 1769999900000,
             "updatedAt": 1770000000000
           }],
@@ -362,14 +365,33 @@ struct FleetModelsTests {
     #expect(host.name == "Mac Studio")
     #expect(host.address == "100.68.201.40")
     #expect(host.port == 5901)
+    #expect(host.quicPort == 5911)
+    #expect(host.quicCertHash == "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA")
+    #expect(!host.webtransport)
 
     let target = DesktopTarget(host: host)
     #expect(target.endpoint?.host == "100.68.201.40")
     #expect(target.endpoint?.port == 5901)
+    #expect(target.quic?.port == 5911)
+    #expect(target.quic?.certHash == "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA")
     #expect(target.desktopAvailable)
 
     let fleetTarget = DesktopTarget(lease: lease)
     #expect(fleetTarget.nativeVncSessionID == "IS-257")
+  }
+
+  @Test
+  func acceptsLegacyDesktopRegistrationWithoutQUICFields() throws {
+    let host = try JSONDecoder().decode(
+      FleetAPIDesktopHost.self,
+      from: Data(
+        #"{"id":"legacy","owner":"operator","name":"Legacy Mac","address":"100.64.0.2","port":5901,"createdAt":1769999900000,"updatedAt":1770000000000}"#.utf8))
+      .desktopHost()
+
+    #expect(host.quicPort == nil)
+    #expect(host.quicCertHash == nil)
+    #expect(!host.webtransport)
+    #expect(DesktopTarget(host: host).quic == nil)
   }
 
   @Test @MainActor
