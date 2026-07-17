@@ -287,6 +287,70 @@ struct QUICTransportTests {
     #expect(!server.quicAvailable)
   }
 
+  @Test(
+    .enabled(if: udpLoopbackAvailable, "UDP loopback is unavailable in this sandbox"),
+    .timeLimit(.minutes(1)))
+  func connectionGroupsWithoutStreamsDoNotReserveViewerSlots() async throws {
+    let fixture = try QUICIdentityFixture()
+    defer { fixture.remove() }
+    let tcpPort = try availableLoopbackPort(socketType: SOCK_STREAM)
+    let quicPort = try availableLoopbackPort(socketType: SOCK_DGRAM)
+    let descriptor = CapturedDisplayDescriptor(
+      displayID: 0,
+      displayBounds: CGRect(x: 0, y: 0, width: 64, height: 64),
+      frameWidth: 64,
+      frameHeight: 64,
+      sourcePixelWidth: 64,
+      sourcePixelHeight: 64)
+    let gate = RFBHostSessionGate()
+    let events = QUICEventLog()
+    let server = TailnetRFBServer(
+      identity: .init(
+        tailnetName: "example.test",
+        loginName: "tester@example.test",
+        dnsName: "test-host.example.test",
+        hostName: "Test Host",
+        ipv4Address: "127.0.0.1",
+        userID: 42),
+      runner: QUICNoopTailscaleRunner(),
+      capture: MacScreenCapture(),
+      descriptor: descriptor,
+      input: QUICNoopRemoteInput(),
+      port: tcpPort,
+      quicPort: quicPort,
+      quicIdentity: fixture.hostIdentity,
+      sessionGate: gate,
+      eventHandler: { events.append($0) })
+    try server.start()
+    defer { server.stop() }
+
+    let clock = ContinuousClock()
+    var deadline = clock.now.advanced(by: .seconds(2))
+    while !server.quicAvailable, clock.now < deadline {
+      try await Task.sleep(for: .milliseconds(10))
+    }
+    #expect(server.quicAvailable)
+
+    let endpoint = NWEndpoint.hostPort(
+      host: "127.0.0.1",
+      port: try #require(NWEndpoint.Port(rawValue: quicPort)))
+    let connections = try (0..<TailnetRFBServer.maximumSessions).map { _ in
+      NWConnection(
+        to: endpoint,
+        using: try QUICParameters.client(expectedCertHash: fixture.hostIdentity.certHash))
+    }
+    for connection in connections { connection.start(queue: .global(qos: .userInitiated)) }
+    defer { for connection in connections { connection.cancel() } }
+
+    deadline = clock.now.advanced(by: .seconds(1))
+    while server.pendingQUICGroupCount < connections.count, clock.now < deadline {
+      try await Task.sleep(for: .milliseconds(10))
+    }
+    #expect(server.pendingQUICGroupCount == connections.count)
+    #expect(gate.reservedCount == 0)
+    #expect(gate.activeCount == 0)
+  }
+
   @Test
   func tcpAndQUICSessionsShareTheFourSessionGate() throws {
     let gate = RFBHostSessionGate()
@@ -294,13 +358,13 @@ struct QUICTransportTests {
     let sessions = try activeTransports.map { transport in
       (transport: transport, claim: try #require(gate.acquire()))
     }
-    let pendingQUIC = try [#require(gate.reserve()), #require(gate.reserve())]
+    let pendingStreams = try [#require(gate.reserve()), #require(gate.reserve())]
     #expect(sessions.filter { $0.transport == .quic }.count == 1)
     #expect(gate.activeCount == activeTransports.count)
-    #expect(gate.reservedCount == pendingQUIC.count)
+    #expect(gate.reservedCount == pendingStreams.count)
     #expect(gate.acquire() == nil)
     for session in sessions { gate.release(session.claim) }
-    for reservation in pendingQUIC { gate.release(reservation) }
+    for reservation in pendingStreams { gate.release(reservation) }
     #expect(gate.activeCount == 0)
     #expect(gate.reservedCount == 0)
   }

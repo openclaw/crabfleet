@@ -262,6 +262,7 @@ final class DirectSessionClaimingRFBByteStream: RFBByteStream, @unchecked Sendab
 final class TailnetRFBServer: @unchecked Sendable {
   typealias EventHandler = @Sendable (TailnetRFBServerEvent) -> Void
   static let maximumSessions = 4
+  static let maximumPendingQUICGroups = 16
 
   static func canAdmitSession(currentCount: Int) -> Bool {
     currentCount >= 0 && currentCount < maximumSessions
@@ -290,7 +291,6 @@ final class TailnetRFBServer: @unchecked Sendable {
   private var listener: NWListener?
   private var quicListener: NWListener?
   private var quicGroups: [ObjectIdentifier: NWConnectionGroup] = [:]
-  private var pendingQUICReservations: [ObjectIdentifier: UUID] = [:]
   private var pendingQUICTimeouts: [ObjectIdentifier: Task<Void, Never>] = [:]
   private var sessionQUICGroupIDs: [UUID: ObjectIdentifier] = [:]
   private var listenerGeneration: UUID?
@@ -307,6 +307,10 @@ final class TailnetRFBServer: @unchecked Sendable {
 
   var quicAvailable: Bool {
     withLock { quicListener != nil && readyTransports.contains(.quic) }
+  }
+
+  var pendingQUICGroupCount: Int {
+    withLock { pendingQUICTimeouts.count }
   }
 
   init(
@@ -389,7 +393,7 @@ final class TailnetRFBServer: @unchecked Sendable {
   func stop() {
     let values = withLock {
       () -> (
-        NWListener?, NWListener?, [(UUID, RFBHostSession)], [NWConnectionGroup], [UUID],
+        NWListener?, NWListener?, [(UUID, RFBHostSession)], [NWConnectionGroup],
         [Task<Void, Never>]
       ) in
       if !sessions.isEmpty {
@@ -407,20 +411,18 @@ final class TailnetRFBServer: @unchecked Sendable {
         sessionQualityModes.removeAll()
         audioSessionIDs.removeAll()
         quicGroups.removeAll()
-        pendingQUICReservations.removeAll()
         pendingQUICTimeouts.removeAll()
         sessionQUICGroupIDs.removeAll()
       }
       return (
         listener, quicListener, Array(sessions), Array(quicGroups.values),
-        Array(pendingQUICReservations.values), Array(pendingQUICTimeouts.values))
+        Array(pendingQUICTimeouts.values))
     }
     values.0?.cancel()
     values.1?.cancel()
     for (_, session) in values.2 { session.stop() }
     for group in values.3 { group.cancel() }
-    for reservation in values.4 { sessionGate.release(reservation) }
-    for timeout in values.5 { timeout.cancel() }
+    for timeout in values.4 { timeout.cancel() }
   }
 
   func setViewOnly(_ enabled: Bool) {
@@ -512,10 +514,6 @@ final class TailnetRFBServer: @unchecked Sendable {
   }
 
   private func accept(_ group: NWConnectionGroup, generation: UUID) {
-    guard let reservation = sessionGate.reserve() else {
-      group.cancel()
-      return
-    }
     let groupID = ObjectIdentifier(group)
     let timeout = Task { [weak self, weak group] in
       try? await Task.sleep(for: .seconds(2))
@@ -523,15 +521,15 @@ final class TailnetRFBServer: @unchecked Sendable {
       self.expirePendingQUICGroup(group, groupID: groupID)
     }
     let retained = withLock { () -> Bool in
-      guard listenerGeneration == generation, quicListener != nil else { return false }
+      guard listenerGeneration == generation, quicListener != nil,
+        pendingQUICTimeouts.count < Self.maximumPendingQUICGroups
+      else { return false }
       quicGroups[groupID] = group
-      pendingQUICReservations[groupID] = reservation
       pendingQUICTimeouts[groupID] = timeout
       return true
     }
     guard retained else {
       timeout.cancel()
-      sessionGate.release(reservation)
       group.cancel()
       return
     }
@@ -549,7 +547,7 @@ final class TailnetRFBServer: @unchecked Sendable {
         connection.cancel()
         return
       }
-      guard let reservation = self.consumePendingQUICReservation(group, groupID: groupID) else {
+      guard self.consumePendingQUICGroup(group, groupID: groupID) else {
         connection.cancel()
         return
       }
@@ -557,8 +555,7 @@ final class TailnetRFBServer: @unchecked Sendable {
         connection,
         transport: .quic,
         generation: generation,
-        quicGroup: group,
-        reservation: reservation)
+        quicGroup: group)
     }
     group.start(queue: queue)
   }
@@ -567,19 +564,12 @@ final class TailnetRFBServer: @unchecked Sendable {
     _ connection: NWConnection,
     transport: DirectRFBTransport,
     generation: UUID,
-    quicGroup: NWConnectionGroup? = nil,
-    reservation: UUID? = nil
+    quicGroup: NWConnectionGroup? = nil
   ) {
-    let sessionID: UUID
-    if let reservation {
-      sessionID = reservation
-    } else {
-      guard let newReservation = sessionGate.reserve() else {
-        connection.cancel()
-        if let quicGroup { discard(quicGroup) }
-        return
-      }
-      sessionID = newReservation
+    guard let sessionID = sessionGate.reserve() else {
+      connection.cancel()
+      if let quicGroup { discard(quicGroup) }
+      return
     }
     let sessionDescriptor = sessionGate.descriptor(basedOn: descriptor)
 
@@ -675,40 +665,40 @@ final class TailnetRFBServer: @unchecked Sendable {
   }
 
   private func discard(_ group: NWConnectionGroup) {
-    _ = withLock {
+    let timeout = withLock {
+      let timeout = pendingQUICTimeouts.removeValue(forKey: ObjectIdentifier(group))
       quicGroups.removeValue(forKey: ObjectIdentifier(group))
+      return timeout
     }
+    timeout?.cancel()
     group.cancel()
   }
 
-  private func consumePendingQUICReservation(
+  private func consumePendingQUICGroup(
     _ group: NWConnectionGroup,
     groupID: ObjectIdentifier
-  ) -> UUID? {
-    let values = withLock { () -> (UUID, Task<Void, Never>?)? in
-      guard quicGroups[groupID] === group,
-        let reservation = pendingQUICReservations.removeValue(forKey: groupID)
-      else { return nil }
-      return (reservation, pendingQUICTimeouts.removeValue(forKey: groupID))
+  ) -> Bool {
+    let timeout = withLock { () -> Task<Void, Never>? in
+      guard quicGroups[groupID] === group else { return nil }
+      return pendingQUICTimeouts.removeValue(forKey: groupID)
     }
-    values?.1?.cancel()
-    return values?.0
+    timeout?.cancel()
+    return timeout != nil
   }
 
   private func releasePendingQUICGroup(
     _ group: NWConnectionGroup,
     groupID: ObjectIdentifier
   ) -> Bool {
-    let values = withLock { () -> (UUID, Task<Void, Never>?)? in
+    let timeout = withLock { () -> Task<Void, Never>? in
       guard quicGroups[groupID] === group,
-        let reservation = pendingQUICReservations.removeValue(forKey: groupID)
+        let timeout = pendingQUICTimeouts.removeValue(forKey: groupID)
       else { return nil }
       quicGroups.removeValue(forKey: groupID)
-      return (reservation, pendingQUICTimeouts.removeValue(forKey: groupID))
+      return timeout
     }
-    guard let values else { return false }
-    values.1?.cancel()
-    sessionGate.release(values.0)
+    guard let timeout else { return false }
+    timeout.cancel()
     return true
   }
 
