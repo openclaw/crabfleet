@@ -31,10 +31,6 @@ enum AccessCodePersistenceResult: Equatable {
   case updated
   case saveFailed
   case cleanupFailed
-
-  var permitsConnection: Bool {
-    self != .saveFailed
-  }
 }
 
 private struct VNCKeychainError: Error {

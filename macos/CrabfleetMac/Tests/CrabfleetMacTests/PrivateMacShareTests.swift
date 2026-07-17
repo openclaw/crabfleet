@@ -2404,11 +2404,13 @@ struct PrivateMacShareTests {
     let coordinator = ClipboardCoordinator(pasteboard: viewerPasteboard, pollingInterval: 0.02)
     let session = VNCSessionController(targetID: "smoke", clipboardCoordinator: coordinator)
     coordinator.focus(session: session, targetID: "smoke")
+    var authenticationSuccessCount = 0
     session.connect(
       host: identity.ipv4Address,
       port: port,
       username: "",
-      password: "test-auth-token"
+      password: "test-auth-token",
+      authenticationSucceeded: { authenticationSuccessCount += 1 }
     )
     defer { session.disconnect() }
 
@@ -2422,6 +2424,7 @@ struct PrivateMacShareTests {
     try await waitFor("initial framebuffer update") {
       session.framebufferUpdateCount > 0
     }
+    #expect(authenticationSuccessCount == 1)
 
     // Viewer to host: emoji only survives the extended UTF-8 path.
     viewerPasteboard.clearContents()

@@ -106,6 +106,7 @@ final class VNCSessionController: NSObject, ObservableObject {
   private var credentialConnectionID: ObjectIdentifier?
   private var username = ""
   private var password = ""
+  private var authenticationSucceeded: (() -> Void)?
   private var thumbnailWorkItem: DispatchWorkItem?
   private var thumbnailGeneration: UInt64 = 0
   private var isPresentingLiveSurface = false
@@ -140,7 +141,8 @@ final class VNCSessionController: NSObject, ObservableObject {
     username: String,
     password: String,
     clipboardEnabled: Bool = true,
-    quic: QUICConnectionConfiguration? = nil
+    quic: QUICConnectionConfiguration? = nil,
+    authenticationSucceeded: (() -> Void)? = nil
   ) {
     tearDownConnection()
 
@@ -150,6 +152,7 @@ final class VNCSessionController: NSObject, ObservableObject {
     framebuffer = nil
     framebufferUpdateCount = 0
     phase = .connecting
+    self.authenticationSucceeded = authenticationSucceeded
     clipboardCoordinator?.sessionStateDidChange(self, targetID: targetID)
 
     let request = VNCConnectionRequest(
@@ -389,6 +392,7 @@ final class VNCSessionController: NSObject, ObservableObject {
     audioPlayer.stop()
     connection = nil
     transport = nil
+    authenticationSucceeded = nil
     framebuffer = nil
     framebufferRevision += 1
     clearCredentials()
@@ -526,6 +530,9 @@ extension VNCSessionController: VNCConnectionDelegate {
       pendingTCPFallbackRequest = nil
       clearTCPFallbackRetry()
       phase = .connected
+      let authenticationSucceeded = self.authenticationSucceeded
+      self.authenticationSucceeded = nil
+      authenticationSucceeded?()
       _ = connection.setQualityMode(qualityMode.vncQualityMode)
     case .disconnecting:
       phase = pendingTCPFallbackRequest == nil ? .disconnecting : .connecting

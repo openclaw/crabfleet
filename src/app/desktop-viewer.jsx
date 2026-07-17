@@ -14,6 +14,7 @@ import { WebSocketByteStream } from "./rfb/stream.ts";
 import { cursorCSS, remotePointerAfterCursorShape, shouldShowCursorOverlay } from "./rfb/cursor.ts";
 import { ViewerStatsWindow } from "./rfb/stats.ts";
 import { loadViewerQuality, saveViewerQuality } from "./rfb/quality.ts";
+import { browserDirectRFBAuthentication as directRFBAuthentication } from "./rfb/browser-auth.ts";
 
 export function desktopViewerHostID(pathname = location.pathname) {
   const match = pathname.match(/^\/app\/desktops\/([^/]+)\/?$/);
@@ -650,18 +651,11 @@ export function DesktopViewer({ host, onExit }) {
 }
 
 export function browserDirectRFBAuthentication(hostID) {
-  const key = `crabfleet.rfb.password.${hostID}`;
-  const saved = sessionStorage.getItem(key);
-  const promptedAccessCode =
-    saved ?? window.prompt("Enter the 12-character Crabfleet sharing password");
-  if (promptedAccessCode === null) throw new Error("RFB password entry cancelled");
-  return {
-    get password() {
-      return promptedAccessCode;
-    },
-    onVNCAuthentication(succeeded) {
-      if (!succeeded) sessionStorage.removeItem(key);
-      else sessionStorage.setItem(key, promptedAccessCode);
-    },
-  };
+  let storage = null;
+  try {
+    storage = window.sessionStorage;
+  } catch {}
+  return directRFBAuthentication(hostID, storage, () =>
+    window.prompt("Enter the 12-character Crabfleet sharing password"),
+  );
 }
