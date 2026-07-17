@@ -283,3 +283,41 @@ class ByteTransport implements RFBTransport {
   send(): void {}
   close(): void {}
 }
+
+test("closing during AudioContext resume keeps the player muted and rejects", async (t) => {
+  const descriptors = saveGlobals("AudioContext", "AudioWorkletNode");
+  t.after(() => restoreGlobals(descriptors));
+  let finishResume!: () => void;
+  class FakeAudioContext {
+    state = "suspended";
+    destination = {};
+    audioWorklet = { addModule: async () => {} };
+    createGain() {
+      return { gain: { value: 0 }, connect() {}, disconnect() {} };
+    }
+    resume() {
+      return new Promise<void>((resolve) => (finishResume = resolve));
+    }
+    async close() {
+      this.state = "closed";
+    }
+  }
+  Object.defineProperty(globalThis, "AudioContext", {
+    value: FakeAudioContext,
+    configurable: true,
+  });
+  Object.defineProperty(globalThis, "AudioWorkletNode", {
+    value: class {
+      port = { onmessage: null, postMessage() {} };
+      connect() {}
+      disconnect() {}
+    },
+    configurable: true,
+  });
+  const player = new RemoteAudioPlayer();
+  const enabling = player.enableFromGesture();
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  await player.close();
+  finishResume();
+  await assert.rejects(enabling, /audio player closed/);
+});

@@ -309,7 +309,11 @@ export class RemoteAudioPlayer {
       }
     }
     if (this.#closed || !this.#context) throw new Error("audio player closed");
-    if (this.#context.state !== "running") await this.#context.resume();
+    const context = this.#context;
+    if (context.state !== "running") await context.resume();
+    // close() may have run while resume() was pending; unmuting then would
+    // report success for a detached graph and desync the shared audio state.
+    if (this.#closed || this.#context !== context) throw new Error("audio player closed");
     this.setMuted(false);
   }
 
