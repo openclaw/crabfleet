@@ -1122,6 +1122,10 @@ final class PrivateMacShareController: ObservableObject {
     listeningDisplayIDs.removeAll()
     displayStacks.removeAll()
     do {
+      // Cold safe-prime validation is intentionally off the main actor. Keep
+      // it ahead of listener admission so it cannot consume a handshake deadline.
+      try await RFBARDPrewarmer.shared.prepare()
+      guard canContinueStarting(generation) else { throw CancellationError() }
       let quicIdentity = try? QUICIdentityStore.loadOrCreate()
       for plan in plans {
         let capture = MacScreenCapture()

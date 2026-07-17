@@ -2010,7 +2010,9 @@ struct PrivateMacShareTests {
     )
     try server.start()
     defer { server.stop() }
-    try await Task.sleep(for: .milliseconds(100))
+    try await waitFor(timeout: .seconds(30)) {
+      events.values.contains(.listening)
+    }
 
     let connection = NWConnection(
       host: "127.0.0.1",
@@ -2296,6 +2298,7 @@ struct PrivateMacShareTests {
     )
 
     let port: UInt16 = 5_909
+    let events = RFBEventRecorder()
     let server = TailnetRFBServer(
       identity: identity,
       runner: runner,
@@ -2312,11 +2315,13 @@ struct PrivateMacShareTests {
       port: port,
       credentialProvider: { "test-auth-token" },
       authThrottle: RFBAuthThrottle(),
-      eventHandler: { _ in }
+      eventHandler: { events.append($0) }
     )
     try server.start()
     defer { server.stop() }
-    try await Task.sleep(for: .milliseconds(250))
+    try await waitFor(timeout: .seconds(30)) {
+      events.values.contains(.listening)
+    }
 
     let session = VNCSessionController()
     session.connect(
@@ -2365,6 +2370,7 @@ struct PrivateMacShareTests {
     let hostClipboard = HostClipboardBridge(pasteboard: hostPasteboard, pollingInterval: 0.02)
 
     let port: UInt16 = 5_921
+    let events = RFBEventRecorder()
     let server = TailnetRFBServer(
       identity: identity,
       runner: StaticTailscaleRunner(output: ""),
@@ -2383,11 +2389,13 @@ struct PrivateMacShareTests {
       port: port,
       credentialProvider: { "test-auth-token" },
       authThrottle: RFBAuthThrottle(),
-      eventHandler: { _ in }
+      eventHandler: { events.append($0) }
     )
     try server.start()
     defer { server.stop() }
-    try await Task.sleep(for: .milliseconds(250))
+    try await waitFor(timeout: .seconds(30)) {
+      events.values.contains(.listening)
+    }
 
     let viewerPasteboard = NSPasteboard(
       name: .init("CrabfleetMacTests.viewer.\(UUID().uuidString)")

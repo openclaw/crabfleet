@@ -101,15 +101,22 @@ public struct VNCARDHostAuthentication: Sendable {
 
 	private let ephemeralExponent: Data
 
+	public static func prewarm() throws {
+		typealias Agreement = VNCProtocol.ARDAuthentication.DiffieHellmanKeyAgreement
+		guard Agreement.validParameters(
+			prime: safePrime,
+			generator: generator,
+			peerKey: paddedValue(2),
+			keyLength: keyLength)
+		else {
+			throw VNCARDHostAuthenticationError.keyGenerationFailed
+		}
+	}
+
 	public init() throws {
 		typealias Agreement = VNCProtocol.ARDAuthentication.DiffieHellmanKeyAgreement
-		guard
-			Agreement.validParameters(
-				prime: Self.safePrime,
-				generator: Self.generator,
-				peerKey: Self.paddedValue(2),
-				keyLength: Self.keyLength),
-			let keyPair = Agreement.generateKeyPair(
+		try Self.prewarm()
+		guard let keyPair = Agreement.generateKeyPair(
 				generator: Self.generator,
 				prime: Self.safePrime,
 				keyLength: Self.keyLength)

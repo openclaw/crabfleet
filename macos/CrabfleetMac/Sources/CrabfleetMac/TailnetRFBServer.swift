@@ -296,6 +296,7 @@ final class TailnetRFBServer: @unchecked Sendable {
   private var sessionQUICGroupIDs: [UUID: ObjectIdentifier] = [:]
   private var listenerGeneration: UUID?
   private var readyTransports: Set<DirectRFBTransport> = []
+  private var listenerPreparation: Task<Void, Never>?
   private var sessions: [UUID: RFBHostSession] = [:]
   private var connectedPeers: [UUID: String] = [:]
   private var sessionTransports: [UUID: DirectRFBTransport] = [:]
@@ -351,9 +352,6 @@ final class TailnetRFBServer: @unchecked Sendable {
   }
 
   func start() throws {
-    // Validate and cache the built-in safe-prime group before accepting a
-    // connection so cold validation does not consume the handshake deadline.
-    _ = try VNCARDHostAuthentication()
     // A listener with `requiredLocalEndpoint` hands out child connections
     // that re-bind that endpoint and fail with EADDRINUSE on current macOS,
     // so the port binds wide and every accepted connection must instead prove
@@ -395,15 +393,56 @@ final class TailnetRFBServer: @unchecked Sendable {
       listenerGeneration = generation
       readyTransports.removeAll()
     }
-    listener.start(queue: queue)
-    configuredQUICListener?.start(queue: queue)
+    let preparation = Task { [weak self, weak listener] in
+      guard let self, let listener else { return }
+      do {
+        try await RFBARDPrewarmer.shared.prepare()
+      } catch {
+        let failedListeners = withLock { () -> (NWListener, NWListener?)? in
+          guard self.listenerGeneration == generation, self.listener === listener else {
+            return nil
+          }
+          self.listener = nil
+          let failedQUICListener = self.quicListener
+          self.quicListener = nil
+          self.listenerGeneration = nil
+          self.listenerPreparation = nil
+          self.readyTransports.removeAll()
+          return (listener, failedQUICListener)
+        }
+        if let failedListeners {
+          failedListeners.0.cancel()
+          failedListeners.1?.cancel()
+          emit(.listenerFailed(error.localizedDescription))
+        }
+        return
+      }
+      let isCurrent = withLock {
+        guard !Task.isCancelled, self.listenerGeneration == generation,
+          self.listener === listener
+        else { return false }
+        self.listenerPreparation = nil
+        return true
+      }
+      if isCurrent {
+        listener.start(queue: queue)
+        configuredQUICListener?.start(queue: queue)
+      }
+    }
+    withLock {
+      if listenerGeneration == generation {
+        listenerPreparation = preparation
+      } else {
+        preparation.cancel()
+      }
+    }
   }
 
   func stop() {
     let values = withLock {
       () -> (
-        NWListener?, NWListener?, [(UUID, RFBHostSession)], [NWConnectionGroup],
-        [Task<Void, Never>]
+        NWListener?, NWListener?, Task<Void, Never>?, [(UUID, RFBHostSession)],
+        [NWConnectionGroup], [Task<Void, Never>]
       ) in
       if !sessions.isEmpty {
         emit(.disconnected(count: 0, remainingPeer: nil))
@@ -413,6 +452,7 @@ final class TailnetRFBServer: @unchecked Sendable {
         quicListener = nil
         listenerGeneration = nil
         readyTransports.removeAll()
+        listenerPreparation = nil
         sessions.removeAll()
         connectedPeers.removeAll()
         sessionTransports.removeAll()
@@ -424,14 +464,15 @@ final class TailnetRFBServer: @unchecked Sendable {
         sessionQUICGroupIDs.removeAll()
       }
       return (
-        listener, quicListener, Array(sessions), Array(quicGroups.values),
-        Array(pendingQUICTimeouts.values))
+        listener, quicListener, listenerPreparation, Array(sessions),
+        Array(quicGroups.values), Array(pendingQUICTimeouts.values))
     }
     values.0?.cancel()
     values.1?.cancel()
-    for (_, session) in values.2 { session.stop() }
-    for group in values.3 { group.cancel() }
-    for timeout in values.4 { timeout.cancel() }
+    values.2?.cancel()
+    for (_, session) in values.3 { session.stop() }
+    for group in values.4 { group.cancel() }
+    for timeout in values.5 { timeout.cancel() }
   }
 
   func setViewOnly(_ enabled: Bool) {

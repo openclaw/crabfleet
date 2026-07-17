@@ -36,6 +36,37 @@ enum ShareAccessCodeError: LocalizedError {
   }
 }
 
+actor RFBARDPrewarmer {
+  static let shared = RFBARDPrewarmer()
+
+  private var preparation: Task<Void, any Error>?
+
+  func prepare() async throws {
+    if let preparation {
+      return try await preparation.value
+    }
+    let preparation = Task {
+      try await withCheckedThrowingContinuation { continuation in
+        DispatchQueue.global(qos: .userInitiated).async {
+          do {
+            try VNCARDHostAuthentication.prewarm()
+            continuation.resume()
+          } catch {
+            continuation.resume(throwing: error)
+          }
+        }
+      }
+    }
+    self.preparation = preparation
+    do {
+      try await preparation.value
+    } catch {
+      self.preparation = nil
+      throw error
+    }
+  }
+}
+
 final class ShareAccessState: @unchecked Sendable {
   private let lock = NSLock()
   private var value = ""
