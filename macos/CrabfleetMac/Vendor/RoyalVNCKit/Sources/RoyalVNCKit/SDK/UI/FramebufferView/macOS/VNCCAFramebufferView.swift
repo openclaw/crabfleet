@@ -863,9 +863,15 @@ private extension VNCCAFramebufferView {
             updateMetalLayerLayout()
         } else {
             updateFallbackLayerLayout()
-        }
+		}
+		updateLocalCursor()
 		updateRemoteCursorOverlay()
     }
+
+	func updateLocalCursor() {
+		let scale = settings.isScalingEnabled ? renderedContentGeometry.scale : 1
+		currentCursor = remoteCursor.nsCursor(scale: scale)
+	}
 
 	func updateRemoteCursorOverlay() {
 		guard let remotePointerPosition,
@@ -969,7 +975,7 @@ extension VNCCAFramebufferView: VNCConnectionDelegate {
         DispatchQueue.main.async { [weak self] in
 			guard let self else { return }
 			self.remoteCursor = cursor
-			self.currentCursor = cursor.nsCursor
+			self.updateLocalCursor()
 			self.updateRemoteCursorOverlay()
         }
     }

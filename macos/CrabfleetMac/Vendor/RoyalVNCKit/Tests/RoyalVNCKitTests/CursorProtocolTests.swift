@@ -1,9 +1,30 @@
 import Foundation
 import Testing
+#if os(macOS)
+import AppKit
+#endif
 
 @testable import RoyalVNCKit
 
 struct CursorProtocolTests {
+	#if os(macOS)
+	@Test @MainActor
+	func scalesFocusedSystemCursorWithFramebuffer() {
+		let cursor = VNCCursor(
+			imageData: Data(repeating: 0xFF, count: 4 * 4 * 4),
+			size: VNCSize(width: 4, height: 4),
+			hotspot: VNCPoint(x: 3, y: 3),
+			bitsPerComponent: 8,
+			bitsPerPixel: 32,
+			bytesPerPixel: 4,
+			isPremultiplied: true)
+
+		let scaled = cursor.nsCursor(scale: 0.5)
+		#expect(scaled.image.size == CGSize(width: 2, height: 2))
+		#expect(scaled.hotSpot == CGPoint(x: 1.5, y: 1.5))
+	}
+	#endif
+
 	@Test
 	func advertisesAlphaBeforeClassicAndPointerPosition() throws {
 		let connection = VNCConnection(settings: VNCConnection.Settings(

@@ -240,6 +240,11 @@ struct CursorPipelinePolicyTests {
 
     try await capture.addCursorSession(id: sessionID)
     try await capture.updateCursorSession(id: sessionID, negotiated: true)
+    #expect(!capture.showsCapturedCursor)
+    await capture.stop()
+    #expect(capture.showsCapturedCursor)
+
+    try await capture.addCursorSession(id: sessionID)
     try await capture.updateCursorSession(id: sessionID, negotiated: false)
     try await capture.removeCursorSession(id: sessionID)
   }

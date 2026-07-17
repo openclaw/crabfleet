@@ -439,7 +439,7 @@ final class MacScreenCapture: NSObject, @unchecked Sendable {
 
   func stop() async {
     _ = try? await configurationGate.run { [self] in
-      guard let stream else { return }
+      let stream = self.stream
       self.stream = nil
       self.configuration = nil
       self.contentFilter = nil
@@ -457,23 +457,16 @@ final class MacScreenCapture: NSObject, @unchecked Sendable {
         frameRateRequirements.removeAll()
         appliedFrameRate = 15
       }
-      try? await stream.stopCapture()
-      cursorMonitor.stop()
-      withFrameLock {
-        cursorReconcileGeneration &+= 1
-        cursorReconcileTask?.cancel()
-        cursorReconcileTask = nil
-        consumerIDs.removeAll()
-        audioConsumerIDs.removeAll()
-        cursorNegotiationState = CursorCaptureNegotiationState()
-        videoFrameHandlers.removeAll()
-        audioSampleHandlers.removeAll()
-        frameRateRequirements.removeAll()
-        appliedFrameRate = 15
+      if let stream {
+        try? await stream.stopCapture()
       }
       clearLatestVideoSource()
       await frameStore.clear()
     }
+  }
+
+  var showsCapturedCursor: Bool {
+    withFrameLock { cursorNegotiationState.showsCursor }
   }
 
   func retainConsumer(id: UUID) {
