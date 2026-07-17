@@ -538,9 +538,118 @@ struct PrivateMacShareTests {
         == [
           .register(identity.ipv4Address, 5_901, "publication-a"),
           .recover(identity.ipv4Address, "publication-a"),
+          .register(identity.ipv4Address, 5_901, "publication-a"),
+          .recover(identity.ipv4Address, "publication-a"),
           .unregister(identity.ipv4Address, "recovered:publication-a"),
         ]
     )
+  }
+
+  @Test @MainActor
+  func preQUICPersistedPublicationRecoversAndAddsQUICCapabilities() async throws {
+    try await assertPersistedCapabilityChange(
+      name: "pre-quic-recovery",
+      originalQUICPort: nil,
+      originalCertHash: nil,
+      updatedQUICPort: 5_911,
+      updatedCertHash: "test-quic-cert-hash-1")
+  }
+
+  @Test @MainActor
+  func persistedPublicationRecoversAcrossQUICCertificateRotation() async throws {
+    try await assertPersistedCapabilityChange(
+      name: "quic-cert-rotation",
+      originalQUICPort: 5_911,
+      originalCertHash: "test-quic-cert-hash-1",
+      updatedQUICPort: 5_911,
+      updatedCertHash: "test-quic-cert-hash-2")
+  }
+
+  @Test @MainActor
+  func persistedPublicationRecoversWhenQUICBecomesUnavailable() async throws {
+    try await assertPersistedCapabilityChange(
+      name: "quic-unavailable",
+      originalQUICPort: 5_911,
+      originalCertHash: "test-quic-cert-hash-1",
+      updatedQUICPort: nil,
+      updatedCertHash: nil)
+  }
+
+  @Test @MainActor
+  func recoveredPublicationReplaysCapabilitiesAfterLostRefreshResponse() async throws {
+    let identity = desktopIdentity(name: "lost-capability-refresh", address: "100.64.12.71")
+    let registration = CapabilityUpdatingAmbiguousDesktopRegistration(
+      uncertainRegistrationCounts: [1, 2])
+    let stateStore = ToggleDesktopRegistrationStateStore()
+    let recoveryScope = desktopRecoveryScope()
+    let initialLifecycle = DesktopHostRegistrationLifecycle(
+      registration: registration,
+      createPublicationID: { "stable-publication-id" },
+      stateStore: stateStore,
+      recoveryScopeProvider: { recoveryScope })
+    await #expect(throws: DesktopHostRegistrationResultUncertainError.self) {
+      try await initialLifecycle.publish(
+        identity: identity,
+        port: 5_901,
+        quicPort: 5_911,
+        quicCertHash: "test-quic-cert-hash-1")
+    }
+
+    var replacementPublicationCount = 0
+    let unavailableLifecycle = DesktopHostRegistrationLifecycle(
+      registration: registration,
+      createPublicationID: {
+        replacementPublicationCount += 1
+        return "unexpected-replacement-publication"
+      },
+      stateStore: stateStore,
+      recoveryScopeProvider: { recoveryScope })
+    await #expect(throws: DesktopHostRegistrationResultUncertainError.self) {
+      try await unavailableLifecycle.publish(identity: identity, port: 5_901)
+    }
+    #expect(await registration.activeQUICPort == nil)
+
+    let restoredLifecycle = DesktopHostRegistrationLifecycle(
+      registration: registration,
+      createPublicationID: {
+        replacementPublicationCount += 1
+        return "unexpected-replacement-publication"
+      },
+      stateStore: stateStore,
+      recoveryScopeProvider: { recoveryScope })
+    let publication = try await restoredLifecycle.publish(
+      identity: identity,
+      port: 5_901,
+      quicPort: 5_911,
+      quicCertHash: "test-quic-cert-hash-1")
+
+    #expect(replacementPublicationCount == 0)
+    #expect(publication.relayAccess == "test-refreshed-ownership-token-3")
+    #expect(await registration.activePublicationID == "stable-publication-id")
+    #expect(await registration.activeQUICPort == 5_911)
+    #expect(await registration.activeQUICCertHash == "test-quic-cert-hash-1")
+    #expect(
+      await registration.events
+        == [
+          .register(
+            publicationID: "stable-publication-id",
+            quicPort: 5_911,
+            quicCertHash: "test-quic-cert-hash-1",
+            webtransport: false),
+          .recover(publicationID: "stable-publication-id"),
+          .register(
+            publicationID: "stable-publication-id",
+            quicPort: nil,
+            quicCertHash: nil,
+            webtransport: false),
+          .recover(publicationID: "stable-publication-id"),
+          .register(
+            publicationID: "stable-publication-id",
+            quicPort: 5_911,
+            quicCertHash: "test-quic-cert-hash-1",
+            webtransport: false),
+          .recover(publicationID: "stable-publication-id"),
+        ])
   }
 
   @Test @MainActor
@@ -2471,6 +2580,75 @@ struct PrivateMacShareTests {
   }
 
   @MainActor
+  private func assertPersistedCapabilityChange(
+    name: String,
+    originalQUICPort: UInt16?,
+    originalCertHash: String?,
+    updatedQUICPort: UInt16?,
+    updatedCertHash: String?
+  ) async throws {
+    let identity = desktopIdentity(name: name, address: "100.64.12.70")
+    let registration = CapabilityUpdatingAmbiguousDesktopRegistration()
+    let stateStore = ToggleDesktopRegistrationStateStore()
+    let recoveryScope = desktopRecoveryScope()
+    let originalLifecycle = DesktopHostRegistrationLifecycle(
+      registration: registration,
+      createPublicationID: { "stable-publication-id" },
+      stateStore: stateStore,
+      recoveryScopeProvider: { recoveryScope }
+    )
+    await #expect(throws: DesktopHostRegistrationResultUncertainError.self) {
+      try await originalLifecycle.publish(
+        identity: identity,
+        port: 5_901,
+        quicPort: originalQUICPort,
+        quicCertHash: originalCertHash,
+        webtransport: false)
+    }
+
+    var replacementPublicationCount = 0
+    let reloadedLifecycle = DesktopHostRegistrationLifecycle(
+      registration: registration,
+      createPublicationID: {
+        replacementPublicationCount += 1
+        return "unexpected-replacement-publication"
+      },
+      stateStore: stateStore,
+      recoveryScopeProvider: { recoveryScope }
+    )
+    let publication = try await reloadedLifecycle.publish(
+      identity: identity,
+      port: 5_901,
+      quicPort: updatedQUICPort,
+      quicCertHash: updatedCertHash,
+      webtransport: false)
+
+    #expect(replacementPublicationCount == 0)
+    #expect(publication.hostID == CrabfleetDesktopRegistration.hostID(identity: identity))
+    #expect(publication.relayAccess == "test-refreshed-ownership-token-2")
+    #expect(
+      await registration.events
+        == [
+          .register(
+            publicationID: "stable-publication-id",
+            quicPort: originalQUICPort,
+            quicCertHash: originalCertHash,
+            webtransport: false),
+          .recover(publicationID: "stable-publication-id"),
+          .register(
+            publicationID: "stable-publication-id",
+            quicPort: updatedQUICPort,
+            quicCertHash: updatedCertHash,
+            webtransport: false),
+          .recover(publicationID: "stable-publication-id"),
+        ]
+    )
+    #expect(await registration.activePublicationID == "stable-publication-id")
+    #expect(await registration.activeQUICPort == updatedQUICPort)
+    #expect(await registration.activeQUICCertHash == updatedCertHash)
+  }
+
+  @MainActor
   private func assertIdleApplicationTerminationContinues(
     transportHandler: @escaping (URLRequest) throws -> (Data, HTTPURLResponse)
   ) async throws {
@@ -2869,6 +3047,87 @@ private actor RecoverableAmbiguousDesktopRegistration: DesktopHostRegistering {
   }
 }
 
+private actor CapabilityUpdatingAmbiguousDesktopRegistration: DesktopHostRegistering {
+  enum Event: Equatable {
+    case register(
+      publicationID: String,
+      quicPort: UInt16?,
+      quicCertHash: String?,
+      webtransport: Bool)
+    case recover(publicationID: String)
+    case unregister
+  }
+
+  private(set) var activePublicationID: String?
+  private(set) var activeQUICPort: UInt16?
+  private(set) var activeQUICCertHash: String?
+  private var activeRegistrationAccess: String?
+  private(set) var events: [Event] = []
+  private var registrationCount = 0
+  private var uncertainRegistrationCounts: Set<Int>
+
+  init(uncertainRegistrationCounts: Set<Int> = [1]) {
+    self.uncertainRegistrationCounts = uncertainRegistrationCounts
+  }
+
+  func register(
+    identity: TailnetIdentity,
+    port: UInt16,
+    publicationID: String
+  ) async throws -> String? {
+    try await register(
+      identity: identity,
+      port: port,
+      quicPort: nil,
+      quicCertHash: nil,
+      webtransport: false,
+      publicationID: publicationID)
+  }
+
+  func register(
+    identity: TailnetIdentity,
+    port: UInt16,
+    quicPort: UInt16?,
+    quicCertHash: String?,
+    webtransport: Bool,
+    publicationID: String
+  ) async throws -> String? {
+    events.append(
+      .register(
+        publicationID: publicationID,
+        quicPort: quicPort,
+        quicCertHash: quicCertHash,
+        webtransport: webtransport))
+    registrationCount += 1
+    if let activePublicationID, activePublicationID != publicationID {
+      throw DesktopRegistrationTestError.failed
+    }
+    activePublicationID = publicationID
+    activeQUICPort = quicPort
+    activeQUICCertHash = quicCertHash
+    let refreshedAccess = "test-refreshed-ownership-token-\(registrationCount)"
+    activeRegistrationAccess = refreshedAccess
+    if uncertainRegistrationCounts.remove(registrationCount) != nil {
+      throw DesktopHostRegistrationResultUncertainError(message: "test response lost")
+    }
+    return refreshedAccess
+  }
+
+  func recover(identity: TailnetIdentity, publicationID: String) async throws -> String? {
+    events.append(.recover(publicationID: publicationID))
+    guard activePublicationID == publicationID else { return nil }
+    return activeRegistrationAccess
+  }
+
+  func unregister(identity: TailnetIdentity, ownershipToken: String?) async throws {
+    events.append(.unregister)
+    activePublicationID = nil
+    activeQUICPort = nil
+    activeQUICCertHash = nil
+    activeRegistrationAccess = nil
+  }
+}
+
 @MainActor
 private final class ToggleDesktopRegistrationStateStore:
   DesktopHostRegistrationStateStoring
@@ -2904,7 +3163,7 @@ private actor IdentityAwareAmbiguousDesktopRegistration: DesktopHostRegistering 
     case unregister(String, String?)
   }
 
-  private let uncertainPublicationIDs: Set<String>
+  private var uncertainPublicationIDs: Set<String>
   private(set) var events: [Event] = []
 
   init(uncertainPublicationIDs: Set<String>) {
@@ -2917,7 +3176,7 @@ private actor IdentityAwareAmbiguousDesktopRegistration: DesktopHostRegistering 
     publicationID: String
   ) async throws -> String? {
     events.append(.register(identity.ipv4Address, port, publicationID))
-    if uncertainPublicationIDs.contains(publicationID) {
+    if uncertainPublicationIDs.remove(publicationID) != nil {
       throw DesktopHostRegistrationResultUncertainError(message: "response lost")
     }
     return "token:\(publicationID)"

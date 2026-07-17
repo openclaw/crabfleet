@@ -176,6 +176,14 @@ final class DesktopHostRegistrationLifecycle {
     }
 
     var identity: TailnetIdentity { persistedIdentity.identity }
+
+    func hasSamePublicationIdentity(
+      identity: TailnetIdentity,
+      hostID: String,
+      port: UInt16
+    ) -> Bool {
+      self.hostID == hostID && self.identity == identity && self.port == port
+    }
   }
 
   private struct PublishedRegistration: Equatable {
@@ -307,9 +315,7 @@ final class DesktopHostRegistrationLifecycle {
     try await loadStateIfNeeded()
     let hostID = CrabfleetDesktopRegistration.hostID(identity: identity)
     let existingTarget = uncertainRegistrations.first {
-      $0.hostID == hostID && $0.identity == identity && $0.port == port
-        && $0.quicPort == quicPort && $0.quicCertHash == quicCertHash
-        && ($0.webtransport ?? false) == webtransport
+      $0.hasSamePublicationIdentity(identity: identity, hostID: hostID, port: port)
     }
     let target =
       existingTarget
@@ -322,6 +328,15 @@ final class DesktopHostRegistrationLifecycle {
         webtransport: webtransport,
         publicationID: createPublicationID()
       )
+    if existingTarget != nil {
+      try await refreshPublicationIfCurrent(
+        identity: identity,
+        port: port,
+        quicPort: quicPort,
+        quicCertHash: quicCertHash,
+        webtransport: webtransport,
+        publicationID: target.publicationID)
+    }
     if existingTarget == nil {
       uncertainRegistrations.append(target)
       try persistState()
@@ -534,6 +549,26 @@ final class DesktopHostRegistrationLifecycle {
       lastPersistenceError = error
       throw error
     }
+  }
+
+  private func refreshPublicationIfCurrent(
+    identity: TailnetIdentity,
+    port: UInt16,
+    quicPort: UInt16?,
+    quicCertHash: String?,
+    webtransport: Bool,
+    publicationID: String
+  ) async throws {
+    guard
+      try await coordinator.recover(identity: identity, publicationID: publicationID) != nil
+    else { return }
+    _ = try await coordinator.register(
+      identity: identity,
+      port: port,
+      quicPort: quicPort,
+      quicCertHash: quicCertHash,
+      webtransport: webtransport,
+      publicationID: publicationID)
   }
 }
 

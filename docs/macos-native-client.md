@@ -99,7 +99,10 @@ an owner-scoped Crabfleet Worker relay for first-party browser access.
    the RFB handshake has not completed in two seconds. Rows without both QUIC
    fields keep the rolling-upgrade-safe TCP behavior. The displayed
    `vnc://100.x.y.z:5901` and consecutive-port addresses remain Quick Connect
-   fallbacks.
+   fallbacks. Recovery keys the publication to the existing host/display
+   endpoint, then refreshes a changed QUIC pin or availability under that same
+   publication ID so upgrades and Keychain identity rotation cannot strand the
+   token-owned Fleet row.
 6. Every token-owned display registration enables the persisted "Allow browser
    access via Crabfleet" toggle, which defaults on. Each display publisher opens
    an authenticated WebSocket to its registration's `DesktopRelayDO`; a
