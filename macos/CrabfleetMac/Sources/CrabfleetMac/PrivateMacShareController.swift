@@ -536,6 +536,7 @@ final class PrivateMacShareController: ObservableObject {
   @Published private(set) var launchAtLoginEnabled = false
   @Published private(set) var streamStats: TailnetStreamStats?
   @Published private(set) var audioActive = false
+  @Published private(set) var connectedViewerCount = 0
 
   @Published var selectedDisplayID: CGDirectDisplayID {
     didSet {
@@ -1042,20 +1043,22 @@ final class PrivateMacShareController: ObservableObject {
     case .authorizing(let peer):
       phase = .authorizing
       connectedPeer = peer
-    case .connected(let peer):
+    case .connected(let peer, let count):
       phase = .connected
       connectedPeer = peer
+      connectedViewerCount = count
       streamStats = nil
       notice = nil
     case .streaming(let stats):
       streamStats = stats
     case .audioActive(let isActive):
       audioActive = isActive
-    case .disconnected:
-      phase = .sharing
-      connectedPeer = nil
+    case .disconnected(let count, let remainingPeer):
+      connectedViewerCount = count
+      phase = count == 0 ? .sharing : .connected
+      connectedPeer = remainingPeer
       streamStats = nil
-      audioActive = false
+      if count == 0 { audioActive = false }
     case .listenerFailed(let message):
       let pendingRegistration = registrationTask
       phase = .failed

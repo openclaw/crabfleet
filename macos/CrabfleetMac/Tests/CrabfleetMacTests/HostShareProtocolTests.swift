@@ -299,6 +299,33 @@ struct HostClipboardBridgeTests {
   }
 
   @Test
+  func multicastsHostAndPeerClipboardWithoutRebaselining() async throws {
+    let pasteboard = NSPasteboard(name: .init("CrabfleetMacTests.\(UUID().uuidString)"))
+    pasteboard.clearContents()
+    pasteboard.setString("initial", forType: .string)
+    let firstID = UUID()
+    let secondID = UUID()
+    let first = PushRecorder()
+    let second = PushRecorder()
+    let bridge = HostClipboardBridge(pasteboard: pasteboard, pollingInterval: 10)
+    bridge.attach(id: firstID) { first.append($0) }
+    try await Task.sleep(for: .milliseconds(30))
+
+    pasteboard.clearContents()
+    pasteboard.setString("host copy", forType: .string)
+    bridge.attach(id: secondID) { second.append($0) }
+    bridge.poll()
+    #expect(first.values == ["host copy"])
+    #expect(second.values == ["host copy"])
+
+    bridge.receiveClientText(id: firstID, text: "first viewer copy")
+    try await waitUntil { second.values == ["host copy", "first viewer copy"] }
+    #expect(first.values == ["host copy"])
+    #expect(pasteboard.string(forType: .string) == "first viewer copy")
+    bridge.detachAll()
+  }
+
+  @Test
   func forwardsClipboardClearsAndLocallyReusedClientValues() async throws {
     let pasteboard = NSPasteboard(name: .init("CrabfleetMacTests.\(UUID().uuidString)"))
     pasteboard.clearContents()

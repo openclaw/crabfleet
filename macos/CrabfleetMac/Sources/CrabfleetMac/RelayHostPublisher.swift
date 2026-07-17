@@ -251,11 +251,12 @@ final class RelayHostPublisher: @unchecked Sendable {
     }
 
     let baseStream = RelayWebSocketByteStream(task: socket)
+    let sessionID = UUID()
     let stream = SessionClaimingRFBByteStream(
       base: baseStream,
       gate: sessionGate,
-      onAcquire: { [weak capture] in capture?.setConsumerActive(true) },
-      onRelease: { [weak capture] in capture?.setConsumerActive(false) }
+      onAcquire: {},
+      onRelease: {}
     )
     let connected = ThreadSafeRelayConnectionState()
 
@@ -273,7 +274,8 @@ final class RelayHostPublisher: @unchecked Sendable {
         viewOnly: true,
         audioEnabled: false,
         qualityMode: .auto,
-        didAuthorize: {},
+        sessionID: sessionID,
+        didAuthorize: { [weak capture] in capture?.retainConsumer(id: sessionID) },
         eventHandler: { [eventHandler] event in
           if case .connected = event {
             stream.finishHandshake()
@@ -291,6 +293,7 @@ final class RelayHostPublisher: @unchecked Sendable {
         },
         didFinish: { [weak self] finishedSession in
           stream.finishClaim()
+          self?.capture.releaseConsumer(id: sessionID)
           socket.cancel(with: .normalClosure, reason: nil)
           self?.clear(finishedSession, socket: socket)
           continuation.resume()
