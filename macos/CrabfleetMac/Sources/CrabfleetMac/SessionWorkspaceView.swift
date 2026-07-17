@@ -406,7 +406,7 @@ struct DesktopConnectionSheet: View {
   @State private var address: String
   @State private var username: String
   @State private var password = ""
-  @State private var rememberAccessCode = true
+  @State private var rememberAccessCode: Bool
   @State private var clipboardEnabled = false
   @State private var validationMessage: String?
 
@@ -424,6 +424,7 @@ struct DesktopConnectionSheet: View {
     _address = State(initialValue: address)
     _username = State(initialValue: target.endpoint?.username ?? "")
     _password = { password in State(initialValue: password) }(storedAccessCode.value)
+    _rememberAccessCode = State(initialValue: storedAccessCode.wasRemembered)
   }
 
   var body: some View {
@@ -520,6 +521,7 @@ struct DesktopConnectionSheet: View {
 }
 
 struct QuickConnectSheet: View {
+  let storedAccessCode: (VNCAddress) -> StoredAccessCode
   let connect: (String, VNCAddress, String, Bool, Bool) -> Bool
 
   @Environment(\.dismiss) private var dismiss
@@ -528,9 +530,10 @@ struct QuickConnectSheet: View {
   @State private var address = ""
   @State private var username = ""
   @State private var password = ""
-  @State private var rememberAccessCode = true
+  @State private var rememberAccessCode = false
   @State private var clipboardEnabled = false
   @State private var validationMessage: String?
+  @State private var credentialIdentity: VNCAddress?
 
   var body: some View {
     VStack(alignment: .leading, spacing: 20) {
@@ -578,6 +581,19 @@ struct QuickConnectSheet: View {
     .padding(24)
     .frame(width: 540)
     .onAppear { addressFocused = true }
+    .onChange(of: address) { _, _ in refreshRememberedState() }
+    .onChange(of: username) { _, _ in refreshRememberedState() }
+  }
+
+  private func refreshRememberedState() {
+    guard let parsed = try? VNCAddress.parse(address) else { return }
+    let effectiveAddress = VNCAddress(
+      host: parsed.host,
+      port: parsed.port,
+      username: username.isEmpty ? parsed.username : username)
+    guard effectiveAddress != credentialIdentity else { return }
+    credentialIdentity = effectiveAddress
+    rememberAccessCode = storedAccessCode(effectiveAddress).wasRemembered
   }
 
   private func submit() {

@@ -21,6 +21,7 @@ struct FleetRootView: View {
   @State private var showingQuickConnect = false
   @State private var showingPrivateShare = false
   @State private var didHandleLaunchConnection = false
+  @State private var keychainCleanupWarning: String?
 
   private var allTargets: [DesktopTarget] {
     let saved = connections.profiles.map(DesktopTarget.init(profile:))
@@ -120,19 +121,17 @@ struct FleetRootView: View {
       }
     }
     .sheet(isPresented: $showingQuickConnect) {
-      QuickConnectSheet { name, address, password, clipboardEnabled, rememberAccessCode in
+      QuickConnectSheet(storedAccessCode: connections.accessCode(for:)) {
+        name, address, password, clipboardEnabled, rememberAccessCode in
         let storedAccessCode = connections.accessCode(for: address)
         guard !password.isEmpty || storedAccessCode.canSafelySubmitBlank else { return false }
-        let effectiveAccessCode =
-          password.isEmpty && rememberAccessCode
-          ? storedAccessCode.value
-          : password
-        guard
-          connections.rememberAccessCode(
-            effectiveAccessCode,
-            for: address,
-            enabled: rememberAccessCode)
-        else { return false }
+        let effectiveAccessCode = password.isEmpty ? storedAccessCode.value : password
+        let persistence = connections.rememberAccessCode(
+          effectiveAccessCode,
+          for: address,
+          enabled: rememberAccessCode)
+        guard persistence.permitsConnection else { return false }
+        reportCleanupFailure(persistence)
         let profile = connections.save(name: name, address: address)
         let target = DesktopTarget(profile: profile)
         let request: VNCConnectionRequest = { password in
@@ -155,6 +154,17 @@ struct FleetRootView: View {
     }
     .sheet(isPresented: $showingPrivateShare) {
       PrivateMacShareSheet(controller: privateShare)
+    }
+    .alert(
+      "Keychain cleanup incomplete",
+      isPresented: Binding(
+        get: { keychainCleanupWarning != nil },
+        set: { if !$0 { keychainCleanupWarning = nil } }
+      )
+    ) {
+      Button("OK") { keychainCleanupWarning = nil }
+    } message: {
+      Text(keychainCleanupWarning ?? "")
     }
     .onAppear(perform: connectLaunchConnectionIfNeeded)
     .onExitCommand(perform: closeFocus)
@@ -247,12 +257,12 @@ struct FleetRootView: View {
 
   private func persistedDirectRequest(_ request: VNCConnectionRequest) -> VNCConnectionRequest? {
     let address = request.address
-    guard
-      connections.rememberAccessCode(
-        request.password,
-        for: address,
-        enabled: request.rememberAccessCode)
-    else { return nil }
+    let persistence = connections.rememberAccessCode(
+      request.password,
+      for: address,
+      enabled: request.rememberAccessCode)
+    guard persistence.permitsConnection else { return nil }
+    reportCleanupFailure(persistence)
     return .init(
       host: request.host,
       port: request.port,
@@ -261,6 +271,12 @@ struct FleetRootView: View {
       clipboardEnabled: request.clipboardEnabled,
       rememberAccessCode: request.rememberAccessCode,
       quic: request.quic)
+  }
+
+  private func reportCleanupFailure(_ result: AccessCodePersistenceResult) {
+    guard result == .cleanupFailed else { return }
+    keychainCleanupWarning =
+      "The connection opened with the password in memory, but an older saved password could not be removed. Retry after Keychain is available."
   }
 
   private func closeFocus() {

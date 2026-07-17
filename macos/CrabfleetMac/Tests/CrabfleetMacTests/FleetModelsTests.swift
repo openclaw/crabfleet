@@ -300,10 +300,12 @@ struct FleetModelsTests {
       keychain: keychain)
 
     #expect(library.accessCode(for: address) == .missing)
-    #expect(library.rememberAccessCode("test-auth-token", for: address, enabled: true))
+    #expect(
+      library.rememberAccessCode("test-auth-token", for: address, enabled: true) == .updated)
     #expect(library.accessCode(for: address) == .available("test-auth-token"))
     #expect(defaults.data(forKey: "profiles") == nil)
-    #expect(library.rememberAccessCode("test-auth-token", for: address, enabled: false))
+    #expect(
+      library.rememberAccessCode("test-auth-token", for: address, enabled: false) == .updated)
     #expect(library.accessCode(for: address) == .missing)
   }
 
@@ -318,8 +320,10 @@ struct FleetModelsTests {
     let first = VNCAddress(host: "viewer.test", port: 5900, username: "alice")
     let second = VNCAddress(host: "viewer.test", port: 5900, username: "bob")
 
-    #expect(library.rememberAccessCode("test-auth-token-1", for: first, enabled: true))
-    #expect(library.rememberAccessCode("test-auth-token-2", for: second, enabled: true))
+    #expect(
+      library.rememberAccessCode("test-auth-token-1", for: first, enabled: true) == .updated)
+    #expect(
+      library.rememberAccessCode("test-auth-token-2", for: second, enabled: true) == .updated)
     #expect(library.accessCode(for: first) == .available("test-auth-token-1"))
     #expect(library.accessCode(for: second) == .available("test-auth-token-2"))
 
@@ -338,6 +342,29 @@ struct FleetModelsTests {
     #expect(
       library.accessCode(for: .init(host: "viewer.test", port: 5900, username: ""))
         == .unavailable)
+  }
+
+  @Test @MainActor
+  func memoryOnlyAccessCodeDoesNotDependOnKeychainCleanup() throws {
+    let defaults = try #require(UserDefaults(suiteName: "CrabfleetMacTests.\(UUID().uuidString)"))
+    let library = ConnectionLibrary(
+      defaults: defaults,
+      storageKey: "profiles",
+      keychain: FailingVNCKeychainStore())
+    let address = VNCAddress(host: "viewer.test", port: 5900, username: "")
+
+    #expect(
+      library.rememberAccessCode("test-auth-token", for: address, enabled: false)
+        == .cleanupFailed)
+    #expect(
+      library.rememberAccessCode("test-auth-token", for: address, enabled: true) == .saveFailed)
+  }
+
+  @Test
+  func remembersOnlyPreviouslyStoredAccessCodesByDefault() {
+    #expect(!StoredAccessCode.missing.wasRemembered)
+    #expect(!StoredAccessCode.unavailable.wasRemembered)
+    #expect(StoredAccessCode.available("test-auth-token").wasRemembered)
   }
 
   @Test

@@ -20,6 +20,21 @@ enum StoredAccessCode: Equatable {
   var canSafelySubmitBlank: Bool {
     self != .unavailable
   }
+
+  var wasRemembered: Bool {
+    if case .available = self { return true }
+    return false
+  }
+}
+
+enum AccessCodePersistenceResult: Equatable {
+  case updated
+  case saveFailed
+  case cleanupFailed
+
+  var permitsConnection: Bool {
+    self != .saveFailed
+  }
 }
 
 private struct VNCKeychainError: Error {
@@ -113,8 +128,16 @@ final class ConnectionLibrary: ObservableObject {
   }
 
   @discardableResult
-  func rememberAccessCode(_ value: String, for address: VNCAddress, enabled: Bool) -> Bool {
-    enabled ? keychain.save(value, for: address) : keychain.remove(for: address)
+  func rememberAccessCode(
+    _ value: String,
+    for address: VNCAddress,
+    enabled: Bool
+  ) -> AccessCodePersistenceResult {
+    guard enabled else {
+      // A memory-only connection must remain usable when Keychain is unavailable.
+      return keychain.remove(for: address) ? .updated : .cleanupFailed
+    }
+    return keychain.save(value, for: address) ? .updated : .saveFailed
   }
 
   @discardableResult
