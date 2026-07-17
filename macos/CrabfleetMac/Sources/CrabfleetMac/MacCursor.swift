@@ -102,9 +102,13 @@ enum CursorCoordinateMapper {
     frameWidth: Int,
     frameHeight: Int
   ) -> (x: UInt16, y: UInt16)? {
-    guard descriptor.displayBounds.contains(position) else { return nil }
-    let width = max(frameWidth - 1, 1)
-    let height = max(frameHeight - 1, 1)
+    guard frameWidth > 0, frameHeight > 0,
+      frameWidth <= Int(UInt16.max) + 1, frameHeight <= Int(UInt16.max) + 1,
+      descriptor.displayBounds.width > 0, descriptor.displayBounds.height > 0,
+      descriptor.displayBounds.contains(position)
+    else { return nil }
+    let width = frameWidth - 1
+    let height = frameHeight - 1
     let xRatio = min(max((position.x - descriptor.displayBounds.minX) / descriptor.displayBounds.width, 0), 1)
     let yRatio = min(max((position.y - descriptor.displayBounds.minY) / descriptor.displayBounds.height, 0), 1)
     return (

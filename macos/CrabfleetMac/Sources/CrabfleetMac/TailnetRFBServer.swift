@@ -630,6 +630,7 @@ final class RFBHostSession: @unchecked Sendable {
   private var lastLocalPointerInput: TimeInterval?
   private var cursorStateGeneration: UInt64 = 0
   private var sentCursorSinceLastVideo = false
+  private var preferCursorPosition = false
 
   init(
     byteStream: any RFBByteStream,
@@ -1017,12 +1018,14 @@ final class RFBHostSession: @unchecked Sendable {
           withLock { sentCursorSinceLastVideo = false }
           continue protocolLoop
         }
-        let shouldTryCursor = incremental && !withLock { sentCursorSinceLastVideo }
+        let shouldTryCursor = !incremental || !withLock { sentCursorSinceLastVideo }
         if shouldTryCursor, let snapshot = withLock({ latestCursorSnapshot }) {
           do {
             if try await sendCursorSnapshot(snapshot, io: io) {
-              withLock { sentCursorSinceLastVideo = true }
-              continue protocolLoop
+              if incremental {
+                withLock { sentCursorSinceLastVideo = true }
+                continue protocolLoop
+              }
             }
           } catch is RFBSendExpiredError {
             // The cursor deadline expired before its write. Preserve this
@@ -1116,12 +1119,18 @@ final class RFBHostSession: @unchecked Sendable {
 
       case 5:  // PointerEvent
         let payload = try await io.readExactly(5)
-        if inputGate.pointerEvent(
+        let accepted = inputGate.pointerEvent(
           buttonMask: payload[0],
           x: payload.readUInt16(at: 1),
           y: payload.readUInt16(at: 3)
-        ) {
-          withLock { lastLocalPointerInput = ProcessInfo.processInfo.systemUptime }
+        )
+        withLock {
+          // The viewer renders its local event optimistically. Force a later
+          // authoritative PointerPos even when view-only input rejects it.
+          lastCursorPosition = nil
+          if accepted {
+            lastLocalPointerInput = ProcessInfo.processInfo.systemUptime
+          }
         }
 
       case 6:  // ClientCutText
@@ -1375,7 +1384,8 @@ final class RFBHostSession: @unchecked Sendable {
         lastLocalPointerInput,
         finished,
         cursorIsVisible,
-        cursorStateGeneration
+        cursorStateGeneration,
+        preferCursorPosition
       )
     }
     guard !state.7 else { return false }
@@ -1411,13 +1421,36 @@ final class RFBHostSession: @unchecked Sendable {
       return true
     }
 
-    if let encoding = state.0,
-      let sourceImage = snapshot.image,
-      let image = CursorCoordinateMapper.cursorImage(
-        sourceImage,
+    let mappedImage = snapshot.image.flatMap {
+      CursorCoordinateMapper.cursorImage(
+        $0,
         descriptor: descriptor,
         frameWidth: state.2,
-        frameHeight: state.3),
+        frameHeight: state.3)
+    }
+    let imageChanged = mappedImage.map { $0.contentHash != state.4 } ?? false
+    let positionChanged = state.5?.x != position.x || state.5?.y != position.y
+    let now = ProcessInfo.processInfo.systemUptime
+    let latestLocalInput = withLock { lastLocalPointerInput }
+    let canSendPosition = state.1 && CursorEchoPolicy.shouldSendPointerPosition(
+      positionChanged: positionChanged,
+      lastLocalInput: latestLocalInput,
+      now: now)
+
+    if canSendPosition && (state.10 || !imageChanged) {
+      try await io.send(
+        RFBWire.pointerPositionUpdate(x: position.x, y: position.y),
+        timeout: .milliseconds(100))
+      withLock {
+        guard cursorStateGeneration == state.9 else { return }
+        lastCursorPosition = position
+        preferCursorPosition = false
+      }
+      return true
+    }
+
+    if let encoding = state.0,
+      let image = mappedImage,
       image.contentHash != state.4
     {
       let update: Data
@@ -1432,26 +1465,20 @@ final class RFBHostSession: @unchecked Sendable {
         guard cursorStateGeneration == state.9 else { return }
         lastCursorImageHash = image.contentHash
         cursorIsVisible = true
+        preferCursorPosition = true
       }
       return true
     }
 
     guard withLock({ cursorStateGeneration == state.9 }) else { return false }
-    guard state.1 else { return false }
-    let changed = state.5?.x != position.x || state.5?.y != position.y
-    let now = ProcessInfo.processInfo.systemUptime
-    let latestLocalInput = withLock { lastLocalPointerInput }
-    guard CursorEchoPolicy.shouldSendPointerPosition(
-      positionChanged: changed,
-      lastLocalInput: latestLocalInput,
-      now: now)
-    else { return false }
+    guard canSendPosition else { return false }
     try await io.send(
       RFBWire.pointerPositionUpdate(x: position.x, y: position.y),
       timeout: .milliseconds(100))
     withLock {
       guard cursorStateGeneration == state.9 else { return }
       lastCursorPosition = position
+      preferCursorPosition = false
     }
     return true
   }
@@ -2153,6 +2180,7 @@ final class RFBHostSession: @unchecked Sendable {
       cursorFrameHeight = height
       lastCursorImageHash = nil
       lastCursorPosition = nil
+      preferCursorPosition = false
       cursorStateGeneration &+= 1
     }
   }

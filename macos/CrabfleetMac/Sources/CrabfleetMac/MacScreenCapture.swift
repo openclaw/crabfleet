@@ -168,7 +168,7 @@ final class MacScreenCapture: NSObject, @unchecked Sendable {
     configuration.pixelFormat = kCVPixelFormatType_32BGRA
     configuration.minimumFrameInterval = CMTime(value: 1, timescale: 15)
     configuration.queueDepth = 3
-    configuration.showsCursor = true
+    configuration.showsCursor = withFrameLock { cursorNegotiationState.showsCursor }
     configuration.capturesAudio = false
     configuration.excludesCurrentProcessAudio = true
     configuration.colorSpaceName = CGColorSpace.sRGB
@@ -184,13 +184,29 @@ final class MacScreenCapture: NSObject, @unchecked Sendable {
       audioOutputAvailable = false
     }
     try await stream.startCapture()
-    try await configurationGate.run { [self] in
-      self.stream = stream
-      self.configuration = configuration
-      self.contentFilter = filter
-      self.audioOutputAvailable = audioOutputAvailable
-      self.withFrameLock { self.appliedFrameRate = 15 }
-      self.cursorMonitor.start()
+    do {
+      try await configurationGate.run { [self] in
+        let desiredShowsCursor = self.withFrameLock { self.cursorNegotiationState.showsCursor }
+        if configuration.showsCursor != desiredShowsCursor {
+          let previousShowsCursor = configuration.showsCursor
+          configuration.showsCursor = desiredShowsCursor
+          do {
+            try await stream.updateConfiguration(configuration)
+          } catch {
+            configuration.showsCursor = previousShowsCursor
+            throw error
+          }
+        }
+        self.stream = stream
+        self.configuration = configuration
+        self.contentFilter = filter
+        self.audioOutputAvailable = audioOutputAvailable
+        self.withFrameLock { self.appliedFrameRate = 15 }
+        self.cursorMonitor.start()
+      }
+    } catch {
+      try? await stream.stopCapture()
+      throw error
     }
 
     return CapturedDisplayDescriptor(
@@ -311,11 +327,13 @@ final class MacScreenCapture: NSObject, @unchecked Sendable {
   }
 
   func addCursorSession(id: UUID) async throws {
-    try await updateCursorNegotiation { $0.join(id) }
+    try await updateCursorNegotiation(allowsStoppedCapture: true) { $0.join(id) }
   }
 
   func updateCursorSession(id: UUID, negotiated: Bool) async throws {
-    try await updateCursorNegotiation { $0.setNegotiated(negotiated, for: id) }
+    try await updateCursorNegotiation(allowsStoppedCapture: true) {
+      $0.setNegotiated(negotiated, for: id)
+    }
   }
 
   func removeCursorSession(id: UUID) async throws {

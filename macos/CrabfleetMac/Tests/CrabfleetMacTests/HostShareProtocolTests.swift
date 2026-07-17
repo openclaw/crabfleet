@@ -234,6 +234,17 @@ struct HostShareWireTests {
 
 struct CursorPipelinePolicyTests {
   @Test
+  func stoppedCaptureAcceptsCursorSessionLifecycle() async throws {
+    let capture = MacScreenCapture()
+    let sessionID = UUID()
+
+    try await capture.addCursorSession(id: sessionID)
+    try await capture.updateCursorSession(id: sessionID, negotiated: true)
+    try await capture.updateCursorSession(id: sessionID, negotiated: false)
+    try await capture.removeCursorSession(id: sessionID)
+  }
+
+  @Test
   func captureBakesUnlessEveryActiveSessionNegotiatedCursor() {
     let first = UUID()
     let second = UUID()
@@ -307,6 +318,20 @@ struct CursorPipelinePolicyTests {
         descriptor: descriptor,
         frameWidth: descriptor.frameWidth,
         frameHeight: descriptor.frameHeight) == nil)
+    let onePixel = try #require(
+      CursorCoordinateMapper.pointerPosition(
+        CGPoint(x: 820, y: 500),
+        descriptor: descriptor,
+        frameWidth: 1,
+        frameHeight: 1))
+    #expect(onePixel.x == 0)
+    #expect(onePixel.y == 0)
+    #expect(
+      CursorCoordinateMapper.pointerPosition(
+        CGPoint(x: 820, y: 500),
+        descriptor: descriptor,
+        frameWidth: 0,
+        frameHeight: 1) == nil)
 
     let image = SystemCursorImage(
       width: 32,
