@@ -105,6 +105,7 @@ final class RelayHostPublisher: @unchecked Sendable {
   private let eventHandler: EventHandler
   private let taskFactory: TaskFactory
   private let lock = NSLock()
+  private let eventQueue = DispatchQueue(label: "org.openclaw.crabfleet.relay-host-events")
   private var active = false
   private var viewOnly = false
   private var audioEnabled = true
@@ -112,6 +113,9 @@ final class RelayHostPublisher: @unchecked Sendable {
   private var publisherTask: Task<Void, Never>?
   private var webSocketTask: (any RelayWebSocketTasking)?
   private var session: RFBHostSession?
+  private var sessionID: UUID?
+  private var connectedSessionID: UUID?
+  private var viewerEventGeneration: UInt64 = 0
 
   init(
     endpoint: URL,
@@ -153,8 +157,11 @@ final class RelayHostPublisher: @unchecked Sendable {
     let values = withLock { () -> (Task<Void, Never>?, RFBHostSession?, (any RelayWebSocketTasking)?) in
       active = false
       defer {
+        publishViewerSessionsLocked([])
         publisherTask = nil
         session = nil
+        sessionID = nil
+        connectedSessionID = nil
         webSocketTask = nil
       }
       return (publisherTask, session, webSocketTask)
@@ -185,8 +192,8 @@ final class RelayHostPublisher: @unchecked Sendable {
     _ mode: ShareQualityMode,
     completion: (@Sendable (Bool) -> Void)? = nil
   ) -> Bool {
-    withLock {
-      guard let activeSession = session else {
+    withLock { () -> Bool in
+      guard let activeSession = session, !activeSession.isFinished else {
         qualityMode = mode
         if let completion { Task { completion(true) } }
         return true
@@ -215,6 +222,14 @@ final class RelayHostPublisher: @unchecked Sendable {
         })
       guard accepted else { return false }
       qualityMode = mode
+      if let sessionID, connectedSessionID == sessionID {
+        publishViewerSessionsLocked([
+          TailnetViewerSession(
+            id: sessionID,
+            peer: "Crabfleet browser",
+            qualityMode: activeSession.activeQualityMode)
+        ])
+      }
       return true
     }
   }
@@ -283,10 +298,12 @@ final class RelayHostPublisher: @unchecked Sendable {
           sessionGate.finishResize(width: width, height: height)
         },
         didAuthorize: {},
-        eventHandler: { [eventHandler] event in
+        eventHandler: { [weak self] event in
+          guard let self else { return }
           if case .connected = event {
             stream.finishHandshake()
             connected.markConnected()
+            markViewerSessionConnected(sessionID)
           }
           if !connected.value {
             if case .disconnected = event { return }
@@ -296,13 +313,28 @@ final class RelayHostPublisher: @unchecked Sendable {
               return
             }
           }
-          if case .disconnected = event { connected.markDisconnected() }
-          eventHandler(event)
+          if case .disconnected = event {
+            connected.markDisconnected()
+            disconnectViewerSession(sessionID)
+          }
+          if case .qualityModeChanged(let mode) = event {
+            publishViewerSessions(
+              [
+                TailnetViewerSession(
+                  id: sessionID,
+                  peer: "Crabfleet browser",
+                  qualityMode: mode)
+              ],
+              for: sessionID)
+          } else {
+            emit(event)
+          }
         },
-        didFinish: { [weak self, eventHandler] finishedSession in
+        didFinish: { [weak self] finishedSession in
           stream.finishClaim()
           if connected.consumeSyntheticDisconnect() {
-            eventHandler(.disconnected(count: 0, remainingPeer: nil))
+            self?.disconnectViewerSession(sessionID)
+            self?.emit(.disconnected(count: 0, remainingPeer: nil))
           }
           socket.cancel(with: .normalClosure, reason: nil)
           self?.clear(finishedSession, socket: socket)
@@ -312,6 +344,8 @@ final class RelayHostPublisher: @unchecked Sendable {
       let shouldRun = withLock { () -> Bool in
         guard active, !Task.isCancelled else { return false }
         session = hostSession
+        self.sessionID = sessionID
+        connectedSessionID = nil
         hostSession.setViewOnly(viewOnly)
         hostSession.setAudioEnabled(audioEnabled)
         hostSession.setQualityMode(qualityMode)
@@ -328,9 +362,54 @@ final class RelayHostPublisher: @unchecked Sendable {
 
   private func clear(_ finishedSession: RFBHostSession, socket: any RelayWebSocketTasking) {
     withLock {
-      if session === finishedSession { session = nil }
+      if session === finishedSession {
+        publishViewerSessionsLocked([])
+        session = nil
+        sessionID = nil
+        connectedSessionID = nil
+      }
       if sameTask(webSocketTask, socket) { webSocketTask = nil }
     }
+  }
+
+  private func publishViewerSessions(
+    _ sessions: [TailnetViewerSession],
+    for expectedSessionID: UUID
+  ) {
+    withLock {
+      guard sessionID == expectedSessionID, connectedSessionID == expectedSessionID else { return }
+      publishViewerSessionsLocked(sessions)
+    }
+  }
+
+  private func markViewerSessionConnected(_ expectedSessionID: UUID) {
+    withLock {
+      guard sessionID == expectedSessionID else { return }
+      connectedSessionID = expectedSessionID
+    }
+  }
+
+  private func disconnectViewerSession(_ expectedSessionID: UUID) {
+    withLock {
+      guard sessionID == expectedSessionID else { return }
+      connectedSessionID = nil
+      publishViewerSessionsLocked([])
+    }
+  }
+
+  private func publishViewerSessionsLocked(_ sessions: [TailnetViewerSession]) {
+    viewerEventGeneration &+= 1
+    let generation = viewerEventGeneration
+    eventQueue.async { [weak self] in
+      guard let self,
+        self.withLock({ self.viewerEventGeneration == generation })
+      else { return }
+      self.eventHandler(.viewerSessionsChanged(sessions))
+    }
+  }
+
+  private func emit(_ event: TailnetRFBServerEvent) {
+    eventQueue.async { [eventHandler] in eventHandler(event) }
   }
 
   private var isActive: Bool { withLock { active } }

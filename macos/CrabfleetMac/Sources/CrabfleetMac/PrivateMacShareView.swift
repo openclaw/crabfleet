@@ -89,13 +89,30 @@ struct PrivateMacShareSheet: View {
           .help("Share up to four displays; stop sharing to change the selection.")
         }
 
-        Picker("Quality", selection: $controller.qualityMode) {
+        Picker("Default quality", selection: $controller.qualityMode) {
           ForEach(ShareQualityMode.allCases) { mode in
             Text(mode.title).tag(mode)
           }
         }
         .pickerStyle(.segmented)
-        .help("Auto balances detail and motion; Sharp favors text; Smooth favors motion.")
+        .help("Default for older viewers; capable viewers choose their own quality.")
+
+        if !controller.viewerSessions.isEmpty {
+          VStack(alignment: .leading, spacing: 5) {
+            Text("Viewer quality")
+              .font(.caption.weight(.semibold))
+            ForEach(controller.viewerSessions) { viewer in
+              HStack {
+                Text("\(viewer.display) · \(viewer.peer)")
+                  .lineLimit(1)
+                Spacer()
+                Text(viewer.qualityMode.title)
+                  .foregroundStyle(.secondary)
+              }
+              .font(.caption)
+            }
+          }
+        }
 
         Toggle(
           "Sync clipboard with the connected device",

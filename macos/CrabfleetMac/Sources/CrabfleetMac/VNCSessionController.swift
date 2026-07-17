@@ -35,6 +35,7 @@ final class VNCSessionController: NSObject, ObservableObject {
   ) -> [VNCFrameEncodingType] {
     var encodings: [VNCFrameEncodingType] = [
       .crabfleetHEVC, .openH264, .tight, .hextile, .crabfleetAudio,
+      .crabfleetQualityControl,
     ]
     if supportsHEVC444 { encodings.insert(.crabfleetChroma444, at: 1) }
     return encodings
@@ -79,9 +80,17 @@ final class VNCSessionController: NSObject, ObservableObject {
   @Published private(set) var thumbnail: NSImage?
   @Published private(set) var clipboardEnabled = false
   @Published private(set) var isAudioMuted = false
+  @Published var qualityMode: ShareQualityMode {
+    didSet {
+      defaults.set(qualityMode.rawValue, forKey: qualityModeDefaultsKey)
+      _ = connection?.setQualityMode(qualityMode.vncQualityMode)
+    }
+  }
   private(set) var framebufferUpdateCount: UInt64 = 0
 
   private let targetID: String
+  private let defaults: UserDefaults
+  private let qualityModeDefaultsKey: String
   private weak var clipboardCoordinator: ClipboardCoordinator?
   private(set) var connection: VNCConnection?
   private let credentialLock = NSLock()
@@ -97,10 +106,16 @@ final class VNCSessionController: NSObject, ObservableObject {
 
   init(
     targetID: String = UUID().uuidString,
-    clipboardCoordinator: ClipboardCoordinator? = nil
+    clipboardCoordinator: ClipboardCoordinator? = nil,
+    defaults: UserDefaults = .standard
   ) {
     self.targetID = targetID
     self.clipboardCoordinator = clipboardCoordinator
+    self.defaults = defaults
+    let qualityKey = "org.openclaw.crabfleet.viewer.quality-mode.\(targetID)"
+    qualityModeDefaultsKey = qualityKey
+    qualityMode = defaults.string(forKey: qualityKey)
+      .flatMap(ShareQualityMode.init(rawValue:)) ?? .auto
     super.init()
   }
 
@@ -305,6 +320,7 @@ extension VNCSessionController: VNCConnectionDelegate {
       phase = .connecting
     case .connected:
       phase = .connected
+      _ = connection.setQualityMode(qualityMode.vncQualityMode)
     case .disconnecting:
       phase = .disconnecting
     case .disconnected:
@@ -385,6 +401,16 @@ extension VNCSessionController: VNCConnectionDelegate {
     self.framebuffer = framebuffer
     framebufferRevision += 1
     scheduleThumbnailCapture(delay: 0)
+  }
+}
+
+private extension ShareQualityMode {
+  var vncQualityMode: VNCQualityMode {
+    switch self {
+    case .auto: .auto
+    case .sharp: .sharp
+    case .smooth: .smooth
+    }
   }
 }
 

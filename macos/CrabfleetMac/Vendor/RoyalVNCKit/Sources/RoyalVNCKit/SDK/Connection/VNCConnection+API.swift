@@ -77,6 +77,12 @@ private enum PixelFormatFenceProbePayload {
 	static let completion = Data("royalvnc-pixel-format-complete".utf8)
 }
 
+public enum VNCQualityMode: UInt8, CaseIterable, Sendable {
+	case auto = 0
+	case sharp = 1
+	case smooth = 2
+}
+
 // MARK: - Connect/Disconnect
 public extension VNCConnection {
 #if canImport(ObjectiveC)
@@ -139,6 +145,23 @@ public extension VNCConnection {
 			)
 		)
 		return true
+	}
+
+	/// Updates this viewer's quality preference after the server has received
+	/// the Crabfleet quality-control pseudo-encoding in SetEncodings.
+	@discardableResult
+	func setQualityMode(_ mode: VNCQualityMode) -> Bool {
+		guard settings.frameEncodings.contains(.crabfleetQualityControl) else {
+			return false
+		}
+		return withQualityControlLock {
+			requestedQualityMode = mode
+			guard connectionState.status == .connected, isQualityControlAcknowledged else {
+				return false
+			}
+			enqueueClientToServerMessage(VNCProtocol.QualityControl(mode: mode))
+			return true
+		}
 	}
 }
 

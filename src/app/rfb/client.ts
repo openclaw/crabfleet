@@ -6,6 +6,7 @@ export const RFB_ENCODINGS = {
   tight: 7,
   audio: 0x4341_4631,
   chroma444: 0x4334_3434,
+  qualityControl: 0x5143_544c,
   cursorWithAlpha: -314,
   pointerPosition: -232,
   extendedDesktopSize: -308,
@@ -54,6 +55,7 @@ export interface RFBClientOptions {
   h264: boolean;
   chroma444?: boolean;
   audio?: boolean;
+  qualityMode?: RFBQualityMode;
   onState?: (state: string) => void;
   onReady?: () => void;
   onServerInit?: (info: RFBServerInfo) => void;
@@ -66,6 +68,8 @@ export interface RFBClientOptions {
   onTraffic?: (bytes: number) => void;
   onAudio?: (message: RFBAudioMessage) => void;
 }
+
+export type RFBQualityMode = "auto" | "sharp" | "smooth";
 
 interface RFBScreenLayout {
   id: number;
@@ -89,6 +93,8 @@ export class RFBClient {
   #audioEnabled: boolean;
   #approvedClipboardText: string | null = null;
   #forceFullRefresh = false;
+  #qualityMode: RFBQualityMode | undefined;
+  #qualityControlNegotiated = false;
 
   constructor(transport: RFBTransport, options: RFBClientOptions) {
     this.transport = transport;
@@ -97,11 +103,13 @@ export class RFBClient {
     this.#h264Enabled = options.h264;
     this.#chroma444Enabled = options.chroma444 === true;
     this.#audioEnabled = options.audio === true;
+    this.#qualityMode = options.qualityMode;
     this.codec = this.#hevcEnabled ? "HEVC" : options.h264 ? "H.264" : "JPEG";
   }
 
   async start(): Promise<void> {
     this.#running = true;
+    this.#qualityControlNegotiated = false;
     try {
       this.#options.onState?.("Negotiating RFB 3.8");
       await this.#handshake();
@@ -122,7 +130,13 @@ export class RFBClient {
 
   disconnect(): void {
     this.#running = false;
+    this.#qualityControlNegotiated = false;
     this.transport.close();
+  }
+
+  setQualityMode(mode: RFBQualityMode): void {
+    this.#qualityMode = mode;
+    if (this.#qualityControlNegotiated) this.transport.send(encodeQualityControl(mode));
   }
 
   reportDecoderFailure(codec: "hevc" | "h264", _error: Error): void {
@@ -272,6 +286,14 @@ export class RFBClient {
       const message = await readRFBAudioMessage(this.transport);
       this.#options.onAudio?.(message);
       if (message.kind === "packet") this.#options.onTraffic?.(message.payload.byteLength);
+      return;
+    }
+    if (type === 201) {
+      const capability = await this.transport.readExactly(3);
+      if (capability[0] !== 1 || capability[1] !== 0 || capability[2] !== 0)
+        throw new Error("invalid QCTL capability acknowledgement");
+      this.#qualityControlNegotiated = true;
+      if (this.#qualityMode) this.transport.send(encodeQualityControl(this.#qualityMode));
       return;
     }
     throw new Error(`unsupported RFB server message ${type}`);
@@ -450,12 +472,18 @@ export class RFBClient {
       ...(this.#h264Enabled ? [RFB_ENCODINGS.openH264] : []),
       RFB_ENCODINGS.tight,
       ...(this.#audioEnabled ? [RFB_ENCODINGS.audio] : []),
+      RFB_ENCODINGS.qualityControl,
       RFB_ENCODINGS.cursorWithAlpha,
       RFB_ENCODINGS.pointerPosition,
       RFB_ENCODINGS.extendedDesktopSize,
       RFB_ENCODINGS.extendedClipboard,
     ];
   }
+}
+
+export function encodeQualityControl(mode: RFBQualityMode): Uint8Array {
+  const wireMode = mode === "auto" ? 0 : mode === "sharp" ? 1 : 2;
+  return new Uint8Array([201, wireMode, 0, 0]);
 }
 
 export async function readRFBAudioMessage(transport: RFBTransport): Promise<RFBAudioMessage> {

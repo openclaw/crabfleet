@@ -21,6 +21,7 @@ public enum _ObjC_VNCFrameEncodingType: Int64 {
 	case crabfleetAudio = 0x43414631
 	case crabfleetChroma444 = 0x43343434
 	case crabfleetHEVC = 0x48455631
+	case crabfleetQualityControl = 0x5143544c
 }
 
 public enum VNCFrameEncodingType: VNCEncodingType {
@@ -36,6 +37,7 @@ public enum VNCFrameEncodingType: VNCEncodingType {
 	case crabfleetAudio = 0x43414631
 	case crabfleetChroma444 = 0x43343434
 	case crabfleetHEVC = 0x48455631
+	case crabfleetQualityControl = 0x5143544c
 }
 
 extension VNCFrameEncodingType: CustomStringConvertible {
@@ -65,6 +67,8 @@ extension VNCFrameEncodingType: CustomStringConvertible {
 				"Crabfleet HEVC 4:4:4 capability"
 			case .crabfleetHEVC:
 				"Crabfleet HEVC"
+			case .crabfleetQualityControl:
+				"Crabfleet per-viewer quality control capability"
 		}
 	}
 }
@@ -158,6 +162,8 @@ extension VNCFrameEncodingType {
 				.crabfleetChroma444
 			case .crabfleetHEVC:
 				.crabfleetHEVC
+			case .crabfleetQualityControl:
+				.crabfleetQualityControl
 		}
 	}
 }

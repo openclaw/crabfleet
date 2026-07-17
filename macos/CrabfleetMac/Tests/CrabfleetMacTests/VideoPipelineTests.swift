@@ -436,6 +436,25 @@ struct VideoPipelineTests {
   }
 
   @Test
+  @MainActor
+  func nativeViewerPersistsQualityPerHost() throws {
+    let suiteName = "CrabfleetMacTests.\(UUID().uuidString)"
+    let defaults = try #require(UserDefaults(suiteName: suiteName))
+    defaults.removePersistentDomain(forName: suiteName)
+
+    let first = VNCSessionController(targetID: "host-1", defaults: defaults)
+    first.qualityMode = .sharp
+    let sameHost = VNCSessionController(targetID: "host-1", defaults: defaults)
+    let otherHost = VNCSessionController(targetID: "host-2", defaults: defaults)
+
+    #expect(sameHost.qualityMode == .sharp)
+    #expect(otherHost.qualityMode == .auto)
+    #expect(
+      VNCSessionController.preferredFrameEncodings(supportsHEVC444: false)
+        .contains(.crabfleetQualityControl))
+  }
+
+  @Test
   func captureFansOutFramesAndReferenceCountsConsumers() throws {
     let capture = MacScreenCapture()
     let firstID = UUID()

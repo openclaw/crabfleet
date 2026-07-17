@@ -178,6 +178,15 @@ public final class VNCConnection: NSObjectOrAnyObject, @unchecked Sendable {
 	let inputStateLock = NSLock()
     var mouseButtonState: VNCProtocol.MousePointerButton = [ ]
     var lastMousePosition = VNCProtocol.MousePosition(x: 0, y: 0)
+	let qualityControlLock = NSLock()
+	var requestedQualityMode: VNCQualityMode?
+	var isQualityControlAcknowledged = false
+
+	func withQualityControlLock<T>(_ operation: () -> T) -> T {
+		qualityControlLock.lock()
+		defer { qualityControlLock.unlock() }
+		return operation()
+	}
 
     lazy var connection: some NetworkConnection = {
         let connectionSettings = NetworkConnectionSettings(connectionTimeout: 15,
@@ -445,6 +454,7 @@ extension VNCConnection {
 			  connectionState.status == .disconnected else {
 			return false
 		}
+		withQualityControlLock { isQualityControlAcknowledged = false }
 
 		updateConnectionState(.connecting)
 

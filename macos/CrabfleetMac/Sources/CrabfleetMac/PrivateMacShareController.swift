@@ -543,6 +543,12 @@ struct PrivateMacDisplayPlan: Equatable, Sendable {
 
 @MainActor
 final class PrivateMacShareController: ObservableObject {
+  struct ViewerSession: Identifiable, Equatable {
+    let id: String
+    let display: String
+    let peer: String
+    let qualityMode: ShareQualityMode
+  }
   private struct DisplayStack {
     let plan: PrivateMacDisplayPlan
     let capture: MacScreenCapture
@@ -631,6 +637,7 @@ final class PrivateMacShareController: ObservableObject {
   @Published private(set) var streamStats: TailnetStreamStats?
   @Published private(set) var audioActive = false
   @Published private(set) var connectedViewerCount = 0
+  @Published private(set) var viewerSessions: [ViewerSession] = []
 
   @Published var selectedDisplayIDs: Set<CGDirectDisplayID> {
     didSet {
@@ -724,6 +731,7 @@ final class PrivateMacShareController: ObservableObject {
   private var activePlans: [PrivateMacDisplayPlan] = []
   private var listeningDisplayIDs: Set<CGDirectDisplayID> = []
   private var viewerCounts: [DisplaySessionKey: Int] = [:]
+  private var displayViewerSessions: [DisplaySessionKey: [TailnetViewerSession]] = [:]
   private var displayPeers: [DisplaySessionKey: String] = [:]
   private var displayStats: [DisplaySessionKey: TailnetStreamStats] = [:]
   private var audioSessionKeys: Set<DisplaySessionKey> = []
@@ -1111,6 +1119,8 @@ final class PrivateMacShareController: ObservableObject {
     activePlans.removeAll()
     listeningDisplayIDs.removeAll()
     viewerCounts.removeAll()
+    displayViewerSessions.removeAll()
+    viewerSessions.removeAll()
     displayPeers.removeAll()
     displayStats.removeAll()
     audioSessionKeys.removeAll()
@@ -1244,6 +1254,15 @@ final class PrivateMacShareController: ObservableObject {
     case .audioActive(let isActive):
       if isActive { audioSessionKeys.insert(key) } else { audioSessionKeys.remove(key) }
       audioActive = !audioSessionKeys.isEmpty
+    case .viewerSessionsChanged(let sessions):
+      if sessions.isEmpty {
+        displayViewerSessions.removeValue(forKey: key)
+      } else {
+        displayViewerSessions[key] = sessions
+      }
+      updateViewerSessions()
+    case .qualityModeChanged:
+      break
     case .disconnected(let count, let remainingPeer):
       let normalizedCount = transport == .relay ? 0 : count
       if normalizedCount == 0 {
@@ -1251,6 +1270,7 @@ final class PrivateMacShareController: ObservableObject {
         displayPeers.removeValue(forKey: key)
         displayStats.removeValue(forKey: key)
         audioSessionKeys.remove(key)
+        displayViewerSessions.removeValue(forKey: key)
       } else {
         viewerCounts[key] = normalizedCount
         if let remainingPeer { displayPeers[key] = remainingPeer }
@@ -1260,6 +1280,7 @@ final class PrivateMacShareController: ObservableObject {
       connectedPeer = connectedViewerCount == 1 ? displayPeers.values.first : nil
       updateAggregateStats()
       audioActive = !audioSessionKeys.isEmpty
+      updateViewerSessions()
     case .listenerFailed(let message):
       guard transport == .tailnet else { return }
       let pendingRegistration = registrationTask
@@ -1267,6 +1288,8 @@ final class PrivateMacShareController: ObservableObject {
       connectedPeer = nil
       streamStats = nil
       audioActive = false
+      displayViewerSessions.removeAll()
+      viewerSessions.removeAll()
       notice = PrivateMacShareError.listenerFailed(message).localizedDescription
       serverGeneration = nil
       for publisher in relayPublishers.values { publisher.stop() }
@@ -1283,6 +1306,21 @@ final class PrivateMacShareController: ObservableObject {
       phase = connectedViewerCount == 0 ? .sharing : .connected
       notice = message
     }
+  }
+
+  private func updateViewerSessions() {
+    viewerSessions = displayViewerSessions.flatMap { key, sessions in
+      let display = activePlans.first { $0.display.id == key.displayID }?.display.label
+        ?? "Display"
+      let transport = key.transport == .relay ? "Browser" : "Tailnet"
+      return sessions.map { session in
+        ViewerSession(
+          id: "\(key.displayID)-\(transport)-\(session.id.uuidString)",
+          display: display,
+          peer: session.peer,
+          qualityMode: session.qualityMode)
+      }
+    }.sorted { $0.id < $1.id }
   }
 
   private func updateAggregateStats() {

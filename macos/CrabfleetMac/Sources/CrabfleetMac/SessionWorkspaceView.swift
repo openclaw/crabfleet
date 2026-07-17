@@ -89,6 +89,15 @@ private struct FocusToolbar: View {
       Spacer()
 
       if session.phase == .connected {
+        Picker("Quality", selection: $session.qualityMode) {
+          ForEach(ShareQualityMode.allCases) { mode in
+            Text(mode.title).tag(mode)
+          }
+        }
+        .pickerStyle(.segmented)
+        .frame(width: 190)
+        .help("Quality for this viewer and host")
+
         Button {
           session.toggleAudioMuted()
         } label: {
