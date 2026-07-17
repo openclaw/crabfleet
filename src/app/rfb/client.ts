@@ -1,4 +1,5 @@
 import type { RFBAudioMessage } from "./audio.ts";
+import { vncChallengeResponse } from "./vnc-auth.ts";
 
 export const RFB_ENCODINGS = {
   hevc: 0x4845_5631,
@@ -56,6 +57,8 @@ export interface RFBClientOptions {
   chroma444?: boolean;
   audio?: boolean;
   qualityMode?: RFBQualityMode;
+  password?: string | (() => Promise<string> | string);
+  onVNCAuthentication?: (succeeded: boolean) => void;
   onState?: (state: string) => void;
   onReady?: () => void;
   onServerInit?: (info: RFBServerInfo) => void;
@@ -240,10 +243,29 @@ export class RFBClient {
     const securityCount = (await this.transport.readExactly(1))[0]!;
     if (!securityCount) throw new Error("RFB server offered no security types");
     const securityTypes = await this.transport.readExactly(securityCount);
-    if (!securityTypes.includes(1)) throw new Error("RFB relay requires security None");
-    this.transport.send(new Uint8Array([1]));
-    if (readUint32(await this.transport.readExactly(4)) !== 0)
-      throw new Error("RFB security negotiation failed");
+    const canUseVNC = securityTypes.includes(2) && this.#options.password !== undefined;
+    if (canUseVNC) {
+      this.transport.send(new Uint8Array([2]));
+      const challenge = await this.transport.readExactly(16);
+      const configured = this.#options.password;
+      const password = typeof configured === "function" ? await configured() : configured!;
+      this.transport.send(vncChallengeResponse(challenge, password));
+    } else if (securityTypes.includes(1)) {
+      this.transport.send(new Uint8Array([1]));
+    } else if (securityTypes.includes(2)) {
+      throw new Error("RFB password required");
+    } else {
+      throw new Error("RFB server offered no supported security type");
+    }
+    const securityResult = readUint32(await this.transport.readExactly(4));
+    if (securityResult !== 0) {
+      if (canUseVNC) this.#options.onVNCAuthentication?.(false);
+      const reasonLength = readUint32(await this.transport.readExactly(4));
+      if (reasonLength > 4096) throw new Error("RFB security failure reason is too long");
+      const reason = new TextDecoder().decode(await this.transport.readExactly(reasonLength));
+      throw new Error(reason || "RFB security negotiation failed");
+    }
+    if (canUseVNC) this.#options.onVNCAuthentication?.(true);
     this.transport.send(new Uint8Array([1]));
 
     const init = await this.transport.readExactly(24);

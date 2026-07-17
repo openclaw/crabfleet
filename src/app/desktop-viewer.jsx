@@ -152,6 +152,11 @@ export function DesktopViewer({ host, onExit }) {
       `${socketProtocol}//${location.host}/api/desktop-hosts/${encodeURIComponent(host.id)}/relay/viewer`,
     );
     const stream = new WebSocketByteStream(socket);
+    const accessCodeProvider = browserRFBPassword(host.id);
+    const authenticationOptions = ((password) => ({
+      password,
+      onVNCAuthentication: accessCodeProvider.complete,
+    }))(accessCodeProvider.get);
 
     const statsTimer = setInterval(() => {
       const snapshot = statsWindow.snapshot(performance.now());
@@ -211,6 +216,7 @@ export function DesktopViewer({ host, onExit }) {
         chroma444: hevc && rext,
         audio,
         qualityMode: loadViewerQuality(sessionStorage, host.id),
+        ...authenticationOptions,
         onState: setConnectionState,
         onReady: () => {
           readyRef.current = true;
@@ -647,4 +653,23 @@ export function DesktopViewer({ host, onExit }) {
       </aside>
     </main>
   );
+}
+
+function browserRFBPassword(hostID) {
+  const key = `crabfleet.rfb.password.${hostID}`;
+  let promptedAccessCode = null;
+  return {
+    get() {
+      const saved = sessionStorage.getItem(key);
+      if (saved !== null) return saved;
+      promptedAccessCode = window.prompt("Enter the 12-character Crabfleet sharing password");
+      if (promptedAccessCode === null) throw new Error("RFB password entry cancelled");
+      return promptedAccessCode;
+    },
+    complete(succeeded) {
+      if (!succeeded) sessionStorage.removeItem(key);
+      else if (promptedAccessCode !== null) sessionStorage.setItem(key, promptedAccessCode);
+      promptedAccessCode = null;
+    },
+  };
 }
