@@ -250,6 +250,8 @@ export class RFBClient {
       this.transport.send(new Uint8Array([2]));
       const challenge = await this.transport.readExactly(16);
       this.transport.send(vncChallengeResponse(challenge, this.#options.password!));
+    } else if (this.#options.password !== undefined) {
+      throw new Error("RFB direct connection requires VNC authentication");
     } else if (securityTypes.includes(1)) {
       this.transport.send(new Uint8Array([1]));
     } else if (securityTypes.includes(2)) {

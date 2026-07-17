@@ -124,6 +124,17 @@ test("RFB 3.8 direct handshake refuses VNC auth without a password", async () =>
   assert.equal(transport.sent.length, 1);
 });
 
+test("RFB direct credentials forbid a Security None downgrade", async () => {
+  const transport = new ScriptedTransport(bytes(new TextEncoder().encode("RFB 003.008\n"), [1, 1]));
+  const client = new RFBClient(transport, {
+    h264: false,
+    password: "test-auth-token",
+  });
+
+  await assert.rejects(client.start(), /direct connection requires VNC authentication/);
+  assert.equal(transport.sent.length, 1);
+});
+
 test("H.264 decode failure renegotiates Tight and requests a full JPEG frame", async () => {
   const name = new TextEncoder().encode("Studio");
   const transcript = bytes(

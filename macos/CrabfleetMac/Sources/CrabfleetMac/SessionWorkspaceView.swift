@@ -400,6 +400,7 @@ struct DesktopConnectionSheet: View {
   let connect: (VNCConnectionRequest) -> Bool
   private let credentialAddress: String
   private let credentialUsername: String
+  private let credentialAccessCode: String
   private let canSafelySubmitBlank: Bool
 
   @Environment(\.dismiss) private var dismiss
@@ -420,7 +421,8 @@ struct DesktopConnectionSheet: View {
     let address = target.endpoint?.displayValue ?? "127.0.0.1:5900"
     credentialAddress = address
     credentialUsername = target.endpoint?.username ?? ""
-    canSafelySubmitBlank = storedAccessCode.canSafelySubmitBlank
+    credentialAccessCode = storedAccessCode.value
+    canSafelySubmitBlank = storedAccessCode == .missing
     _address = State(initialValue: address)
     _username = State(initialValue: target.endpoint?.username ?? "")
     _password = { password in State(initialValue: password) }(storedAccessCode.value)
@@ -478,16 +480,15 @@ struct DesktopConnectionSheet: View {
     }
     .padding(24)
     .frame(width: 540)
-    .onChange(of: address) { _, value in
-      if value != credentialAddress {
-        password = ""
-      }
-    }
-    .onChange(of: username) { _, value in
-      if value != credentialUsername {
-        password = ""
-      }
-    }
+    .onChange(of: address) { _, _ in refreshPasswordForCredentialIdentity() }
+    .onChange(of: username) { _, _ in refreshPasswordForCredentialIdentity() }
+  }
+
+  private func refreshPasswordForCredentialIdentity() {
+    password =
+      address == credentialAddress && username == credentialUsername
+      ? credentialAccessCode
+      : ""
   }
 
   private func submit() {
