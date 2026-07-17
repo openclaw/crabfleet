@@ -1027,7 +1027,16 @@ final class RFBHostSession: @unchecked Sendable {
           framebufferUpdateArbiter.recordVideoResponse()
           continue protocolLoop
         }
-        let videoReady = withLock { videoPixelMailbox?.hasPendingElement == true }
+        var videoReady = withLock { videoPixelMailbox?.hasPendingElement == true }
+        // The pixel mailbox only backs the HEVC/H.264 path; on Tight/JPEG
+        // fallback an undelivered frame-store frame must also count as
+        // pending video, or continuous cursor traffic starves the stream.
+        if !videoReady, selectedVideoCodec == nil, selectedFrameEncoding == .tight,
+          let frame = await capture.frameStore.latest(),
+          frame.sequence != lastSentJPEGSequence
+        {
+          videoReady = true
+        }
         var attemptedCursorForRequest = false
         if let snapshot = framebufferUpdateArbiter.takeCursorIfAllowed(
           videoReady: videoReady,

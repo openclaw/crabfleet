@@ -568,6 +568,94 @@ struct RFBHostSessionStreamTests {
   }
 
   @Test
+  func continuousCursorTrafficDoesNotStarveTightVideo() async throws {
+    let descriptor = CapturedDisplayDescriptor(
+      displayID: 1,
+      displayBounds: CGRect(x: 0, y: 0, width: 100, height: 100),
+      frameWidth: 100,
+      frameHeight: 100,
+      sourcePixelWidth: 200,
+      sourcePixelHeight: 200)
+    let image = SystemCursorImage(
+      width: 2,
+      height: 2,
+      pointWidth: 2,
+      pointHeight: 2,
+      hotspot: CGPoint(x: 1, y: 1),
+      rgba: Data(repeating: 0xAA, count: 16),
+      contentHash: Data([0xFA, 0xCE]))
+    let snapshots = ThreadSafeSnapshotBox(
+      SystemCursorSnapshot(image: image, position: CGPoint(x: 10, y: 10)))
+    let capture = MacScreenCapture()
+    await capture.frameStore.update(
+      .init(jpegData: Data([0xFF, 0xD8, 0xFF, 0xD9]), sequence: 1, width: 100, height: 100))
+
+    let cursorEncodings = clientSetEncodings([
+      RFBWire.tightEncoding,
+      RFBWire.cursorWithAlphaEncoding,
+      RFBWire.pointerPositionEncoding,
+    ])
+    var incoming = RFBVersion.serverBanner
+    incoming.append(contentsOf: [1, 1])  // None security, shared ClientInit.
+    incoming.append(cursorEncodings)
+    incoming.append(clientFramebufferUpdateRequest(width: 100, height: 100))
+    incoming.append(clientFramebufferUpdateRequest(width: 100, height: 100))
+
+    let stream = FeedableRFBByteStream(incoming: incoming)
+    let finished = ThreadSafeFlag()
+    let session = RFBHostSession(
+      byteStream: stream,
+      capture: capture,
+      descriptor: descriptor,
+      input: HandshakeRemoteInput(),
+      clipboard: nil,
+      remoteAddressOverride: "Crabfleet browser",
+      skipTailnetCheck: true,
+      desktopName: "Crabfleet — Cursor Fairness Test",
+      handshakeTimeout: .seconds(1),
+      viewOnly: false,
+      audioEnabled: false,
+      qualityMode: .auto,
+      cursorSnapshotProvider: { snapshots.value },
+      captureOutputSizeUpdater: { _, _ in },
+      didAuthorize: {},
+      eventHandler: { _ in },
+      didFinish: { _ in finished.set() })
+
+    session.start()
+    let clock = ContinuousClock()
+    let deadline = clock.now.advanced(by: .seconds(3))
+    func waitFor(_ predicate: @escaping () -> Bool) async throws {
+      while !predicate(), clock.now < deadline {
+        try await Task.sleep(for: .milliseconds(5))
+      }
+      #expect(predicate())
+    }
+
+    // Initial cursor shape/position and first JPEG frame flow out.
+    let jpegMarker = Data([0xFF, 0xD8, 0xFF, 0xD9])
+    try await waitFor { stream.outgoing.range(of: jpegMarker) != nil }
+
+    // A fresh desktop frame arrives while every subsequent request also has
+    // fresh cursor traffic (position changes each time). Video must still
+    // get its turn: the second JPEG payload must appear even though cursor
+    // updates never stop.
+    let second = Data([0xFF, 0xD8, 0x01, 0xFF, 0xD9])
+    await capture.frameStore.update(
+      .init(jpegData: second, sequence: 2, width: 100, height: 100))
+    for step in 0..<8 {
+      snapshots.set(
+        SystemCursorSnapshot(
+          image: image,
+          position: CGPoint(x: 10 + step, y: 10)))
+      stream.feed(cursorEncodings)
+      stream.feed(clientFramebufferUpdateRequest(width: 100, height: 100))
+    }
+    try await waitFor { stream.outgoing.range(of: second) != nil }
+    session.stop()
+  }
+
+  @Test
   func cursorReappearingAtSamePositionResendsPointerAfterHide() async throws {
     let descriptor = CapturedDisplayDescriptor(
       displayID: 1,
@@ -602,8 +690,9 @@ struct RFBHostSessionStreamTests {
     var incoming = RFBVersion.serverBanner
     incoming.append(contentsOf: [1, 1])  // None security, shared ClientInit.
     incoming.append(cursorEncodings)
-    incoming.append(clientFramebufferUpdateRequest(width: 100, height: 100))
-    incoming.append(clientFramebufferUpdateRequest(width: 100, height: 100))
+    for _ in 0..<4 {
+      incoming.append(clientFramebufferUpdateRequest(width: 100, height: 100))
+    }
 
     let mappedImage = try #require(
       CursorCoordinateMapper.cursorImage(
@@ -657,12 +746,15 @@ struct RFBHostSessionStreamTests {
     // standing in for the 60 Hz monitor the loopback harness does not run.
     snapshots.set(hidden)
     stream.feed(cursorEncodings)
-    stream.feed(clientFramebufferUpdateRequest(width: 100, height: 100))
+    for _ in 0..<3 {
+      stream.feed(clientFramebufferUpdateRequest(width: 100, height: 100))
+    }
     try await waitFor { stream.outgoing.range(of: hiddenUpdate) != nil }
     snapshots.set(visible)
     stream.feed(cursorEncodings)
-    stream.feed(clientFramebufferUpdateRequest(width: 100, height: 100))
-    stream.feed(clientFramebufferUpdateRequest(width: 100, height: 100))
+    for _ in 0..<4 {
+      stream.feed(clientFramebufferUpdateRequest(width: 100, height: 100))
+    }
     try await waitFor { () -> Bool in
       let outgoing = stream.outgoing
       guard let hiddenRange = outgoing.range(of: hiddenUpdate) else { return false }
@@ -718,13 +810,15 @@ struct RFBHostSessionStreamTests {
         RFBWire.pointerPositionEncoding,
         RFBWire.extendedDesktopSizeEncoding,
       ]))
-    incoming.append(clientFramebufferUpdateRequest(width: 100, height: 100))  // Size announce.
-    incoming.append(clientFramebufferUpdateRequest(width: 100, height: 100))  // Cursor shape.
-    incoming.append(clientFramebufferUpdateRequest(width: 100, height: 100))  // PointerPos.
+    // Five requests per phase: announce, cursor shape, pointer, and slack for
+    // the video turns the cursor/video fairness gate interleaves.
+    for _ in 0..<5 {
+      incoming.append(clientFramebufferUpdateRequest(width: 100, height: 100))
+    }
     incoming.append(clientSetDesktopSize(width: 200, height: 200))
-    incoming.append(clientFramebufferUpdateRequest(width: 200, height: 200))  // Size announce.
-    incoming.append(clientFramebufferUpdateRequest(width: 200, height: 200))  // Cursor shape.
-    incoming.append(clientFramebufferUpdateRequest(width: 200, height: 200))  // PointerPos.
+    for _ in 0..<5 {
+      incoming.append(clientFramebufferUpdateRequest(width: 200, height: 200))
+    }
 
     let initialImage = try #require(
       CursorCoordinateMapper.cursorImage(
