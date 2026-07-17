@@ -353,7 +353,7 @@ struct PrivateMacShareTests {
     publish.cancel()
 
     let remove = Task {
-      try await coordinator.unregister(identity: identity, ownershipToken: "registration-token")
+      try await coordinator.unregister(identity: identity, ownershipToken: "test-ownership-token-1")
     }
     try await Task.sleep(for: .milliseconds(20))
     #expect(await registration.events == [.registerStarted])
@@ -1444,14 +1444,14 @@ struct PrivateMacShareTests {
 
     let removal = try registration.removalRequest(
       identity: identity,
-      ownershipToken: "desktop-ownership-token"
+      ownershipToken: "test-ownership-token-2"
     )
     #expect(removal.url == request.url)
     #expect(removal.httpMethod == "DELETE")
     #expect(removal.value(forHTTPHeaderField: "Cookie") == "crabbox_session=secret")
     #expect(
       removal.value(forHTTPHeaderField: "X-Crabfleet-Ownership-Token")
-        == "desktop-ownership-token"
+        == "test-ownership-token-2"
     )
     #expect(removal.httpBody == nil)
   }
@@ -1498,7 +1498,7 @@ struct PrivateMacShareTests {
     let transport = DesktopRegistrationTransport { request in
       let responseURL = try #require(request.url)
       return (
-        Data(#"{"host":{"id":"workstation"},"ownershipToken":"server-ownership-token"}"#.utf8),
+        Data(#"{"host":{"id":"workstation"},"ownershipToken":"test-ownership-token-3"}"#.utf8),
         try #require(
           HTTPURLResponse(
             url: responseURL,
@@ -1524,7 +1524,7 @@ struct PrivateMacShareTests {
         port: 5_901,
         publicationID: "publication-id"
       )
-        == "server-ownership-token"
+        == "test-ownership-token-3"
     )
   }
 
@@ -1574,7 +1574,7 @@ struct PrivateMacShareTests {
       let json = try #require(JSONSerialization.jsonObject(with: body) as? [String: Any])
       #expect(json["publicationID"] as? String == "publication-id")
       return (
-        Data(#"{"ownershipToken":"server-ownership-token"}"#.utf8),
+        Data(#"{"ownershipToken":"test-ownership-token-3"}"#.utf8),
         try #require(
           HTTPURLResponse(
             url: responseURL,
@@ -1598,7 +1598,7 @@ struct PrivateMacShareTests {
       try await registration.recover(
         identity: identity,
         publicationID: "publication-id"
-      ) == "server-ownership-token"
+      ) == "test-ownership-token-3"
     )
   }
 
@@ -2658,7 +2658,7 @@ private actor SuspendedDesktopRegistration: DesktopHostRegistering {
       registrationContinuation = continuation
     }
     events.append(.registerFinished)
-    return "registration-token"
+    return "test-ownership-token-1"
   }
 
   func recover(identity: TailnetIdentity, publicationID: String) async throws -> String? {
@@ -2666,7 +2666,7 @@ private actor SuspendedDesktopRegistration: DesktopHostRegistering {
   }
 
   func unregister(identity: TailnetIdentity, ownershipToken: String?) async throws {
-    #expect(ownershipToken == "registration-token")
+    #expect(ownershipToken == "test-ownership-token-1")
     events.append(.unregisterStarted)
   }
 
@@ -3016,7 +3016,7 @@ private actor SuspendedDesktopCleanupRegistration: DesktopHostRegistering {
     port: UInt16,
     publicationID: String
   ) async throws -> String? {
-    "slow-cleanup-token"
+    "test-ownership-token-slow"
   }
 
   func recover(identity: TailnetIdentity, publicationID: String) async throws -> String? {
@@ -3024,7 +3024,7 @@ private actor SuspendedDesktopCleanupRegistration: DesktopHostRegistering {
   }
 
   func unregister(identity: TailnetIdentity, ownershipToken: String?) async throws {
-    #expect(ownershipToken == "slow-cleanup-token")
+    #expect(ownershipToken == "test-ownership-token-slow")
     await withCheckedContinuation { continuation in
       unregistrationContinuation = continuation
     }

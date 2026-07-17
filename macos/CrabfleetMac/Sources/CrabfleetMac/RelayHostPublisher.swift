@@ -255,8 +255,8 @@ final class RelayHostPublisher: @unchecked Sendable {
     let stream = SessionClaimingRFBByteStream(
       base: baseStream,
       gate: sessionGate,
-      onAcquire: {},
-      onRelease: {}
+      onAcquire: { [weak capture] in capture?.retainConsumer(id: sessionID) },
+      onRelease: { [weak capture] in capture?.releaseConsumer(id: sessionID) }
     )
     let connected = ThreadSafeRelayConnectionState()
 
@@ -267,6 +267,9 @@ final class RelayHostPublisher: @unchecked Sendable {
         descriptor: descriptor,
         input: input,
         clipboard: clipboard,
+        desktopSizeProvider: { [sessionGate, descriptor] in
+          sessionGate.descriptor(basedOn: descriptor)
+        },
         remoteAddressOverride: "Crabfleet browser",
         skipTailnetCheck: true,
         desktopName: "Crabfleet — \(Host.current().localizedName ?? "Mac")",
@@ -275,7 +278,11 @@ final class RelayHostPublisher: @unchecked Sendable {
         audioEnabled: false,
         qualityMode: .auto,
         sessionID: sessionID,
-        didAuthorize: { [weak capture] in capture?.retainConsumer(id: sessionID) },
+        beginResize: { [sessionGate] in sessionGate.beginResize() },
+        finishResize: { [sessionGate] width, height in
+          sessionGate.finishResize(width: width, height: height)
+        },
+        didAuthorize: {},
         eventHandler: { [eventHandler] event in
           if case .connected = event {
             stream.finishHandshake()
@@ -289,11 +296,14 @@ final class RelayHostPublisher: @unchecked Sendable {
               return
             }
           }
+          if case .disconnected = event { connected.markDisconnected() }
           eventHandler(event)
         },
-        didFinish: { [weak self] finishedSession in
+        didFinish: { [weak self, eventHandler] finishedSession in
           stream.finishClaim()
-          self?.capture.releaseConsumer(id: sessionID)
+          if connected.consumeSyntheticDisconnect() {
+            eventHandler(.disconnected(count: 0, remainingPeer: nil))
+          }
           socket.cancel(with: .normalClosure, reason: nil)
           self?.clear(finishedSession, socket: socket)
           continuation.resume()
@@ -347,6 +357,7 @@ final class SessionClaimingRFBByteStream: RFBByteStream, @unchecked Sendable {
   private let onRelease: @Sendable () -> Void
   private let lock = NSLock()
   private var claim: UUID?
+  private var finished = false
   private var handshakeDeadline: ContinuousClock.Instant?
 
   init(
@@ -362,10 +373,13 @@ final class SessionClaimingRFBByteStream: RFBByteStream, @unchecked Sendable {
   }
 
   func readExactly(_ count: Int) async throws -> Data {
-    if withLock({ claim == nil }) {
+    let needsClaim = try withLock { () throws -> Bool in
+      guard !finished else { throw CancellationError() }
+      return claim == nil
+    }
+    if needsClaim {
       try await base.waitForIncomingData()
       try acquireIfNeeded()
-      withLock { handshakeDeadline = .now.advanced(by: .seconds(30)) }
     }
     guard let deadline = withLock({ handshakeDeadline }) else {
       return try await base.readExactly(count)
@@ -383,14 +397,14 @@ final class SessionClaimingRFBByteStream: RFBByteStream, @unchecked Sendable {
 
   func finishClaim() {
     let released = withLock { () -> UUID? in
-      defer {
-        claim = nil
-        handshakeDeadline = nil
-      }
-      return claim
+      if claim != nil { onRelease() }
+      let value = claim
+      claim = nil
+      finished = true
+      handshakeDeadline = nil
+      return value
     }
     if let released {
-      onRelease()
       gate.release(released)
     }
   }
@@ -416,15 +430,16 @@ final class SessionClaimingRFBByteStream: RFBByteStream, @unchecked Sendable {
   }
 
   private func acquireIfNeeded() throws {
-    let acquired = try withLock { () throws -> Bool in
-      if claim != nil { return false }
+    try withLock {
+      guard !finished else { throw CancellationError() }
+      if claim != nil { return }
       guard let next = gate.acquire() else {
-        throw PrivateMacShareError.protocolError("another remote desktop session is active")
+        throw PrivateMacShareError.protocolError("the desktop viewer limit is reached")
       }
       claim = next
-      return true
+      handshakeDeadline = .now.advanced(by: .seconds(30))
+      onAcquire()
     }
-    if acquired { onAcquire() }
   }
 
   private func withLock<T>(_ body: () throws -> T) rethrows -> T {
@@ -437,6 +452,7 @@ final class SessionClaimingRFBByteStream: RFBByteStream, @unchecked Sendable {
 private final class ThreadSafeRelayConnectionState: @unchecked Sendable {
   private let lock = NSLock()
   private var connected = false
+  private var disconnected = false
 
   var value: Bool {
     lock.lock()
@@ -448,5 +464,19 @@ private final class ThreadSafeRelayConnectionState: @unchecked Sendable {
     lock.lock()
     connected = true
     lock.unlock()
+  }
+
+  func markDisconnected() {
+    lock.lock()
+    disconnected = true
+    lock.unlock()
+  }
+
+  func consumeSyntheticDisconnect() -> Bool {
+    lock.lock()
+    defer { lock.unlock() }
+    guard connected, !disconnected else { return false }
+    disconnected = true
+    return true
   }
 }

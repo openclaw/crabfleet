@@ -64,11 +64,45 @@ extension RFBByteStream {
 final class RFBHostSessionGate: @unchecked Sendable {
   private let lock = NSLock()
   private var activeClaims: Set<UUID> = []
+  private var reservations: Set<UUID> = []
+  private var currentWidth: Int?
+  private var currentHeight: Int?
+  private var resizeInProgress = false
+
+  func configure(descriptor: CapturedDisplayDescriptor) {
+    lock.lock()
+    if currentWidth == nil || currentHeight == nil {
+      currentWidth = descriptor.frameWidth
+      currentHeight = descriptor.frameHeight
+    }
+    lock.unlock()
+  }
+
+  func reserve() -> UUID? {
+    lock.lock()
+    defer { lock.unlock() }
+    guard !resizeInProgress,
+      activeClaims.count + reservations.count < TailnetRFBServer.maximumSessions
+    else { return nil }
+    let reservation = UUID()
+    reservations.insert(reservation)
+    return reservation
+  }
+
+  func activate(_ reservation: UUID) -> UUID? {
+    lock.lock()
+    defer { lock.unlock() }
+    guard !resizeInProgress, reservations.remove(reservation) != nil else { return nil }
+    activeClaims.insert(reservation)
+    return reservation
+  }
 
   func acquire() -> UUID? {
     lock.lock()
     defer { lock.unlock() }
-    guard activeClaims.count < TailnetRFBServer.maximumSessions else { return nil }
+    guard !resizeInProgress,
+      activeClaims.count + reservations.count < TailnetRFBServer.maximumSessions
+    else { return nil }
     let claim = UUID()
     activeClaims.insert(claim)
     return claim
@@ -77,6 +111,7 @@ final class RFBHostSessionGate: @unchecked Sendable {
   func release(_ claim: UUID) {
     lock.lock()
     activeClaims.remove(claim)
+    reservations.remove(claim)
     lock.unlock()
   }
 
@@ -91,6 +126,42 @@ final class RFBHostSessionGate: @unchecked Sendable {
     defer { lock.unlock() }
     return activeClaims.count
   }
+
+  var reservedCount: Int {
+    lock.lock()
+    defer { lock.unlock() }
+    return reservations.count
+  }
+
+  func descriptor(basedOn descriptor: CapturedDisplayDescriptor) -> CapturedDisplayDescriptor {
+    lock.lock()
+    defer { lock.unlock() }
+    return CapturedDisplayDescriptor(
+      displayID: descriptor.displayID,
+      displayBounds: descriptor.displayBounds,
+      frameWidth: currentWidth ?? descriptor.frameWidth,
+      frameHeight: currentHeight ?? descriptor.frameHeight,
+      sourcePixelWidth: descriptor.sourcePixelWidth,
+      sourcePixelHeight: descriptor.sourcePixelHeight)
+  }
+
+  func beginResize() -> Bool {
+    lock.lock()
+    defer { lock.unlock() }
+    guard !resizeInProgress, activeClaims.count == 1, reservations.isEmpty else { return false }
+    resizeInProgress = true
+    return true
+  }
+
+  func finishResize(width: Int?, height: Int?) {
+    lock.lock()
+    if let width, let height {
+      currentWidth = width
+      currentHeight = height
+    }
+    resizeInProgress = false
+    lock.unlock()
+  }
 }
 
 final class DirectSessionClaimingRFBByteStream: RFBByteStream, @unchecked Sendable {
@@ -99,11 +170,13 @@ final class DirectSessionClaimingRFBByteStream: RFBByteStream, @unchecked Sendab
   private let onAcquire: @Sendable () -> Void
   private let onRelease: @Sendable () -> Void
   private let lock = NSLock()
+  private var reservation: UUID?
   private var claim: UUID?
 
   init(
     base: any RFBByteStream,
     gate: RFBHostSessionGate,
+    reservation: UUID? = nil,
     onAcquire: @escaping @Sendable () -> Void,
     onRelease: @escaping @Sendable () -> Void
   ) {
@@ -111,6 +184,7 @@ final class DirectSessionClaimingRFBByteStream: RFBByteStream, @unchecked Sendab
     self.gate = gate
     self.onAcquire = onAcquire
     self.onRelease = onRelease
+    self.reservation = reservation ?? gate.reserve()
   }
 
   var hasClaim: Bool { withLock { claim != nil } }
@@ -121,11 +195,18 @@ final class DirectSessionClaimingRFBByteStream: RFBByteStream, @unchecked Sendab
     guard !hasClaim else { return try await base.readExactly(count) }
 
     var result = try await base.readExactly(1)
-    guard let acquired = gate.acquire() else {
-      throw PrivateMacShareError.protocolError("another desktop viewer is active")
+    let acquired = withLock { () -> UUID? in
+      guard let reservation,
+        let acquired = gate.activate(reservation)
+      else { return nil }
+      claim = acquired
+      self.reservation = nil
+      onAcquire()
+      return acquired
     }
-    withLock { claim = acquired }
-    onAcquire()
+    guard acquired != nil else {
+      throw PrivateMacShareError.protocolError("the desktop viewer limit is reached")
+    }
     if count > 1 {
       result.append(try await base.readExactly(count - 1))
     }
@@ -142,13 +223,13 @@ final class DirectSessionClaimingRFBByteStream: RFBByteStream, @unchecked Sendab
 
   func finishClaim() {
     let released = withLock { () -> UUID? in
-      defer { claim = nil }
-      return claim
+      let value = claim ?? reservation
+      if claim != nil { onRelease() }
+      claim = nil
+      reservation = nil
+      return value
     }
-    if let released {
-      onRelease()
-      gate.release(released)
-    }
+    if let released { gate.release(released) }
   }
 
   private func withLock<T>(_ body: () -> T) -> T {
@@ -185,14 +266,11 @@ final class TailnetRFBServer: @unchecked Sendable {
   private let lock = NSLock()
   private let eventHandler: EventHandler
   private var listener: NWListener?
+  private var listenerGeneration: UUID?
   private var sessions: [UUID: RFBHostSession] = [:]
-  private var pendingSessionIDs: Set<UUID> = []
   private var connectedPeers: [UUID: String] = [:]
   private var sessionStats: [UUID: TailnetStreamStats] = [:]
   private var audioSessionIDs: Set<UUID> = []
-  private var currentWidth: Int
-  private var currentHeight: Int
-  private var resizeInProgress = false
   private var viewOnly = false
   private var audioEnabled = true
   private var qualityMode: ShareQualityMode = .auto
@@ -221,8 +299,7 @@ final class TailnetRFBServer: @unchecked Sendable {
     self.handshakeTimeout = handshakeTimeout
     self.sessionGate = sessionGate
     self.eventHandler = eventHandler
-    currentWidth = descriptor.frameWidth
-    currentHeight = descriptor.frameHeight
+    sessionGate.configure(descriptor: descriptor)
   }
 
   func start() throws {
@@ -249,10 +326,14 @@ final class TailnetRFBServer: @unchecked Sendable {
         break
       }
     }
+    let generation = UUID()
     listener.newConnectionHandler = { [weak self] connection in
-      self?.accept(connection)
+      self?.accept(connection, generation: generation)
     }
-    self.listener = listener
+    withLock {
+      self.listener = listener
+      listenerGeneration = generation
+    }
     listener.start(queue: queue)
   }
 
@@ -263,8 +344,8 @@ final class TailnetRFBServer: @unchecked Sendable {
       }
       defer {
         listener = nil
+        listenerGeneration = nil
         sessions.removeAll()
-        pendingSessionIDs.removeAll()
         connectedPeers.removeAll()
         sessionStats.removeAll()
         audioSessionIDs.removeAll()
@@ -272,10 +353,7 @@ final class TailnetRFBServer: @unchecked Sendable {
       return (listener, Array(sessions))
     }
     values.0?.cancel()
-    for (sessionID, session) in values.1 {
-      capture.releaseConsumer(id: sessionID)
-      session.stop()
-    }
+    for (_, session) in values.1 { session.stop() }
   }
 
   func setViewOnly(_ enabled: Bool) {
@@ -325,31 +403,19 @@ final class TailnetRFBServer: @unchecked Sendable {
     }
   }
 
-  private func accept(_ connection: NWConnection) {
-    let sessionID = UUID()
-    let sessionDescriptor = withLock { () -> CapturedDisplayDescriptor? in
-      guard !resizeInProgress,
-        Self.canAdmitSession(currentCount: sessions.count + pendingSessionIDs.count)
-      else { return nil }
-      pendingSessionIDs.insert(sessionID)
-      return CapturedDisplayDescriptor(
-        displayID: descriptor.displayID,
-        displayBounds: descriptor.displayBounds,
-        frameWidth: currentWidth,
-        frameHeight: currentHeight,
-        sourcePixelWidth: descriptor.sourcePixelWidth,
-        sourcePixelHeight: descriptor.sourcePixelHeight)
-    }
-    guard let sessionDescriptor else {
+  private func accept(_ connection: NWConnection, generation: UUID) {
+    guard let sessionID = sessionGate.reserve() else {
       connection.cancel()
       return
     }
+    let sessionDescriptor = sessionGate.descriptor(basedOn: descriptor)
 
     let stream = DirectSessionClaimingRFBByteStream(
       base: RFBConnectionIO(connection: connection),
       gate: sessionGate,
-      onAcquire: {},
-      onRelease: {}
+      reservation: sessionID,
+      onAcquire: { [weak capture] in capture?.retainConsumer(id: sessionID) },
+      onRelease: { [weak capture] in capture?.releaseConsumer(id: sessionID) }
     )
     let authorizer =
       peerAuthorizer
@@ -365,6 +431,9 @@ final class TailnetRFBServer: @unchecked Sendable {
       descriptor: sessionDescriptor,
       input: input,
       clipboard: clipboard,
+      desktopSizeProvider: { [sessionGate, descriptor] in
+        sessionGate.descriptor(basedOn: descriptor)
+      },
       requiredLocalAddress: identity.ipv4Address,
       desktopName: "Crabfleet — \(identity.hostName)",
       handshakeTimeout: handshakeTimeout,
@@ -373,10 +442,10 @@ final class TailnetRFBServer: @unchecked Sendable {
       qualityMode: .auto,
       sessionID: sessionID,
       beginResize: { [weak self] in self?.beginResize(sessionID: sessionID) == true },
-      finishResize: { [weak self] width, height in
-        self?.finishResize(width: width, height: height)
+      finishResize: { [sessionGate] width, height in
+        sessionGate.finishResize(width: width, height: height)
       },
-      didAuthorize: { [weak self] in self?.retainConsumerIfActive(sessionID: sessionID) },
+      didAuthorize: {},
       eventHandler: { [weak self] event in
         self?.handleSessionEvent(event, sessionID: sessionID)
       },
@@ -386,22 +455,21 @@ final class TailnetRFBServer: @unchecked Sendable {
       }
     )
     let admitted = withLock { () -> Bool in
-      guard pendingSessionIDs.remove(sessionID) != nil, !resizeInProgress,
-        Self.canAdmitSession(currentCount: sessions.count)
-      else {
+      guard listenerGeneration == generation, listener != nil, sessions[sessionID] == nil else {
         return false
       }
       sessions[sessionID] = newSession
       newSession.setViewOnly(viewOnly)
       newSession.setAudioEnabled(audioEnabled)
       newSession.setQualityMode(qualityMode)
+      newSession.start()
       return true
     }
     guard admitted else {
+      stream.finishClaim()
       connection.cancel()
       return
     }
-    newSession.start()
   }
 
   private func clear(_ finishedSession: RFBHostSession, sessionID: UUID) {
@@ -415,14 +483,6 @@ final class TailnetRFBServer: @unchecked Sendable {
         .disconnected(
           count: connectedPeers.count,
           remainingPeer: connectedPeers.values.first))
-    }
-    capture.releaseConsumer(id: sessionID)
-  }
-
-  private func retainConsumerIfActive(sessionID: UUID) {
-    withLock {
-      guard sessions[sessionID] != nil else { return }
-      capture.retainConsumer(id: sessionID)
     }
   }
 
@@ -472,24 +532,8 @@ final class TailnetRFBServer: @unchecked Sendable {
   }
 
   private func beginResize(sessionID: UUID) -> Bool {
-    withLock {
-      guard !resizeInProgress, sessions.count == 1, sessions[sessionID] != nil else {
-        return false
-      }
-      guard pendingSessionIDs.isEmpty else { return false }
-      resizeInProgress = true
-      return true
-    }
-  }
-
-  private func finishResize(width: Int?, height: Int?) {
-    withLock {
-      if let width, let height {
-        currentWidth = width
-        currentHeight = height
-      }
-      resizeInProgress = false
-    }
+    guard withLock({ sessions[sessionID] != nil }) else { return false }
+    return sessionGate.beginResize()
   }
 
   private func withLock<T>(_ body: () -> T) -> T {
@@ -513,6 +557,7 @@ final class RFBHostSession: @unchecked Sendable {
   private let input: any RemoteInputForwarding
   private let inputGate: RemoteInputSessionGate
   private let clipboard: (any HostClipboardSyncing)?
+  private let desktopSizeProvider: @Sendable () -> CapturedDisplayDescriptor?
   private let requiredLocalAddress: String?
   private let remoteAddressOverride: String?
   private let skipTailnetCheck: Bool
@@ -575,6 +620,7 @@ final class RFBHostSession: @unchecked Sendable {
     descriptor: CapturedDisplayDescriptor,
     input: any RemoteInputForwarding,
     clipboard: (any HostClipboardSyncing)?,
+    desktopSizeProvider: @escaping @Sendable () -> CapturedDisplayDescriptor? = { nil },
     requiredLocalAddress: String? = nil,
     remoteAddressOverride: String? = nil,
     skipTailnetCheck: Bool = false,
@@ -600,6 +646,7 @@ final class RFBHostSession: @unchecked Sendable {
     inputGate = RemoteInputSessionGate(input: input, viewOnly: viewOnly)
     self.audioEnabled = audioEnabled
     self.clipboard = clipboard
+    self.desktopSizeProvider = desktopSizeProvider
     self.requiredLocalAddress = requiredLocalAddress
     self.remoteAddressOverride = remoteAddressOverride
     self.skipTailnetCheck = skipTailnetCheck
@@ -784,6 +831,11 @@ final class RFBHostSession: @unchecked Sendable {
     }
 
     _ = try await io.readUInt8()  // ClientInit shared flag
+    if let latestDescriptor = desktopSizeProvider() {
+      currentWidth = latestDescriptor.frameWidth
+      currentHeight = latestDescriptor.frameHeight
+      input.updateFrameSize(width: currentWidth, height: currentHeight)
+    }
     try await io.send(
       try RFBWire.serverInit(
         width: currentWidth,
