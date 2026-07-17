@@ -558,6 +558,8 @@ final class RFBHostSession: @unchecked Sendable {
   private let connection: NWConnection?
   private let authorizer: (any TailnetPeerAuthorizing)?
   private let capture: MacScreenCapture
+  private let cursorSnapshotProvider: @Sendable () -> SystemCursorSnapshot?
+  private let captureOutputSizeUpdater: @Sendable (Int, Int) async throws -> Void
   private let descriptor: CapturedDisplayDescriptor
   private let input: any RemoteInputForwarding
   private let inputGate: RemoteInputSessionGate
@@ -651,6 +653,8 @@ final class RFBHostSession: @unchecked Sendable {
     audioEnabled: Bool,
     qualityMode: ShareQualityMode,
     sessionID: UUID = UUID(),
+    cursorSnapshotProvider: (@Sendable () -> SystemCursorSnapshot?)? = nil,
+    captureOutputSizeUpdater: (@Sendable (Int, Int) async throws -> Void)? = nil,
     beginResize: @escaping @Sendable () -> Bool = { true },
     finishResize: @escaping @Sendable (Int?, Int?) -> Void = { _, _ in },
     didAuthorize: @escaping @Sendable () -> Void,
@@ -662,6 +666,10 @@ final class RFBHostSession: @unchecked Sendable {
     self.connection = connection
     self.authorizer = authorizer
     self.capture = capture
+    self.cursorSnapshotProvider = cursorSnapshotProvider ?? { capture.currentCursorSnapshot() }
+    self.captureOutputSizeUpdater = captureOutputSizeUpdater ?? { width, height in
+      try await capture.updateOutputSize(width: width, height: height)
+    }
     self.descriptor = descriptor
     self.input = input
     inputGate = RemoteInputSessionGate(input: input, viewOnly: viewOnly)
@@ -982,7 +990,7 @@ final class RFBHostSession: @unchecked Sendable {
               cursorStateGeneration &+= 1
             }
           }
-          if let snapshot = capture.currentCursorSnapshot() {
+          if let snapshot = cursorSnapshotProvider() {
             receiveCursorSnapshot(snapshot, force: true)
           }
         } catch {
@@ -1317,7 +1325,7 @@ final class RFBHostSession: @unchecked Sendable {
     }
 
     do {
-      try await capture.updateOutputSize(width: target.width, height: target.height)
+      try await captureOutputSizeUpdater(target.width, target.height)
     } catch {
       // Status 2 = out of resources; the rectangle echoes the attempted layout.
       try await io.send(
@@ -1362,7 +1370,7 @@ final class RFBHostSession: @unchecked Sendable {
             sourcePixelWidth: descriptor.sourcePixelWidth,
             sourcePixelHeight: descriptor.sourcePixelHeight)
           if tightTarget.width != currentWidth || tightTarget.height != currentHeight {
-            try await capture.updateOutputSize(width: tightTarget.width, height: tightTarget.height)
+            try await captureOutputSizeUpdater(tightTarget.width, tightTarget.height)
             committedWidth = tightTarget.width
             committedHeight = tightTarget.height
             currentWidth = tightTarget.width
@@ -1532,6 +1540,9 @@ final class RFBHostSession: @unchecked Sendable {
         lastCursorImageHash = image.contentHash
         cursorIsVisible = true
         preferCursorPosition = true
+      }
+      if canSendPosition {
+        reofferCursorSnapshotIfCurrent(snapshot)
       }
       return true
     }
@@ -1786,7 +1797,7 @@ final class RFBHostSession: @unchecked Sendable {
       sourcePixelWidth: descriptor.sourcePixelWidth,
       sourcePixelHeight: descriptor.sourcePixelHeight)
     guard target.width != currentWidth || target.height != currentHeight else { return }
-    try await capture.updateOutputSize(width: target.width, height: target.height)
+    try await captureOutputSizeUpdater(target.width, target.height)
     currentWidth = target.width
     currentHeight = target.height
     input.updateFrameSize(width: currentWidth, height: currentHeight)
@@ -2265,6 +2276,12 @@ final class RFBHostSession: @unchecked Sendable {
       lastCursorPosition = nil
       preferCursorPosition = false
       cursorStateGeneration &+= 1
+      // Resizing does not change the system cursor, so the 60 Hz monitor's
+      // dedup would strand the client on old-geometry cursor state forever;
+      // re-offer the unchanged snapshot so it is re-sent with new mapping.
+      if let snapshot = latestCursorSnapshot {
+        framebufferUpdateArbiter.offerCursor(snapshot)
+      }
     }
   }
 

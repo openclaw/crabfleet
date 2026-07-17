@@ -566,6 +566,147 @@ struct RFBHostSessionStreamTests {
     )
     #expect(stream.outgoing == expected)
   }
+
+  @Test
+  func resizeReplaysStationaryCursorShapeAndPointerAtNewGeometry() async throws {
+    let descriptor = CapturedDisplayDescriptor(
+      displayID: 1,
+      displayBounds: CGRect(x: 0, y: 0, width: 100, height: 100),
+      frameWidth: 100,
+      frameHeight: 100,
+      sourcePixelWidth: 200,
+      sourcePixelHeight: 200)
+    let image = SystemCursorImage(
+      width: 2,
+      height: 2,
+      pointWidth: 2,
+      pointHeight: 2,
+      hotspot: CGPoint(x: 1, y: 1),
+      rgba: Data([
+        0xFF, 0, 0, 0xFF, 0, 0, 0xFF, 0xFF,
+        0, 0xFF, 0, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+      ]),
+      contentHash: Data([0xC0, 0xDE]))
+    let snapshot = SystemCursorSnapshot(
+      image: image,
+      position: CGPoint(x: 75, y: 25))
+    let capture = MacScreenCapture()
+    await capture.frameStore.update(
+      .init(jpegData: Data([0xFF, 0xD8, 0xFF, 0xD9]), sequence: 1, width: 100, height: 100))
+
+    var incoming = RFBVersion.serverBanner
+    incoming.append(contentsOf: [1, 1])  // None security, shared ClientInit.
+    incoming.append(
+      clientSetEncodings([
+        RFBWire.tightEncoding,
+        RFBWire.cursorWithAlphaEncoding,
+        RFBWire.pointerPositionEncoding,
+        RFBWire.extendedDesktopSizeEncoding,
+      ]))
+    incoming.append(clientFramebufferUpdateRequest(width: 100, height: 100))  // Size announce.
+    incoming.append(clientFramebufferUpdateRequest(width: 100, height: 100))  // Cursor shape.
+    incoming.append(clientFramebufferUpdateRequest(width: 100, height: 100))  // PointerPos.
+    incoming.append(clientSetDesktopSize(width: 200, height: 200))
+    incoming.append(clientFramebufferUpdateRequest(width: 200, height: 200))  // Size announce.
+    incoming.append(clientFramebufferUpdateRequest(width: 200, height: 200))  // Cursor shape.
+    incoming.append(clientFramebufferUpdateRequest(width: 200, height: 200))  // PointerPos.
+
+    let initialImage = try #require(
+      CursorCoordinateMapper.cursorImage(
+        image,
+        descriptor: descriptor,
+        frameWidth: 100,
+        frameHeight: 100))
+    let resizedImage = try #require(
+      CursorCoordinateMapper.cursorImage(
+        image,
+        descriptor: descriptor,
+        frameWidth: 200,
+        frameHeight: 200))
+    let initialPosition = try #require(
+      CursorCoordinateMapper.pointerPosition(
+        snapshot.position,
+        descriptor: descriptor,
+        frameWidth: 100,
+        frameHeight: 100))
+    let resizedPosition = try #require(
+      CursorCoordinateMapper.pointerPosition(
+        snapshot.position,
+        descriptor: descriptor,
+        frameWidth: 200,
+        frameHeight: 200))
+    let initialShape = try RFBWire.cursorWithAlphaUpdate(image: initialImage)
+    let resizedShape = try RFBWire.cursorWithAlphaUpdate(image: resizedImage)
+    let initialPointer = RFBWire.pointerPositionUpdate(
+      x: initialPosition.x,
+      y: initialPosition.y)
+    let resizedPointer = RFBWire.pointerPositionUpdate(
+      x: resizedPosition.x,
+      y: resizedPosition.y)
+
+    let stream = InMemoryRFBByteStream(incoming: incoming)
+    let finished = ThreadSafeFlag()
+    let resizeCompletedAt = ThreadSafeTimestamp()
+    let session = RFBHostSession(
+      byteStream: stream,
+      capture: capture,
+      descriptor: descriptor,
+      input: HandshakeRemoteInput(),
+      clipboard: nil,
+      remoteAddressOverride: "Crabfleet browser",
+      skipTailnetCheck: true,
+      desktopName: "Crabfleet — Cursor Resize Test",
+      handshakeTimeout: .seconds(1),
+      viewOnly: false,
+      audioEnabled: false,
+      qualityMode: .auto,
+      cursorSnapshotProvider: { snapshot },
+      captureOutputSizeUpdater: { width, height in
+        await capture.frameStore.update(
+          .init(
+            jpegData: Data([0xFF, 0xD8, 0xFF, 0xD9]),
+            sequence: 2,
+            width: width,
+            height: height))
+        resizeCompletedAt.set(ProcessInfo.processInfo.systemUptime)
+      },
+      didAuthorize: {},
+      eventHandler: { _ in },
+      didFinish: { _ in finished.set() })
+
+    let clock = ContinuousClock()
+    let startedAt = clock.now
+    session.start()
+    let deadline = startedAt.advanced(by: .seconds(1))
+    while stream.outgoing.range(of: resizedPointer) == nil, clock.now < deadline {
+      try await Task.sleep(for: .milliseconds(5))
+    }
+    let deliveredAt = ProcessInfo.processInfo.systemUptime
+    session.stop()
+
+    let outgoing = stream.outgoing
+    let initialShapeRange = try #require(outgoing.range(of: initialShape))
+    let initialPointerRange = try #require(
+      outgoing.range(of: initialPointer, in: initialShapeRange.upperBound..<outgoing.endIndex))
+    let resizedShapeRange = try #require(
+      outgoing.range(of: resizedShape, in: initialPointerRange.upperBound..<outgoing.endIndex))
+    _ = try #require(
+      outgoing.range(of: resizedPointer, in: resizedShapeRange.upperBound..<outgoing.endIndex))
+    #expect(initialImage.width == 2)
+    #expect(resizedImage.width == 4)
+    #expect(initialPosition.x == 74)
+    #expect(initialPosition.y == 25)
+    #expect(resizedPosition.x == 149)
+    #expect(resizedPosition.y == 50)
+    let resizeTimestamp = try #require(resizeCompletedAt.value)
+    #expect(deliveredAt - resizeTimestamp < 0.25)
+
+    let finishDeadline = clock.now.advanced(by: .seconds(1))
+    while !finished.value, clock.now < finishDeadline {
+      try await Task.sleep(for: .milliseconds(5))
+    }
+    #expect(finished.value)
+  }
 }
 
 @MainActor
@@ -834,6 +975,36 @@ private final class DirectionEndpointRecorder: ClipboardSessionEndpoint {
   }
 }
 
+private func clientSetEncodings(_ encodings: [Int32]) -> Data {
+  var message = Data([2, 0])
+  message.appendBigEndian(UInt16(encodings.count))
+  for encoding in encodings { message.appendBigEndian(encoding) }
+  return message
+}
+
+private func clientFramebufferUpdateRequest(width: UInt16, height: UInt16) -> Data {
+  var message = Data([3, 1])
+  message.appendBigEndian(UInt16(0))
+  message.appendBigEndian(UInt16(0))
+  message.appendBigEndian(width)
+  message.appendBigEndian(height)
+  return message
+}
+
+private func clientSetDesktopSize(width: UInt16, height: UInt16) -> Data {
+  var message = Data([251, 0])
+  message.appendBigEndian(width)
+  message.appendBigEndian(height)
+  message.append(contentsOf: [1, 0])
+  message.appendBigEndian(UInt32(0))  // Screen ID.
+  message.appendBigEndian(UInt16(0))
+  message.appendBigEndian(UInt16(0))
+  message.appendBigEndian(width)
+  message.appendBigEndian(height)
+  message.appendBigEndian(UInt32(0))  // Flags.
+  return message
+}
+
 private final class InMemoryRFBByteStream: RFBByteStream, @unchecked Sendable {
   private let lock = NSLock()
   private var incoming: Data
@@ -936,6 +1107,23 @@ private final class ThreadSafeFlag: @unchecked Sendable {
   func set() {
     lock.lock()
     storage = true
+    lock.unlock()
+  }
+}
+
+private final class ThreadSafeTimestamp: @unchecked Sendable {
+  private let lock = NSLock()
+  private var storage: TimeInterval?
+
+  var value: TimeInterval? {
+    lock.lock()
+    defer { lock.unlock() }
+    return storage
+  }
+
+  func set(_ value: TimeInterval) {
+    lock.lock()
+    storage = value
     lock.unlock()
   }
 }
