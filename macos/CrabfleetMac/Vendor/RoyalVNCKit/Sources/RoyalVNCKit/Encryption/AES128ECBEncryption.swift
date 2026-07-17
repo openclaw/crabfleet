@@ -11,6 +11,21 @@ struct AES128ECBEncryption {
     data: Data,
     key: Data
   ) -> Data? {
+    crypt(data: data, key: key, operation: CCOperation(kCCEncrypt))
+  }
+
+  static func decrypt(
+    data: Data,
+    key: Data
+  ) -> Data? {
+    crypt(data: data, key: key, operation: CCOperation(kCCDecrypt))
+  }
+
+  private static func crypt(
+    data: Data,
+    key: Data,
+    operation: CCOperation
+  ) -> Data? {
     guard key.count == kCCKeySizeAES128 else { return nil }
 
     var input = data
@@ -27,7 +42,7 @@ struct AES128ECBEncryption {
       input.withUnsafeBytes { inputBuffer in
         output.withUnsafeMutableBytes { outputBuffer in
           CCCrypt(
-            CCOperation(kCCEncrypt),
+            operation,
             CCAlgorithm(kCCAlgorithmAES),
             CCOptions(kCCOptionECBMode),
             keyBuffer.baseAddress,

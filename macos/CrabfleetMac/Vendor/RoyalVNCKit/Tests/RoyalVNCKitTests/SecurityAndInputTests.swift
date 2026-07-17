@@ -84,6 +84,63 @@ struct SecurityAndInputTests {
   }
 
   @Test
+  func appleRemoteDesktopHostRoundTripsExistingClientImplementation() async throws {
+    let host = try VNCARDHostAuthentication()
+    let loopback = ARDLoopbackConnection(incoming: host.challenge)
+    let client = try await VNCProtocol.ARDAuthentication.receive(connection: loopback)
+
+    try await client.send(
+      connection: loopback,
+      credential: VNCUsernamePasswordCredential(
+        username: "test-viewer",
+        password: "test-auth-token"))
+
+    #expect(loopback.outgoing.count == VNCARDHostAuthentication.responseLength)
+    #expect(
+      host.verifies(
+        response: loopback.outgoing,
+        password: "test-auth-token"))
+    #expect(
+      !host.verifies(
+        response: loopback.outgoing,
+        password: "decoy-token"))
+  }
+
+  @Test
+  func vncHostAuthenticationMatchesCompatibilityVector() {
+    let challenge = Data(0..<16)
+    let expected = Data([
+      0x8A, 0x5F, 0xA9, 0x58, 0xF0, 0xD8, 0x19, 0xBD,
+      0xCB, 0x98, 0x1C, 0x9B, 0x47, 0x63, 0x6E, 0xD0,
+    ])
+
+    #expect(
+      VNCHostAuthentication.response(
+        challenge: challenge,
+        password: "test-auth-token") == expected)
+    #expect(
+      VNCHostAuthentication.verifies(
+        response: expected,
+        challenge: challenge,
+        password: "test-auth-token"))
+    #expect(
+      !VNCHostAuthentication.verifies(
+        response: expected,
+        challenge: challenge,
+        password: "decoy-token"))
+    #expect(
+      VNCHostAuthentication.verifies(
+        response: (Data([0xFF]) + expected).dropFirst(),
+        challenge: challenge,
+        password: "test-auth-token"))
+    #expect(
+      !VNCHostAuthentication.verifies(
+        response: expected + Data(repeating: 0, count: 256),
+        challenge: challenge,
+        password: "test-auth-token"))
+  }
+
+  @Test
   func evictsValidatedAppleRemoteDesktopSafePrimesInInsertionOrder() {
     var cache = ARDKeyAgreement.ValidatedSafePrimeCache(capacity: 3)
     let values = (0..<5).map { Data([$0]) }
@@ -258,5 +315,33 @@ struct SecurityAndInputTests {
 
   private func ultraVNCValue(_ value: UInt64) -> Data {
     withUnsafeBytes(of: value.bigEndian) { Data($0) }
+  }
+}
+
+private final class ARDLoopbackConnection: NetworkConnectionReading, NetworkConnectionWriting {
+  private let incoming: Data
+  private var offset = 0
+  private(set) var outgoing = Data()
+
+  init(incoming: Data) {
+    self.incoming = incoming
+  }
+
+  func read(minimumLength: Int, maximumLength: Int) async throws -> Data {
+    let remaining = incoming.count - offset
+    guard minimumLength > 0, maximumLength >= minimumLength, remaining >= minimumLength else {
+      throw VNCError.protocol(.noData)
+    }
+    let count = min(maximumLength, remaining)
+    defer { offset += count }
+    return incoming.subdata(in: offset..<(offset + count))
+  }
+
+  func write(value: UInt8) async throws {
+    outgoing.append(value)
+  }
+
+  func write(data: Data) async throws {
+    outgoing.append(data)
   }
 }
