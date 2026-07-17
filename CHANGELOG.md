@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Add persisted four-display Share This Mac selection with consecutive per-display Tailscale listeners and Fleet rows, four concurrent authorized viewers per display, multicast clipboard and aggregate viewer diagnostics, single-viewer resize fencing, independent per-session video pipelines, and primary-display refcounted system-audio capture.
 - Add first-party browser access for registered Share This Mac desktops with a registration-owner-scoped Worker relay, WebCodecs H.264 and Tight/JPEG fallback, remote input, clipboard sync, resize pacing, and an ownership-token macOS publisher.
 - Add preferred hardware HEVC sharing with H.264 and Tight/JPEG fallback, Annex-B VPS/SPS/PPS decoding, ScreenCaptureKit dirty-rectangle idle suppression, persisted live Auto/Sharp/Smooth quality modes with mode-specific VideoToolbox maximum-frame-QP text-sharpness floors and one-shot static-text settling refreshes, throughput- and latency-aware bitrate control, and codec, target-bitrate, and changed-area stream diagnostics.
 - Add negotiated system-audio streaming to Share This Mac with opt-in ScreenCaptureKit capture, AAC-LC at 48 kHz, serialized bounded `CAF1` RFB messages, native jitter-buffered playback, live host audio control, and focus-aware viewer muting while leaving third-party VNC clients video-only.
