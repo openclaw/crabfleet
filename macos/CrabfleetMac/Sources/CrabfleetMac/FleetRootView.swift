@@ -246,9 +246,11 @@ struct FleetRootView: View {
       }(savedAccessCode.value)
       sessions.connect(
         targetID: target.id,
-        request: request
+        request: request,
+        authenticationSucceeded: {
+          connections.markConnected(profileID: profile.id)
+        }
       )
-      connections.markConnected(profileID: profile.id)
     }
   }
 

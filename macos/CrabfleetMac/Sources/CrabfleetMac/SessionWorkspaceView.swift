@@ -595,6 +595,7 @@ struct QuickConnectSheet: View {
       username: username.isEmpty ? parsed.username : username)
     guard effectiveAddress != credentialIdentity else { return }
     credentialIdentity = effectiveAddress
+    password = ""
     rememberAccessCode = storedAccessCode(effectiveAddress).wasRemembered
   }
 
