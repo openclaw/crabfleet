@@ -101,8 +101,9 @@ an owner-scoped Crabfleet Worker relay for first-party browser access.
 7. Direct and browser transports share a four-session gate per display. Tailnet
    sessions claim their reserved slot on the first client RFB byte; a relay
    connection carries exactly one session and counts against the same cap.
-   Relay and tailnet viewers may coexist, and quality and view-only changes fan
-   out atomically across both transports.
+   Relay and tailnet viewers may coexist. View-only changes fan out atomically;
+   quality is selected independently by capable viewers, while the host picker
+   supplies the default for older viewers.
 8. Clipboard sync with all connected peers is on by default and can be disabled
    before starting the share. Host changes fan out to every viewer; viewer text
    updates the shared pasteboard and fans out to the other viewers, last writer
@@ -149,8 +150,19 @@ SPS and requires `chroma_format_idc == 3`; a rejected profile or silent encoder
 downgrade permanently falls that client session back to 4:2:0 without breaking
 video. Auto and Sharp send one doubled-bitrate keyframe
 after two static seconds so text settles, then return to zero encode work;
-Smooth omits that refresh. The persisted quality picker applies live without a
-reconnect: 4:2:0 Auto uses 1.5–30 Mbit/s and 4:4:4 Auto uses 2.25–45 Mbit/s at
+Smooth omits that refresh. A capable viewer advertises the `QCTL`
+pseudo-encoding (`0x5143544c`). A capable host confirms support with
+server-to-client message 201 containing version byte `1` and two zero pad bytes;
+the viewer sends no new message to an older host that omits this acknowledgement.
+After acknowledgement, the viewer selects its session mode with client message
+201: one mode byte (`0` Auto, `1` Sharp, or `2` Smooth) followed by two zero pad
+bytes. The host accepts this message only after `QCTL` appeared in that
+session's latest SetEncodings message; an unnegotiated request, unknown mode, or
+nonzero padding fails the session. Older viewers and hosts retain the host's persisted
+**Default quality** setting. The native toolbar picker persists per host, while
+the browser picker persists per host in `sessionStorage`; both apply live
+without a reconnect. The share sheet lists every active viewer and its mode.
+4:2:0 Auto uses 1.5–30 Mbit/s and 4:4:4 Auto uses 2.25–45 Mbit/s at
 up to 60 fps with a maximum frame QP of 40; 4:2:0 Sharp uses 8–40 Mbit/s and
 4:4:4 Sharp uses 12–48 Mbit/s at up to 30 fps with a maximum frame QP of 30 to
 preserve readable text even when VideoToolbox must sacrifice frames. Smooth
@@ -253,6 +265,9 @@ are both available it also negotiates `CAF1`, primes about 100 ms of audio in a
 and hidden tabs mute immediately while continuing bounded playback progress.
 The **Stats** button reveals local-only codec, decoded-fps, incoming-Mbit/s,
 audio-drop, and jitter-depth diagnostics; the overlay is hidden by default.
+The adjacent **Auto / Sharp / Smooth** picker sends negotiated `QCTL` updates
+for this browser session only and restores the tab's per-host choice from
+`sessionStorage`.
 
 Remote clipboard reads use only the snapshot last approved with **Send to
 Mac**; loading or editing clipboard text never exposes it by itself. Reading

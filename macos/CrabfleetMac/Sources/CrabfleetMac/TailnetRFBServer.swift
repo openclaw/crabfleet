@@ -12,6 +12,14 @@ enum TailnetRFBServerEvent: Equatable, Sendable {
   case disconnected(count: Int, remainingPeer: String?)
   case listenerFailed(String)
   case sessionFailed(String)
+  case qualityModeChanged(ShareQualityMode)
+  case viewerSessionsChanged([TailnetViewerSession])
+}
+
+struct TailnetViewerSession: Equatable, Identifiable, Sendable {
+  let id: UUID
+  let peer: String
+  let qualityMode: ShareQualityMode
 }
 
 struct TailnetStreamStats: Equatable, Sendable {
@@ -275,6 +283,7 @@ final class TailnetRFBServer: @unchecked Sendable {
   private var sessions: [UUID: RFBHostSession] = [:]
   private var connectedPeers: [UUID: String] = [:]
   private var sessionStats: [UUID: TailnetStreamStats] = [:]
+  private var sessionQualityModes: [UUID: ShareQualityMode] = [:]
   private var audioSessionIDs: Set<UUID> = []
   private var viewOnly = false
   private var audioEnabled = true
@@ -353,6 +362,7 @@ final class TailnetRFBServer: @unchecked Sendable {
         sessions.removeAll()
         connectedPeers.removeAll()
         sessionStats.removeAll()
+        sessionQualityModes.removeAll()
         audioSessionIDs.removeAll()
       }
       return (listener, Array(sessions))
@@ -382,7 +392,7 @@ final class TailnetRFBServer: @unchecked Sendable {
     _ mode: ShareQualityMode,
     completion: (@Sendable (Bool) -> Void)? = nil
   ) -> Bool {
-    withLock {
+    withLock { () -> Bool in
       let activeSessions = Array(sessions.values)
       guard !activeSessions.isEmpty else {
         qualityMode = mode
@@ -390,20 +400,24 @@ final class TailnetRFBServer: @unchecked Sendable {
         return true
       }
       let previousMode = qualityMode
-      var acceptedSessions: [RFBHostSession] = []
-      for activeSession in activeSessions {
+      var acceptedSessions: [(UUID, RFBHostSession, ShareQualityMode)] = []
+      for (sessionID, activeSession) in sessions {
+        let previousActiveMode = activeSession.activeQualityMode
         guard activeSession.setQualityMode(mode) else {
-          for acceptedSession in acceptedSessions {
+          for (acceptedID, acceptedSession, acceptedMode) in acceptedSessions {
             if !acceptedSession.setQualityMode(previousMode) {
               acceptedSession.stop()
             }
+            sessionQualityModes[acceptedID] = acceptedMode
           }
           return false
         }
-        acceptedSessions.append(activeSession)
+        sessionQualityModes[sessionID] = activeSession.activeQualityMode
+        acceptedSessions.append((sessionID, activeSession, previousActiveMode))
       }
       qualityMode = mode
       if let completion { Task { completion(true) } }
+      emit(.viewerSessionsChanged(viewerSessionsLocked()))
       return true
     }
   }
@@ -464,6 +478,7 @@ final class TailnetRFBServer: @unchecked Sendable {
         return false
       }
       sessions[sessionID] = newSession
+      sessionQualityModes[sessionID] = qualityMode
       newSession.setViewOnly(viewOnly)
       newSession.setAudioEnabled(audioEnabled)
       newSession.setQualityMode(qualityMode)
@@ -483,11 +498,13 @@ final class TailnetRFBServer: @unchecked Sendable {
       sessions.removeValue(forKey: sessionID)
       connectedPeers.removeValue(forKey: sessionID)
       sessionStats.removeValue(forKey: sessionID)
+      sessionQualityModes.removeValue(forKey: sessionID)
       audioSessionIDs.remove(sessionID)
       emit(
         .disconnected(
           count: connectedPeers.count,
           remainingPeer: connectedPeers.values.first))
+      emit(.viewerSessionsChanged(viewerSessionsLocked()))
     }
   }
 
@@ -498,7 +515,16 @@ final class TailnetRFBServer: @unchecked Sendable {
         guard sessions[sessionID] != nil else { return }
         connectedPeers[sessionID] = peer
         emit(.connected(peer, count: connectedPeers.count))
+        emit(.viewerSessionsChanged(viewerSessionsLocked()))
       }
+    case .qualityModeChanged(let mode):
+      withLock {
+        guard sessions[sessionID] != nil else { return }
+        sessionQualityModes[sessionID] = mode
+        emit(.viewerSessionsChanged(viewerSessionsLocked()))
+      }
+    case .viewerSessionsChanged:
+      break
     case .streaming(let stats):
       withLock {
         guard sessions[sessionID] != nil else { return }
@@ -534,6 +560,13 @@ final class TailnetRFBServer: @unchecked Sendable {
         emit(event)
       }
     }
+  }
+
+  private func viewerSessionsLocked() -> [TailnetViewerSession] {
+    connectedPeers.compactMap { sessionID, peer in
+      guard let mode = sessionQualityModes[sessionID] else { return nil }
+      return TailnetViewerSession(id: sessionID, peer: peer, qualityMode: mode)
+    }.sorted { $0.id.uuidString < $1.id.uuidString }
   }
 
   private func beginResize(sessionID: UUID) -> Bool {
@@ -594,6 +627,7 @@ final class RFBHostSession: @unchecked Sendable {
   private var supportsExtendedDesktopSize = false
   private var supportsExtendedClipboard = false
   private var supportsCrabfleetAudio = false
+  private var supportsCrabfleetQualityControl = false
   private var sentServerClipboardCaps = false
   private var needsDesktopSizeAnnounce = false
   private var clientClipboardCaps: VNCExtendedClipboardCaps?
@@ -620,6 +654,8 @@ final class RFBHostSession: @unchecked Sendable {
   private var audioIsActive = false
   private var audioPathBroken = false
   private var qualityMode: ShareQualityMode
+  private var defaultQualityMode: ShareQualityMode
+  private var viewerQualityMode: ShareQualityMode?
   private var frameIntervalGeneration: UInt64 = 0
   private var qualityModeRefreshRequested = false
   private var idleRefreshPolicy = VideoIdleRefreshPolicy(
@@ -682,6 +718,7 @@ final class RFBHostSession: @unchecked Sendable {
     self.desktopName = desktopName
     self.handshakeTimeout = handshakeTimeout
     self.qualityMode = qualityMode
+    defaultQualityMode = qualityMode
     self.beginResize = beginResize
     self.finishResize = finishResize
     self.didAuthorize = didAuthorize
@@ -741,6 +778,45 @@ final class RFBHostSession: @unchecked Sendable {
     completion: (@Sendable (Bool) -> Void)? = nil
   ) -> Bool {
     let accepted = withLock { () -> Bool in
+      let previousDefaultMode = defaultQualityMode
+      defaultQualityMode = mode
+      guard viewerQualityMode == nil else { return true }
+      guard applyQualityModeLocked(mode) else {
+        defaultQualityMode = previousDefaultMode
+        return false
+      }
+      return true
+    }
+    if let completion { Task { completion(accepted) } }
+    return accepted
+  }
+
+  var activeQualityMode: ShareQualityMode { withLock { qualityMode } }
+  var isFinished: Bool { withLock { finished } }
+
+  var activeRateControllerBounds: ClosedRange<Int> {
+    withLock {
+      let lowerBound = qualityMode.bitrateFloor(chroma: rateController.chroma)
+      let upperBound = qualityMode.bitrateCeiling(chroma: rateController.chroma)
+      return lowerBound...upperBound
+    }
+  }
+
+  private func setViewerQualityMode(_ mode: ShareQualityMode?) -> Bool {
+    let accepted = withLock { () -> Bool in
+      let previousViewerMode = viewerQualityMode
+      viewerQualityMode = mode
+      guard applyQualityModeLocked(mode ?? defaultQualityMode) else {
+        viewerQualityMode = previousViewerMode
+        return false
+      }
+      return true
+    }
+    if accepted { eventHandler(.qualityModeChanged(activeQualityMode)) }
+    return accepted
+  }
+
+  private func applyQualityModeLocked(_ mode: ShareQualityMode) -> Bool {
       let previousMaximumFrameQP = qualityMode.maximumFrameQP
       let previousRateController = rateController
       let previousMode = qualityMode
@@ -760,9 +836,6 @@ final class RFBHostSession: @unchecked Sendable {
       }
       qualityModeRefreshRequested = true
       return true
-    }
-    if let completion { Task { completion(accepted) } }
-    return accepted
   }
 
   private func beginProtocolIfNeeded() {
@@ -834,6 +907,7 @@ final class RFBHostSession: @unchecked Sendable {
     startCursorPath()
     attachClipboard()
     eventHandler(.connected(remoteAddress, count: 0))
+    eventHandler(.qualityModeChanged(activeQualityMode))
     resetRateController()
     lastStatsTimestamp = ProcessInfo.processInfo.systemUptime
     try await messageLoop(io: io)
@@ -957,6 +1031,16 @@ final class RFBHostSession: @unchecked Sendable {
         supportsCrabfleetHEVC = encodings.contains(RFBWire.crabfleetHEVCEncoding)
         supportsCrabfleetChroma444 = encodings.contains(RFBWire.crabfleetChroma444Encoding)
         supportsOpenH264 = encodings.contains(RFBWire.openH264Encoding)
+        let nextSupportsQualityControl = encodings.contains(
+          RFBWire.crabfleetQualityControlEncoding)
+        let shouldAcknowledgeQualityControl =
+          nextSupportsQualityControl && !supportsCrabfleetQualityControl
+        if supportsCrabfleetQualityControl, !nextSupportsQualityControl,
+          !setViewerQualityMode(nil)
+        {
+          throw PrivateMacShareError.protocolError("quality reconfiguration failed")
+        }
+        supportsCrabfleetQualityControl = nextSupportsQualityControl
         let nextCursorEncoding = RFBWire.preferredCursorEncoding(from: encodings)
         let nextSupportsPointerPosition = encodings.contains(RFBWire.pointerPositionEncoding)
         if encodings.contains(RFBWire.extendedDesktopSizeEncoding),
@@ -1005,8 +1089,26 @@ final class RFBHostSession: @unchecked Sendable {
         if !supportsCrabfleetHEVC, !supportsOpenH264 {
           if supportsTightEncoding { try await prepareTightFallback(io: io) }
         }
+        if shouldAcknowledgeQualityControl {
+          try await io.send(RFBWire.qualityControlCapability())
+        }
         try await sendServerClipboardCapsIfNeeded(io: io)
         await reconcileAudioPath(io: io)
+
+      case 201:  // Crabfleet per-viewer quality control
+        let payload = try await io.readExactly(3)
+        guard supportsCrabfleetQualityControl else {
+          throw PrivateMacShareError.protocolError("quality control was not negotiated")
+        }
+        guard payload[1] == 0, payload[2] == 0 else {
+          throw PrivateMacShareError.protocolError("invalid quality control padding")
+        }
+        guard let mode = ShareQualityMode(wireValue: payload[0]) else {
+          throw PrivateMacShareError.protocolError("unknown quality control mode")
+        }
+        guard setViewerQualityMode(mode) else {
+          throw PrivateMacShareError.protocolError("quality reconfiguration failed")
+        }
 
       case 3:  // FramebufferUpdateRequest
         let payload = try await io.readExactly(9)

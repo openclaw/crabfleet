@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Add bilaterally negotiated `QCTL` per-viewer Auto/Sharp/Smooth quality control with strict fail-closed message parsing, independent session rate and chroma policy, per-host native and session-scoped browser pickers, host default fallback for older peers, and active viewer-mode diagnostics.
 - Add negotiated client-side cursors to Share This Mac with standard CursorWithAlpha, classic Cursor, and PointerPos RFB rectangles, all-viewer capture-baking reconciliation, 60 Hz deduplicated host polling with local-input echo suppression, and native and browser remote-pointer overlays.
 - Bring the browser desktop viewer to near-native parity with feature-probed HEVC Main and RExt 4:4:4 decoding plus H.264/Tight renegotiation, negotiated AAC-LC `CAF1` playback through a bounded AudioWorklet jitter buffer with gesture and visibility muting, and a hidden-by-default local codec, fps, throughput, audio-drop, and jitter overlay.
 - Add decode-probed `C444` negotiation for full-chroma HEVC Main 4:4:4 between Crabfleet Macs, SPS-verified host fallback, chroma-fenced keyframe resets, RExt `hvcC` construction in the native viewer, 4:4:4-aware bitrate bounds, and active/fallback stream diagnostics while preserving 4:2:0 for Smooth and older peers.

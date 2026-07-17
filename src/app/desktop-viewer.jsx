@@ -13,6 +13,7 @@ import { CanvasRenderer } from "./rfb/render.ts";
 import { WebSocketByteStream } from "./rfb/stream.ts";
 import { cursorCSS, remotePointerAfterCursorShape, shouldShowCursorOverlay } from "./rfb/cursor.ts";
 import { ViewerStatsWindow } from "./rfb/stats.ts";
+import { loadViewerQuality, saveViewerQuality } from "./rfb/quality.ts";
 
 export function desktopViewerHostID(pathname = location.pathname) {
   const match = pathname.match(/^\/app\/desktops\/([^/]+)\/?$/);
@@ -69,6 +70,9 @@ export function DesktopViewer({ host, onExit }) {
     jitterMs: 0,
   });
   const [statsVisible, setStatsVisible] = useState(false);
+  const [qualityMode, setQualityMode] = useState(() =>
+    loadViewerQuality(sessionStorage, host?.id || "unknown"),
+  );
   const [audioAvailable, setAudioAvailable] = useState(false);
   const [audioMuted, setAudioMuted] = useState(true);
   const [manualClipboard, setManualClipboard] = useState("");
@@ -107,6 +111,10 @@ export function DesktopViewer({ host, onExit }) {
     }
     pointer.buttonsDown = false;
   };
+
+  useEffect(() => {
+    if (host?.id) setQualityMode(loadViewerQuality(sessionStorage, host.id));
+  }, [host?.id]);
 
   useEffect(() => {
     const releaseInput = () => {
@@ -202,6 +210,7 @@ export function DesktopViewer({ host, onExit }) {
         h264,
         chroma444: hevc && rext,
         audio,
+        qualityMode: loadViewerQuality(sessionStorage, host.id),
         onState: setConnectionState,
         onReady: () => {
           readyRef.current = true;
@@ -421,6 +430,12 @@ export function DesktopViewer({ host, onExit }) {
     }
   };
 
+  const selectQualityMode = (mode) => {
+    setQualityMode(mode);
+    saveViewerQuality(sessionStorage, host.id, mode);
+    sessionRef.current?.setQualityMode(mode);
+  };
+
   const showCursorOverlay =
     cursorImage &&
     remotePointer &&
@@ -456,6 +471,18 @@ export function DesktopViewer({ host, onExit }) {
               <span>{stats.jitterMs.toFixed(0)} ms jitter</span>
             </div>
           ) : null}
+          <div class="desktop-quality-picker" role="group" aria-label="Viewer quality">
+            {["auto", "sharp", "smooth"].map((mode) => (
+              <button
+                key={mode}
+                class={qualityMode === mode ? "active" : ""}
+                aria-pressed={qualityMode === mode}
+                onClick={() => selectQualityMode(mode)}
+              >
+                {mode[0].toUpperCase() + mode.slice(1)}
+              </button>
+            ))}
+          </div>
           <button
             class="desktop-tool-button"
             onClick={() => setStatsVisible((visible) => !visible)}

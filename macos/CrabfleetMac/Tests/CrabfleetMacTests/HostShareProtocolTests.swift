@@ -100,6 +100,12 @@ struct HostShareWireTests {
   }
 
   @Test
+  func qualityControlCapabilityMatchesWireFormat() {
+    #expect(RFBWire.crabfleetQualityControlEncoding == 0x5143_544c)
+    #expect(RFBWire.qualityControlCapability() == Data([201, 1, 0, 0]))
+  }
+
+  @Test
   func audioWireRejectsInvalidBounds() {
     #expect(throws: (any Error).self) {
       _ = try RFBWire.audioConfig(channels: 0, sampleRate: 48_000, magicCookie: Data())
@@ -429,6 +435,59 @@ struct RFBHostSessionStreamTests {
   @Test
   func readsAByteFromDataWithANonzeroStartIndex() async throws {
     #expect(try await SlicedRFBByteStream().readUInt8() == 42)
+  }
+
+  @Test
+  func negotiatedQualityControlAppliesIndependentRateBoundsPerSession() async throws {
+    let sharp = qualitySession(
+      messages: clientSetEncodings([RFBWire.crabfleetQualityControlEncoding])
+        + clientQualityControl(1),
+      defaultMode: .auto)
+    let smooth = qualitySession(
+      messages: clientSetEncodings([RFBWire.crabfleetQualityControlEncoding])
+        + clientQualityControl(2),
+      defaultMode: .auto)
+
+    sharp.session.start()
+    smooth.session.start()
+    try await waitForFinish(sharp.finished, smooth.finished)
+
+    #expect(sharp.session.activeQualityMode == .sharp)
+    #expect(smooth.session.activeQualityMode == .smooth)
+    #expect(sharp.session.activeRateControllerBounds == 8_000_000...40_000_000)
+    #expect(smooth.session.activeRateControllerBounds == 1_500_000...20_000_000)
+    #expect(sharp.events.qualityModes.contains(.sharp))
+    #expect(smooth.events.qualityModes.contains(.smooth))
+    #expect(sharp.session.setQualityMode(.smooth))
+    #expect(sharp.session.activeQualityMode == .sharp)
+  }
+
+  @Test
+  func sessionWithoutQualityNegotiationKeepsHostDefault() async throws {
+    let fallback = qualitySession(messages: Data(), defaultMode: .sharp)
+    fallback.session.start()
+    try await waitForFinish(fallback.finished)
+
+    #expect(fallback.session.activeQualityMode == .sharp)
+    #expect(fallback.session.activeRateControllerBounds == 8_000_000...40_000_000)
+    #expect(fallback.session.setQualityMode(.smooth))
+    #expect(fallback.session.activeQualityMode == .smooth)
+  }
+
+  @Test
+  func qualityControlFailsClosedWithoutNegotiationOrForUnknownMode() async throws {
+    let unnegotiated = qualitySession(messages: clientQualityControl(1), defaultMode: .auto)
+    unnegotiated.session.start()
+    try await waitForFinish(unnegotiated.finished)
+    #expect(unnegotiated.events.failure?.contains("was not negotiated") == true)
+
+    let unknown = qualitySession(
+      messages: clientSetEncodings([RFBWire.crabfleetQualityControlEncoding])
+        + clientQualityControl(3),
+      defaultMode: .auto)
+    unknown.session.start()
+    try await waitForFinish(unknown.finished)
+    #expect(unknown.events.failure?.contains("unknown quality control mode") == true)
   }
 
   @Test
@@ -1191,6 +1250,55 @@ private func clientSetEncodings(_ encodings: [Int32]) -> Data {
   return message
 }
 
+private func clientQualityControl(_ mode: UInt8) -> Data {
+  Data([201, mode, 0, 0])
+}
+
+private func qualitySession(
+  messages: Data,
+  defaultMode: ShareQualityMode
+) -> (session: RFBHostSession, finished: ThreadSafeFlag, events: QualityEventRecorder) {
+  let descriptor = CapturedDisplayDescriptor(
+    displayID: 1,
+    displayBounds: CGRect(x: 0, y: 0, width: 100, height: 100),
+    frameWidth: 100,
+    frameHeight: 100,
+    sourcePixelWidth: 100,
+    sourcePixelHeight: 100)
+  var incoming = RFBVersion.serverBanner
+  incoming.append(contentsOf: [1, 1])
+  incoming.append(messages)
+  let finished = ThreadSafeFlag()
+  let events = QualityEventRecorder()
+  let session = RFBHostSession(
+    byteStream: InMemoryRFBByteStream(incoming: incoming),
+    capture: MacScreenCapture(),
+    descriptor: descriptor,
+    input: HandshakeRemoteInput(),
+    clipboard: nil,
+    remoteAddressOverride: "Test viewer",
+    skipTailnetCheck: true,
+    desktopName: "Crabfleet quality test",
+    handshakeTimeout: .seconds(1),
+    viewOnly: false,
+    audioEnabled: false,
+    qualityMode: defaultMode,
+    didAuthorize: {},
+    eventHandler: { events.append($0) },
+    didFinish: { _ in finished.set() })
+  return (session, finished, events)
+}
+
+private func waitForFinish(_ flags: ThreadSafeFlag...) async throws {
+  let clock = ContinuousClock()
+  let deadline = clock.now.advanced(by: .seconds(1))
+  while flags.contains(where: { !$0.value }), clock.now < deadline {
+    try await Task.sleep(for: .milliseconds(5))
+  }
+  let allFinished = flags.allSatisfy { $0.value }
+  #expect(allFinished)
+}
+
 private func clientFramebufferUpdateRequest(width: UInt16, height: UInt16) -> Data {
   var message = Data([3, 1])
   message.appendBigEndian(UInt16(0))
@@ -1416,6 +1524,35 @@ private final class ThreadSafeTimestamp: @unchecked Sendable {
   func set(_ value: TimeInterval) {
     lock.lock()
     storage = value
+    lock.unlock()
+  }
+}
+
+private final class QualityEventRecorder: @unchecked Sendable {
+  private let lock = NSLock()
+  private var events: [TailnetRFBServerEvent] = []
+
+  var qualityModes: [ShareQualityMode] {
+    lock.lock()
+    defer { lock.unlock() }
+    return events.compactMap {
+      if case .qualityModeChanged(let mode) = $0 { return mode }
+      return nil
+    }
+  }
+
+  var failure: String? {
+    lock.lock()
+    defer { lock.unlock() }
+    return events.compactMap {
+      if case .sessionFailed(let message) = $0 { return message }
+      return nil
+    }.last
+  }
+
+  func append(_ event: TailnetRFBServerEvent) {
+    lock.lock()
+    events.append(event)
     lock.unlock()
   }
 }

@@ -2458,6 +2458,29 @@
         font-size: 11px;
         white-space: nowrap;
       }
+      .desktop-quality-picker {
+        display: flex;
+        overflow: hidden;
+        border: 1px solid rgb(255 255 255 / 0.12);
+        border-radius: 4px;
+      }
+      .desktop-quality-picker button {
+        min-height: 28px;
+        padding: 5px 8px;
+        border: 0;
+        border-left: 1px solid rgb(255 255 255 / 0.1);
+        border-radius: 0;
+        color: #8d919d;
+        background: #10121a;
+        font-size: 10px;
+      }
+      .desktop-quality-picker button:first-child {
+        border-left: 0;
+      }
+      .desktop-quality-picker button.active {
+        color: #f4f4f6;
+        background: rgb(52 211 153 / 0.18);
+      }
       .desktop-viewer-stats span {
         padding: 7px 9px;
         border-left: 1px solid rgb(255 255 255 / 0.1);

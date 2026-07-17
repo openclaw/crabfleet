@@ -61,8 +61,24 @@ private extension VNCConnection {
 			case VNCProtocol.CrabfleetAudio.messageType:
 				try await handleCrabfleetAudioMessage()
 
+			case VNCProtocol.QualityControlCapability.messageType:
+				try await handleQualityControlCapabilityMessage()
+
 			default:
 				throw VNCError.protocol(.unsupportedServerToClientMessage(messageType: messageType))
+		}
+	}
+
+	func handleQualityControlCapabilityMessage() async throws {
+		guard settings.frameEncodings.contains(.crabfleetQualityControl) else {
+			throw VNCError.protocol(.invalidData)
+		}
+		_ = try await VNCProtocol.QualityControlCapability.receive(connection: connection)
+		withQualityControlLock {
+			isQualityControlAcknowledged = true
+			if let requestedQualityMode {
+				enqueueClientToServerMessage(VNCProtocol.QualityControl(mode: requestedQualityMode))
+			}
 		}
 	}
 

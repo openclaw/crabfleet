@@ -5,6 +5,7 @@ import {
   RFBClient,
   RFB_ENCODINGS,
   decodeClipboardProvide,
+  encodeQualityControl,
   encodeSetEncodings,
   encodeTightCompactLength,
   readBoundedStream,
@@ -23,6 +24,7 @@ test("RFB 3.8 handshake records exact client bytes and paces empty updates", asy
     new Uint8Array(16),
     uint32(name.byteLength),
     name,
+    [201, 1, 0, 0],
     [0, 0, 0, 0],
   );
   const transport = new ScriptedTransport(transcript);
@@ -42,6 +44,7 @@ test("RFB 3.8 handshake records exact client bytes and paces empty updates", asy
     encodeSetEncodings([
       RFB_ENCODINGS.openH264,
       RFB_ENCODINGS.tight,
+      RFB_ENCODINGS.qualityControl,
       RFB_ENCODINGS.cursorWithAlpha,
       RFB_ENCODINGS.pointerPosition,
       RFB_ENCODINGS.extendedDesktopSize,
@@ -100,6 +103,7 @@ test("H.264 decode failure renegotiates Tight and requests a full JPEG frame", a
     transport.sent[6],
     encodeSetEncodings([
       RFB_ENCODINGS.tight,
+      RFB_ENCODINGS.qualityControl,
       RFB_ENCODINGS.cursorWithAlpha,
       RFB_ENCODINGS.pointerPosition,
       RFB_ENCODINGS.extendedDesktopSize,
@@ -121,6 +125,7 @@ test("capability handshake advertises HEVC, C444, and CAF1 only when probed", as
     new Uint8Array(16),
     uint32(name.byteLength),
     name,
+    [201, 1, 0, 0],
   );
   const transport = new ScriptedTransport(transcript);
   const client = new RFBClient(transport, {
@@ -128,6 +133,7 @@ test("capability handshake advertises HEVC, C444, and CAF1 only when probed", as
     h264: true,
     chroma444: true,
     audio: true,
+    qualityMode: "sharp",
   });
   await assert.rejects(client.start(), /scripted server ended/);
   assert.deepEqual(
@@ -138,11 +144,55 @@ test("capability handshake advertises HEVC, C444, and CAF1 only when probed", as
       RFB_ENCODINGS.openH264,
       RFB_ENCODINGS.tight,
       RFB_ENCODINGS.audio,
+      RFB_ENCODINGS.qualityControl,
       RFB_ENCODINGS.cursorWithAlpha,
       RFB_ENCODINGS.pointerPosition,
       RFB_ENCODINGS.extendedDesktopSize,
       RFB_ENCODINGS.extendedClipboard,
     ]),
+  );
+  assert.deepEqual(transport.sent[6], encodeQualityControl("sharp"));
+});
+
+test("QCTL waits for a valid server acknowledgement", async () => {
+  const name = new TextEncoder().encode("Legacy host");
+  const legacy = new ScriptedTransport(
+    bytes(
+      new TextEncoder().encode("RFB 003.008\n"),
+      [1, 1],
+      uint32(0),
+      uint16(800),
+      uint16(600),
+      new Uint8Array(16),
+      uint32(name.byteLength),
+      name,
+    ),
+  );
+  await assert.rejects(
+    new RFBClient(legacy, { h264: false, qualityMode: "smooth" }).start(),
+    /scripted server ended/,
+  );
+  assert.equal(
+    legacy.sent.some((frame) => frame[0] === 201),
+    false,
+  );
+
+  const malformed = new ScriptedTransport(
+    bytes(
+      new TextEncoder().encode("RFB 003.008\n"),
+      [1, 1],
+      uint32(0),
+      uint16(800),
+      uint16(600),
+      new Uint8Array(16),
+      uint32(name.byteLength),
+      name,
+      [201, 2, 0, 0],
+    ),
+  );
+  await assert.rejects(
+    new RFBClient(malformed, { h264: false, qualityMode: "sharp" }).start(),
+    /invalid QCTL capability acknowledgement/,
   );
 });
 
@@ -199,6 +249,7 @@ test("HEVC and H.264 failures renegotiate down the codec chain while retaining C
       RFB_ENCODINGS.openH264,
       RFB_ENCODINGS.tight,
       RFB_ENCODINGS.audio,
+      RFB_ENCODINGS.qualityControl,
       RFB_ENCODINGS.cursorWithAlpha,
       RFB_ENCODINGS.pointerPosition,
       RFB_ENCODINGS.extendedDesktopSize,
@@ -210,6 +261,7 @@ test("HEVC and H.264 failures renegotiate down the codec chain while retaining C
     encodeSetEncodings([
       RFB_ENCODINGS.tight,
       RFB_ENCODINGS.audio,
+      RFB_ENCODINGS.qualityControl,
       RFB_ENCODINGS.cursorWithAlpha,
       RFB_ENCODINGS.pointerPosition,
       RFB_ENCODINGS.extendedDesktopSize,
@@ -240,6 +292,12 @@ test("SetEncodings preserves signed pseudo-encoding words", () => {
   assert.equal(new DataView(encoded.buffer).getInt32(16), -232);
   assert.equal(new DataView(encoded.buffer).getInt32(20), -308);
   assert.equal(new DataView(encoded.buffer).getUint32(24), 0xc0a1e5ce);
+});
+
+test("QCTL quality messages use the strict four-byte wire format", () => {
+  assert.deepEqual(encodeQualityControl("auto"), new Uint8Array([201, 0, 0, 0]));
+  assert.deepEqual(encodeQualityControl("sharp"), new Uint8Array([201, 1, 0, 0]));
+  assert.deepEqual(encodeQualityControl("smooth"), new Uint8Array([201, 2, 0, 0]));
 });
 
 test("browser parses host CursorWithAlpha and PointerPos fixtures", async () => {

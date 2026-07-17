@@ -15,6 +15,23 @@ enum ShareQualityMode: String, CaseIterable, Identifiable, Sendable {
     }
   }
 
+  init?(wireValue: UInt8) {
+    switch wireValue {
+    case 0: self = .auto
+    case 1: self = .sharp
+    case 2: self = .smooth
+    default: return nil
+    }
+  }
+
+  var wireValue: UInt8 {
+    switch self {
+    case .auto: 0
+    case .sharp: 1
+    case .smooth: 2
+    }
+  }
+
   var bitrateFloor: Int {
     switch self {
     case .auto, .smooth: 1_500_000
