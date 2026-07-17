@@ -1,6 +1,8 @@
 import { useEffect, useRef, useState } from "preact/hooks";
+import { RemoteAudioPlayer, supportsWebCodecsAudio } from "./rfb/audio.ts";
 import { RFBClient } from "./rfb/client.ts";
 import { H264Decoder, supportsWebCodecsH264 } from "./rfb/h264.ts";
+import { HEVCDecoder, supportsWebCodecsHEVC, supportsWebCodecsHEVCRExt } from "./rfb/hevc.ts";
 import {
   keysymForKey,
   pointerButtonMask,
@@ -9,6 +11,7 @@ import {
 } from "./rfb/input.ts";
 import { CanvasRenderer } from "./rfb/render.ts";
 import { WebSocketByteStream } from "./rfb/stream.ts";
+import { ViewerStatsWindow } from "./rfb/stats.ts";
 
 export function desktopViewerHostID(pathname = location.pathname) {
   const match = pathname.match(/^\/app\/desktops\/([^/]+)\/?$/);
@@ -28,10 +31,20 @@ export function DesktopViewer({ host, onExit }) {
   const pressedKeysRef = useRef(new Map());
   const pointerRef = useRef({ x: 0, y: 0, buttonsDown: false });
   const pendingResizeRef = useRef(null);
+  const audioRef = useRef(null);
+  const audioEnabledRef = useRef(false);
   const [connectionState, setConnectionState] = useState("Preparing decoder");
   const [serverName, setServerName] = useState(host?.name || host?.id || "Desktop");
   const [codec, setCodec] = useState("Detecting");
-  const [stats, setStats] = useState({ fps: 0, bitrate: 0 });
+  const [stats, setStats] = useState({
+    fps: 0,
+    mbitPerSecond: 0,
+    droppedAudio: 0,
+    jitterMs: 0,
+  });
+  const [statsVisible, setStatsVisible] = useState(false);
+  const [audioAvailable, setAudioAvailable] = useState(false);
+  const [audioMuted, setAudioMuted] = useState(true);
   const [manualClipboard, setManualClipboard] = useState("");
   const [clipboardNotice, setClipboardNotice] = useState("");
 
@@ -68,41 +81,78 @@ export function DesktopViewer({ host, onExit }) {
 
   useEffect(() => {
     if (!host || !canvasRef.current) return undefined;
+    audioEnabledRef.current = false;
+    setAudioMuted(true);
+    setAudioAvailable(false);
     let disposed = false;
-    let decoder = null;
+    let h264Decoder = null;
+    let hevcDecoder = null;
+    let client = null;
     const renderer = new CanvasRenderer(canvasRef.current);
-    const sample = { started: performance.now(), frames: 0, bytes: 0 };
+    const statsWindow = new ViewerStatsWindow(performance.now());
     const socketProtocol = location.protocol === "https:" ? "wss:" : "ws:";
     const socket = new WebSocket(
       `${socketProtocol}//${location.host}/api/desktop-hosts/${encodeURIComponent(host.id)}/relay/viewer`,
     );
     const stream = new WebSocketByteStream(socket);
 
-    const updateStats = () => {
-      const now = performance.now();
-      const elapsed = now - sample.started;
-      if (elapsed < 1000) return;
-      setStats({
-        fps: Math.round((sample.frames * 1000) / elapsed),
-        bitrate: Math.round((sample.bytes * 8) / elapsed),
-      });
-      sample.started = now;
-      sample.frames = 0;
-      sample.bytes = 0;
-    };
+    const statsTimer = setInterval(() => {
+      const snapshot = statsWindow.snapshot(performance.now());
+      setStats((current) => ({ ...current, ...snapshot }));
+    }, 250);
 
     const connect = async () => {
-      const h264 = await supportsWebCodecsH264();
+      const [hevc, h264, rext, audio] = await Promise.all([
+        supportsWebCodecsHEVC(),
+        supportsWebCodecsH264(),
+        supportsWebCodecsHEVCRExt(),
+        supportsWebCodecsAudio(),
+      ]);
       if (disposed) return;
-      setCodec(h264 ? "H.264 / WebCodecs" : "JPEG / Tight");
-      if (h264) {
-        decoder = new H264Decoder(
-          (frame) => renderer.present(frame),
-          (error) => setConnectionState(`Decoder error: ${error.message}`),
+      setCodec(hevc ? "HEVC / WebCodecs" : h264 ? "H.264 / WebCodecs" : "JPEG / Tight");
+      if (hevc) {
+        hevcDecoder = new HEVCDecoder(
+          async (frame) => {
+            await renderer.present(frame);
+            statsWindow.recordDecodedFrame(performance.now());
+          },
+          (error) => {
+            if (client) client.reportDecoderFailure("hevc", error);
+            else setConnectionState(`Decoder error: ${error.message}`);
+          },
+          () => client?.requestCodecRefresh(),
         );
       }
-      const client = new RFBClient(stream, {
+      if (h264) {
+        h264Decoder = new H264Decoder(
+          async (frame) => {
+            await renderer.present(frame);
+            statsWindow.recordDecodedFrame(performance.now());
+          },
+          (error) => {
+            if (client) client.reportDecoderFailure("h264", error);
+            else setConnectionState(`Decoder error: ${error.message}`);
+          },
+        );
+      }
+      if (audio) {
+        const player = new RemoteAudioPlayer(
+          (audioStats) =>
+            setStats((current) => ({
+              ...current,
+              droppedAudio: audioStats.droppedPackets,
+              jitterMs: audioStats.jitterDepthMs,
+            })),
+          (error) => setConnectionState(`Audio disabled: ${error.message}`),
+        );
+        audioRef.current = player;
+        player.setMuted(true);
+      }
+      client = new RFBClient(stream, {
+        hevc,
         h264,
+        chroma444: hevc && rext,
+        audio,
         onState: setConnectionState,
         onReady: () => {
           readyRef.current = true;
@@ -111,24 +161,41 @@ export function DesktopViewer({ host, onExit }) {
         },
         onServerInit: (info) => {
           setServerName(info.name);
-          setCodec(info.codec === "H.264" ? "H.264 / WebCodecs" : "JPEG / Tight");
+          setCodec(
+            info.codec === "HEVC"
+              ? "HEVC / WebCodecs"
+              : info.codec === "H.264"
+                ? "H.264 / WebCodecs"
+                : "JPEG / Tight",
+          );
         },
         onResize: () => {},
         onTraffic: (bytes) => {
-          sample.bytes += bytes;
+          statsWindow.recordTraffic(bytes, performance.now());
         },
         onFrame: async (frame) => {
-          sample.frames += 1;
-          updateStats();
-          if (frame.encoding === "h264") {
-            await decoder.decode(frame.payload, frame.flags);
+          if (frame.encoding === "hevc") {
+            await hevcDecoder.decode(frame.payload, frame.flags);
+          } else if (frame.encoding === "h264") {
+            await h264Decoder.decode(frame.payload, frame.flags);
           } else {
             const bitmap = await createImageBitmap(
               new Blob([frame.payload], { type: "image/jpeg" }),
             );
             await renderer.present(bitmap);
+            statsWindow.recordDecodedFrame(performance.now());
           }
-          setCodec(frame.encoding === "h264" ? "H.264 / WebCodecs" : "JPEG / Tight");
+          setCodec(
+            frame.encoding === "hevc"
+              ? "HEVC / WebCodecs"
+              : frame.encoding === "h264"
+                ? "H.264 / WebCodecs"
+                : "JPEG / Tight",
+          );
+        },
+        onAudio: (message) => {
+          if (message.kind === "config" && audioRef.current) setAudioAvailable(true);
+          audioRef.current?.receive(message);
         },
         onClipboard: async (text) => {
           setManualClipboard(text);
@@ -170,6 +237,7 @@ export function DesktopViewer({ host, onExit }) {
     socket.addEventListener("close", onPreOpenClose);
     return () => {
       disposed = true;
+      clearInterval(statsTimer);
       socket.removeEventListener("open", onOpen);
       socket.removeEventListener("error", onPreOpenError);
       socket.removeEventListener("close", onPreOpenClose);
@@ -179,10 +247,24 @@ export function DesktopViewer({ host, onExit }) {
       sessionRef.current = null;
       readyRef.current = false;
       stream.close();
-      decoder?.close();
+      h264Decoder?.close();
+      hevcDecoder?.close();
+      void audioRef.current?.close();
+      audioRef.current = null;
+      audioEnabledRef.current = false;
       renderer.clear();
     };
   }, [host?.id]);
+
+  useEffect(() => {
+    const onVisibility = () => {
+      const muted = document.hidden || !audioEnabledRef.current;
+      audioRef.current?.setMuted(muted);
+      setAudioMuted(muted);
+    };
+    document.addEventListener("visibilitychange", onVisibility);
+    return () => document.removeEventListener("visibilitychange", onVisibility);
+  }, []);
 
   useEffect(() => {
     const stage = stageRef.current;
@@ -235,6 +317,24 @@ export function DesktopViewer({ host, onExit }) {
     }
   };
 
+  const toggleAudio = async () => {
+    const player = audioRef.current;
+    if (!player) return;
+    try {
+      if (!audioEnabledRef.current) {
+        await player.enableFromGesture();
+        audioEnabledRef.current = true;
+      } else {
+        audioEnabledRef.current = false;
+      }
+      const muted = document.hidden || !audioEnabledRef.current;
+      player.setMuted(muted);
+      setAudioMuted(muted);
+    } catch (error) {
+      setConnectionState(error instanceof Error ? error.message : String(error));
+    }
+  };
+
   return (
     <main class="desktop-viewer">
       <header class="desktop-viewer-bar">
@@ -245,10 +345,27 @@ export function DesktopViewer({ host, onExit }) {
             <span>{connectionState}</span>
           </div>
         </div>
-        <div class="desktop-viewer-stats" aria-label="Stream statistics">
-          <span>{codec}</span>
-          <span>{stats.fps} fps</span>
-          <span>{stats.bitrate} kbps</span>
+        <div class="desktop-viewer-tools">
+          {statsVisible ? (
+            <div class="desktop-viewer-stats" aria-label="Stream statistics">
+              <span>{codec}</span>
+              <span>{stats.fps.toFixed(0)} fps</span>
+              <span>{stats.mbitPerSecond.toFixed(2)} Mbit/s</span>
+              <span>{stats.droppedAudio} audio drops</span>
+              <span>{stats.jitterMs.toFixed(0)} ms jitter</span>
+            </div>
+          ) : null}
+          <button
+            class="desktop-tool-button"
+            onClick={() => setStatsVisible((visible) => !visible)}
+          >
+            {statsVisible ? "Hide stats" : "Stats"}
+          </button>
+          {audioAvailable ? (
+            <button class="desktop-tool-button" onClick={toggleAudio}>
+              {audioMuted ? "Unmute audio" : "Mute audio"}
+            </button>
+          ) : null}
         </div>
         <button
           class="danger"

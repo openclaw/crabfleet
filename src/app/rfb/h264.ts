@@ -1,7 +1,10 @@
-export interface AnnexBNalUnit {
-  type: number;
-  data: Uint8Array;
-}
+import {
+  annexBToLengthPrefixed,
+  parseAnnexB as parseSharedAnnexB,
+  type AnnexBNalUnit,
+} from "./annex-b.ts";
+
+export type { AnnexBNalUnit } from "./annex-b.ts";
 
 export interface BrowserVideoFrame {
   width: number;
@@ -48,45 +51,11 @@ function encodedVideoChunkAPI(): EncodedVideoChunkAPI {
 }
 
 export function parseAnnexB(data: Uint8Array): AnnexBNalUnit[] {
-  const units: AnnexBNalUnit[] = [];
-  let payloadStart = -1;
-  for (let index = 0; index + 3 < data.byteLength; index += 1) {
-    if (data[index] !== 0 || data[index + 1] !== 0) continue;
-    const startCodeOffset = index;
-    let nextPayload = -1;
-    if (data[index + 2] === 1) {
-      nextPayload = index + 3;
-      index += 2;
-    } else if (data[index + 2] === 0 && data[index + 3] === 1) {
-      nextPayload = index + 4;
-      index += 3;
-    }
-    if (nextPayload < 0) continue;
-    if (payloadStart >= 0) appendNalUnit(units, data.slice(payloadStart, startCodeOffset));
-    payloadStart = nextPayload;
-  }
-  if (payloadStart >= 0) appendNalUnit(units, data.slice(payloadStart));
-  return units;
-}
-
-function appendNalUnit(units: AnnexBNalUnit[], data: Uint8Array): void {
-  if (!data.byteLength) return;
-  if (units.length >= 1_024) throw new Error("H.264 access unit has too many NAL units");
-  units.push({ type: data[0]! & 0x1f, data });
+  return parseSharedAnnexB(data, "h264");
 }
 
 export function annexBToAvcc(units: AnnexBNalUnit[]): Uint8Array {
-  const length = units.reduce((total, unit) => total + 4 + unit.data.byteLength, 0);
-  const result = new Uint8Array(length);
-  const view = new DataView(result.buffer);
-  let offset = 0;
-  for (const unit of units) {
-    view.setUint32(offset, unit.data.byteLength);
-    offset += 4;
-    result.set(unit.data, offset);
-    offset += unit.data.byteLength;
-  }
-  return result;
+  return annexBToLengthPrefixed(units);
 }
 
 export function avcDescription(sps: Uint8Array, pps: Uint8Array): Uint8Array {

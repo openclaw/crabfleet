@@ -207,17 +207,26 @@ publisher, and capture stream.
 
 Fleet lists each owned registration with an **Open in browser** action. The
 fullscreen Preact viewer speaks RFB 3.8 over the owner-authenticated relay,
-offers Open H.264 plus Tight/JPEG fallback, and never changes the host's default
-BGRA pixel format. WebCodecs H.264 is feature-detected; unsupported browsers
-offer Tight only. Framebuffer requests are paced one at a time after the prior
-frame is presented, including empty updates, and ExtendedDesktopSize requests
-are debounced until the host announces its screen layout.
+offers feature-probed HEVC, Open H.264, and Tight/JPEG in that order, and never
+changes the host's default BGRA pixel format. HEVC is advertised only when the
+browser accepts the Main profile; the separate `C444` capability requires the
+RExt 4:4:4 probe. Decoder failure renegotiates HEVC to H.264 to Tight without
+affecting older hosts or clients. Framebuffer requests remain paced one at a
+time, including empty updates, and ExtendedDesktopSize requests are debounced
+until the host announces its screen layout.
 
 The viewer renders aspect-fit at device pixel ratio, forwards bounded pointer
-and keyboard input, shows codec/frame-rate/throughput state, and synchronizes
-text clipboard through the same Extended Clipboard dialect as the native
-client. Remote clipboard reads use only the snapshot last approved with **Send
-to Mac**; loading or editing clipboard text never exposes it by itself. Reading
+and keyboard input, and synchronizes text clipboard through the same Extended
+Clipboard dialect as the native client. When WebCodecs AAC-LC and AudioWorklet
+are both available it also negotiates `CAF1`, primes about 100 ms of audio in a
+120 ms bounded worklet buffer, drops late packets, and resynchronizes gaps over
+500 ms. Audio starts muted; **Unmute audio** supplies the required user gesture,
+and hidden tabs mute immediately while continuing bounded playback progress.
+The **Stats** button reveals local-only codec, decoded-fps, incoming-Mbit/s,
+audio-drop, and jitter-depth diagnostics; the overlay is hidden by default.
+
+Remote clipboard reads use only the snapshot last approved with **Send to
+Mac**; loading or editing clipboard text never exposes it by itself. Reading
 the browser's system clipboard requires the user to press **Load system
 clipboard** before explicitly approving that snapshot.
 
