@@ -114,6 +114,11 @@ public final class VNCCAFramebufferView: NSView, VNCFramebufferView {
     private var metalDevice: MTLDevice?
     private var commandQueue: MTLCommandQueue?
     private var metalLayer: CAMetalLayer?
+    private let remoteCursorContainerLayer = CALayer()
+    private let remoteCursorLayer = CALayer()
+    private var remoteCursor = VNCCursor.empty
+    private var remotePointerPosition: VNCPoint?
+    private var localPointerPosition: VNCPoint?
 
     private var ioSurfaceTexture: MTLTexture?
     private var currentIOSurface: IOSurface?
@@ -147,6 +152,15 @@ public final class VNCCAFramebufferView: NSView, VNCFramebufferView {
         layer.masksToBounds = false
         layer.allowsEdgeAntialiasing = false
         layer.backgroundColor = .clear
+
+        remoteCursorContainerLayer.isHidden = true
+        remoteCursorContainerLayer.masksToBounds = true
+        remoteCursorContainerLayer.zPosition = 1
+        remoteCursorLayer.contentsGravity = .resize
+        remoteCursorLayer.minificationFilter = .nearest
+        remoteCursorLayer.magnificationFilter = .nearest
+        remoteCursorContainerLayer.addSublayer(remoteCursorLayer)
+        layer.addSublayer(remoteCursorContainerLayer)
 
         if Self.enableMetalRendering,
            let device = MTLCreateSystemDefaultDevice(),
@@ -258,7 +272,7 @@ public final class VNCCAFramebufferView: NSView, VNCFramebufferView {
 		}
 
 		let newTrackingArea = NSTrackingArea(rect: bounds,
-											 options: [ .activeInKeyWindow, .inVisibleRect, .mouseMoved ],
+											 options: [ .activeInKeyWindow, .inVisibleRect, .mouseMoved, .mouseEnteredAndExited ],
 											 owner: self,
 											 userInfo: nil)
 
@@ -300,6 +314,10 @@ public final class VNCCAFramebufferView: NSView, VNCFramebufferView {
 	}
 
 	public override func mouseMoved(with event: NSEvent) { handleMouseMoved(with: event) }
+	public override func mouseExited(with event: NSEvent) {
+		localPointerPosition = nil
+		updateRemoteCursorOverlay()
+	}
 
 	public override func mouseDown(with event: NSEvent) { handleMouseDown(with: event) }
 	public override func mouseDragged(with event: NSEvent) { handleMouseDragged(with: event) }
@@ -338,19 +356,39 @@ private extension VNCCAFramebufferView {
         }
     }
 
+	var renderedContentGeometry: (rect: CGRect, scale: CGFloat) {
+		if settings.isScalingEnabled {
+			return (contentRect, scaleRatio)
+		}
+		return (
+			CGRect(
+				x: (bounds.width - framebufferSize.width) / 2,
+				y: (bounds.height - framebufferSize.height) / 2,
+				width: framebufferSize.width,
+				height: framebufferSize.height),
+			1)
+	}
+
     func scaledContentRelativePosition(of event: NSEvent) -> UInt16Point? {
 		let viewRelativePosition = viewRelativePosition(of: event)
-
-		let contentRect = contentRect
+		let geometry = renderedContentGeometry
+		let contentRect = geometry.rect
 
 		guard contentRect.contains(viewRelativePosition) else {
+			localPointerPosition = nil
+			updateRemoteCursorOverlay()
             return nil
         }
 
-		let scaledPosition = CGPoint(x: (viewRelativePosition.x - contentRect.origin.x) / scaleRatio,
-									 y: (viewRelativePosition.y - contentRect.origin.y) / scaleRatio)
+		let scaledPosition = CGPoint(
+			x: (viewRelativePosition.x - contentRect.origin.x) / geometry.scale,
+			y: (viewRelativePosition.y - contentRect.origin.y) / geometry.scale)
 
         let scaledPositionUInt16 = UInt16Point(scaledPosition)
+		let localPosition = VNCPoint(x: scaledPositionUInt16.x, y: scaledPositionUInt16.y)
+		localPointerPosition = localPosition
+		remotePointerPosition = localPosition
+		updateRemoteCursorOverlay()
 
         return scaledPositionUInt16
 	}
@@ -820,12 +858,48 @@ private extension VNCCAFramebufferView {
     }
 
     func frameSizeDidChange(_ size: CGSize) {
+		localPointerPosition = nil
         if isMetalActive {
             updateMetalLayerLayout()
         } else {
             updateFallbackLayerLayout()
-        }
+		}
+		updateLocalCursor()
+		updateRemoteCursorOverlay()
     }
+
+	func updateLocalCursor() {
+		let scale = settings.isScalingEnabled ? renderedContentGeometry.scale : 1
+		currentCursor = remoteCursor.nsCursor(scale: scale)
+	}
+
+	func updateRemoteCursorOverlay() {
+		guard let remotePointerPosition,
+			  remotePointerPosition != localPointerPosition,
+			  !remoteCursor.isEmpty,
+			  let image = remoteCursor.cgImage else {
+			remoteCursorContainerLayer.isHidden = true
+			return
+		}
+
+		let geometry = renderedContentGeometry
+		let scale = geometry.scale
+		let content = geometry.rect
+		let width = CGFloat(remoteCursor.size.width) * scale
+		let height = CGFloat(remoteCursor.size.height) * scale
+		let x = CGFloat(remotePointerPosition.x) * scale
+			- CGFloat(remoteCursor.hotspot.x) * scale
+		let y = content.height - CGFloat(remotePointerPosition.y) * scale
+			- (CGFloat(remoteCursor.size.height) - CGFloat(remoteCursor.hotspot.y)) * scale
+
+		CATransaction.begin()
+		CATransaction.setDisableActions(true)
+		remoteCursorContainerLayer.frame = content
+		remoteCursorLayer.contents = image
+		remoteCursorLayer.frame = CGRect(x: x, y: y, width: width, height: height)
+		remoteCursorContainerLayer.isHidden = false
+		CATransaction.commit()
+	}
 
     func updateMetalLayerLayout() {
         guard let metalLayer else {
@@ -899,9 +973,25 @@ extension VNCCAFramebufferView: VNCConnectionDelegate {
         didUpdateCursor cursor: VNCCursor
     ) {
         DispatchQueue.main.async { [weak self] in
-            self?.currentCursor = cursor.nsCursor
+			guard let self else { return }
+			self.remoteCursor = cursor
+			if cursor.isEmpty {
+				self.remotePointerPosition = nil
+			}
+			self.updateLocalCursor()
+			self.updateRemoteCursorOverlay()
         }
     }
+
+	public func connection(
+		_ connection: VNCConnection,
+		didUpdatePointerPositionX x: UInt16,
+		y: UInt16
+	) {
+		remotePointerPosition = VNCPoint(x: x, y: y)
+		updateRemoteCursorOverlay()
+		delegate?.connection?(connection, didUpdatePointerPositionX: x, y: y)
+	}
 
     // Passthrough
     public func connection(

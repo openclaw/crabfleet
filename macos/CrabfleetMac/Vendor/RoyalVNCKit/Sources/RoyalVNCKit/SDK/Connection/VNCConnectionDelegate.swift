@@ -55,6 +55,16 @@ public protocol VNCConnectionDelegate: AnyObject {
 #endif
 	func connection(_ connection: VNCConnection,
 					didUpdateCursor cursor: VNCCursor)
+
+#if canImport(ObjectiveC)
+	@objc optional func connection(_ connection: VNCConnection,
+					didUpdatePointerPositionX x: UInt16,
+					y: UInt16)
+#else
+	func connection(_ connection: VNCConnection,
+					didUpdatePointerPositionX x: UInt16,
+					y: UInt16)
+#endif
 }
 
 #if !canImport(ObjectiveC)
@@ -63,5 +73,9 @@ public extension VNCConnectionDelegate {
 					prefersUsernameAuthentication authenticationType: VNCAuthenticationType) -> Bool {
 		false
 	}
+
+	func connection(_ connection: VNCConnection,
+					didUpdatePointerPositionX x: UInt16,
+					y: UInt16) {}
 }
 #endif

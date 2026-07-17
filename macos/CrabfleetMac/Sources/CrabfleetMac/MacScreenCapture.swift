@@ -91,6 +91,7 @@ struct ShareableDisplayOption: Identifiable, Equatable, Sendable {
 
 final class MacScreenCapture: NSObject, @unchecked Sendable {
   let frameStore = CapturedDesktopFrameStore()
+  private let cursorMonitor = MacCursorMonitor()
 
   private let captureQueue = DispatchQueue(
     label: "org.openclaw.crabfleet.screen-capture",
@@ -108,6 +109,9 @@ final class MacScreenCapture: NSObject, @unchecked Sendable {
   private var sequence: UInt64 = 0
   private var consumerIDs: Set<UUID> = []
   private var audioConsumerIDs: Set<UUID> = []
+  private var cursorNegotiationState = CursorCaptureNegotiationState()
+  private var cursorReconcileTask: Task<Void, Never>?
+  private var cursorReconcileGeneration: UInt64 = 0
   private var videoFrameHandlers: [UUID: @Sendable (VideoPixelSource) -> Void] = [:]
   private var audioSampleHandlers: [UUID: @Sendable (CMSampleBuffer) -> Void] = [:]
   private var frameRateRequirements: [UUID: Int] = [:]
@@ -164,7 +168,7 @@ final class MacScreenCapture: NSObject, @unchecked Sendable {
     configuration.pixelFormat = kCVPixelFormatType_32BGRA
     configuration.minimumFrameInterval = CMTime(value: 1, timescale: 15)
     configuration.queueDepth = 3
-    configuration.showsCursor = true
+    configuration.showsCursor = withFrameLock { cursorNegotiationState.showsCursor }
     configuration.capturesAudio = false
     configuration.excludesCurrentProcessAudio = true
     configuration.colorSpaceName = CGColorSpace.sRGB
@@ -180,12 +184,29 @@ final class MacScreenCapture: NSObject, @unchecked Sendable {
       audioOutputAvailable = false
     }
     try await stream.startCapture()
-    try await configurationGate.run { [self] in
-      self.stream = stream
-      self.configuration = configuration
-      self.contentFilter = filter
-      self.audioOutputAvailable = audioOutputAvailable
-      self.withFrameLock { self.appliedFrameRate = 15 }
+    do {
+      try await configurationGate.run { [self] in
+        let desiredShowsCursor = self.withFrameLock { self.cursorNegotiationState.showsCursor }
+        if configuration.showsCursor != desiredShowsCursor {
+          let previousShowsCursor = configuration.showsCursor
+          configuration.showsCursor = desiredShowsCursor
+          do {
+            try await stream.updateConfiguration(configuration)
+          } catch {
+            configuration.showsCursor = previousShowsCursor
+            throw error
+          }
+        }
+        self.stream = stream
+        self.configuration = configuration
+        self.contentFilter = filter
+        self.audioOutputAvailable = audioOutputAvailable
+        self.withFrameLock { self.appliedFrameRate = 15 }
+        self.cursorMonitor.start()
+      }
+    } catch {
+      try? await stream.stopCapture()
+      throw error
     }
 
     return CapturedDisplayDescriptor(
@@ -305,27 +326,147 @@ final class MacScreenCapture: NSObject, @unchecked Sendable {
     }
   }
 
+  func addCursorSession(id: UUID) async throws {
+    try await updateCursorNegotiation(allowsStoppedCapture: true) { $0.join(id) }
+  }
+
+  func updateCursorSession(id: UUID, negotiated: Bool) async throws {
+    try await updateCursorNegotiation(allowsStoppedCapture: true) {
+      $0.setNegotiated(negotiated, for: id)
+    }
+  }
+
+  func removeCursorSession(id: UUID) async throws {
+    do {
+      try await updateCursorNegotiation(
+        allowsStoppedCapture: true,
+        preservesMutationOnFailure: true
+      ) { $0.leave(id) }
+    } catch {
+      scheduleCursorReconciliation()
+      throw error
+    }
+  }
+
+  func addCursorHandler(id: UUID, handler: @escaping MacCursorMonitor.Handler) {
+    cursorMonitor.addHandler(id: id, handler: handler)
+  }
+
+  func removeCursorHandler(id: UUID) {
+    cursorMonitor.removeHandler(id: id)
+  }
+
+  func currentCursorSnapshot() -> SystemCursorSnapshot? {
+    cursorMonitor.currentSnapshot()
+  }
+
+  private func updateCursorNegotiation(
+    allowsStoppedCapture: Bool = false,
+    preservesMutationOnFailure: Bool = false,
+    _ mutation: @escaping @Sendable (inout CursorCaptureNegotiationState) -> Void
+  ) async throws {
+    try await configurationGate.run { [self] in
+      guard let stream, let configuration else {
+        if allowsStoppedCapture {
+          withFrameLock { mutation(&cursorNegotiationState) }
+          return
+        }
+        throw PrivateMacShareError.captureUnavailable
+      }
+      let previous = withFrameLock { cursorNegotiationState }
+      var next = previous
+      mutation(&next)
+      let previousShowsCursor = configuration.showsCursor
+      withFrameLock { cursorNegotiationState = next }
+      guard previousShowsCursor != next.showsCursor else { return }
+      configuration.showsCursor = next.showsCursor
+      do {
+        try await stream.updateConfiguration(configuration)
+      } catch {
+        if !preservesMutationOnFailure {
+          withFrameLock { cursorNegotiationState = previous }
+        }
+        configuration.showsCursor = previousShowsCursor
+        throw error
+      }
+    }
+  }
+
+  private func scheduleCursorReconciliation() {
+    let task = withFrameLock { () -> Task<Void, Never> in
+      cursorReconcileGeneration &+= 1
+      let generation = cursorReconcileGeneration
+      cursorReconcileTask?.cancel()
+      let task = Task { [weak self] in
+        guard let self else { return }
+        var delay = Duration.milliseconds(100)
+        while !Task.isCancelled {
+          do {
+            try await self.reconcileCursorConfiguration()
+            break
+          } catch {
+            try? await Task.sleep(for: delay)
+            delay = min(delay * 2, .seconds(5))
+          }
+        }
+        self.withFrameLock {
+          if self.cursorReconcileGeneration == generation {
+            self.cursorReconcileTask = nil
+          }
+        }
+      }
+      cursorReconcileTask = task
+      return task
+    }
+    _ = task
+  }
+
+  private func reconcileCursorConfiguration() async throws {
+    try await configurationGate.run { [self] in
+      guard let stream, let configuration else { return }
+      let desiredShowsCursor = withFrameLock { cursorNegotiationState.showsCursor }
+      guard configuration.showsCursor != desiredShowsCursor else { return }
+      let previousShowsCursor = configuration.showsCursor
+      configuration.showsCursor = desiredShowsCursor
+      do {
+        try await stream.updateConfiguration(configuration)
+      } catch {
+        configuration.showsCursor = previousShowsCursor
+        throw error
+      }
+    }
+  }
+
   func stop() async {
-    let stopped = try? await configurationGate.run { [self] in
-      guard let stream else { return false }
+    _ = try? await configurationGate.run { [self] in
+      let stream = self.stream
       self.stream = nil
       self.configuration = nil
       self.contentFilter = nil
       self.audioOutputAvailable = false
-      try? await stream.stopCapture()
-      return true
+      cursorMonitor.stop()
+      withFrameLock {
+        cursorReconcileGeneration &+= 1
+        cursorReconcileTask?.cancel()
+        cursorReconcileTask = nil
+        consumerIDs.removeAll()
+        audioConsumerIDs.removeAll()
+        cursorNegotiationState = CursorCaptureNegotiationState()
+        videoFrameHandlers.removeAll()
+        audioSampleHandlers.removeAll()
+        frameRateRequirements.removeAll()
+        appliedFrameRate = 15
+      }
+      if let stream {
+        try? await stream.stopCapture()
+      }
+      clearLatestVideoSource()
+      await frameStore.clear()
     }
-    guard stopped == true else { return }
-    withFrameLock {
-      consumerIDs.removeAll()
-      audioConsumerIDs.removeAll()
-      videoFrameHandlers.removeAll()
-      audioSampleHandlers.removeAll()
-      frameRateRequirements.removeAll()
-      appliedFrameRate = 15
-    }
-    clearLatestVideoSource()
-    await frameStore.clear()
+  }
+
+  var showsCapturedCursor: Bool {
+    withFrameLock { cursorNegotiationState.showsCursor }
   }
 
   func retainConsumer(id: UUID) {

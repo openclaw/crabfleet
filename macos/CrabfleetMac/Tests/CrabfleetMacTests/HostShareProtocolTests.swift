@@ -7,6 +7,85 @@ import Testing
 
 struct HostShareWireTests {
   @Test
+  func cursorPseudoEncodingsMatchRFBFixtures() throws {
+    let image = RFBCursorImage(
+      width: 2,
+      height: 1,
+      hotspotX: 1,
+      hotspotY: 0,
+      rgba: Data([
+        0x11, 0x22, 0x33, 0xFF,
+        0x20, 0x10, 0x08, 0x80,
+      ]))
+
+    #expect(
+      try RFBWire.cursorWithAlphaUpdate(image: image)
+        == Data([
+          0, 0, 0, 1,
+          0, 1, 0, 0, 0, 2, 0, 1, 0xFF, 0xFF, 0xFE, 0xC6,
+          0, 0, 0, 0,
+          0x11, 0x22, 0x33, 0xFF, 0x20, 0x10, 0x08, 0x80,
+        ]))
+    #expect(
+      try RFBWire.cursorUpdate(image: image)
+        == Data([
+          0, 0, 0, 1,
+          0, 1, 0, 0, 0, 2, 0, 1, 0xFF, 0xFF, 0xFF, 0x11,
+          0x33, 0x22, 0x11, 0,
+          0x10, 0x20, 0x40, 0,
+          0xC0,
+        ]))
+    #expect(
+      RFBWire.pointerPositionUpdate(x: 1, y: 0)
+        == Data([
+          0, 0, 0, 1,
+          0, 1, 0, 0, 0, 0, 0, 0, 0xFF, 0xFF, 0xFF, 0x18,
+        ]))
+    #expect(
+      RFBWire.hiddenCursorUpdate(encoding: .cursorWithAlpha)
+        == Data([
+          0, 0, 0, 1,
+          0, 0, 0, 0, 0, 0, 0, 0, 0xFF, 0xFF, 0xFE, 0xC6,
+          0, 0, 0, 0,
+        ]))
+  }
+
+  @Test
+  func classicCursorMasksFaintAntialiasingAsTransparent() throws {
+    let update = try RFBWire.cursorUpdate(
+      image: RFBCursorImage(
+        width: 1,
+        height: 1,
+        hotspotX: 0,
+        hotspotY: 0,
+        rgba: Data([0x10, 0x08, 0x04, 0x7F])))
+
+    #expect(update.last == 0)
+  }
+
+  @Test
+  func cursorWireRejectsInvalidDimensionsAndPayloads() {
+    for image in [
+      RFBCursorImage(width: 0, height: 1, hotspotX: 0, hotspotY: 0, rgba: Data()),
+      RFBCursorImage(width: 129, height: 1, hotspotX: 0, hotspotY: 0, rgba: Data(count: 516)),
+      RFBCursorImage(width: 1, height: 1, hotspotX: 1, hotspotY: 0, rgba: Data(count: 4)),
+      RFBCursorImage(width: 1, height: 1, hotspotX: 0, hotspotY: 0, rgba: Data(count: 3)),
+    ] {
+      #expect(throws: (any Error).self) { _ = try RFBWire.cursorWithAlphaUpdate(image: image) }
+      #expect(throws: (any Error).self) { _ = try RFBWire.cursorUpdate(image: image) }
+    }
+  }
+
+  @Test
+  func cursorNegotiationPrefersAlphaThenClassic() {
+    #expect(
+      RFBWire.preferredCursorEncoding(
+        from: [RFBWire.cursorEncoding, RFBWire.cursorWithAlphaEncoding]) == .cursorWithAlpha)
+    #expect(RFBWire.preferredCursorEncoding(from: [RFBWire.cursorEncoding]) == .cursor)
+    #expect(RFBWire.preferredCursorEncoding(from: [RFBWire.pointerPositionEncoding]) == nil)
+  }
+
+  @Test
   func audioMessagesMatchWireFormat() throws {
     #expect(
       try RFBWire.audioConfig(
@@ -153,6 +232,199 @@ struct HostShareWireTests {
   }
 }
 
+struct CursorPipelinePolicyTests {
+  @Test
+  func pendingStaticVideoRequestWakesForCursorRectangle() async throws {
+    let arbiter = FramebufferUpdateArbiter<Int>()
+    let videoMailbox = VideoMailbox<Int>()
+    let snapshot = SystemCursorSnapshot(image: nil, position: CGPoint(x: 7, y: 9))
+    let clock = ContinuousClock()
+    let startedAt = clock.now
+
+    async let pending = arbiter.next(videoMailbox: videoMailbox, timeout: .seconds(2))
+    try await Task.sleep(for: .milliseconds(20))
+    arbiter.offerCursor(snapshot)
+
+    guard case .cursor(let delivered) = await pending else {
+      Issue.record("pending framebuffer request did not wake for cursor")
+      return
+    }
+    #expect(delivered == snapshot)
+    #expect(startedAt.duration(to: clock.now) < .milliseconds(250))
+    #expect(
+      RFBWire.pointerPositionUpdate(x: 7, y: 9)
+        == Data([
+          0, 0, 0, 1,
+          0, 7, 0, 9, 0, 0, 0, 0, 0xFF, 0xFF, 0xFF, 0x18,
+        ]))
+  }
+
+  @Test
+  func cursorAndVideoAvailabilityAlternateWithoutBlockingStaticCursor() async {
+    let arbiter = FramebufferUpdateArbiter<Int>()
+    let videoMailbox = VideoMailbox<Int>()
+    let first = SystemCursorSnapshot(image: nil, position: CGPoint(x: 1, y: 1))
+    let second = SystemCursorSnapshot(image: nil, position: CGPoint(x: 2, y: 2))
+
+    videoMailbox.offer(1)
+    arbiter.signalVideo()
+    arbiter.offerCursor(first)
+    guard case .cursor(let deliveredFirst) =
+      await arbiter.next(videoMailbox: videoMailbox, timeout: .milliseconds(50))
+    else {
+      Issue.record("cursor did not win the first ready pair")
+      return
+    }
+    #expect(deliveredFirst == first)
+    arbiter.recordCursorResponse()
+
+    arbiter.offerCursor(second)
+    guard case .video(let deliveredVideo) =
+      await arbiter.next(videoMailbox: videoMailbox, timeout: .milliseconds(50))
+    else {
+      Issue.record("ready video did not follow cursor-only response")
+      return
+    }
+    #expect(deliveredVideo == 1)
+    arbiter.recordVideoResponse()
+
+    videoMailbox.offer(2)
+    arbiter.signalVideo()
+    guard case .cursor(let deliveredSecond) =
+      await arbiter.next(videoMailbox: videoMailbox, timeout: .milliseconds(50))
+    else {
+      Issue.record("cursor did not resume after video response")
+      return
+    }
+    #expect(deliveredSecond == second)
+  }
+
+  @Test
+  func stoppedCaptureAcceptsCursorSessionLifecycle() async throws {
+    let capture = MacScreenCapture()
+    let sessionID = UUID()
+
+    try await capture.addCursorSession(id: sessionID)
+    try await capture.updateCursorSession(id: sessionID, negotiated: true)
+    #expect(!capture.showsCapturedCursor)
+    await capture.stop()
+    #expect(capture.showsCapturedCursor)
+
+    try await capture.addCursorSession(id: sessionID)
+    try await capture.updateCursorSession(id: sessionID, negotiated: false)
+    try await capture.removeCursorSession(id: sessionID)
+  }
+
+  @Test
+  func captureBakesUnlessEveryActiveSessionNegotiatedCursor() {
+    let first = UUID()
+    let second = UUID()
+    var state = CursorCaptureNegotiationState()
+
+    #expect(state.showsCursor)
+    state.join(first)
+    #expect(state.showsCursor)
+    state.setNegotiated(true, for: first)
+    #expect(!state.showsCursor)
+    state.join(second)
+    #expect(state.showsCursor)
+    state.setNegotiated(true, for: second)
+    #expect(!state.showsCursor)
+    state.setNegotiated(false, for: first)
+    #expect(state.showsCursor)
+    state.leave(first)
+    #expect(!state.showsCursor)
+    state.leave(second)
+    #expect(state.showsCursor)
+  }
+
+  @Test
+  func cursorContentHashDeduplicatesOnlyIdenticalImages() {
+    let first = RFBCursorImage(
+      width: 1, height: 1, hotspotX: 0, hotspotY: 0, rgba: Data([1, 2, 3, 4]))
+    let changed = RFBCursorImage(
+      width: 1, height: 1, hotspotX: 0, hotspotY: 0, rgba: Data([1, 2, 3, 5]))
+    var deduplicator = CursorImageDeduplicator()
+
+    let firstSend = deduplicator.shouldSend(hash: first.contentHash)
+    let duplicateSend = deduplicator.shouldSend(hash: first.contentHash)
+    let changedSend = deduplicator.shouldSend(hash: changed.contentHash)
+    #expect(firstSend)
+    #expect(!duplicateSend)
+    #expect(changedSend)
+  }
+
+  @Test
+  func pointerEchoSuppressionExpiresAfter250Milliseconds() {
+    #expect(
+      !CursorEchoPolicy.shouldSendPointerPosition(
+        positionChanged: true, lastLocalInput: 10, now: 10.249))
+    #expect(
+      CursorEchoPolicy.shouldSendPointerPosition(
+        positionChanged: true, lastLocalInput: 10, now: 10.25))
+    #expect(
+      !CursorEchoPolicy.shouldSendPointerPosition(
+        positionChanged: false, lastLocalInput: nil, now: 20))
+  }
+
+  @Test
+  func cursorCoordinatesInvertRemoteInputMapping() throws {
+    let descriptor = CapturedDisplayDescriptor(
+      displayID: 1,
+      displayBounds: CGRect(x: 100, y: 50, width: 1_440, height: 900),
+      frameWidth: 2_880,
+      frameHeight: 1_800,
+      sourcePixelWidth: 2_880,
+      sourcePixelHeight: 1_800)
+    let position = CursorCoordinateMapper.pointerPosition(
+      CGPoint(x: 820, y: 500),
+      descriptor: descriptor,
+      frameWidth: descriptor.frameWidth,
+      frameHeight: descriptor.frameHeight)
+    #expect(position?.x == 1_440)
+    #expect(position?.y == 900)
+    #expect(
+      CursorCoordinateMapper.pointerPosition(
+        CGPoint(x: 99, y: 500),
+        descriptor: descriptor,
+        frameWidth: descriptor.frameWidth,
+        frameHeight: descriptor.frameHeight) == nil)
+    let onePixel = try #require(
+      CursorCoordinateMapper.pointerPosition(
+        CGPoint(x: 820, y: 500),
+        descriptor: descriptor,
+        frameWidth: 1,
+        frameHeight: 1))
+    #expect(onePixel.x == 0)
+    #expect(onePixel.y == 0)
+    #expect(
+      CursorCoordinateMapper.pointerPosition(
+        CGPoint(x: 820, y: 500),
+        descriptor: descriptor,
+        frameWidth: 0,
+        frameHeight: 1) == nil)
+
+    let image = SystemCursorImage(
+      width: 32,
+      height: 32,
+      pointWidth: 16,
+      pointHeight: 16,
+      hotspot: CGPoint(x: 2, y: 3),
+      rgba: Data(repeating: 0x7F, count: 32 * 32 * 4),
+      contentHash: Data([1]))
+    let mapped = try #require(
+      CursorCoordinateMapper.cursorImage(
+        image,
+        descriptor: descriptor,
+        frameWidth: descriptor.frameWidth,
+        frameHeight: descriptor.frameHeight))
+    #expect(mapped.width == 32)
+    #expect(mapped.height == 32)
+    #expect(mapped.hotspotX == 4)
+    #expect(mapped.hotspotY == 6)
+  }
+}
+
 struct RFBHostSessionStreamTests {
   @Test
   func readsAByteFromDataWithANonzeroStartIndex() async throws {
@@ -293,6 +565,356 @@ struct RFBHostSessionStreamTests {
       try RFBWire.serverInit(width: 800, height: 600, name: "Crabfleet — Test Mac")
     )
     #expect(stream.outgoing == expected)
+  }
+
+  @Test
+  func continuousCursorTrafficDoesNotStarveTightVideo() async throws {
+    let descriptor = CapturedDisplayDescriptor(
+      displayID: 1,
+      displayBounds: CGRect(x: 0, y: 0, width: 100, height: 100),
+      frameWidth: 100,
+      frameHeight: 100,
+      sourcePixelWidth: 200,
+      sourcePixelHeight: 200)
+    let image = SystemCursorImage(
+      width: 2,
+      height: 2,
+      pointWidth: 2,
+      pointHeight: 2,
+      hotspot: CGPoint(x: 1, y: 1),
+      rgba: Data(repeating: 0xAA, count: 16),
+      contentHash: Data([0xFA, 0xCE]))
+    let snapshots = ThreadSafeSnapshotBox(
+      SystemCursorSnapshot(image: image, position: CGPoint(x: 10, y: 10)))
+    let capture = MacScreenCapture()
+    await capture.frameStore.update(
+      .init(jpegData: Data([0xFF, 0xD8, 0xFF, 0xD9]), sequence: 1, width: 100, height: 100))
+
+    let cursorEncodings = clientSetEncodings([
+      RFBWire.tightEncoding,
+      RFBWire.cursorWithAlphaEncoding,
+      RFBWire.pointerPositionEncoding,
+    ])
+    var incoming = RFBVersion.serverBanner
+    incoming.append(contentsOf: [1, 1])  // None security, shared ClientInit.
+    incoming.append(cursorEncodings)
+    incoming.append(clientFramebufferUpdateRequest(width: 100, height: 100))
+    incoming.append(clientFramebufferUpdateRequest(width: 100, height: 100))
+
+    let stream = FeedableRFBByteStream(incoming: incoming)
+    let finished = ThreadSafeFlag()
+    let session = RFBHostSession(
+      byteStream: stream,
+      capture: capture,
+      descriptor: descriptor,
+      input: HandshakeRemoteInput(),
+      clipboard: nil,
+      remoteAddressOverride: "Crabfleet browser",
+      skipTailnetCheck: true,
+      desktopName: "Crabfleet — Cursor Fairness Test",
+      handshakeTimeout: .seconds(1),
+      viewOnly: false,
+      audioEnabled: false,
+      qualityMode: .auto,
+      cursorSnapshotProvider: { snapshots.value },
+      captureOutputSizeUpdater: { _, _ in },
+      didAuthorize: {},
+      eventHandler: { _ in },
+      didFinish: { _ in finished.set() })
+
+    session.start()
+    let clock = ContinuousClock()
+    let deadline = clock.now.advanced(by: .seconds(3))
+    func waitFor(_ predicate: @escaping () -> Bool) async throws {
+      while !predicate(), clock.now < deadline {
+        try await Task.sleep(for: .milliseconds(5))
+      }
+      #expect(predicate())
+    }
+
+    // Initial cursor shape/position and first JPEG frame flow out.
+    let jpegMarker = Data([0xFF, 0xD8, 0xFF, 0xD9])
+    try await waitFor { stream.outgoing.range(of: jpegMarker) != nil }
+
+    // A fresh desktop frame arrives while every subsequent request also has
+    // fresh cursor traffic (position changes each time). Video must still
+    // get its turn: the second JPEG payload must appear even though cursor
+    // updates never stop.
+    let second = Data([0xFF, 0xD8, 0x01, 0xFF, 0xD9])
+    await capture.frameStore.update(
+      .init(jpegData: second, sequence: 2, width: 100, height: 100))
+    for step in 0..<8 {
+      snapshots.set(
+        SystemCursorSnapshot(
+          image: image,
+          position: CGPoint(x: 10 + step, y: 10)))
+      stream.feed(cursorEncodings)
+      stream.feed(clientFramebufferUpdateRequest(width: 100, height: 100))
+    }
+    try await waitFor { stream.outgoing.range(of: second) != nil }
+    session.stop()
+  }
+
+  @Test
+  func cursorReappearingAtSamePositionResendsPointerAfterHide() async throws {
+    let descriptor = CapturedDisplayDescriptor(
+      displayID: 1,
+      displayBounds: CGRect(x: 0, y: 0, width: 100, height: 100),
+      frameWidth: 100,
+      frameHeight: 100,
+      sourcePixelWidth: 200,
+      sourcePixelHeight: 200)
+    let image = SystemCursorImage(
+      width: 2,
+      height: 2,
+      pointWidth: 2,
+      pointHeight: 2,
+      hotspot: CGPoint(x: 1, y: 1),
+      rgba: Data([
+        0xFF, 0, 0, 0xFF, 0, 0, 0xFF, 0xFF,
+        0, 0xFF, 0, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+      ]),
+      contentHash: Data([0xC0, 0xDE]))
+    let visible = SystemCursorSnapshot(image: image, position: CGPoint(x: 75, y: 25))
+    let hidden = SystemCursorSnapshot(image: nil, position: CGPoint(x: 75, y: 25))
+    let snapshots = ThreadSafeSnapshotBox(visible)
+    let capture = MacScreenCapture()
+    await capture.frameStore.update(
+      .init(jpegData: Data([0xFF, 0xD8, 0xFF, 0xD9]), sequence: 1, width: 100, height: 100))
+
+    let cursorEncodings = clientSetEncodings([
+      RFBWire.tightEncoding,
+      RFBWire.cursorWithAlphaEncoding,
+      RFBWire.pointerPositionEncoding,
+    ])
+    var incoming = RFBVersion.serverBanner
+    incoming.append(contentsOf: [1, 1])  // None security, shared ClientInit.
+    incoming.append(cursorEncodings)
+    for _ in 0..<4 {
+      incoming.append(clientFramebufferUpdateRequest(width: 100, height: 100))
+    }
+
+    let mappedImage = try #require(
+      CursorCoordinateMapper.cursorImage(
+        image,
+        descriptor: descriptor,
+        frameWidth: 100,
+        frameHeight: 100))
+    let mappedPosition = try #require(
+      CursorCoordinateMapper.pointerPosition(
+        visible.position,
+        descriptor: descriptor,
+        frameWidth: 100,
+        frameHeight: 100))
+    let shape = try RFBWire.cursorWithAlphaUpdate(image: mappedImage)
+    let pointer = RFBWire.pointerPositionUpdate(x: mappedPosition.x, y: mappedPosition.y)
+    let hiddenUpdate = RFBWire.hiddenCursorUpdate(encoding: .cursorWithAlpha)
+
+    let stream = FeedableRFBByteStream(incoming: incoming)
+    let finished = ThreadSafeFlag()
+    let session = RFBHostSession(
+      byteStream: stream,
+      capture: capture,
+      descriptor: descriptor,
+      input: HandshakeRemoteInput(),
+      clipboard: nil,
+      remoteAddressOverride: "Crabfleet browser",
+      skipTailnetCheck: true,
+      desktopName: "Crabfleet — Cursor Hide Test",
+      handshakeTimeout: .seconds(1),
+      viewOnly: false,
+      audioEnabled: false,
+      qualityMode: .auto,
+      cursorSnapshotProvider: { snapshots.value },
+      captureOutputSizeUpdater: { _, _ in },
+      didAuthorize: {},
+      eventHandler: { _ in },
+      didFinish: { _ in finished.set() })
+
+    session.start()
+    let clock = ContinuousClock()
+    let deadline = clock.now.advanced(by: .seconds(2))
+    func waitFor(_ predicate: @escaping () -> Bool) async throws {
+      while !predicate(), clock.now < deadline {
+        try await Task.sleep(for: .milliseconds(5))
+      }
+      #expect(predicate())
+    }
+
+    try await waitFor { stream.outgoing.range(of: pointer) != nil }
+    // Re-sending identical SetEncodings force-resamples the cursor provider,
+    // standing in for the 60 Hz monitor the loopback harness does not run.
+    snapshots.set(hidden)
+    stream.feed(cursorEncodings)
+    for _ in 0..<3 {
+      stream.feed(clientFramebufferUpdateRequest(width: 100, height: 100))
+    }
+    try await waitFor { stream.outgoing.range(of: hiddenUpdate) != nil }
+    snapshots.set(visible)
+    stream.feed(cursorEncodings)
+    for _ in 0..<4 {
+      stream.feed(clientFramebufferUpdateRequest(width: 100, height: 100))
+    }
+    try await waitFor { () -> Bool in
+      let outgoing = stream.outgoing
+      guard let hiddenRange = outgoing.range(of: hiddenUpdate) else { return false }
+      return outgoing.range(of: pointer, in: hiddenRange.upperBound..<outgoing.endIndex) != nil
+    }
+    session.stop()
+
+    let outgoing = stream.outgoing
+    let firstShape = try #require(outgoing.range(of: shape))
+    let firstPointer = try #require(
+      outgoing.range(of: pointer, in: firstShape.upperBound..<outgoing.endIndex))
+    let hiddenRange = try #require(
+      outgoing.range(of: hiddenUpdate, in: firstPointer.upperBound..<outgoing.endIndex))
+    let secondShape = try #require(
+      outgoing.range(of: shape, in: hiddenRange.upperBound..<outgoing.endIndex))
+    _ = try #require(
+      outgoing.range(of: pointer, in: secondShape.upperBound..<outgoing.endIndex))
+  }
+
+  @Test
+  func resizeReplaysStationaryCursorShapeAndPointerAtNewGeometry() async throws {
+    let descriptor = CapturedDisplayDescriptor(
+      displayID: 1,
+      displayBounds: CGRect(x: 0, y: 0, width: 100, height: 100),
+      frameWidth: 100,
+      frameHeight: 100,
+      sourcePixelWidth: 200,
+      sourcePixelHeight: 200)
+    let image = SystemCursorImage(
+      width: 2,
+      height: 2,
+      pointWidth: 2,
+      pointHeight: 2,
+      hotspot: CGPoint(x: 1, y: 1),
+      rgba: Data([
+        0xFF, 0, 0, 0xFF, 0, 0, 0xFF, 0xFF,
+        0, 0xFF, 0, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+      ]),
+      contentHash: Data([0xC0, 0xDE]))
+    let snapshot = SystemCursorSnapshot(
+      image: image,
+      position: CGPoint(x: 75, y: 25))
+    let capture = MacScreenCapture()
+    await capture.frameStore.update(
+      .init(jpegData: Data([0xFF, 0xD8, 0xFF, 0xD9]), sequence: 1, width: 100, height: 100))
+
+    var incoming = RFBVersion.serverBanner
+    incoming.append(contentsOf: [1, 1])  // None security, shared ClientInit.
+    incoming.append(
+      clientSetEncodings([
+        RFBWire.tightEncoding,
+        RFBWire.cursorWithAlphaEncoding,
+        RFBWire.pointerPositionEncoding,
+        RFBWire.extendedDesktopSizeEncoding,
+      ]))
+    // Five requests per phase: announce, cursor shape, pointer, and slack for
+    // the video turns the cursor/video fairness gate interleaves.
+    for _ in 0..<5 {
+      incoming.append(clientFramebufferUpdateRequest(width: 100, height: 100))
+    }
+    incoming.append(clientSetDesktopSize(width: 200, height: 200))
+    for _ in 0..<5 {
+      incoming.append(clientFramebufferUpdateRequest(width: 200, height: 200))
+    }
+
+    let initialImage = try #require(
+      CursorCoordinateMapper.cursorImage(
+        image,
+        descriptor: descriptor,
+        frameWidth: 100,
+        frameHeight: 100))
+    let resizedImage = try #require(
+      CursorCoordinateMapper.cursorImage(
+        image,
+        descriptor: descriptor,
+        frameWidth: 200,
+        frameHeight: 200))
+    let initialPosition = try #require(
+      CursorCoordinateMapper.pointerPosition(
+        snapshot.position,
+        descriptor: descriptor,
+        frameWidth: 100,
+        frameHeight: 100))
+    let resizedPosition = try #require(
+      CursorCoordinateMapper.pointerPosition(
+        snapshot.position,
+        descriptor: descriptor,
+        frameWidth: 200,
+        frameHeight: 200))
+    let initialShape = try RFBWire.cursorWithAlphaUpdate(image: initialImage)
+    let resizedShape = try RFBWire.cursorWithAlphaUpdate(image: resizedImage)
+    let initialPointer = RFBWire.pointerPositionUpdate(
+      x: initialPosition.x,
+      y: initialPosition.y)
+    let resizedPointer = RFBWire.pointerPositionUpdate(
+      x: resizedPosition.x,
+      y: resizedPosition.y)
+
+    let stream = InMemoryRFBByteStream(incoming: incoming)
+    let finished = ThreadSafeFlag()
+    let resizeCompletedAt = ThreadSafeTimestamp()
+    let session = RFBHostSession(
+      byteStream: stream,
+      capture: capture,
+      descriptor: descriptor,
+      input: HandshakeRemoteInput(),
+      clipboard: nil,
+      remoteAddressOverride: "Crabfleet browser",
+      skipTailnetCheck: true,
+      desktopName: "Crabfleet — Cursor Resize Test",
+      handshakeTimeout: .seconds(1),
+      viewOnly: false,
+      audioEnabled: false,
+      qualityMode: .auto,
+      cursorSnapshotProvider: { snapshot },
+      captureOutputSizeUpdater: { width, height in
+        await capture.frameStore.update(
+          .init(
+            jpegData: Data([0xFF, 0xD8, 0xFF, 0xD9]),
+            sequence: 2,
+            width: width,
+            height: height))
+        resizeCompletedAt.set(ProcessInfo.processInfo.systemUptime)
+      },
+      didAuthorize: {},
+      eventHandler: { _ in },
+      didFinish: { _ in finished.set() })
+
+    let clock = ContinuousClock()
+    let startedAt = clock.now
+    session.start()
+    let deadline = startedAt.advanced(by: .seconds(1))
+    while stream.outgoing.range(of: resizedPointer) == nil, clock.now < deadline {
+      try await Task.sleep(for: .milliseconds(5))
+    }
+    let deliveredAt = ProcessInfo.processInfo.systemUptime
+    session.stop()
+
+    let outgoing = stream.outgoing
+    let initialShapeRange = try #require(outgoing.range(of: initialShape))
+    let initialPointerRange = try #require(
+      outgoing.range(of: initialPointer, in: initialShapeRange.upperBound..<outgoing.endIndex))
+    let resizedShapeRange = try #require(
+      outgoing.range(of: resizedShape, in: initialPointerRange.upperBound..<outgoing.endIndex))
+    _ = try #require(
+      outgoing.range(of: resizedPointer, in: resizedShapeRange.upperBound..<outgoing.endIndex))
+    #expect(initialImage.width == 2)
+    #expect(resizedImage.width == 4)
+    #expect(initialPosition.x == 74)
+    #expect(initialPosition.y == 25)
+    #expect(resizedPosition.x == 149)
+    #expect(resizedPosition.y == 50)
+    let resizeTimestamp = try #require(resizeCompletedAt.value)
+    #expect(deliveredAt - resizeTimestamp < 0.25)
+
+    let finishDeadline = clock.now.advanced(by: .seconds(1))
+    while !finished.value, clock.now < finishDeadline {
+      try await Task.sleep(for: .milliseconds(5))
+    }
+    #expect(finished.value)
   }
 }
 
@@ -562,6 +1184,87 @@ private final class DirectionEndpointRecorder: ClipboardSessionEndpoint {
   }
 }
 
+private func clientSetEncodings(_ encodings: [Int32]) -> Data {
+  var message = Data([2, 0])
+  message.appendBigEndian(UInt16(encodings.count))
+  for encoding in encodings { message.appendBigEndian(encoding) }
+  return message
+}
+
+private func clientFramebufferUpdateRequest(width: UInt16, height: UInt16) -> Data {
+  var message = Data([3, 1])
+  message.appendBigEndian(UInt16(0))
+  message.appendBigEndian(UInt16(0))
+  message.appendBigEndian(width)
+  message.appendBigEndian(height)
+  return message
+}
+
+private func clientSetDesktopSize(width: UInt16, height: UInt16) -> Data {
+  var message = Data([251, 0])
+  message.appendBigEndian(width)
+  message.appendBigEndian(height)
+  message.append(contentsOf: [1, 0])
+  message.appendBigEndian(UInt32(0))  // Screen ID.
+  message.appendBigEndian(UInt16(0))
+  message.appendBigEndian(UInt16(0))
+  message.appendBigEndian(width)
+  message.appendBigEndian(height)
+  message.appendBigEndian(UInt32(0))  // Flags.
+  return message
+}
+
+private final class FeedableRFBByteStream: RFBByteStream, @unchecked Sendable {
+  private let lock = NSLock()
+  private var incoming = Data()
+  private var sent = Data()
+
+  init(incoming: Data = Data()) {
+    self.incoming = incoming
+  }
+
+  var outgoing: Data {
+    lock.lock()
+    defer { lock.unlock() }
+    return sent
+  }
+
+  func feed(_ data: Data) {
+    lock.lock()
+    incoming.append(data)
+    lock.unlock()
+  }
+
+  func readExactly(_ count: Int) async throws -> Data {
+    guard count >= 0 else {
+      throw PrivateMacShareError.protocolError("in-memory stream ended")
+    }
+    while true {
+      let chunk: Data? = {
+        lock.lock()
+        defer { lock.unlock() }
+        guard incoming.count >= count else { return nil }
+        let result = incoming.prefix(count)
+        incoming.removeFirst(count)
+        return Data(result)
+      }()
+      if let chunk { return chunk }
+      try await Task.sleep(for: .milliseconds(2))
+    }
+  }
+
+  func send(_ data: Data) async throws {
+    lock.lock()
+    sent.append(data)
+    lock.unlock()
+  }
+
+  func send(_ data: Data, deadline: ContinuousClock.Instant?) async throws {
+    if let deadline, ContinuousClock().now >= deadline { throw RFBSendExpiredError() }
+    try await send(data)
+  }
+}
+
 private final class InMemoryRFBByteStream: RFBByteStream, @unchecked Sendable {
   private let lock = NSLock()
   private var incoming: Data
@@ -651,6 +1354,38 @@ private struct SlicedRFBByteStream: RFBByteStream {
   }
 }
 
+@MainActor
+struct CursorVisibilityProbeTests {
+  @Test
+  func systemCursorVisibilityProbeResolves() {
+    // The probe resolves the deprecated-but-exported CGCursorIsVisible symbol
+    // at runtime. If this expectation ever fails, macOS dropped the symbol and
+    // hidden-cursor suppression silently degrades to always-visible.
+    #expect(MacCursorMonitor.systemCursorVisibility != nil)
+  }
+}
+
+private final class ThreadSafeSnapshotBox: @unchecked Sendable {
+  private let lock = NSLock()
+  private var storage: SystemCursorSnapshot
+
+  init(_ value: SystemCursorSnapshot) {
+    storage = value
+  }
+
+  var value: SystemCursorSnapshot {
+    lock.lock()
+    defer { lock.unlock() }
+    return storage
+  }
+
+  func set(_ value: SystemCursorSnapshot) {
+    lock.lock()
+    storage = value
+    lock.unlock()
+  }
+}
+
 private final class ThreadSafeFlag: @unchecked Sendable {
   private let lock = NSLock()
   private var storage = false
@@ -664,6 +1399,23 @@ private final class ThreadSafeFlag: @unchecked Sendable {
   func set() {
     lock.lock()
     storage = true
+    lock.unlock()
+  }
+}
+
+private final class ThreadSafeTimestamp: @unchecked Sendable {
+  private let lock = NSLock()
+  private var storage: TimeInterval?
+
+  var value: TimeInterval? {
+    lock.lock()
+    defer { lock.unlock() }
+    return storage
+  }
+
+  func set(_ value: TimeInterval) {
+    lock.lock()
+    storage = value
     lock.unlock()
   }
 }

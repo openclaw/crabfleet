@@ -42,6 +42,8 @@ test("RFB 3.8 handshake records exact client bytes and paces empty updates", asy
     encodeSetEncodings([
       RFB_ENCODINGS.openH264,
       RFB_ENCODINGS.tight,
+      RFB_ENCODINGS.cursorWithAlpha,
+      RFB_ENCODINGS.pointerPosition,
       RFB_ENCODINGS.extendedDesktopSize,
       RFB_ENCODINGS.extendedClipboard,
     ]),
@@ -98,6 +100,8 @@ test("H.264 decode failure renegotiates Tight and requests a full JPEG frame", a
     transport.sent[6],
     encodeSetEncodings([
       RFB_ENCODINGS.tight,
+      RFB_ENCODINGS.cursorWithAlpha,
+      RFB_ENCODINGS.pointerPosition,
       RFB_ENCODINGS.extendedDesktopSize,
       RFB_ENCODINGS.extendedClipboard,
     ]),
@@ -134,6 +138,8 @@ test("capability handshake advertises HEVC, C444, and CAF1 only when probed", as
       RFB_ENCODINGS.openH264,
       RFB_ENCODINGS.tight,
       RFB_ENCODINGS.audio,
+      RFB_ENCODINGS.cursorWithAlpha,
+      RFB_ENCODINGS.pointerPosition,
       RFB_ENCODINGS.extendedDesktopSize,
       RFB_ENCODINGS.extendedClipboard,
     ]),
@@ -193,6 +199,8 @@ test("HEVC and H.264 failures renegotiate down the codec chain while retaining C
       RFB_ENCODINGS.openH264,
       RFB_ENCODINGS.tight,
       RFB_ENCODINGS.audio,
+      RFB_ENCODINGS.cursorWithAlpha,
+      RFB_ENCODINGS.pointerPosition,
       RFB_ENCODINGS.extendedDesktopSize,
       RFB_ENCODINGS.extendedClipboard,
     ]),
@@ -202,6 +210,8 @@ test("HEVC and H.264 failures renegotiate down the codec chain while retaining C
     encodeSetEncodings([
       RFB_ENCODINGS.tight,
       RFB_ENCODINGS.audio,
+      RFB_ENCODINGS.cursorWithAlpha,
+      RFB_ENCODINGS.pointerPosition,
       RFB_ENCODINGS.extendedDesktopSize,
       RFB_ENCODINGS.extendedClipboard,
     ]),
@@ -221,11 +231,90 @@ test("SetEncodings preserves signed pseudo-encoding words", () => {
   const encoded = encodeSetEncodings([
     RFB_ENCODINGS.openH264,
     RFB_ENCODINGS.tight,
+    RFB_ENCODINGS.cursorWithAlpha,
+    RFB_ENCODINGS.pointerPosition,
     RFB_ENCODINGS.extendedDesktopSize,
     RFB_ENCODINGS.extendedClipboard,
   ]);
-  assert.equal(new DataView(encoded.buffer).getInt32(12), -308);
-  assert.equal(new DataView(encoded.buffer).getUint32(16), 0xc0a1e5ce);
+  assert.equal(new DataView(encoded.buffer).getInt32(12), -314);
+  assert.equal(new DataView(encoded.buffer).getInt32(16), -232);
+  assert.equal(new DataView(encoded.buffer).getInt32(20), -308);
+  assert.equal(new DataView(encoded.buffer).getUint32(24), 0xc0a1e5ce);
+});
+
+test("browser parses host CursorWithAlpha and PointerPos fixtures", async () => {
+  const name = new TextEncoder().encode("Studio");
+  const transcript = bytes(
+    new TextEncoder().encode("RFB 003.008\n"),
+    [1, 1],
+    uint32(0),
+    uint16(2),
+    uint16(1),
+    new Uint8Array(16),
+    uint32(name.byteLength),
+    name,
+    [
+      0, 0, 0, 1, 0, 1, 0, 0, 0, 2, 0, 1, 0xff, 0xff, 0xfe, 0xc6, 0, 0, 0, 0, 0x11, 0x22, 0x33,
+      0xff, 0x20, 0x10, 0x08, 0x80,
+    ],
+    [0, 0, 0, 1, 0, 1, 0, 0, 0, 0, 0, 0, 0xff, 0xff, 0xff, 0x18],
+  );
+  const transport = new ScriptedTransport(transcript);
+  const cursors: unknown[] = [];
+  const positions: unknown[] = [];
+  const client = new RFBClient(transport, {
+    h264: false,
+    onCursor: (cursor) => cursors.push(cursor),
+    onPointerPosition: (position) => positions.push(position),
+  });
+
+  await assert.rejects(client.start(), /scripted server ended/);
+  assert.deepEqual(cursors, [
+    {
+      width: 2,
+      height: 1,
+      hotspotX: 1,
+      hotspotY: 0,
+      rgba: new Uint8Array([0x11, 0x22, 0x33, 0xff, 0x20, 0x10, 0x08, 0x80]),
+    },
+  ]);
+  assert.deepEqual(positions, [{ x: 1, y: 0 }]);
+});
+
+test("browser fails the session on malformed cursor bounds", async () => {
+  const name = new TextEncoder().encode("Studio");
+  const transcript = bytes(
+    new TextEncoder().encode("RFB 003.008\n"),
+    [1, 1],
+    uint32(0),
+    uint16(2),
+    uint16(1),
+    new Uint8Array(16),
+    uint32(name.byteLength),
+    name,
+    [0, 0, 0, 1, 0, 0, 0, 0, 0, 129, 0, 1, 0xff, 0xff, 0xfe, 0xc6, 0, 0, 0, 0],
+  );
+  const transport = new ScriptedTransport(transcript);
+  const client = new RFBClient(transport, { h264: false });
+
+  await assert.rejects(client.start(), /invalid CursorWithAlpha rectangle/);
+  assert.deepEqual(transport.closed, { code: 1002, reason: "RFB protocol error" });
+
+  const invalidPixels = bytes(
+    new TextEncoder().encode("RFB 003.008\n"),
+    [1, 1],
+    uint32(0),
+    uint16(2),
+    uint16(1),
+    new Uint8Array(16),
+    uint32(name.byteLength),
+    name,
+    [0, 0, 0, 1, 0, 0, 0, 0, 0, 1, 0, 1, 0xff, 0xff, 0xfe, 0xc6, 0, 0, 0, 0, 1, 0, 0, 0],
+  );
+  const pixelTransport = new ScriptedTransport(invalidPixels);
+  const pixelClient = new RFBClient(pixelTransport, { h264: false });
+  await assert.rejects(pixelClient.start(), /invalid premultiplied CursorWithAlpha pixels/);
+  assert.deepEqual(pixelTransport.closed, { code: 1002, reason: "RFB protocol error" });
 });
 
 test("resize waits for ExtendedDesktopSize and preserves the host screen identity", async () => {
@@ -364,6 +453,7 @@ test("rejected clipboard text is not approved for later remote requests", async 
 
 class ScriptedTransport implements RFBTransport {
   readonly sent: Uint8Array[] = [];
+  closed: { code?: number; reason?: string } | undefined;
   #incoming: Uint8Array;
   #offset = 0;
 
@@ -382,7 +472,9 @@ class ScriptedTransport implements RFBTransport {
     this.sent.push(data.slice());
   }
 
-  close(): void {}
+  close(code?: number, reason?: string): void {
+    this.closed = { code, reason };
+  }
 }
 
 class InteractiveTransport implements RFBTransport {

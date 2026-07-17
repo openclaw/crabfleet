@@ -9,16 +9,27 @@ import AppKit
 
 public extension VNCCursor {
 	var nsCursor: NSCursor {
+		nsCursor(scale: 1)
+	}
+
+	func nsCursor(scale: CGFloat) -> NSCursor {
 		guard !isEmpty else {
 			return Self.emptyNSCursor
 		}
 
-		guard let nsImage else {
+		guard let cgImage else {
 			return Self.emptyNSCursor
 		}
+		let scale = max(scale, CGFloat.leastNonzeroMagnitude)
+		let imageSize = CGSize(
+			width: max(1, CGFloat(size.width) * scale),
+			height: max(1, CGFloat(size.height) * scale))
+		let image = NSImage(cgImage: cgImage, size: imageSize)
+		let scaledHotspot = CGPoint(
+			x: CGFloat(hotspot.x) * scale,
+			y: CGFloat(hotspot.y) * scale)
 
-		let cursor = NSCursor(image: nsImage,
-							  hotSpot: hotspot.cgPoint)
+		let cursor = NSCursor(image: image, hotSpot: scaledHotspot)
 
 		return cursor
 	}
@@ -26,17 +37,25 @@ public extension VNCCursor {
 
 private extension VNCCursor {
 	static var emptyNSCursor: NSCursor {
-		// TODO: Should use a "dot" cursor like in other VNC clients
-
-		.arrow
+		let dimension = 16
+		guard let representation = NSBitmapImageRep(
+			bitmapDataPlanes: nil,
+			pixelsWide: dimension,
+			pixelsHigh: dimension,
+			bitsPerSample: 8,
+			samplesPerPixel: 4,
+			hasAlpha: true,
+			isPlanar: false,
+			colorSpaceName: .deviceRGB,
+			bytesPerRow: dimension * 4,
+			bitsPerPixel: 32) else {
+			return .arrow
+		}
+		representation.bitmapData?.initialize(repeating: 0, count: dimension * dimension * 4)
+		let image = NSImage(size: CGSize(width: dimension, height: dimension))
+		image.addRepresentation(representation)
+		return NSCursor(image: image, hotSpot: .zero)
 	}
 
-	var nsImage: NSImage? {
-		guard let cgImage else { return nil }
-
-		let nsImage = NSImage(cgImage: cgImage, size: size.cgSize)
-
-		return nsImage
-	}
 }
 #endif

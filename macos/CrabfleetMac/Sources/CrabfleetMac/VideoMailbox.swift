@@ -18,6 +18,17 @@ final class VideoMailbox<Element>: @unchecked Sendable {
     withLock { finished }
   }
 
+  var hasPendingElement: Bool {
+    withLock { latestElement != nil }
+  }
+
+  func takePending() -> Element? {
+    withLock {
+      defer { latestElement = nil }
+      return latestElement
+    }
+  }
+
   func offer(_ element: Element, onDrop: () -> Void = {}) {
     let continuation = withLock { () -> CheckedContinuation<Element?, Never>? in
       guard !finished else { return nil }
@@ -88,6 +99,82 @@ final class VideoMailbox<Element>: @unchecked Sendable {
       return waiter?.continuation
     }
     continuation?.resume(returning: nil)
+  }
+
+  private func withLock<T>(_ body: () -> T) -> T {
+    lock.lock()
+    defer { lock.unlock() }
+    return body()
+  }
+}
+
+/// Arbitrates one pending framebuffer request between cursor and video work.
+/// Cursor traffic yields after a cursor-only response only while a video value
+/// is actually pending; a static video stream never delays a cursor wake.
+final class FramebufferUpdateArbiter<Video>: @unchecked Sendable {
+  enum Ready {
+    case cursor(SystemCursorSnapshot)
+    case video(Video)
+    case idle
+  }
+
+  private let cursorMailbox = VideoMailbox<SystemCursorSnapshot>()
+  private let wakeMailbox = VideoMailbox<UInt8>()
+  private let lock = NSLock()
+  private var cursorSentSinceVideo = false
+
+  func offerCursor(_ snapshot: SystemCursorSnapshot) {
+    cursorMailbox.offer(snapshot)
+    wakeMailbox.offer(1)
+  }
+
+  func signalVideo() {
+    wakeMailbox.offer(1)
+  }
+
+  func takeCursorIfAllowed(videoReady: Bool, force: Bool = false) -> SystemCursorSnapshot? {
+    guard cursorMailbox.hasPendingElement else { return nil }
+    let shouldDefer = withLock { cursorSentSinceVideo && videoReady }
+    guard force || !shouldDefer else { return nil }
+    _ = wakeMailbox.takePending()
+    return cursorMailbox.takePending()
+  }
+
+  func next(
+    videoMailbox: VideoMailbox<Video>,
+    timeout: Duration,
+    allowCursor: Bool = true
+  ) async -> Ready {
+    let clock = ContinuousClock()
+    let deadline = clock.now.advanced(by: timeout)
+    while !Task.isCancelled {
+      let videoReady = videoMailbox.hasPendingElement
+      if allowCursor, let cursor = takeCursorIfAllowed(videoReady: videoReady) {
+        return .cursor(cursor)
+      }
+      if let video = videoMailbox.takePending() {
+        _ = wakeMailbox.takePending()
+        return .video(video)
+      }
+      let remaining = clock.now.duration(to: deadline)
+      guard remaining > .zero,
+        await wakeMailbox.next(timeout: remaining) != nil
+      else { return .idle }
+    }
+    return .idle
+  }
+
+  func recordCursorResponse() {
+    withLock { cursorSentSinceVideo = true }
+  }
+
+  func recordVideoResponse() {
+    withLock { cursorSentSinceVideo = false }
+  }
+
+  func finish() {
+    cursorMailbox.finish()
+    wakeMailbox.finish()
   }
 
   private func withLock<T>(_ body: () -> T) -> T {

@@ -183,6 +183,33 @@ sessions while the app is inactive are muted automatically. Third-party VNC
 clients never receive the private audio message because they do not advertise
 `CAF1`.
 
+### Cursor pipeline
+
+Share This Mac uses the standard RFB CursorWithAlpha (`-314`), Cursor (`-239`),
+and PointerPos (`-232`) pseudo-encodings so fully negotiated displays can avoid
+baking pointer movement into video. CursorWithAlpha is preferred and carries a Raw nested rectangle with a
+premultiplied RGBA bitmap; classic Cursor remains the fallback for viewers that
+advertise it. Shapes are capped at 128×128, validated before allocation, and
+sent only after explicit per-session negotiation. The host polls the system
+cursor on a dedicated 60 Hz queue, hashes shapes to suppress duplicates, and
+suppresses position echoes for 250 ms after that session sends local pointer
+input. Cursor-only framebuffer responses use the serialized RFB writer with a
+100 ms deadline and alternate with video so pointer traffic cannot starve the
+desktop.
+
+ScreenCaptureKit cursor baking is shared per display. It is disabled only when
+every active session on that display negotiated a cursor shape channel and is
+reconciled on joins, leaves, and encoding changes with rollback and bounded
+retry after configuration failure. Negotiated sessions continue receiving
+cursor rectangles during mixed legacy/modern periods while baking stays on.
+
+The RoyalVNCKit fork advertises CursorWithAlpha, classic Cursor, and PointerPos,
+sets the received image as the focused/hovered AppKit cursor, and draws a clipped
+remote overlay when PointerPos diverges from the local mouse. The browser
+advertises CursorWithAlpha and PointerPos only, installs the received image as a
+CSS canvas cursor, and keeps a framebuffer-scaled overlay visible for remote
+movement, lost pointer focus, and resize transitions.
+
 After the first Screen Recording grant, restart the bundled app before starting
 the share. Ad-hoc development signatures do not provide a stable TCC identity,
 so a rebuilt prototype may need permission again. Sign every iterative build
@@ -216,7 +243,9 @@ time, including empty updates, and ExtendedDesktopSize requests are debounced
 until the host announces its screen layout.
 
 The viewer renders aspect-fit at device pixel ratio, forwards bounded pointer
-and keyboard input, and synchronizes text clipboard through the same Extended
+and keyboard input, renders negotiated CursorWithAlpha shapes locally, uses
+PointerPos for a remote overlay when another viewer or the host moves the
+pointer, and synchronizes text clipboard through the same Extended
 Clipboard dialect as the native client. When WebCodecs AAC-LC and AudioWorklet
 are both available it also negotiates `CAF1`, primes about 100 ms of audio in a
 120 ms bounded worklet buffer, drops late packets, and resynchronizes gaps over
