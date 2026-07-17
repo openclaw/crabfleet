@@ -104,6 +104,7 @@ enum RFBWire {
   static let openH264Encoding: Int32 = 50
   static let crabfleetAudioEncoding: Int32 = 0x4341_4631
   static let crabfleetHEVCEncoding: Int32 = 0x4845_5631
+  static let crabfleetChroma444Encoding: Int32 = 0x4334_3434
   static let extendedDesktopSizeEncoding: Int32 = -308
   static let extendedClipboardEncoding = Int32(bitPattern: 0xc0a1_e5ce)
   static let maximumClipboardBytes = 1 * 1_024 * 1_024
@@ -152,6 +153,20 @@ enum RFBWire {
 
   static func shouldStreamAudio(hostEnabled: Bool, encodings: [Int32]) -> Bool {
     hostEnabled && encodings.contains(crabfleetAudioEncoding)
+  }
+
+  static func preferredChroma(
+    codec: MacVideoCodec,
+    qualityMode: ShareQualityMode,
+    encodings: [Int32],
+    chroma444Unavailable: Bool = false
+  ) -> MacVideoChroma {
+    guard codec == .hevc,
+      qualityMode != .smooth,
+      !chroma444Unavailable,
+      encodings.contains(crabfleetChroma444Encoding)
+    else { return .chroma420 }
+    return .chroma444
   }
 
   static func audioConfig(channels: UInt8, sampleRate: UInt32, magicCookie: Data) throws -> Data {

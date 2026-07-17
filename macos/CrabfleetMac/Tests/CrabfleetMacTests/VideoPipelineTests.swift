@@ -1,6 +1,7 @@
 import CoreMedia
 import Foundation
 import Testing
+import VideoToolbox
 
 @testable import CrabfleetMac
 
@@ -56,6 +57,19 @@ struct VideoPipelineTests {
   }
 
   @Test
+  func crabfleetHEVC444FlagRoundTripsInEnvelope() throws {
+    let payload = Data([0, 0, 0, 1, 0x26, 0x01, 0xAA])
+    let update = try RFBWire.crabfleetHEVCUpdate(
+      width: 1_280,
+      height: 720,
+      payload: payload,
+      flags: 0x2 | 0x4)
+
+    #expect(update.readUInt32(at: 20) == 0x6)
+    #expect(update.suffix(payload.count) == payload)
+  }
+
+  @Test
   func convertsLengthPrefixedNALUnitsToAnnexB() throws {
     let input = Data([0, 0, 0, 2, 0x41, 0x01, 0, 0, 0, 3, 0x65, 0x02, 0x03])
     let output = try MacVideoEncoder.annexBData(
@@ -103,6 +117,42 @@ struct VideoPipelineTests {
       result.append(set)
     } + Data([0, 0, 0, 1, 0x26, 0x01]))
     #expect(MacVideoCodec.hevc.videoToolboxType == kCMVideoCodecType_HEVC)
+  }
+
+  @Test
+  func parsesHEVCChromaFormatFromSPSFixtures() throws {
+    let main420 = Data([
+      0x42, 0x01, 0x01, 0x04, 0x08, 0x00, 0x00, 0x03, 0x00, 0x9f, 0xa8, 0x00,
+      0x00, 0x03, 0x00, 0x00, 0x1e, 0xa0, 0x20, 0x81, 0x05, 0x96, 0xea, 0x49,
+      0x32, 0xbc, 0x05, 0xa0, 0x20, 0x00, 0x00, 0x03, 0x00, 0x20, 0x00, 0x00,
+      0x03, 0x00, 0x21, 0x00,
+    ])
+    let main444 = Data([
+      0x42, 0x01, 0x01, 0x04, 0x08, 0x00, 0x00, 0x03, 0x00, 0x9e, 0x28, 0x00,
+      0x00, 0x03, 0x00, 0x00, 0x1e, 0x90, 0x04, 0x10, 0x20, 0xb2, 0xdd, 0x49,
+      0x26, 0x57, 0x80, 0xb4, 0x04, 0x00, 0x00, 0x03, 0x00, 0x04, 0x00, 0x00,
+      0x03, 0x00, 0x04, 0x20,
+    ])
+
+    #expect(try HEVCSPSParser.chromaFormatIDC(from: main420) == 1)
+    #expect(try HEVCSPSParser.chromaFormatIDC(from: main444) == 3)
+    #expect(throws: (any Error).self) {
+      _ = try HEVCSPSParser.chromaFormatIDC(from: Data([0x42, 0x01]))
+    }
+  }
+
+  @Test
+  func rejectedMain444ProfileFallsBackToMain() {
+    var profiles: [CFString] = []
+    let selection = MacVideoEncoder.selectProfile(codec: .hevc, requestedChroma: .chroma444) {
+      profile in
+      profiles.append(profile)
+      return profile == hevcMain444AutoLevel ? kVTPropertyNotSupportedErr : noErr
+    }
+
+    #expect(selection.chroma == .chroma420)
+    #expect(!selection.chroma444Available)
+    #expect(profiles == [hevcMain444AutoLevel, kVTProfileLevel_HEVC_Main_AutoLevel])
   }
 
   @Test
@@ -170,6 +220,16 @@ struct VideoPipelineTests {
     #expect(controller.averageBitrate <= 40_000_000)
     #expect(controller.setMode(.smooth) == 20_000_000)
     #expect(controller.mode.framesPerSecond == 60)
+  }
+
+  @Test
+  func chroma444RateControllerRaisesBounds() {
+    var auto = VideoRateController(mode: .auto, chroma: .chroma444)
+    #expect(ShareQualityMode.auto.bitrateFloor(chroma: .chroma444) == 2_250_000)
+    #expect(ShareQualityMode.auto.bitrateCeiling(chroma: .chroma444) == 45_000_000)
+    #expect(ShareQualityMode.sharp.bitrateCeiling(chroma: .chroma444) == 48_000_000)
+    #expect(auto.setMode(.sharp) == 12_000_000)
+    #expect(auto.chroma == .chroma444)
   }
 
   @Test
@@ -337,6 +397,42 @@ struct VideoPipelineTests {
         h264PathBroken: true) == .tight)
     #expect(RFBWire.preferredFrameEncoding(from: [RFBWire.tightEncoding]) == .tight)
     #expect(RFBWire.preferredFrameEncoding(from: [5]) == nil)
+  }
+
+  @Test
+  func videoNegotiationGatesChroma444ByCodecModeAndCapability() {
+    let capable = [RFBWire.crabfleetChroma444Encoding]
+    #expect(
+      RFBWire.preferredChroma(codec: .hevc, qualityMode: .sharp, encodings: capable)
+        == .chroma444)
+    #expect(
+      RFBWire.preferredChroma(codec: .hevc, qualityMode: .auto, encodings: capable)
+        == .chroma444)
+    #expect(
+      RFBWire.preferredChroma(codec: .hevc, qualityMode: .smooth, encodings: capable)
+        == .chroma420)
+    #expect(
+      RFBWire.preferredChroma(codec: .hevc, qualityMode: .sharp, encodings: [])
+        == .chroma420)
+    #expect(
+      RFBWire.preferredChroma(codec: .h264, qualityMode: .sharp, encodings: capable)
+        == .chroma420)
+    #expect(
+      RFBWire.preferredChroma(
+        codec: .hevc,
+        qualityMode: .sharp,
+        encodings: capable,
+        chroma444Unavailable: true) == .chroma420)
+  }
+
+  @Test
+  func nativeControllerAdvertisesC444OnlyAfterDecodeProbe() {
+    #expect(
+      !VNCSessionController.preferredFrameEncodings(supportsHEVC444: false)
+        .contains(.crabfleetChroma444))
+    #expect(
+      VNCSessionController.preferredFrameEncodings(supportsHEVC444: true)
+        .contains(.crabfleetChroma444))
   }
 
   @Test

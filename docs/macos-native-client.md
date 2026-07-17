@@ -122,13 +122,21 @@ an owner-scoped Crabfleet Worker relay for first-party browser access.
 ### Video pipeline
 
 Crabfleet endpoints prefer the private `HEV1` HEVC encoding (`0x48455631`), then
-the community Open H.264 encoding (type 50), then Tight/JPEG. Both video
+the community Open H.264 encoding (type 50), then Tight/JPEG. A native viewer
+advertises the `C444` pseudo-encoding (`0x43343434`) only after a startup
+VideoToolbox probe creates a decoder for canned Main 4:4:4 parameter sets. With
+that explicit capability, HEVC uses Main 4:4:4 in Auto and Sharp; Smooth and
+clients without `C444` retain the byte-identical Main 4:2:0 path. Both video
 encodings use the same rectangle envelope: a 32-bit payload length, reset flags,
-and Annex-B access units. VideoToolbox encodes HEVC Main or H.264 Constrained
-Baseline in low-latency realtime mode without frame reordering; keyframes carry
-VPS/SPS/PPS for HEVC or SPS/PPS for H.264. The viewer keeps bounded
-per-geometry VideoToolbox decoder contexts, waits for a random-access picture
-after resets, decodes every access unit in a rectangle, and displays the last.
+and Annex-B access units. HEVC flag `0x4` marks Main 4:4:4 payloads. A chroma
+transition tears down the encoder and changes that flag only on a keyframe that
+also carries the existing context-reset flag. VideoToolbox encodes HEVC Main,
+HEVC Main 4:4:4, or H.264 Constrained Baseline in low-latency realtime mode
+without frame reordering; keyframes carry VPS/SPS/PPS for HEVC or SPS/PPS for
+H.264. The viewer derives the RExt `hvcC` profile, compatibility, and constraint
+bytes from those parameter sets, keeps bounded per-geometry decoder contexts,
+waits for a random-access picture after resets, decodes every access unit in a
+rectangle, and displays the last.
 Initial capture is capped at 2560×1600, and either video codec may resize up to
 4096×2304 within the selected display's native pixel size. HEVC setup or encode
 failure retries H.264 before the session falls back to the 15 fps Tight/JPEG
@@ -136,19 +144,25 @@ path; third-party clients never offer the private HEVC number, and the Open
 H.264 wire format remains unchanged.
 
 ScreenCaptureKit dirty rectangles keep ordinary unchanged frames out of the
-latest-wins pixel mailbox. Auto and Sharp send one doubled-bitrate keyframe
+latest-wins pixel mailbox. Before sending a 4:4:4 keyframe, the host parses its
+SPS and requires `chroma_format_idc == 3`; a rejected profile or silent encoder
+downgrade permanently falls that client session back to 4:2:0 without breaking
+video. Auto and Sharp send one doubled-bitrate keyframe
 after two static seconds so text settles, then return to zero encode work;
 Smooth omits that refresh. The persisted quality picker applies live without a
-session restart: Auto uses 1.5–30 Mbit/s at up to 60 fps with a maximum frame
-QP of 40, Sharp uses 8–40 Mbit/s at up to 30 fps with a maximum frame QP of 30
-to preserve readable text even when VideoToolbox must sacrifice frames, and
-Smooth uses 1.5–20 Mbit/s at up to 60 fps without a QP cap. The controller tracks
+reconnect: 4:2:0 Auto uses 1.5–30 Mbit/s and 4:4:4 Auto uses 2.25–45 Mbit/s at
+up to 60 fps with a maximum frame QP of 40; 4:2:0 Sharp uses 8–40 Mbit/s and
+4:4:4 Sharp uses 12–48 Mbit/s at up to 30 fps with a maximum frame QP of 30 to
+preserve readable text even when VideoToolbox must sacrifice frames. Smooth
+always uses 4:2:0 at 1.5–20 Mbit/s and up to 60 fps without a QP cap. The controller tracks
 EWMA link throughput and send latency, reduces toward 80% of measured
 throughput above 50 ms, and recovers by at most 1 Mbit/s per clear second scaled
 by changed screen area. The share sheet reports codec and hardware detail,
 frame rate, throughput, target bitrate, and dirty-area percentage. If a
 VideoToolbox encoder does not support the optional QP property, video remains
 active without the cap and the codec detail reports `QP cap unavailable`.
+Active full-chroma sessions report `HEVC 4:4:4`; a session-level profile or SPS
+fallback reports `4:4:4 unavailable`.
 
 ### Audio pipeline
 

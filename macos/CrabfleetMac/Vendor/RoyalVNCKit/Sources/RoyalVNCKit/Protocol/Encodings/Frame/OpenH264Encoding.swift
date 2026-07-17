@@ -235,10 +235,275 @@ struct OpenH264DecodeGate {
 	}
 }
 
+private struct HEVCBitReader {
+	private let bytes: [UInt8]
+	private var bitOffset = 0
+
+	init(escapedData: Data) {
+		var unescaped: [UInt8] = []
+		var zeroCount = 0
+		for byte in escapedData {
+			if zeroCount >= 2, byte == 0x03 {
+				zeroCount = 0
+				continue
+			}
+			unescaped.append(byte)
+			zeroCount = byte == 0 ? zeroCount + 1 : 0
+		}
+		bytes = unescaped
+	}
+
+	mutating func readBits(_ count: Int) throws -> UInt64 {
+		guard count >= 0, count <= 64, bitOffset <= bytes.count * 8 - count else {
+			throw OpenH264DecodeError.invalidParameterSets
+		}
+		var value: UInt64 = 0
+		for _ in 0..<count {
+			let byte = bytes[bitOffset / 8]
+			value = (value << 1) | UInt64((byte >> (7 - bitOffset % 8)) & 1)
+			bitOffset += 1
+		}
+		return value
+	}
+
+	mutating func readUnsignedExpGolomb() throws -> Int {
+		var leadingZeroCount = 0
+		while try readBits(1) == 0 {
+			leadingZeroCount += 1
+			guard leadingZeroCount <= 31 else {
+				throw OpenH264DecodeError.invalidParameterSets
+			}
+		}
+		let suffix = leadingZeroCount == 0 ? 0 : try readBits(leadingZeroCount)
+		return (1 << leadingZeroCount) - 1 + Int(suffix)
+	}
+}
+
+struct HEVCSPSMetadata: Equatable {
+	let profileByte: UInt8
+	let compatibilityFlags: [UInt8]
+	let constraintFlags: [UInt8]
+	let levelIDC: UInt8
+	let maximumSubLayersMinusOne: UInt8
+	let temporalIDNested: Bool
+	let chromaFormatIDC: UInt8
+	let bitDepthLumaMinus8: UInt8
+	let bitDepthChromaMinus8: UInt8
+
+	static func parse(_ sps: Data) throws -> Self {
+		guard sps.count > 2, (sps[0] >> 1) & 0x3f == 33 else {
+			throw OpenH264DecodeError.invalidParameterSets
+		}
+		let payload = unescape(Data(sps.dropFirst(2)))
+		guard payload.count >= 13 else { throw OpenH264DecodeError.invalidParameterSets }
+		let maximumSubLayersMinusOne = (payload[0] >> 1) & 0x07
+		let temporalIDNested = payload[0] & 1 == 1
+		var reader = HEVCBitReader(escapedData: Data(sps.dropFirst(2)))
+		_ = try reader.readBits(4)
+		_ = try reader.readBits(3)
+		_ = try reader.readBits(1)
+		try skipProfileTierLevel(
+			reader: &reader,
+			maximumSubLayersMinusOne: Int(maximumSubLayersMinusOne))
+		_ = try reader.readUnsignedExpGolomb()
+		let chromaFormatIDC = try reader.readUnsignedExpGolomb()
+		guard (0...3).contains(chromaFormatIDC) else {
+			throw OpenH264DecodeError.invalidParameterSets
+		}
+		if chromaFormatIDC == 3 { _ = try reader.readBits(1) }
+		_ = try reader.readUnsignedExpGolomb()
+		_ = try reader.readUnsignedExpGolomb()
+		if try reader.readBits(1) == 1 {
+			for _ in 0..<4 { _ = try reader.readUnsignedExpGolomb() }
+		}
+		let bitDepthLumaMinus8 = try reader.readUnsignedExpGolomb()
+		let bitDepthChromaMinus8 = try reader.readUnsignedExpGolomb()
+		guard bitDepthLumaMinus8 <= 7, bitDepthChromaMinus8 <= 7 else {
+			throw OpenH264DecodeError.invalidParameterSets
+		}
+		return Self(
+			profileByte: payload[1],
+			compatibilityFlags: Array(payload[2..<6]),
+			constraintFlags: Array(payload[6..<12]),
+			levelIDC: payload[12],
+			maximumSubLayersMinusOne: maximumSubLayersMinusOne,
+			temporalIDNested: temporalIDNested,
+			chromaFormatIDC: UInt8(chromaFormatIDC),
+			bitDepthLumaMinus8: UInt8(bitDepthLumaMinus8),
+			bitDepthChromaMinus8: UInt8(bitDepthChromaMinus8))
+	}
+
+	private static func unescape(_ data: Data) -> [UInt8] {
+		var result: [UInt8] = []
+		var zeroCount = 0
+		for byte in data {
+			if zeroCount >= 2, byte == 0x03 {
+				zeroCount = 0
+				continue
+			}
+			result.append(byte)
+			zeroCount = byte == 0 ? zeroCount + 1 : 0
+		}
+		return result
+	}
+
+	private static func skipProfileTierLevel(
+		reader: inout HEVCBitReader,
+		maximumSubLayersMinusOne: Int
+	) throws {
+		_ = try reader.readBits(64)
+		_ = try reader.readBits(32)
+		var profilePresent: [Bool] = []
+		var levelPresent: [Bool] = []
+		for _ in 0..<maximumSubLayersMinusOne {
+			profilePresent.append(try reader.readBits(1) == 1)
+			levelPresent.append(try reader.readBits(1) == 1)
+		}
+		if maximumSubLayersMinusOne > 0 {
+			_ = try reader.readBits((8 - maximumSubLayersMinusOne) * 2)
+		}
+		for index in 0..<maximumSubLayersMinusOne {
+			if profilePresent[index] {
+				_ = try reader.readBits(64)
+				_ = try reader.readBits(24)
+			}
+			if levelPresent[index] { _ = try reader.readBits(8) }
+		}
+	}
+}
+
+struct HEVCHVCCBuilder {
+	static func make(vps: Data, sps: Data, pps: Data) throws -> Data {
+		guard !vps.isEmpty, !pps.isEmpty,
+			vps.count <= Int(UInt16.max),
+			sps.count <= Int(UInt16.max),
+			pps.count <= Int(UInt16.max) else {
+			throw OpenH264DecodeError.invalidParameterSets
+		}
+		let metadata = try HEVCSPSMetadata.parse(sps)
+		var record = Data([1, metadata.profileByte])
+		record.append(contentsOf: metadata.compatibilityFlags)
+		record.append(contentsOf: metadata.constraintFlags)
+		record.append(metadata.levelIDC)
+		record.append(contentsOf: [0xf0, 0x00, 0xfc, 0xfc | metadata.chromaFormatIDC])
+		record.append(0xf8 | metadata.bitDepthLumaMinus8)
+		record.append(0xf8 | metadata.bitDepthChromaMinus8)
+		record.append(contentsOf: [0, 0])
+		let temporalLayers = metadata.maximumSubLayersMinusOne + 1
+		record.append((temporalLayers << 3) | (metadata.temporalIDNested ? 0x04 : 0) | 0x03)
+		record.append(3)
+		for (type, parameterSet) in [(UInt8(32), vps), (UInt8(33), sps), (UInt8(34), pps)] {
+			record.append(0x80 | type)
+			record.append(contentsOf: [0, 1])
+			let count = UInt16(parameterSet.count)
+			record.append(UInt8(count >> 8))
+			record.append(UInt8(count & 0xff))
+			record.append(parameterSet)
+		}
+		return record
+	}
+}
+
+enum OpenH264DecoderResetAction: Equatable {
+	case keep
+	case resetThis
+	case resetAll
+	case reject
+}
+
+struct OpenH264DecoderResetPolicy {
+	static func action(
+		codec: VideoAnnexBCodec,
+		flags: UInt32,
+		existingChroma444: Bool?
+	) -> OpenH264DecoderResetAction {
+		let chroma444 = flags & 0x4 != 0
+		if codec != .hevc, chroma444 { return .reject }
+		if flags & 0x2 != 0 { return .resetAll }
+		if flags & 0x1 != 0 { return .resetThis }
+		if let existingChroma444, existingChroma444 != chroma444 { return .reject }
+		return .keep
+	}
+}
+
 #if canImport(VideoToolbox)
 import CoreMedia
 import CoreVideo
 import VideoToolbox
+
+private enum HEVCVideoToolbox {
+	static func makeFormatDescription(vps: Data, sps: Data, pps: Data) throws
+		-> CMVideoFormatDescription {
+		_ = try HEVCHVCCBuilder.make(vps: vps, sps: sps, pps: pps)
+		return try vps.withUnsafeBytes { vpsBytes in
+			try sps.withUnsafeBytes { spsBytes in
+				try pps.withUnsafeBytes { ppsBytes in
+					guard let vpsBase = vpsBytes.bindMemory(to: UInt8.self).baseAddress,
+						  let spsBase = spsBytes.bindMemory(to: UInt8.self).baseAddress,
+						  let ppsBase = ppsBytes.bindMemory(to: UInt8.self).baseAddress else {
+						throw OpenH264DecodeError.invalidParameterSets
+					}
+					var pointers: [UnsafePointer<UInt8>] = [vpsBase, spsBase, ppsBase]
+					var sizes = [vps.count, sps.count, pps.count]
+					var description: CMFormatDescription?
+					let status = CMVideoFormatDescriptionCreateFromHEVCParameterSets(
+						allocator: kCFAllocatorDefault,
+						parameterSetCount: 3,
+						parameterSetPointers: &pointers,
+						parameterSetSizes: &sizes,
+						nalUnitHeaderLength: 4,
+						extensions: nil,
+						formatDescriptionOut: &description)
+					guard status == noErr, let description else {
+						throw OpenH264DecodeError.videoToolbox(status)
+					}
+					return description
+				}
+			}
+		}
+	}
+}
+
+public enum VNCHEVC444Capability {
+	public static let isSupported: Bool = {
+		let vps = Data([
+			0x40, 0x01, 0x0c, 0x01, 0xff, 0xff, 0x04, 0x08, 0x00, 0x00, 0x03, 0x00,
+			0x9e, 0x28, 0x00, 0x00, 0x03, 0x00, 0x00, 0x1e, 0xba, 0x02, 0x40,
+		])
+		let sps = Data([
+			0x42, 0x01, 0x01, 0x04, 0x08, 0x00, 0x00, 0x03, 0x00, 0x9e, 0x28, 0x00,
+			0x00, 0x03, 0x00, 0x00, 0x1e, 0x90, 0x04, 0x10, 0x20, 0xb2, 0xdd, 0x49,
+			0x26, 0x57, 0x80, 0xb4, 0x04, 0x00, 0x00, 0x03, 0x00, 0x04, 0x00, 0x00,
+			0x03, 0x00, 0x04, 0x20,
+		])
+		let pps = Data([0x44, 0x01, 0xc1, 0x72, 0x86, 0x0c, 0x02, 0x24])
+		do {
+			let metadata = try HEVCSPSMetadata.parse(sps)
+			guard metadata.profileByte & 0x1f == 4, metadata.chromaFormatIDC == 3 else {
+				return false
+			}
+			let formatDescription = try HEVCVideoToolbox.makeFormatDescription(
+				vps: vps, sps: sps, pps: pps)
+			let attributes: CFDictionary = [
+				kCVPixelBufferPixelFormatTypeKey: kCVPixelFormatType_32BGRA,
+				kCVPixelBufferIOSurfacePropertiesKey: [:] as CFDictionary,
+			] as CFDictionary
+			var session: VTDecompressionSession?
+			let status = VTDecompressionSessionCreate(
+				allocator: kCFAllocatorDefault,
+				formatDescription: formatDescription,
+				decoderSpecification: nil,
+				imageBufferAttributes: attributes,
+				outputCallback: nil,
+				decompressionSessionOut: &session)
+			guard status == noErr, let session else { return false }
+			VTDecompressionSessionInvalidate(session)
+			return true
+		} catch {
+			return false
+		}
+	}()
+}
 
 extension VNCProtocol {
 	final class OpenH264Encoding: VNCFrameEncoding {
@@ -265,9 +530,11 @@ extension VNCProtocol {
 			var pps: Data?
 			var decodeGate: OpenH264DecodeGate
 			var codedByteCount = 0
+			let chroma444: Bool
 
-			init(codec: VideoAnnexBCodec) {
+			init(codec: VideoAnnexBCodec, chroma444: Bool) {
 				decodeGate = OpenH264DecodeGate(codec: codec)
+				self.chroma444 = chroma444
 			}
 		}
 
@@ -299,19 +566,31 @@ extension VNCProtocol {
 			let flags = try await connection.readUInt32()
 			let payload = try await connection.read(length: length)
 			let nalUnits = OpenH264AnnexB.nalUnits(from: payload)
+			let chroma444 = flags & 0x4 != 0
 
 			let newGeometry = Geometry(
 				x: rectangle.xPosition,
 				y: rectangle.yPosition,
 				width: rectangle.width,
 				height: rectangle.height)
-			if flags & 0x2 != 0 {
+			let resetAction = OpenH264DecoderResetPolicy.action(
+				codec: codec,
+				flags: flags,
+				existingChroma444: contexts[newGeometry]?.chroma444)
+			switch resetAction {
+			case .resetAll:
 				invalidateAllDecoders()
-			} else if flags & 0x1 != 0, let context = contexts.removeValue(forKey: newGeometry) {
-				invalidateDecoder(context)
-				contextOrder.removeAll { $0 == newGeometry }
+			case .resetThis:
+				if let context = contexts.removeValue(forKey: newGeometry) {
+					invalidateDecoder(context)
+					contextOrder.removeAll { $0 == newGeometry }
+				}
+			case .reject:
+				throw VNCError.protocol(.invalidData)
+			case .keep:
+				break
 			}
-			let context = context(for: newGeometry)
+			let context = context(for: newGeometry, chroma444: chroma444)
 			guard !nalUnits.isEmpty else {
 				logger.logError("Video frame has no Annex-B NAL units")
 				context.decodeGate.decodeFailed()
@@ -321,7 +600,7 @@ extension VNCProtocol {
 			// in order to keep the decoder's reference state, display the last.
 			var lastImageBuffer: CVPixelBuffer?
 			for accessUnit in OpenH264AnnexB.accessUnits(from: nalUnits, codec: codec) {
-				guard updateParameterSets(in: accessUnit, context: context, logger: logger) else {
+				guard try updateParameterSets(in: accessUnit, context: context, logger: logger) else {
 					return
 				}
 				guard context.decodeGate.shouldDecode(accessUnit) else { continue }
@@ -385,8 +664,20 @@ extension VNCProtocol {
 			in accessUnit: [Data],
 			context: DecoderContext,
 			logger: VNCLogger
-		) -> Bool {
+		) throws -> Bool {
 			let parameterSets = OpenH264AnnexB.videoParameterSets(in: accessUnit, codec: codec)
+			if codec == .hevc, let sps = parameterSets.sps {
+				do {
+					let isSPS444 = try HEVCSPSMetadata.parse(sps).chromaFormatIDC == 3
+					guard isSPS444 == context.chroma444 else {
+						logger.logError("HEVC chroma flag does not match the SPS")
+						throw VNCError.protocol(.invalidData)
+					}
+				} catch {
+					logger.logError("HEVC SPS is malformed")
+					throw VNCError.protocol(.invalidData)
+				}
+			}
 			let candidateVPS = parameterSets.vps ?? context.vps
 			let candidateSPS = parameterSets.sps ?? context.sps
 			let candidatePPS = parameterSets.pps ?? context.pps
@@ -437,7 +728,7 @@ extension VNCProtocol {
 			contextOrder.removeAll()
 		}
 
-		private func context(for geometry: Geometry) -> DecoderContext {
+		private func context(for geometry: Geometry, chroma444: Bool) -> DecoderContext {
 			if let context = contexts[geometry] {
 				contextOrder.removeAll { $0 == geometry }
 				contextOrder.append(geometry)
@@ -449,7 +740,7 @@ extension VNCProtocol {
 				contextOrder.removeFirst()
 				invalidateDecoder(oldestContext)
 			}
-			let context = DecoderContext(codec: codec)
+			let context = DecoderContext(codec: codec, chroma444: chroma444)
 			contexts[geometry] = context
 			contextOrder.append(geometry)
 			return context
@@ -492,32 +783,7 @@ extension VNCProtocol {
 
 		private func makeHEVCFormatDescription(vps: Data, sps: Data, pps: Data) throws
 			-> CMVideoFormatDescription {
-			try vps.withUnsafeBytes { vpsBytes in
-				try sps.withUnsafeBytes { spsBytes in
-					try pps.withUnsafeBytes { ppsBytes in
-						guard let vpsBase = vpsBytes.bindMemory(to: UInt8.self).baseAddress,
-							  let spsBase = spsBytes.bindMemory(to: UInt8.self).baseAddress,
-							  let ppsBase = ppsBytes.bindMemory(to: UInt8.self).baseAddress else {
-							throw OpenH264DecodeError.invalidParameterSets
-						}
-						var pointers: [UnsafePointer<UInt8>] = [vpsBase, spsBase, ppsBase]
-						var sizes = [vps.count, sps.count, pps.count]
-						var description: CMFormatDescription?
-						let status = CMVideoFormatDescriptionCreateFromHEVCParameterSets(
-							allocator: kCFAllocatorDefault,
-							parameterSetCount: 3,
-							parameterSetPointers: &pointers,
-							parameterSetSizes: &sizes,
-							nalUnitHeaderLength: 4,
-							extensions: nil,
-							formatDescriptionOut: &description)
-						guard status == noErr, let description else {
-							throw OpenH264DecodeError.videoToolbox(status)
-						}
-						return description
-					}
-				}
-			}
+			try HEVCVideoToolbox.makeFormatDescription(vps: vps, sps: sps, pps: pps)
 		}
 
 		private func makeDecoder(formatDescription: CMVideoFormatDescription) throws

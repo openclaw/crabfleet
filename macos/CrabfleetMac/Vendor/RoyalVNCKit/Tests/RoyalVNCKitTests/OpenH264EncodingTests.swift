@@ -43,6 +43,48 @@ struct OpenH264EncodingTests {
 	}
 
 	@Test
+	func buildsRExtHVCCFromActualProfileTierLevel() throws {
+		let vps = Data([
+			0x40, 0x01, 0x0c, 0x01, 0xff, 0xff, 0x04, 0x08, 0x00, 0x00, 0x03, 0x00,
+			0x9e, 0x28, 0x00, 0x00, 0x03, 0x00, 0x00, 0x1e, 0xba, 0x02, 0x40,
+		])
+		let sps = Data([
+			0x42, 0x01, 0x01, 0x04, 0x08, 0x00, 0x00, 0x03, 0x00, 0x9e, 0x28, 0x00,
+			0x00, 0x03, 0x00, 0x00, 0x1e, 0x90, 0x04, 0x10, 0x20, 0xb2, 0xdd, 0x49,
+			0x26, 0x57, 0x80, 0xb4, 0x04, 0x00, 0x00, 0x03, 0x00, 0x04, 0x00, 0x00,
+			0x03, 0x00, 0x04, 0x20,
+		])
+		let pps = Data([0x44, 0x01, 0xc1, 0x72, 0x86, 0x0c, 0x02, 0x24])
+
+		let metadata = try HEVCSPSMetadata.parse(sps)
+		let record = try HEVCHVCCBuilder.make(vps: vps, sps: sps, pps: pps)
+
+		#expect(metadata.profileByte & 0x1f == 4)
+		#expect(metadata.chromaFormatIDC == 3)
+		#expect(Array(record.prefix(13)) == [
+			1, 4, 0x08, 0, 0, 0, 0x9e, 0x28, 0, 0, 0, 0, 0x1e,
+		])
+		#expect(record[16] & 0x03 == 3)
+		#expect(record[22] == 3)
+	}
+
+	@Test
+	func resetsDecoderBeforeAcceptingAChromaFlagTransition() {
+		#expect(
+			OpenH264DecoderResetPolicy.action(
+				codec: .hevc, flags: 0x4, existingChroma444: false) == .reject)
+		#expect(
+			OpenH264DecoderResetPolicy.action(
+				codec: .hevc, flags: 0x2 | 0x4, existingChroma444: false) == .resetAll)
+		#expect(
+			OpenH264DecoderResetPolicy.action(
+				codec: .hevc, flags: 0x4, existingChroma444: true) == .keep)
+		#expect(
+			OpenH264DecoderResetPolicy.action(
+				codec: .h264, flags: 0x4, existingChroma444: nil) == .reject)
+	}
+
+	@Test
 	func hevcRecoveryGateAcceptsIRAPPictures() {
 		let inter = Data([1 << 1, 1, 0x80])
 		let bla = Data([16 << 1, 1, 0x80])

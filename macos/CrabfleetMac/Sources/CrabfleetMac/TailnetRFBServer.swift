@@ -27,11 +27,16 @@ struct TailnetStreamStats: Equatable, Sendable {
     codec: String,
     hardwareAccelerated: Bool,
     maximumFrameQPAvailable: Bool,
-    maximumFrameQPRequested: Bool
+    maximumFrameQPRequested: Bool,
+    chroma444Available: Bool = true,
+    chroma444Requested: Bool = false
   ) -> String {
     var detail = codec + (codec == "JPEG" ? "" : hardwareAccelerated ? " hw" : " sw")
     if !maximumFrameQPAvailable, maximumFrameQPRequested {
       detail += " · QP cap unavailable"
+    }
+    if !chroma444Available, chroma444Requested {
+      detail += " · 4:4:4 unavailable"
     }
     return detail
   }
@@ -580,6 +585,7 @@ final class RFBHostSession: @unchecked Sendable {
   // Negotiated per-connection state; only the protocol task mutates it.
   private var supportsTightEncoding = false
   private var supportsCrabfleetHEVC = false
+  private var supportsCrabfleetChroma444 = false
   private var supportsOpenH264 = false
   private var supportsExtendedDesktopSize = false
   private var supportsExtendedClipboard = false
@@ -594,6 +600,7 @@ final class RFBHostSession: @unchecked Sendable {
   private var videoPixelMailbox: VideoMailbox<VideoPixelSource>?
   private var videoFrameConsumer: Task<Void, Never>?
   private var hevcPathBroken = false
+  private var chroma444Unavailable = false
   private var h264PathBroken = false
   private var needsContextReset = false
   private var forceNextKeyframe = false
@@ -714,7 +721,7 @@ final class RFBHostSession: @unchecked Sendable {
       let previousRateController = rateController
       let previousMode = qualityMode
       qualityMode = mode
-      let bitrate = rateController.setMode(mode)
+      let bitrate = rateController.setMode(mode, chroma: videoEncoder?.activeChroma)
       guard let videoEncoder else {
         return true
       }
@@ -912,6 +919,7 @@ final class RFBHostSession: @unchecked Sendable {
         let encodings = (0..<count).map { encodingData.readInt32(at: $0 * 4) }
         supportsTightEncoding = encodings.contains(RFBWire.tightEncoding)
         supportsCrabfleetHEVC = encodings.contains(RFBWire.crabfleetHEVCEncoding)
+        supportsCrabfleetChroma444 = encodings.contains(RFBWire.crabfleetChroma444Encoding)
         supportsOpenH264 = encodings.contains(RFBWire.openH264Encoding)
         if encodings.contains(RFBWire.extendedDesktopSizeEncoding),
           !supportsExtendedDesktopSize
@@ -923,7 +931,10 @@ final class RFBHostSession: @unchecked Sendable {
           supportsExtendedClipboard = encodings.contains(RFBWire.extendedClipboardEncoding)
           supportsCrabfleetAudio = encodings.contains(RFBWire.crabfleetAudioEncoding)
         }
-        if let activeCodec = activeVideoEncoder?.codec, activeCodec != selectedVideoCodec {
+        if let activeEncoder = activeVideoEncoder,
+          activeEncoder.codec != selectedVideoCodec
+            || activeEncoder.activeChroma != selectedVideoChroma
+        {
           await stopVideoPath(markBroken: nil)
         }
         if !supportsCrabfleetHEVC, !supportsOpenH264 {
@@ -949,6 +960,9 @@ final class RFBHostSession: @unchecked Sendable {
             ))
         }
         while let codec = selectedVideoCodec {
+          if let encoder = activeVideoEncoder, encoder.activeChroma != selectedVideoChroma {
+            await stopVideoPath(markBroken: nil)
+          }
           if activeVideoEncoder == nil {
             do {
               try await startVideoPath(codec: codec)
@@ -961,14 +975,20 @@ final class RFBHostSession: @unchecked Sendable {
             if !incremental { requestKeyframe() }
             switch await nextVideoUpdate(encoder: encoder) {
             case .frame(let frame, let dirtyAreaFraction):
-              let flags: UInt32 = needsContextReset ? 0x2 : 0
+              guard !needsContextReset || frame.isKeyframe else {
+                requestKeyframe()
+                try await io.send(RFBWire.emptyUpdate())
+                continue protocolLoop
+              }
+              let flags: UInt32 = (needsContextReset ? 0x2 : 0)
+                | (encoder.activeChroma == .chroma444 ? 0x4 : 0)
               let update = try videoUpdate(frame: frame, codec: codec, flags: flags)
               let sendSeconds = try await timedSend(update, io: io)
               needsContextReset = false
               recordFrameStats(
                 byteCount: frame.data.count,
                 sendSeconds: sendSeconds,
-                codec: codec == .hevc ? "HEVC" : "H.264",
+                codec: videoCodecDescription(codec: codec, encoder: encoder),
                 hardwareAccelerated: encoder.isHardwareAccelerated,
                 encoder: encoder,
                 dirtyAreaFraction: dirtyAreaFraction)
@@ -978,10 +998,14 @@ final class RFBHostSession: @unchecked Sendable {
               // client's request loop and input keep flowing.
               try await io.send(RFBWire.emptyUpdate())
               emitStatsIfDue(
-                codec: codec == .hevc ? "HEVC" : "H.264",
+                codec: videoCodecDescription(codec: codec, encoder: encoder),
                 hardwareAccelerated: encoder.isHardwareAccelerated,
-                maximumFrameQPAvailable: encoder.isMaximumFrameQPAvailable)
+                maximumFrameQPAvailable: encoder.isMaximumFrameQPAvailable,
+                chroma444Available: !chroma444Unavailable)
               continue protocolLoop
+            case .chromaFallback:
+              chroma444Unavailable = true
+              await stopVideoPath(markBroken: nil)
             case .failed:
               await stopVideoPath(markBroken: codec)
             }
@@ -1395,12 +1419,16 @@ final class RFBHostSession: @unchecked Sendable {
   /// the inter-frame reference chain stays intact and stale frames are dropped
   /// before they cost encoder time.
   private func startVideoPath(codec: MacVideoCodec) async throws {
-    let maximumFrameQP = withLock { qualityMode.maximumFrameQP }
+    let configuration = withLock { (qualityMode.maximumFrameQP, selectedVideoChroma) }
     let encoder = try MacVideoEncoder(
       width: currentWidth,
       height: currentHeight,
       codec: codec,
-      maximumFrameQP: maximumFrameQP)
+      chroma: configuration.1,
+      maximumFrameQP: configuration.0)
+    if configuration.1 == .chroma444, encoder.activeChroma != .chroma444 {
+      chroma444Unavailable = true
+    }
     let pixelMailbox = VideoMailbox<VideoPixelSource>()
     _ = replaceVideoEncoder(with: encoder)
     withLock { videoPixelMailbox = pixelMailbox }
@@ -1511,6 +1539,17 @@ final class RFBHostSession: @unchecked Sendable {
     }
   }
 
+  private var selectedVideoChroma: MacVideoChroma {
+    guard let codec = selectedVideoCodec else { return .chroma420 }
+    var encodings: [Int32] = []
+    if supportsCrabfleetChroma444 { encodings.append(RFBWire.crabfleetChroma444Encoding) }
+    return RFBWire.preferredChroma(
+      codec: codec,
+      qualityMode: qualityMode,
+      encodings: encodings,
+      chroma444Unavailable: chroma444Unavailable)
+  }
+
   private func videoUpdate(
     frame: EncodedVideoFrame,
     codec: MacVideoCodec,
@@ -1545,7 +1584,9 @@ final class RFBHostSession: @unchecked Sendable {
   @discardableResult
   private func resetRateController() -> ShareQualityMode {
     withLock {
-      rateController = VideoRateController(mode: qualityMode)
+      rateController = VideoRateController(
+        mode: qualityMode,
+        chroma: videoEncoder?.activeChroma ?? selectedVideoChroma)
       return qualityMode
     }
   }
@@ -1561,7 +1602,7 @@ final class RFBHostSession: @unchecked Sendable {
       generation: UInt64,
       qpStatus: OSStatus
     ) in
-      rateController = VideoRateController(mode: qualityMode)
+      rateController = VideoRateController(mode: qualityMode, chroma: encoder.activeChroma)
       frameIntervalGeneration &+= 1
       var qpStatus = noErr
       if videoEncoder === encoder {
@@ -1661,6 +1702,7 @@ final class RFBHostSession: @unchecked Sendable {
   private enum VideoUpdateOutcome {
     case frame(EncodedVideoFrame, dirtyAreaFraction: Double)
     case idle
+    case chromaFallback
     case failed
   }
 
@@ -1722,6 +1764,9 @@ final class RFBHostSession: @unchecked Sendable {
     }
 
     while let output = await encodedMailbox.next(timeout: .seconds(1)) {
+      if case .chromaFallbackRequired = output {
+        return .chromaFallback
+      }
       guard case .frame(let frame) = output else {
         requestKeyframe()
         if isIdleRefresh {
@@ -1805,6 +1850,7 @@ final class RFBHostSession: @unchecked Sendable {
       codec: codec,
       hardwareAccelerated: hardwareAccelerated,
       maximumFrameQPAvailable: encoder?.isMaximumFrameQPAvailable ?? true,
+      chroma444Available: !chroma444Unavailable,
       now: now)
   }
 
@@ -1812,6 +1858,7 @@ final class RFBHostSession: @unchecked Sendable {
     codec: String,
     hardwareAccelerated: Bool,
     maximumFrameQPAvailable: Bool = true,
+    chroma444Available: Bool = true,
     now: Double = ProcessInfo.processInfo.systemUptime
   ) {
     guard now - lastStatsTimestamp >= 2 else { return }
@@ -1823,7 +1870,11 @@ final class RFBHostSession: @unchecked Sendable {
       codec: codec,
       hardwareAccelerated: hardwareAccelerated,
       maximumFrameQPAvailable: maximumFrameQPAvailable,
-      maximumFrameQPRequested: withLock { qualityMode.maximumFrameQP != nil })
+      maximumFrameQPRequested: withLock { qualityMode.maximumFrameQP != nil },
+      chroma444Available: chroma444Available,
+      chroma444Requested: withLock {
+        supportsCrabfleetChroma444 && qualityMode != .smooth && supportsCrabfleetHEVC
+      })
     eventHandler(
       .streaming(
         TailnetStreamStats(
@@ -1834,6 +1885,11 @@ final class RFBHostSession: @unchecked Sendable {
           dirtyAreaPercent: snapshot.dirtyAreaPercent,
           framesPerSecond: snapshot.fps,
           megabitsPerSecond: snapshot.megabitsPerSecond)))
+  }
+
+  private func videoCodecDescription(codec: MacVideoCodec, encoder: MacVideoEncoder) -> String {
+    codec == .hevc && encoder.activeChroma == .chroma444 ? "HEVC 4:4:4" : codec == .hevc
+      ? "HEVC" : "H.264"
   }
 
   /// Waits for a frame matching the announced framebuffer size, discarding
