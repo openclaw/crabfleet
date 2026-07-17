@@ -236,6 +236,7 @@ struct VNCConnectionRequest: Equatable {
   let clipboardEnabled: Bool
   let rememberAccessCode: Bool
   var quic: QUICConnectionConfiguration?
+  let prefersPasswordOnlyARD: Bool
 
   init(
     host: String,
@@ -244,7 +245,8 @@ struct VNCConnectionRequest: Equatable {
     password: String,
     clipboardEnabled: Bool,
     rememberAccessCode: Bool = false,
-    quic: QUICConnectionConfiguration? = nil
+    quic: QUICConnectionConfiguration? = nil,
+    prefersPasswordOnlyARD: Bool = false
   ) {
     self.host = host
     self.port = port
@@ -253,6 +255,7 @@ struct VNCConnectionRequest: Equatable {
     self.clipboardEnabled = clipboardEnabled
     self.rememberAccessCode = rememberAccessCode
     self.quic = quic
+    self.prefersPasswordOnlyARD = prefersPasswordOnlyARD
   }
 
   var address: VNCAddress {

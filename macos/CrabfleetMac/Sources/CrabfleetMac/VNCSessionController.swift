@@ -106,6 +106,7 @@ final class VNCSessionController: NSObject, ObservableObject {
   private var credentialConnectionID: ObjectIdentifier?
   private var username = ""
   private var password = ""
+  private var prefersPasswordOnlyARD = false
   private var authenticationSucceeded: (() -> Void)?
   private var thumbnailWorkItem: DispatchWorkItem?
   private var thumbnailGeneration: UInt64 = 0
@@ -142,6 +143,7 @@ final class VNCSessionController: NSObject, ObservableObject {
     password: String,
     clipboardEnabled: Bool = true,
     quic: QUICConnectionConfiguration? = nil,
+    prefersPasswordOnlyARD: Bool = false,
     authenticationSucceeded: (() -> Void)? = nil
   ) {
     tearDownConnection()
@@ -161,7 +163,8 @@ final class VNCSessionController: NSObject, ObservableObject {
       username: username,
       password: password,
       clipboardEnabled: clipboardEnabled,
-      quic: quic)
+      quic: quic,
+      prefersPasswordOnlyARD: prefersPasswordOnlyARD)
     if let quic {
       do {
         guard let quicPort = NWEndpoint.Port(rawValue: UInt16(quic.port)) else {
@@ -220,7 +223,11 @@ final class VNCSessionController: NSObject, ObservableObject {
     applyFramebufferUpdatePolicy(to: connection)
     self.connection = connection
     self.transport = transport
-    setCredentials(username: request.username, password: request.password, for: connection)
+    setCredentials(
+      username: request.username,
+      password: request.password,
+      prefersPasswordOnlyARD: request.prefersPasswordOnlyARD,
+      for: connection)
     connection.connect()
   }
 
@@ -405,21 +412,30 @@ final class VNCSessionController: NSObject, ObservableObject {
     credentialConnectionID = nil
     username = ""
     password = ""
+    prefersPasswordOnlyARD = false
   }
 
-  private func setCredentials(username: String, password: String, for connection: VNCConnection) {
+  private func setCredentials(
+    username: String,
+    password: String,
+    prefersPasswordOnlyARD: Bool,
+    for connection: VNCConnection
+  ) {
     credentialLock.lock()
     defer { credentialLock.unlock() }
     credentialConnectionID = ObjectIdentifier(connection)
     self.username = username
     self.password = password
+    self.prefersPasswordOnlyARD = prefersPasswordOnlyARD
   }
 
-  private func credentials(for connection: VNCConnection) -> (username: String, password: String)? {
+  private func credentials(
+    for connection: VNCConnection
+  ) -> (username: String, password: String, prefersPasswordOnlyARD: Bool)? {
     credentialLock.lock()
     defer { credentialLock.unlock() }
     guard credentialConnectionID == ObjectIdentifier(connection) else { return nil }
-    return (username, password)
+    return (username, password, prefersPasswordOnlyARD)
   }
 
   func setLiveSurfacePresented(_ isPresented: Bool) {
@@ -591,7 +607,11 @@ extension VNCSessionController: VNCConnectionDelegate {
     prefersUsernameAuthentication authenticationType: VNCAuthenticationType
   ) -> Bool {
     if authenticationType == .appleRemoteDesktop {
-      return !(credentials(for: connection)?.password.isEmpty ?? true)
+      let credentials = credentials(for: connection)
+      let hasUsername = !(credentials?.username.isEmpty ?? true)
+      let hasCrabfleetPassword =
+        credentials?.prefersPasswordOnlyARD == true && !(credentials?.password.isEmpty ?? true)
+      return hasUsername || hasCrabfleetPassword
     }
     return authenticationType.requiresUsername
       && !(credentials(for: connection)?.username.isEmpty ?? true)

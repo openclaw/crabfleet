@@ -15,7 +15,8 @@ struct NativeConnectionTests {
       port: 1,
       username: "",
       password: "test-auth-token",
-      clipboardEnabled: false)
+      clipboardEnabled: false,
+      prefersPasswordOnlyARD: true)
     defer { session.disconnect() }
     let connection = try #require(session.connection)
 
@@ -27,6 +28,30 @@ struct NativeConnectionTests {
       !session.connection(
         connection,
         prefersUsernameAuthentication: .ultraVNCMSLogonII))
+
+    session.connect(
+      host: "127.0.0.1",
+      port: 1,
+      username: "",
+      password: "test-auth-token",
+      clipboardEnabled: false)
+    let genericConnection = try #require(session.connection)
+    #expect(
+      !session.connection(
+        genericConnection,
+        prefersUsernameAuthentication: .appleRemoteDesktop))
+
+    session.connect(
+      host: "127.0.0.1",
+      port: 1,
+      username: "viewer",
+      password: "test-auth-token",
+      clipboardEnabled: false)
+    let usernameConnection = try #require(session.connection)
+    #expect(
+      session.connection(
+        usernameConnection,
+        prefersUsernameAuthentication: .appleRemoteDesktop))
   }
 
   @Test

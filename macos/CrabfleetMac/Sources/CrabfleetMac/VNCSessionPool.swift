@@ -113,6 +113,7 @@ final class VNCSessionPool: ObservableObject {
       password: request.password,
       clipboardEnabled: request.clipboardEnabled,
       quic: request.quic,
+      prefersPasswordOnlyARD: request.prefersPasswordOnlyARD,
       authenticationSucceeded: authenticationSucceeded
     )
 

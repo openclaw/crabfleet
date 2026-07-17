@@ -207,6 +207,8 @@ export function DesktopViewer({ host, onExit }) {
         player.setMuted(true);
       }
       client = new RFBClient(stream, {
+        // This component opens the owner-authenticated Worker relay. Direct
+        // byte transports must await browserDirectRFBAuthentication first.
         hevc,
         h264,
         chroma444: hevc && rext,
@@ -650,12 +652,76 @@ export function DesktopViewer({ host, onExit }) {
   );
 }
 
-export function browserDirectRFBAuthentication(hostID) {
+/** Resolve masked, tab-scoped credentials before a direct transport is opened. */
+export async function browserDirectRFBAuthentication(hostID) {
   let storage = null;
   try {
     storage = window.sessionStorage;
   } catch {}
-  return directRFBAuthentication(hostID, storage, () =>
-    window.prompt("Enter the 12-character Crabfleet sharing password"),
-  );
+  return directRFBAuthentication(hostID, storage, requestBrowserRFBPassword);
+}
+
+export function requestBrowserRFBPassword() {
+  return new Promise((resolve) => {
+    const dialog = document.createElement("dialog");
+    const form = document.createElement("form");
+    const title = document.createElement("h2");
+    const description = document.createElement("p");
+    const label = document.createElement("label");
+    const input = document.createElement("input");
+    const actions = document.createElement("div");
+    const cancel = document.createElement("button");
+    const connect = document.createElement("button");
+    const titleID = `rfb-password-title-${crypto.randomUUID()}`;
+
+    dialog.className = "action-dialog";
+    dialog.setAttribute("aria-labelledby", titleID);
+    form.className = "action-dialog-surface";
+    title.id = titleID;
+    title.textContent = "Connect to shared Mac";
+    description.textContent = "Enter the 12-character Crabfleet sharing password.";
+    label.textContent = "Sharing password";
+    input.type = "password";
+    input.autocomplete = "current-password";
+    input.required = true;
+    input.maxLength = 12;
+    input.pattern = "[A-Za-z0-9]{12}";
+    actions.className = "action-dialog-actions";
+    cancel.type = "button";
+    cancel.textContent = "Cancel";
+    connect.type = "submit";
+    connect.className = "primary";
+    connect.textContent = "Connect";
+
+    label.append(input);
+    actions.append(cancel, connect);
+    form.append(title, description, label, actions);
+    dialog.append(form);
+    document.body.append(dialog);
+
+    const finish = (password) => {
+      input.value = "";
+      dialog.remove();
+      resolve(password);
+    };
+    cancel.addEventListener("click", () => finish(null), { once: true });
+    dialog.addEventListener(
+      "cancel",
+      (event) => {
+        event.preventDefault();
+        finish(null);
+      },
+      { once: true },
+    );
+    form.addEventListener(
+      "submit",
+      (event) => {
+        event.preventDefault();
+        finish(input.value);
+      },
+      { once: true },
+    );
+    dialog.showModal();
+    input.focus();
+  });
 }

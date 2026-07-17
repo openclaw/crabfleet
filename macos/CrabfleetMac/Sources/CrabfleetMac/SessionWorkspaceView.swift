@@ -507,7 +507,8 @@ struct DesktopConnectionSheet: View {
           username: effectiveUsername,
           password: password,
           clipboardEnabled: clipboardEnabled,
-          rememberAccessCode: rememberAccessCode
+          rememberAccessCode: rememberAccessCode,
+          prefersPasswordOnlyARD: target.source == .crabfleet
         ))
       else {
         validationMessage = "Crabfleet could not update this password in Keychain."
