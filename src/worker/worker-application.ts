@@ -18,7 +18,8 @@ import type { RuntimeEnv } from "./env.ts";
 import { githubHeaders } from "./github.ts";
 import { GitHubActionsApplication } from "./github-actions-application.ts";
 import { GitHubReferenceService } from "./github-reference-service.ts";
-import { conflict, forbidden, notFound, readJson } from "./http.ts";
+import { readJson } from "./http.ts";
+import { NativeVNCService } from "./native-vnc-service.ts";
 import { InteractiveSessionApplication } from "./interactive-session-application.ts";
 import { createInteractiveDesktopService } from "./interactive-desktop-service.ts";
 import { DesktopHostRepository } from "./desktop-host-repository.ts";
@@ -41,10 +42,7 @@ import { scheduleNativeAuthPruning, scheduleRecurringCardTick } from "./schedule
 import { createSandboxSessionResourceService } from "./sandbox-session-resources.ts";
 import { ServiceRegistry } from "./service-registry.ts";
 import type { InteractiveSession } from "./session-model.ts";
-import {
-  interactiveSessionAdapterControlPlane,
-  interactiveSessionOwnerSubject,
-} from "./session-model.ts";
+import { interactiveSessionOwnerSubject } from "./session-model.ts";
 import { readInteractiveSessionShareCredential } from "./session-repository.ts";
 import { ownsInteractiveSession } from "./session-access.ts";
 import { readSandboxFleetPolicies } from "./session-control-do.ts";
@@ -204,24 +202,14 @@ export class WorkerApplication {
       requireUser: (request) => auth.authenticate(request),
       revokeToken: (request) => auth.revoke(request),
       readFleet: (user) => this.readFleetState(user, undefined, context),
-      createNativeVNCGrant: async (user, sessionId) => {
-        const session = await this.sessions.readVisibleFresh(user, sessionId);
-        if (!session) throw notFound("session not found");
-        if (session.canControl !== true) throw forbidden("session control required");
-        const controlPlane = session[interactiveSessionAdapterControlPlane];
-        if (
-          session.runtime !== "crabbox" ||
-          session.adapter !== "runtime-v1" ||
-          session.capabilities.nativeVnc !== true ||
-          !session.adapterWorkspaceId ||
-          !controlPlane
-        ) {
-          throw conflict("native VNC is unavailable for this session");
-        }
-        return await this.runtime
-          .workspaceLifecycle()
-          .createNativeVNCGrant(session.profile, controlPlane, session.adapterWorkspaceId);
-      },
+      createNativeVNCGrant: (user, sessionId) =>
+        new NativeVNCService({
+          readSession: (u, id) => this.sessions.readVisibleFresh(u, id),
+          mintGrant: (profile, controlPlane, adapterWorkspaceId) =>
+            this.runtime
+              .workspaceLifecycle()
+              .createNativeVNCGrant(profile, controlPlane, adapterWorkspaceId),
+        }).createGrant(user, sessionId),
       deployment: publicDeploymentConfig(this.env),
     };
   }
