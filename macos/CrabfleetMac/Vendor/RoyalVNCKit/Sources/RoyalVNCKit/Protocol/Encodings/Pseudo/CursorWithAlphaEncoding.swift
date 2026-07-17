@@ -39,6 +39,14 @@ extension VNCProtocol.CursorWithAlphaEncoding {
 		logger.logDebug("Receiving CursorWithAlpha data")
 		let rgba = try await connection.readBuffered(length: payloadLength)
 		logger.logDebug("Finished receiving CursorWithAlpha data")
+		for offset in stride(from: 0, to: payloadLength, by: 4) {
+			let alpha = rgba[rgba.startIndex + offset + 3]
+			guard rgba[rgba.startIndex + offset] <= alpha,
+				  rgba[rgba.startIndex + offset + 1] <= alpha,
+				  rgba[rgba.startIndex + offset + 2] <= alpha else {
+				throw VNCError.protocol(.invalidData)
+			}
+		}
 		framebuffer.updateCursor(
 			VNCCursor(
 				imageData: rgba,

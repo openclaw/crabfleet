@@ -11,7 +11,7 @@ import {
 } from "./rfb/input.ts";
 import { CanvasRenderer } from "./rfb/render.ts";
 import { WebSocketByteStream } from "./rfb/stream.ts";
-import { cursorCSS, shouldShowCursorOverlay } from "./rfb/cursor.ts";
+import { cursorCSS, remotePointerAfterCursorShape, shouldShowCursorOverlay } from "./rfb/cursor.ts";
 import { ViewerStatsWindow } from "./rfb/stats.ts";
 
 export function desktopViewerHostID(pathname = location.pathname) {
@@ -225,6 +225,7 @@ export function DesktopViewer({ host, onExit }) {
           if (!canvas || !cursor) {
             if (canvas) canvas.style.cursor = "none";
             setCursorImage(null);
+            setRemotePointer((current) => remotePointerAfterCursorShape(current, false));
             return;
           }
           const dataURL = cursorDataURL(cursor);

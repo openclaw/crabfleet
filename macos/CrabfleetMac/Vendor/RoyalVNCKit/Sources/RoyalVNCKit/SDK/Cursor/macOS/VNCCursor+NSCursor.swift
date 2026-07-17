@@ -37,9 +37,24 @@ public extension VNCCursor {
 
 private extension VNCCursor {
 	static var emptyNSCursor: NSCursor {
-		// TODO: Should use a "dot" cursor like in other VNC clients
-
-		.arrow
+		let dimension = 16
+		guard let representation = NSBitmapImageRep(
+			bitmapDataPlanes: nil,
+			pixelsWide: dimension,
+			pixelsHigh: dimension,
+			bitsPerSample: 8,
+			samplesPerPixel: 4,
+			hasAlpha: true,
+			isPlanar: false,
+			colorSpaceName: .deviceRGB,
+			bytesPerRow: dimension * 4,
+			bitsPerPixel: 32) else {
+			return .arrow
+		}
+		representation.bitmapData?.initialize(repeating: 0, count: dimension * dimension * 4)
+		let image = NSImage(size: CGSize(width: dimension, height: dimension))
+		image.addRepresentation(representation)
+		return NSCursor(image: image, hotSpot: .zero)
 	}
 
 }

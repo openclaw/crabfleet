@@ -47,3 +47,10 @@ export function shouldShowCursorOverlay(
   if (!hasPointerFocus || !local) return true;
   return remote.x !== local.x || remote.y !== local.y;
 }
+
+export function remotePointerAfterCursorShape(
+  current: CursorPoint | null,
+  hasCursorImage: boolean,
+): CursorPoint | null {
+  return hasCursorImage ? current : null;
+}

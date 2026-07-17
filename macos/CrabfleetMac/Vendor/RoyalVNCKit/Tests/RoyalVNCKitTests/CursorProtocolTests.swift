@@ -9,7 +9,7 @@ import AppKit
 struct CursorProtocolTests {
 	#if os(macOS)
 	@Test @MainActor
-	func scalesFocusedSystemCursorWithFramebuffer() {
+	func scalesFocusedSystemCursorWithFramebuffer() throws {
 		let cursor = VNCCursor(
 			imageData: Data(repeating: 0xFF, count: 4 * 4 * 4),
 			size: VNCSize(width: 4, height: 4),
@@ -22,6 +22,12 @@ struct CursorProtocolTests {
 		let scaled = cursor.nsCursor(scale: 0.5)
 		#expect(scaled.image.size == CGSize(width: 2, height: 2))
 		#expect(scaled.hotSpot == CGPoint(x: 1.5, y: 1.5))
+		let hidden = VNCCursor.empty.nsCursor(scale: 0.5)
+		#expect(hidden.image.size == CGSize(width: 16, height: 16))
+		let representation = try #require(hidden.image.representations.first as? NSBitmapImageRep)
+		let bitmap = try #require(representation.bitmapData)
+		let pixels = Data(bytes: bitmap, count: representation.bytesPerRow * representation.pixelsHigh)
+		#expect(pixels.allSatisfy { $0 == 0 })
 	}
 	#endif
 
@@ -106,6 +112,14 @@ struct CursorProtocolTests {
 			0, 1, 0, 0, 0, 1, 0, 0, 0xFF, 0xFF, 0xFF, 0x18,
 		])
 		await #expect(throws: (any Error).self) { try await parse(malformedPointer) }
+
+		let nonPremultipliedAlpha = Data([
+			0, 0, 0, 1,
+			0, 0, 0, 0, 0, 1, 0, 1, 0xFF, 0xFF, 0xFE, 0xC6,
+			0, 0, 0, 0,
+			0x80, 0, 0, 0x40,
+		])
+		await #expect(throws: (any Error).self) { try await parse(nonPremultipliedAlpha) }
 	}
 
 	private func parse(_ fixture: Data) async throws -> CursorFramebufferDelegate {

@@ -975,6 +975,9 @@ extension VNCCAFramebufferView: VNCConnectionDelegate {
         DispatchQueue.main.async { [weak self] in
 			guard let self else { return }
 			self.remoteCursor = cursor
+			if cursor.isEmpty {
+				self.remotePointerPosition = nil
+			}
 			self.updateLocalCursor()
 			self.updateRemoteCursorOverlay()
         }

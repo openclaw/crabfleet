@@ -1,7 +1,11 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { cursorCSS, shouldShowCursorOverlay } from "../src/app/rfb/cursor.ts";
+import {
+  cursorCSS,
+  remotePointerAfterCursorShape,
+  shouldShowCursorOverlay,
+} from "../src/app/rfb/cursor.ts";
 
 test("cursor CSS preserves image and hotspot within the 128px cap", () => {
   assert.equal(
@@ -25,4 +29,6 @@ test("remote cursor overlay follows focus and local convergence", () => {
   assert.equal(shouldShowCursorOverlay(remote, { x: 10, y: 20 }, true), false);
   assert.equal(shouldShowCursorOverlay(remote, { x: 11, y: 20 }, true), true);
   assert.equal(shouldShowCursorOverlay(remote, { x: 10, y: 20 }, false), true);
+  assert.deepEqual(remotePointerAfterCursorShape(remote, true), remote);
+  assert.equal(remotePointerAfterCursorShape(remote, false), null);
 });
