@@ -105,29 +105,52 @@ struct FleetRootView: View {
     }
     .tint(.mint)
     .sheet(item: $connectionTarget) { target in
-      DesktopConnectionSheet(target: target) { request in
+      DesktopConnectionSheet(
+        target: target,
+        storedAccessCode: target.endpoint.map(connections.accessCode(for:)) ?? .missing
+      ) { request in
+        var request = request
+        request.quic = target.quic
+        guard let request = persistedDirectRequest(request) else { return false }
         sessions.connect(targetID: target.id, request: request)
         if let profileID = target.profileID {
           connections.markConnected(profileID: profileID)
         }
+        return true
       }
     }
     .sheet(isPresented: $showingQuickConnect) {
-      QuickConnectSheet { name, address, password, clipboardEnabled in
+      QuickConnectSheet { name, address, password, clipboardEnabled, rememberAccessCode in
+        let storedAccessCode = connections.accessCode(for: address)
+        guard !password.isEmpty || storedAccessCode.canSafelySubmitBlank else { return false }
+        let effectiveAccessCode =
+          password.isEmpty && rememberAccessCode
+          ? storedAccessCode.value
+          : password
+        guard
+          connections.rememberAccessCode(
+            effectiveAccessCode,
+            for: address,
+            enabled: rememberAccessCode)
+        else { return false }
         let profile = connections.save(name: name, address: address)
         let target = DesktopTarget(profile: profile)
-        sessions.connect(
-          targetID: target.id,
-          request: .init(
+        let request: VNCConnectionRequest = { password in
+          .init(
             host: address.host,
             port: address.port,
             username: address.username,
             password: password,
-            clipboardEnabled: clipboardEnabled
-          )
+            clipboardEnabled: clipboardEnabled,
+            rememberAccessCode: rememberAccessCode)
+        }(effectiveAccessCode)
+        sessions.connect(
+          targetID: target.id,
+          request: request
         )
         connections.markConnected(profileID: profile.id)
         focus(target.id)
+        return true
       }
     }
     .sheet(isPresented: $showingPrivateShare) {
@@ -184,18 +207,8 @@ struct FleetRootView: View {
       sessions.connectCrabbox(targetID: target.id, sessionID: sessionID) {
         try await store.nativeVNCGrant(sessionID: sessionID)
       }
-    } else if target.source == .crabfleet, let endpoint = target.endpoint {
-      sessions.connect(
-        targetID: target.id,
-        request: .init(
-          host: endpoint.host,
-          port: endpoint.port,
-          username: endpoint.username,
-          password: "",
-          clipboardEnabled: false,
-          quic: target.quic
-        )
-      )
+    } else if target.endpoint != nil {
+      connectionTarget = target
     } else {
       connectionTarget = target
     }
@@ -211,17 +224,43 @@ struct FleetRootView: View {
     )
     let target = DesktopTarget(profile: profile)
     focus(target.id)
-    sessions.connect(
-      targetID: target.id,
-      request: .init(
-        host: launchConnection.host,
-        port: launchConnection.port,
-        username: launchConnection.username,
-        password: "",
-        clipboardEnabled: false
+    let savedAccessCode = connections.accessCode(for: launchConnection)
+    if savedAccessCode.value.isEmpty {
+      connectionTarget = target
+    } else {
+      let request: VNCConnectionRequest = { password in
+        .init(
+          host: launchConnection.host,
+          port: launchConnection.port,
+          username: launchConnection.username,
+          password: password,
+          clipboardEnabled: false,
+          rememberAccessCode: true)
+      }(savedAccessCode.value)
+      sessions.connect(
+        targetID: target.id,
+        request: request
       )
-    )
-    connections.markConnected(profileID: profile.id)
+      connections.markConnected(profileID: profile.id)
+    }
+  }
+
+  private func persistedDirectRequest(_ request: VNCConnectionRequest) -> VNCConnectionRequest? {
+    let address = request.address
+    guard
+      connections.rememberAccessCode(
+        request.password,
+        for: address,
+        enabled: request.rememberAccessCode)
+    else { return nil }
+    return .init(
+      host: request.host,
+      port: request.port,
+      username: request.username,
+      password: request.password,
+      clipboardEnabled: request.clipboardEnabled,
+      rememberAccessCode: request.rememberAccessCode,
+      quic: request.quic)
   }
 
   private func closeFocus() {

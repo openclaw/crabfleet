@@ -583,7 +583,10 @@ extension VNCSessionController: VNCConnectionDelegate {
     _ connection: VNCConnection,
     prefersUsernameAuthentication authenticationType: VNCAuthenticationType
   ) -> Bool {
-    authenticationType.requiresUsername
+    if authenticationType == .appleRemoteDesktop {
+      return !(credentials(for: connection)?.password.isEmpty ?? true)
+    }
+    return authenticationType.requiresUsername
       && !(credentials(for: connection)?.username.isEmpty ?? true)
   }
 

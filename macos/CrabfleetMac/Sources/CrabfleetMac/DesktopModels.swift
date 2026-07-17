@@ -234,7 +234,26 @@ struct VNCConnectionRequest: Equatable {
   let username: String
   let password: String
   let clipboardEnabled: Bool
-  var quic: QUICConnectionConfiguration? = nil
+  let rememberAccessCode: Bool
+  var quic: QUICConnectionConfiguration?
+
+  init(
+    host: String,
+    port: Int,
+    username: String,
+    password: String,
+    clipboardEnabled: Bool,
+    rememberAccessCode: Bool = false,
+    quic: QUICConnectionConfiguration? = nil
+  ) {
+    self.host = host
+    self.port = port
+    self.username = username
+    self.password = password
+    self.clipboardEnabled = clipboardEnabled
+    self.rememberAccessCode = rememberAccessCode
+    self.quic = quic
+  }
 
   var address: VNCAddress {
     .init(host: host, port: port, username: username)
