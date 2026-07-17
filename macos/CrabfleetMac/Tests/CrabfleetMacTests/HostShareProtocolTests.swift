@@ -1260,6 +1260,17 @@ private struct SlicedRFBByteStream: RFBByteStream {
   }
 }
 
+@MainActor
+struct CursorVisibilityProbeTests {
+  @Test
+  func systemCursorVisibilityProbeResolves() {
+    // The probe resolves the deprecated-but-exported CGCursorIsVisible symbol
+    // at runtime. If this expectation ever fails, macOS dropped the symbol and
+    // hidden-cursor suppression silently degrades to always-visible.
+    #expect(MacCursorMonitor.systemCursorVisibility != nil)
+  }
+}
+
 private final class ThreadSafeSnapshotBox: @unchecked Sendable {
   private let lock = NSLock()
   private var storage: SystemCursorSnapshot

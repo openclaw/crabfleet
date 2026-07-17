@@ -256,11 +256,27 @@ final class MacCursorMonitor: @unchecked Sendable {
     }
   }
 
+  /// CGCursorIsVisible is the only public visibility signal but has been
+  /// unavailable to Swift since 10.9; the C symbol is still exported, so
+  /// resolve it at runtime and fall back to "visible" if it ever disappears.
+  static let systemCursorVisibility: (() -> Bool)? = {
+    guard let handle = dlopen(nil, RTLD_LAZY), let symbol = dlsym(handle, "CGCursorIsVisible")
+    else { return nil }
+    typealias Probe = @convention(c) () -> boolean_t
+    let probe = unsafeBitCast(symbol, to: Probe.self)
+    return { probe() != 0 }
+  }()
+
   @MainActor
   private static func captureSnapshot() -> SystemCursorSnapshot? {
     guard let event = CGEvent(source: nil) else { return nil }
+    // Visibility is separate system state: an app can hide the cursor while
+    // NSCursor.currentSystem still carries a shape. Publish an empty image so
+    // the existing hidden-shape path suppresses the remote cursor too.
+    let visible = systemCursorVisibility?() ?? true
+    let image = visible ? NSCursor.currentSystem.flatMap(render) : nil
     return SystemCursorSnapshot(
-      image: NSCursor.currentSystem.flatMap(render),
+      image: image,
       position: event.location)
   }
 
