@@ -123,11 +123,14 @@ struct FleetRootView: View {
     }
     .sheet(isPresented: $showingQuickConnect) {
       QuickConnectSheet(storedAccessCode: connections.accessCode(for:)) {
-        name, address, password, clipboardEnabled, rememberAccessCode in
+        name, address, password, clipboardEnabled, rememberAccessCode, prefersPasswordOnlyARD in
         let storedAccessCode = connections.accessCode(for: address)
         guard !password.isEmpty || storedAccessCode.canSafelySubmitBlank else { return false }
         let effectiveAccessCode = password.isEmpty ? storedAccessCode.value : password
-        let profile = connections.save(name: name, address: address)
+        let profile = connections.save(
+          name: name,
+          address: address,
+          prefersPasswordOnlyARD: prefersPasswordOnlyARD)
         let target = DesktopTarget(profile: profile)
         let request: VNCConnectionRequest = { password in
           .init(
@@ -136,7 +139,8 @@ struct FleetRootView: View {
             username: address.username,
             password: password,
             clipboardEnabled: clipboardEnabled,
-            rememberAccessCode: rememberAccessCode)
+            rememberAccessCode: rememberAccessCode,
+            prefersPasswordOnlyARD: prefersPasswordOnlyARD)
         }(effectiveAccessCode)
         sessions.connect(
           targetID: target.id,
@@ -242,7 +246,8 @@ struct FleetRootView: View {
           username: launchConnection.username,
           password: password,
           clipboardEnabled: false,
-          rememberAccessCode: true)
+          rememberAccessCode: true,
+          prefersPasswordOnlyARD: profile.prefersPasswordOnlyARD ?? false)
       }(savedAccessCode.value)
       sessions.connect(
         targetID: target.id,

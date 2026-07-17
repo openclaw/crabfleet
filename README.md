@@ -433,7 +433,7 @@ Full documentation available at [docs.crabfleet.ai](https://docs.crabfleet.ai):
 - Repo operations require allowlist membership
 - Cards and sessions are tenant-private by default; global roles do not bypass another tenant's session boundary
 - Named session grants are owner-managed, time-limited, and independently scoped to read-only or terminal-control access
-- Direct Share This Mac listeners require the per-run password after Tailscale peer authorization; native viewers prefer ARD and can remember it in the data-protection Keychain, while browser direct transports use VNC authentication and sessionStorage only. Owner-authenticated Worker relays retain their existing RFB None inner stream.
+- Direct Share This Mac listeners require the per-run password after Tailscale peer authorization; native viewers prefer ARD (registered hosts automatically, copied addresses through the explicit Crabfleet Share toggle) and can remember it in the data-protection Keychain, while browser direct transports use VNC authentication and sessionStorage only. Owner-authenticated Worker relays retain their existing RFB None inner stream.
 - Merge policy is stored as intent; Crabfleet does not currently perform merges
 - Runtime tokens are scoped and short-lived
 - Secrets never logged or stored in D1/R2

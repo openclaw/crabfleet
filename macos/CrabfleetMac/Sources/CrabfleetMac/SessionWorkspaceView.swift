@@ -408,6 +408,7 @@ struct DesktopConnectionSheet: View {
   @State private var username: String
   @State private var password = ""
   @State private var rememberAccessCode: Bool
+  @State private var prefersPasswordOnlyARD: Bool
   @State private var clipboardEnabled = false
   @State private var validationMessage: String?
 
@@ -427,6 +428,7 @@ struct DesktopConnectionSheet: View {
     _username = State(initialValue: target.endpoint?.username ?? "")
     _password = { password in State(initialValue: password) }(storedAccessCode.value)
     _rememberAccessCode = State(initialValue: storedAccessCode.wasRemembered)
+    _prefersPasswordOnlyARD = State(initialValue: target.prefersPasswordOnlyARD)
   }
 
   var body: some View {
@@ -442,6 +444,7 @@ struct DesktopConnectionSheet: View {
         TextField("VNC address", text: $address, prompt: Text("host:5900 or vnc://host:5900"))
         TextField("Username (optional)", text: $username)
         SecureField("Password", text: $password)
+        Toggle("Crabfleet Share (prefer ARD)", isOn: $prefersPasswordOnlyARD)
         Toggle("Remember password in Keychain", isOn: $rememberAccessCode)
         Toggle("Synchronize text clipboard", isOn: $clipboardEnabled)
       }
@@ -508,7 +511,7 @@ struct DesktopConnectionSheet: View {
           password: password,
           clipboardEnabled: clipboardEnabled,
           rememberAccessCode: rememberAccessCode,
-          prefersPasswordOnlyARD: target.source == .crabfleet
+          prefersPasswordOnlyARD: prefersPasswordOnlyARD
         ))
       else {
         validationMessage = "Crabfleet could not update this password in Keychain."
@@ -524,7 +527,7 @@ struct DesktopConnectionSheet: View {
 
 struct QuickConnectSheet: View {
   let storedAccessCode: (VNCAddress) -> StoredAccessCode
-  let connect: (String, VNCAddress, String, Bool, Bool) -> Bool
+  let connect: (String, VNCAddress, String, Bool, Bool, Bool) -> Bool
 
   @Environment(\.dismiss) private var dismiss
   @FocusState private var addressFocused: Bool
@@ -533,6 +536,7 @@ struct QuickConnectSheet: View {
   @State private var username = ""
   @State private var password = ""
   @State private var rememberAccessCode = false
+  @State private var prefersPasswordOnlyARD = false
   @State private var clipboardEnabled = false
   @State private var validationMessage: String?
   @State private var credentialIdentity: VNCAddress?
@@ -550,6 +554,7 @@ struct QuickConnectSheet: View {
         TextField("Name", text: $name, prompt: Text("Design workstation"))
         TextField("Username (optional)", text: $username)
         SecureField("Password", text: $password)
+        Toggle("Crabfleet Share (prefer ARD)", isOn: $prefersPasswordOnlyARD)
         Toggle("Remember password in Keychain", isOn: $rememberAccessCode)
         Toggle("Synchronize text clipboard", isOn: $clipboardEnabled)
       }
@@ -612,7 +617,13 @@ struct QuickConnectSheet: View {
         ? parsed.host
         : name.trimmingCharacters(in: .whitespacesAndNewlines)
       guard
-        connect(effectiveName, effectiveAddress, password, clipboardEnabled, rememberAccessCode)
+        connect(
+          effectiveName,
+          effectiveAddress,
+          password,
+          clipboardEnabled,
+          rememberAccessCode,
+          prefersPasswordOnlyARD)
       else {
         validationMessage = "Crabfleet could not update this password in Keychain."
         return

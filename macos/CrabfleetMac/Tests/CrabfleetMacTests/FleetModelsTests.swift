@@ -276,7 +276,8 @@ struct FleetModelsTests {
     let library = ConnectionLibrary(defaults: defaults, storageKey: "profiles")
     let profile = library.save(
       name: "Build box",
-      address: .init(host: "127.0.0.1", port: 5901, username: "dev")
+      address: .init(host: "127.0.0.1", port: 5901, username: "dev"),
+      prefersPasswordOnlyARD: true
     )
 
     let reloaded = ConnectionLibrary(defaults: defaults, storageKey: "profiles")
@@ -285,6 +286,7 @@ struct FleetModelsTests {
     #expect(saved.name == "Build box")
     #expect(saved.host == "127.0.0.1")
     #expect(saved.username == "dev")
+    #expect(saved.prefersPasswordOnlyARD == true)
   }
 
   @Test @MainActor

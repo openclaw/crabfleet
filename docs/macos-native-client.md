@@ -262,6 +262,10 @@ authentication. RFB 3.7/3.8 direct listeners offer ARD (type 30) followed by
 VNC authentication (type 2); RFB 3.3 selects VNC authentication. Security None
 is never offered on a tailnet listener. Native Crabfleet viewers prefer ARD,
 which uses the full share password through validated safe-prime Diffie-Hellman.
+Registered Fleet hosts carry that provenance automatically. For a copied share
+address entered through Quick Connect, enable **Crabfleet Share (prefer ARD)**;
+the saved profile remembers that explicit choice without guessing from an IP
+range or credential shape.
 Compatibility clients may select classic VNC DES; that protocol standard uses
 only the first eight ISO-8859-1 password bytes, so ARD is preferred when
 available.
