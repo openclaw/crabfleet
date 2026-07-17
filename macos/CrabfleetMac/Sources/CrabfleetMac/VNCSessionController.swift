@@ -30,6 +30,16 @@ struct VNCViewportSize: Equatable {
 
 @MainActor
 final class VNCSessionController: NSObject, ObservableObject {
+  nonisolated static func preferredFrameEncodings(
+    supportsHEVC444: Bool
+  ) -> [VNCFrameEncodingType] {
+    var encodings: [VNCFrameEncodingType] = [
+      .crabfleetHEVC, .openH264, .tight, .hextile, .crabfleetAudio,
+    ]
+    if supportsHEVC444 { encodings.insert(.crabfleetChroma444, at: 1) }
+    return encodings
+  }
+
   enum Phase: Equatable {
     case idle
     case connecting
@@ -121,7 +131,8 @@ final class VNCSessionController: NSObject, ObservableObject {
       inputMode: .forwardKeyboardShortcutsIfNotInUseLocally,
       clipboardMode: clipboardEnabled ? .externallyManaged : .disabled,
       colorDepth: .depth24Bit,
-      frameEncodings: [.crabfleetHEVC, .openH264, .tight, .hextile, .crabfleetAudio]
+      frameEncodings: Self.preferredFrameEncodings(
+        supportsHEVC444: VNCHEVC444Capability.isSupported)
     )
     let connection = VNCConnection(settings: settings)
     connection.delegate = self

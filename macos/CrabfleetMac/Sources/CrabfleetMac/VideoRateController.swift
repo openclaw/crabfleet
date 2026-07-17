@@ -30,6 +30,15 @@ enum ShareQualityMode: String, CaseIterable, Identifiable, Sendable {
     }
   }
 
+  func bitrateFloor(chroma: MacVideoChroma) -> Int {
+    chroma == .chroma444 ? bitrateFloor * 3 / 2 : bitrateFloor
+  }
+
+  func bitrateCeiling(chroma: MacVideoChroma) -> Int {
+    guard chroma == .chroma444 else { return bitrateCeiling }
+    return self == .sharp ? 48_000_000 : bitrateCeiling * 3 / 2
+  }
+
   var framesPerSecond: Int {
     switch self {
     case .auto, .smooth: 60
@@ -90,6 +99,7 @@ struct VideoRateController: Sendable {
   private static let ewmaAlpha = 0.2
 
   private(set) var mode: ShareQualityMode
+  private(set) var chroma: MacVideoChroma
   private(set) var averageBitrate: Int
   private(set) var throughputEWMA: Double?
   private(set) var sendLatencyEWMA: Double?
@@ -98,18 +108,24 @@ struct VideoRateController: Sendable {
   private var lastAdjustmentTimestamp = -Double.infinity
   private var measurements: [FrameMeasurement] = []
 
-  init(mode: ShareQualityMode = .auto) {
+  init(mode: ShareQualityMode = .auto, chroma: MacVideoChroma = .chroma420) {
     self.mode = mode
-    averageBitrate = min(max(8_000_000, mode.bitrateFloor), mode.bitrateCeiling)
+    self.chroma = chroma
+    averageBitrate = min(
+      max(8_000_000, mode.bitrateFloor(chroma: chroma)),
+      mode.bitrateCeiling(chroma: chroma))
   }
 
   var targetBitrate: Int { averageBitrate }
 
   @discardableResult
-  mutating func setMode(_ mode: ShareQualityMode) -> Int {
+  mutating func setMode(_ mode: ShareQualityMode, chroma: MacVideoChroma? = nil) -> Int {
     self.mode = mode
+    if let chroma { self.chroma = chroma }
     clearSince = nil
-    averageBitrate = min(max(averageBitrate, mode.bitrateFloor), mode.bitrateCeiling)
+    averageBitrate = min(
+      max(averageBitrate, mode.bitrateFloor(chroma: self.chroma)),
+      mode.bitrateCeiling(chroma: self.chroma))
     return averageBitrate
   }
 
@@ -142,7 +158,9 @@ struct VideoRateController: Sendable {
       let measuredTarget = Int(throughputEWMA * 0.8)
       let target = min(
         averageBitrate,
-        min(max(measuredTarget, mode.bitrateFloor), mode.bitrateCeiling))
+        min(
+          max(measuredTarget, mode.bitrateFloor(chroma: chroma)),
+          mode.bitrateCeiling(chroma: chroma)))
       guard target != averageBitrate else { return nil }
       averageBitrate = target
       return target
@@ -165,7 +183,7 @@ struct VideoRateController: Sendable {
     let dirtyScale = dirtyAreaFractionEWMA ?? dirty
     let increment = Int(1_000_000 * dirtyScale)
     guard increment > 0 else { return nil }
-    let target = min(mode.bitrateCeiling, averageBitrate + increment)
+    let target = min(mode.bitrateCeiling(chroma: chroma), averageBitrate + increment)
     guard target != averageBitrate else { return nil }
     averageBitrate = target
     return target

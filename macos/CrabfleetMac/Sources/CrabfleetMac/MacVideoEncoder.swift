@@ -7,16 +7,23 @@ struct EncodedVideoFrame: Sendable {
   let isKeyframe: Bool
   let width: Int
   let height: Int
+  let hevcChromaFormatIDC: Int?
 }
 
 enum MacVideoEncoderOutput: Sendable {
   case frame(EncodedVideoFrame)
   case dropped
+  case chromaFallbackRequired
 
   var requiresKeyframeRecovery: Bool {
-    if case .dropped = self { return true }
-    return false
+    if case .frame = self { return false }
+    return true
   }
+}
+
+enum MacVideoChroma: Equatable, Sendable {
+  case chroma420
+  case chroma444
 }
 
 enum MacVideoCodec: Equatable, Sendable {
@@ -34,6 +41,95 @@ enum MacVideoCodec: Equatable, Sendable {
     switch self {
     case .h264: kVTProfileLevel_H264_ConstrainedBaseline_AutoLevel
     case .hevc: kVTProfileLevel_HEVC_Main_AutoLevel
+    }
+  }
+}
+
+let hevcMain444AutoLevel = "HEVC_Main444_AutoLevel" as CFString
+
+private struct HEVCBitReader {
+  private let bytes: [UInt8]
+  private var bitOffset = 0
+
+  init(escapedData: Data) {
+    var unescaped: [UInt8] = []
+    var zeroCount = 0
+    for byte in escapedData {
+      if zeroCount >= 2, byte == 0x03 {
+        zeroCount = 0
+        continue
+      }
+      unescaped.append(byte)
+      zeroCount = byte == 0 ? zeroCount + 1 : 0
+    }
+    bytes = unescaped
+  }
+
+  mutating func readBits(_ count: Int) throws -> UInt64 {
+    guard count >= 0, count <= 64, bitOffset <= bytes.count * 8 - count else {
+      throw MacVideoEncoderError.malformedNALUnits
+    }
+    var value: UInt64 = 0
+    for _ in 0..<count {
+      let byte = bytes[bitOffset / 8]
+      value = (value << 1) | UInt64((byte >> (7 - bitOffset % 8)) & 1)
+      bitOffset += 1
+    }
+    return value
+  }
+
+  mutating func readUnsignedExpGolomb() throws -> Int {
+    var leadingZeroCount = 0
+    while try readBits(1) == 0 {
+      leadingZeroCount += 1
+      guard leadingZeroCount <= 31 else { throw MacVideoEncoderError.malformedNALUnits }
+    }
+    let suffix = leadingZeroCount == 0 ? 0 : try readBits(leadingZeroCount)
+    return (1 << leadingZeroCount) - 1 + Int(suffix)
+  }
+}
+
+enum HEVCSPSParser {
+  static func chromaFormatIDC(from sps: Data) throws -> Int {
+    guard sps.count > 2, (sps[0] >> 1) & 0x3f == 33 else {
+      throw MacVideoEncoderError.malformedNALUnits
+    }
+    var reader = HEVCBitReader(escapedData: Data(sps.dropFirst(2)))
+    _ = try reader.readBits(4)
+    let maximumSubLayersMinusOne = Int(try reader.readBits(3))
+    _ = try reader.readBits(1)
+    try skipProfileTierLevel(
+      reader: &reader,
+      maximumSubLayersMinusOne: maximumSubLayersMinusOne)
+    _ = try reader.readUnsignedExpGolomb()
+    let chromaFormatIDC = try reader.readUnsignedExpGolomb()
+    guard (0...3).contains(chromaFormatIDC) else {
+      throw MacVideoEncoderError.malformedNALUnits
+    }
+    return chromaFormatIDC
+  }
+
+  private static func skipProfileTierLevel(
+    reader: inout HEVCBitReader,
+    maximumSubLayersMinusOne: Int
+  ) throws {
+    _ = try reader.readBits(64)
+    _ = try reader.readBits(32)
+    var profilePresent: [Bool] = []
+    var levelPresent: [Bool] = []
+    for _ in 0..<maximumSubLayersMinusOne {
+      profilePresent.append(try reader.readBits(1) == 1)
+      levelPresent.append(try reader.readBits(1) == 1)
+    }
+    if maximumSubLayersMinusOne > 0 {
+      _ = try reader.readBits((8 - maximumSubLayersMinusOne) * 2)
+    }
+    for index in 0..<maximumSubLayersMinusOne {
+      if profilePresent[index] {
+        _ = try reader.readBits(64)
+        _ = try reader.readBits(24)
+      }
+      if levelPresent[index] { _ = try reader.readBits(8) }
     }
   }
 }
@@ -72,6 +168,8 @@ struct VideoKeyframePolicy: Sendable {
 
 final class MacVideoEncoder: @unchecked Sendable {
   let codec: MacVideoCodec
+  let activeChroma: MacVideoChroma
+  let isChroma444Available: Bool
   let isHardwareAccelerated: Bool
   let frames: AsyncStream<MacVideoEncoderOutput>
 
@@ -95,6 +193,7 @@ final class MacVideoEncoder: @unchecked Sendable {
     width: Int,
     height: Int,
     codec: MacVideoCodec = .h264,
+    chroma: MacVideoChroma = .chroma420,
     maximumFrameQP: Int? = 40
   ) throws {
     let stream = AsyncStream<MacVideoEncoderOutput>.makeStream(
@@ -102,7 +201,10 @@ final class MacVideoEncoder: @unchecked Sendable {
     frames = stream.stream
     continuation = stream.continuation
     self.codec = codec
-    callbackContext = CallbackContext(continuation: stream.continuation, codec: codec)
+    callbackContext = CallbackContext(
+      continuation: stream.continuation,
+      codec: codec,
+      chroma: .chroma420)
     configuredWidth = width
     configuredHeight = height
 
@@ -164,10 +266,15 @@ final class MacVideoEncoder: @unchecked Sendable {
 
     session = createdSession
     Self.setProperty(createdSession, key: kVTCompressionPropertyKey_RealTime, value: true)
-    Self.setProperty(
-      createdSession,
-      key: kVTCompressionPropertyKey_ProfileLevel,
-      value: codec.profileLevel)
+    let profileSelection = Self.selectProfile(codec: codec, requestedChroma: chroma) { profile in
+      VTSessionSetProperty(
+        createdSession,
+        key: kVTCompressionPropertyKey_ProfileLevel,
+        value: profile)
+    }
+    activeChroma = profileSelection.chroma
+    isChroma444Available = profileSelection.chroma444Available
+    callbackContext.setExpectedChroma(activeChroma)
     Self.setProperty(
       createdSession, key: kVTCompressionPropertyKey_AllowFrameReordering, value: false)
     Self.setProperty(
@@ -207,6 +314,22 @@ final class MacVideoEncoder: @unchecked Sendable {
     } ?? false
     isHardwareAccelerated = usedLowLatency
       || (queryStatus == noErr && hardwareValue)
+  }
+
+  static func selectProfile(
+    codec: MacVideoCodec,
+    requestedChroma: MacVideoChroma,
+    setProfile: (CFString) -> OSStatus
+  ) -> (chroma: MacVideoChroma, chroma444Available: Bool) {
+    guard codec == .hevc, requestedChroma == .chroma444 else {
+      _ = setProfile(codec.profileLevel)
+      return (.chroma420, true)
+    }
+    guard setProfile(hevcMain444AutoLevel) == noErr else {
+      _ = setProfile(kVTProfileLevel_HEVC_Main_AutoLevel)
+      return (.chroma420, false)
+    }
+    return (.chroma444, true)
   }
 
   deinit {
@@ -350,7 +473,7 @@ final class MacVideoEncoder: @unchecked Sendable {
     guard let sampleBuffer else { return }
     do {
       let frame = try MacVideoEncoder.encodedFrame(from: sampleBuffer, codec: context.codec)
-      context.yield(.frame(frame))
+      context.yieldValidated(frame)
     } catch {
       context.continuation.finish()
     }
@@ -361,13 +484,42 @@ final class MacVideoEncoder: @unchecked Sendable {
     let codec: MacVideoCodec
     private let lock = NSLock()
     private var needsKeyframe = false
+    private var expectedChroma: MacVideoChroma
+    private var didValidateChroma = false
+    private var requiresChromaFallback = false
 
     init(
       continuation: AsyncStream<MacVideoEncoderOutput>.Continuation,
-      codec: MacVideoCodec
+      codec: MacVideoCodec,
+      chroma: MacVideoChroma
     ) {
       self.continuation = continuation
       self.codec = codec
+      expectedChroma = chroma
+    }
+
+    func setExpectedChroma(_ chroma: MacVideoChroma) {
+      lock.lock()
+      expectedChroma = chroma
+      didValidateChroma = false
+      requiresChromaFallback = false
+      lock.unlock()
+    }
+
+    func yieldValidated(_ frame: EncodedVideoFrame) {
+      lock.lock()
+      let detectedMismatch = codec == .hevc
+        && expectedChroma == .chroma444
+        && frame.isKeyframe
+        && !didValidateChroma
+        && frame.hevcChromaFormatIDC != 3
+      requiresChromaFallback = requiresChromaFallback || detectedMismatch
+      if codec == .hevc, expectedChroma == .chroma444, frame.isKeyframe {
+        didValidateChroma = true
+      }
+      let mustFallback = requiresChromaFallback
+      lock.unlock()
+      yield(mustFallback ? .chromaFallbackRequired : .frame(frame))
     }
 
     func yield(_ output: MacVideoEncoderOutput) {
@@ -426,6 +578,10 @@ final class MacVideoEncoder: @unchecked Sendable {
       sampleBuffer, createIfNecessary: false) as? [[CFString: Any]]
     let isKeyframe = !(attachments?.first?[kCMSampleAttachmentKey_NotSync] as? Bool ?? false)
     let parameterSetInfo = try parameterSets(from: formatDescription, codec: codec)
+    let chromaFormatIDC = codec == .hevc && isKeyframe
+      ? parameterSetInfo.parameterSets.first(where: { ($0.first ?? 0) >> 1 & 0x3f == 33 })
+        .flatMap { try? HEVCSPSParser.chromaFormatIDC(from: $0) }
+      : nil
     let data = try annexBData(
       lengthPrefixedData: lengthPrefixedData,
       nalUnitHeaderLength: parameterSetInfo.nalUnitHeaderLength,
@@ -436,7 +592,8 @@ final class MacVideoEncoder: @unchecked Sendable {
       data: data,
       isKeyframe: isKeyframe,
       width: Int(dimensions.width),
-      height: Int(dimensions.height))
+      height: Int(dimensions.height),
+      hevcChromaFormatIDC: chromaFormatIDC)
   }
 
   private static func parameterSets(
