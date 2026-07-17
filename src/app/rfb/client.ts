@@ -57,7 +57,9 @@ export interface RFBClientOptions {
   chroma444?: boolean;
   audio?: boolean;
   qualityMode?: RFBQualityMode;
-  password?: string | (() => Promise<string> | string);
+  // Direct transports must resolve interactive input before opening their
+  // connection so a human prompt cannot consume the host handshake deadline.
+  password?: string;
   onVNCAuthentication?: (succeeded: boolean) => void;
   onState?: (state: string) => void;
   onReady?: () => void;
@@ -247,9 +249,7 @@ export class RFBClient {
     if (canUseVNC) {
       this.transport.send(new Uint8Array([2]));
       const challenge = await this.transport.readExactly(16);
-      const configured = this.#options.password;
-      const password = typeof configured === "function" ? await configured() : configured!;
-      this.transport.send(vncChallengeResponse(challenge, password));
+      this.transport.send(vncChallengeResponse(challenge, this.#options.password!));
     } else if (securityTypes.includes(1)) {
       this.transport.send(new Uint8Array([1]));
     } else if (securityTypes.includes(2)) {

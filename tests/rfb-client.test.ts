@@ -71,19 +71,14 @@ test("RFB 3.8 direct handshake selects VNC auth and sends the fork vector", asyn
     name,
   );
   const transport = new ScriptedTransport(transcript);
-  let passwordRequests = 0;
   const authenticationResults: boolean[] = [];
   const client = new RFBClient(transport, {
     h264: false,
-    password: () => {
-      passwordRequests += 1;
-      return "test-auth-token";
-    },
+    password: "test-auth-token",
     onVNCAuthentication: (succeeded) => authenticationResults.push(succeeded),
   });
 
   await assert.rejects(client.start(), /scripted server ended/);
-  assert.equal(passwordRequests, 1);
   assert.deepEqual(authenticationResults, [true]);
   assert.deepEqual(transport.sent[1], new Uint8Array([2]));
   assert.deepEqual(

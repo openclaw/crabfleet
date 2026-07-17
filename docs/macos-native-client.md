@@ -306,10 +306,10 @@ time, including empty updates, and ExtendedDesktopSize requests are debounced
 until the host announces its screen layout.
 
 When the browser RFB client is used with a direct tailnet transport, it selects
-VNC authentication, prompts for the share password, and remembers a successful
-value only in the current tab's `sessionStorage`. A rejected value is removed
-before the next attempt. Relay sessions continue selecting Security None and
-do not prompt.
+VNC authentication. The direct transport resolves its prompt before opening the
+connection, then remembers a successful value only in the current tab's
+`sessionStorage`. A rejected value is removed before the next attempt. Relay
+sessions continue selecting Security None and do not prompt.
 
 The viewer renders aspect-fit at device pixel ratio, forwards bounded pointer
 and keyboard input, renders negotiated CursorWithAlpha shapes locally, uses
