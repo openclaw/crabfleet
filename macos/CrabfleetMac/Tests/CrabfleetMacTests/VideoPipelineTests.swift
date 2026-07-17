@@ -338,4 +338,70 @@ struct VideoPipelineTests {
     #expect(RFBWire.preferredFrameEncoding(from: [RFBWire.tightEncoding]) == .tight)
     #expect(RFBWire.preferredFrameEncoding(from: [5]) == nil)
   }
+
+  @Test
+  func captureFansOutFramesAndReferenceCountsConsumers() throws {
+    let capture = MacScreenCapture()
+    let firstID = UUID()
+    let secondID = UUID()
+    capture.retainConsumer(id: firstID)
+    capture.retainConsumer(id: firstID)
+    capture.retainConsumer(id: secondID)
+    #expect(capture.activeConsumerCount == 2)
+
+    let recorders = (0..<3).map { _ in FrameFanoutRecorder() }
+    for recorder in recorders {
+      capture.addVideoFrameHandler(id: UUID()) { _ in recorder.record() }
+    }
+    var pixelBuffer: CVPixelBuffer?
+    #expect(
+      CVPixelBufferCreate(
+        nil,
+        2,
+        2,
+        kCVPixelFormatType_32BGRA,
+        nil,
+        &pixelBuffer) == kCVReturnSuccess)
+    capture.deliverVideoFrame(
+      VideoPixelSource(
+        pixelBuffer: try #require(pixelBuffer),
+        presentationTime: .zero,
+        dirtyRects: nil,
+        contentRect: nil))
+    #expect(recorders.allSatisfy { $0.count == 1 })
+
+    capture.releaseConsumer(id: firstID)
+    #expect(capture.activeConsumerCount == 1)
+    capture.releaseConsumer(id: secondID)
+    #expect(capture.activeConsumerCount == 0)
+  }
+
+  @Test
+  func captureUsesTheHighestSessionFrameRate() {
+    #expect(MacScreenCapture.effectiveFrameRate([]) == 15)
+    #expect(MacScreenCapture.effectiveFrameRate([15, 60, 30]) == 60)
+    #expect(MacScreenCapture.effectiveFrameRate([15, 30]) == 30)
+  }
+
+  @Test
+  func serverEnforcesSessionCapAndSingleViewerResizePolicy() {
+    #expect(TailnetRFBServer.canAdmitSession(currentCount: 3))
+    #expect(!TailnetRFBServer.canAdmitSession(currentCount: 4))
+    #expect(!TailnetRFBServer.canAdmitSession(currentCount: -1))
+    #expect(TailnetRFBServer.resizeStatus(sessionCount: 1) == 0)
+    #expect(TailnetRFBServer.resizeStatus(sessionCount: 2) == 3)
+  }
+}
+
+private final class FrameFanoutRecorder: @unchecked Sendable {
+  private let lock = NSLock()
+  private var value = 0
+
+  var count: Int {
+    lock.withLock { value }
+  }
+
+  func record() {
+    lock.withLock { value += 1 }
+  }
 }

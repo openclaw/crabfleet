@@ -65,18 +65,28 @@ struct PrivateMacShareSheet: View {
       .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
 
       VStack(alignment: .leading, spacing: 10) {
-        if controller.availableDisplays.count > 1 {
-          Picker("Shared display", selection: $controller.selectedDisplayID) {
+        if !controller.availableDisplays.isEmpty {
+          VStack(alignment: .leading, spacing: 6) {
+            Text("Shared displays")
+              .font(.caption.weight(.semibold))
             ForEach(controller.availableDisplays) { display in
-              Text(display.detail).tag(display.id)
+              Toggle(
+                display.detail,
+                isOn: Binding(
+                  get: { controller.selectedDisplayIDs.contains(display.id) },
+                  set: { controller.setDisplay(display.id, selected: $0) }
+                )
+              )
+              .disabled(
+                controller.phase.isRunning
+                  || (!controller.selectedDisplayIDs.contains(display.id)
+                    && controller.selectedDisplayIDs.count >= 4)
+                  || (controller.selectedDisplayIDs.contains(display.id)
+                    && controller.selectedDisplayIDs.count == 1)
+              )
             }
           }
-          .disabled(controller.phase.isRunning)
-          .help(
-            controller.phase.isRunning
-              ? "Stop sharing to switch displays."
-              : "Which display the connected peer sees."
-          )
+          .help("Share up to four displays; stop sharing to change the selection.")
         }
 
         Picker("Quality", selection: $controller.qualityMode) {
@@ -122,20 +132,23 @@ struct PrivateMacShareSheet: View {
       .toggleStyle(.switch)
       .controlSize(.small)
 
-      if controller.phase.isRunning, let address = controller.connectionAddress {
+      if controller.phase.isRunning, !controller.connectionAddresses.isEmpty {
         VStack(alignment: .leading, spacing: 10) {
           Text("CONNECT FROM YOUR OTHER MAC")
             .font(.system(size: 9, weight: .bold, design: .monospaced))
             .tracking(0.8)
             .foregroundStyle(.secondary)
-          HStack(spacing: 10) {
-            Text(address)
-              .font(.system(.body, design: .monospaced))
-              .textSelection(.enabled)
-            Spacer()
-            Button("Copy", systemImage: "doc.on.doc") {
-              NSPasteboard.general.clearContents()
-              NSPasteboard.general.setString(address, forType: .string)
+          ForEach(Array(controller.connectionAddresses.enumerated()), id: \.offset) {
+            index, address in
+            HStack(spacing: 10) {
+              Text("Display \(index + 1) · \(address)")
+                .font(.system(.body, design: .monospaced))
+                .textSelection(.enabled)
+              Spacer()
+              Button("Copy", systemImage: "doc.on.doc") {
+                NSPasteboard.general.clearContents()
+                NSPasteboard.general.setString(address, forType: .string)
+              }
             }
           }
           Text(
@@ -208,6 +221,9 @@ struct PrivateMacShareSheet: View {
   }
 
   private var phaseDetail: String {
+    let viewers = controller.connectedViewerCount == 1
+      ? "1 viewer"
+      : "\(controller.connectedViewerCount) viewers"
     if let stats = controller.streamStats, controller.phase == .connected {
       let video = String(
         format: "%@ · %.0f fps · %.1f Mbit/s · target %.1f · dirty %.0f%%",
@@ -216,8 +232,10 @@ struct PrivateMacShareSheet: View {
         stats.megabitsPerSecond,
         Double(stats.targetBitrate) / 1_000_000,
         stats.dirtyAreaPercent)
-      return controller.audioActive ? "\(video) · audio: AAC 48 kHz" : video
+      let detail = controller.audioActive ? "\(video) · audio: AAC 48 kHz" : video
+      return "\(viewers) · \(detail)"
     }
+    if controller.connectedViewerCount > 0 { return viewers }
     if let peer = controller.connectedPeer {
       return "\(controller.phase.title) · \(peer)"
     }

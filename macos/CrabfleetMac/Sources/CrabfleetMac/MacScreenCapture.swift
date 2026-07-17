@@ -106,9 +106,12 @@ final class MacScreenCapture: NSObject, @unchecked Sendable {
   private let frameLock = NSLock()
   private let configurationGate = CaptureConfigurationGate()
   private var sequence: UInt64 = 0
-  private var consumerActive = false
-  private var videoFrameHandler: (@Sendable (VideoPixelSource) -> Void)?
-  private var audioSampleHandler: (@Sendable (CMSampleBuffer) -> Void)?
+  private var consumerIDs: Set<UUID> = []
+  private var audioConsumerIDs: Set<UUID> = []
+  private var videoFrameHandlers: [UUID: @Sendable (VideoPixelSource) -> Void] = [:]
+  private var audioSampleHandlers: [UUID: @Sendable (CMSampleBuffer) -> Void] = [:]
+  private var frameRateRequirements: [UUID: Int] = [:]
+  private var appliedFrameRate = 15
   private var latestVideoSource: VideoPixelSource?
   private var stream: SCStream?
   private var configuration: SCStreamConfiguration?
@@ -125,6 +128,10 @@ final class MacScreenCapture: NSObject, @unchecked Sendable {
         height: display.height
       )
     }
+  }
+
+  static func effectiveFrameRate<S: Sequence>(_ requirements: S) -> Int where S.Element == Int {
+    max(requirements.max() ?? 15, 15)
   }
 
   func start(displayID requestedDisplayID: CGDirectDisplayID? = nil) async throws
@@ -178,6 +185,7 @@ final class MacScreenCapture: NSObject, @unchecked Sendable {
       self.configuration = configuration
       self.contentFilter = filter
       self.audioOutputAvailable = audioOutputAvailable
+      self.withFrameLock { self.appliedFrameRate = 15 }
     }
 
     return CapturedDisplayDescriptor(
@@ -202,7 +210,8 @@ final class MacScreenCapture: NSObject, @unchecked Sendable {
     }
   }
 
-  func updateFrameInterval(
+  func updateFrameIntervalRequirement(
+    id: UUID,
     framesPerSecond: Int,
     shouldApply: @escaping @Sendable () -> Bool = { true }
   ) async throws {
@@ -211,31 +220,86 @@ final class MacScreenCapture: NSObject, @unchecked Sendable {
         throw PrivateMacShareError.captureUnavailable
       }
       guard shouldApply() else { return }
-      configuration.minimumFrameInterval = CMTime(
-        value: 1, timescale: CMTimeScale(framesPerSecond))
-      try await stream.updateConfiguration(configuration)
+      let previous = withFrameLock { frameRateRequirements[id] }
+      let nextMaximum = withFrameLock { () -> Int in
+        frameRateRequirements[id] = framesPerSecond
+        return Self.effectiveFrameRate(frameRateRequirements.values)
+      }
+      let previousApplied = withFrameLock { appliedFrameRate }
+      guard previousApplied != nextMaximum else { return }
+      configuration.minimumFrameInterval = CMTime(value: 1, timescale: CMTimeScale(nextMaximum))
+      do {
+        try await stream.updateConfiguration(configuration)
+        withFrameLock { appliedFrameRate = nextMaximum }
+      } catch {
+        withFrameLock { frameRateRequirements[id] = previous }
+        configuration.minimumFrameInterval = CMTime(
+          value: 1, timescale: CMTimeScale(previousApplied))
+        throw error
+      }
     }
   }
 
-  func setAudioCaptureEnabled(_ enabled: Bool) async throws {
+  func removeFrameIntervalRequirement(id: UUID) async throws {
+    try await configurationGate.run { [self] in
+      let removed = withFrameLock { frameRateRequirements.removeValue(forKey: id) }
+      guard removed != nil else { return }
+      guard let stream, let configuration else { return }
+      let nextMaximum = withFrameLock {
+        Self.effectiveFrameRate(frameRateRequirements.values)
+      }
+      let previousApplied = withFrameLock { appliedFrameRate }
+      guard previousApplied != nextMaximum else { return }
+      configuration.minimumFrameInterval = CMTime(value: 1, timescale: CMTimeScale(nextMaximum))
+      do {
+        try await stream.updateConfiguration(configuration)
+        withFrameLock { appliedFrameRate = nextMaximum }
+      } catch {
+        configuration.minimumFrameInterval = CMTime(
+          value: 1, timescale: CMTimeScale(previousApplied))
+        throw error
+      }
+    }
+  }
+
+  func retainAudioConsumer(id: UUID) async throws {
     try await configurationGate.run { [self] in
       guard let stream, let configuration else {
         throw PrivateMacShareError.captureUnavailable
       }
-      if enabled, !audioOutputAvailable {
+      if !audioOutputAvailable {
         throw PrivateMacShareError.captureUnavailable
       }
-      guard audioOutputAvailable else { return }
-      guard configuration.capturesAudio != enabled else { return }
-      let previousCapturesAudio = configuration.capturesAudio
-      let previousExcludesCurrentProcessAudio = configuration.excludesCurrentProcessAudio
-      configuration.capturesAudio = enabled
+      let inserted = withFrameLock { audioConsumerIDs.insert(id).inserted }
+      guard inserted else { return }
+      guard !configuration.capturesAudio else { return }
+      configuration.capturesAudio = true
       configuration.excludesCurrentProcessAudio = true
       do {
         try await stream.updateConfiguration(configuration)
       } catch {
-        configuration.capturesAudio = previousCapturesAudio
-        configuration.excludesCurrentProcessAudio = previousExcludesCurrentProcessAudio
+        withFrameLock { audioConsumerIDs.remove(id) }
+        configuration.capturesAudio = false
+        throw error
+      }
+    }
+  }
+
+  func releaseAudioConsumer(id: UUID) async throws {
+    try await configurationGate.run { [self] in
+      guard let stream, let configuration else {
+        withFrameLock { audioConsumerIDs.remove(id) }
+        return
+      }
+      let removed = withFrameLock { audioConsumerIDs.remove(id) }
+      guard removed != nil else { return }
+      let shouldDisable = withFrameLock { audioConsumerIDs.isEmpty }
+      guard shouldDisable, configuration.capturesAudio else { return }
+      configuration.capturesAudio = false
+      do {
+        try await stream.updateConfiguration(configuration)
+      } catch {
+        configuration.capturesAudio = true
         throw error
       }
     }
@@ -252,28 +316,57 @@ final class MacScreenCapture: NSObject, @unchecked Sendable {
       return true
     }
     guard stopped == true else { return }
+    withFrameLock {
+      consumerIDs.removeAll()
+      audioConsumerIDs.removeAll()
+      videoFrameHandlers.removeAll()
+      audioSampleHandlers.removeAll()
+      frameRateRequirements.removeAll()
+      appliedFrameRate = 15
+    }
     clearLatestVideoSource()
     await frameStore.clear()
   }
 
-  func setConsumerActive(_ isActive: Bool) {
-    frameLock.lock()
-    consumerActive = isActive
-    frameLock.unlock()
+  func retainConsumer(id: UUID) {
+    withFrameLock { consumerIDs.insert(id) }
   }
 
-  func setVideoFrameHandler(
-    _ handler: (@Sendable (VideoPixelSource) -> Void)?
+  func releaseConsumer(id: UUID) {
+    withFrameLock {
+      consumerIDs.remove(id)
+      videoFrameHandlers.removeValue(forKey: id)
+    }
+  }
+
+  func addVideoFrameHandler(
+    id: UUID,
+    handler: @escaping @Sendable (VideoPixelSource) -> Void
   ) {
-    frameLock.lock()
-    videoFrameHandler = handler
-    frameLock.unlock()
+    withFrameLock { videoFrameHandlers[id] = handler }
   }
 
-  func setAudioSampleHandler(_ handler: (@Sendable (CMSampleBuffer) -> Void)?) {
-    frameLock.lock()
-    audioSampleHandler = handler
-    frameLock.unlock()
+  func removeVideoFrameHandler(id: UUID) {
+    withFrameLock { videoFrameHandlers.removeValue(forKey: id) }
+  }
+
+  func addAudioSampleHandler(
+    id: UUID,
+    handler: @escaping @Sendable (CMSampleBuffer) -> Void
+  ) {
+    withFrameLock { audioSampleHandlers[id] = handler }
+  }
+
+  func removeAudioSampleHandler(id: UUID) {
+    withFrameLock { audioSampleHandlers.removeValue(forKey: id) }
+  }
+
+  var activeConsumerCount: Int {
+    withFrameLock { consumerIDs.count }
+  }
+
+  func deliverVideoFrame(_ source: VideoPixelSource) {
+    for handler in currentVideoFrameHandlers() { handler(source) }
   }
 
   func latestVideoFrame() -> VideoPixelSource? {
@@ -462,21 +555,19 @@ final class MacScreenCapture: NSObject, @unchecked Sendable {
   }
 
   private func shouldEncodeFrame() -> Bool {
-    frameLock.lock()
-    defer { frameLock.unlock() }
-    return consumerActive
+    withFrameLock { !consumerIDs.isEmpty }
   }
 
-  private func currentVideoFrameHandler() -> (@Sendable (VideoPixelSource) -> Void)? {
-    frameLock.lock()
-    defer { frameLock.unlock() }
-    return videoFrameHandler
+  private func currentVideoFrameHandlers() -> [@Sendable (VideoPixelSource) -> Void] {
+    withFrameLock { Array(videoFrameHandlers.values) }
   }
 
-  private func currentAudioSampleHandler() -> (@Sendable (CMSampleBuffer) -> Void)? {
-    frameLock.lock()
-    defer { frameLock.unlock() }
-    return audioSampleHandler
+  private func currentAudioSampleHandlers() -> [@Sendable (CMSampleBuffer) -> Void] {
+    withFrameLock { Array(audioSampleHandlers.values) }
+  }
+
+  private func needsJPEGFrame() -> Bool {
+    withFrameLock { consumerIDs.count > videoFrameHandlers.count }
   }
 
   private func retainVideoSource(_ source: VideoPixelSource) {
@@ -489,6 +580,13 @@ final class MacScreenCapture: NSObject, @unchecked Sendable {
     frameLock.lock()
     latestVideoSource = nil
     frameLock.unlock()
+  }
+
+  @discardableResult
+  private func withFrameLock<T>(_ body: () -> T) -> T {
+    frameLock.lock()
+    defer { frameLock.unlock() }
+    return body()
   }
 
   private func encodeJPEG(_ pixelBuffer: CVPixelBuffer) -> Data? {
@@ -532,8 +630,8 @@ extension MacScreenCapture: SCStreamOutput, SCStreamDelegate {
     of outputType: SCStreamOutputType
   ) {
     if outputType == .audio {
-      guard sampleBuffer.isValid, let handler = currentAudioSampleHandler() else { return }
-      handler(sampleBuffer)
+      guard sampleBuffer.isValid else { return }
+      for handler in currentAudioSampleHandlers() { handler(sampleBuffer) }
       return
     }
     guard
@@ -564,12 +662,9 @@ extension MacScreenCapture: SCStreamOutput, SCStreamDelegate {
       contentRect: contentRect)
     retainVideoSource(source)
 
-    if let handler = currentVideoFrameHandler() {
-      handler(source)
-      return
-    }
+    deliverVideoFrame(source)
 
-    guard
+    guard needsJPEGFrame(),
       let jpegData = encodeJPEG(pixelBuffer),
       jpegData.count <= 4 * 1_024 * 1_024
     else {

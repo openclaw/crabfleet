@@ -198,8 +198,51 @@ final class DesktopHostRegistrationLifecycle {
 
   private struct PersistedState: Codable {
     var uncertainRegistrations: [RegistrationTarget]
-    var publishedRegistration: PersistedPublishedRegistration?
+    var publishedRegistrations: [PersistedPublishedRegistration]
     var pendingRemovals: [PersistedPublishedRegistration]
+
+    private enum CodingKeys: String, CodingKey {
+      case uncertainRegistrations
+      case publishedRegistration
+      case publishedRegistrations
+      case pendingRemovals
+    }
+
+    init(
+      uncertainRegistrations: [RegistrationTarget],
+      publishedRegistrations: [PersistedPublishedRegistration],
+      pendingRemovals: [PersistedPublishedRegistration]
+    ) {
+      self.uncertainRegistrations = uncertainRegistrations
+      self.publishedRegistrations = publishedRegistrations
+      self.pendingRemovals = pendingRemovals
+    }
+
+    init(from decoder: any Decoder) throws {
+      let container = try decoder.container(keyedBy: CodingKeys.self)
+      uncertainRegistrations =
+        try container.decodeIfPresent([RegistrationTarget].self, forKey: .uncertainRegistrations)
+        ?? []
+      publishedRegistrations =
+        try container.decodeIfPresent(
+          [PersistedPublishedRegistration].self,
+          forKey: .publishedRegistrations)
+        ?? container.decodeIfPresent(
+          PersistedPublishedRegistration.self,
+          forKey: .publishedRegistration).map { [$0] }
+        ?? []
+      pendingRemovals =
+        try container.decodeIfPresent(
+          [PersistedPublishedRegistration].self,
+          forKey: .pendingRemovals) ?? []
+    }
+
+    func encode(to encoder: any Encoder) throws {
+      var container = encoder.container(keyedBy: CodingKeys.self)
+      try container.encode(uncertainRegistrations, forKey: .uncertainRegistrations)
+      try container.encode(publishedRegistrations, forKey: .publishedRegistrations)
+      try container.encode(pendingRemovals, forKey: .pendingRemovals)
+    }
   }
 
   private let coordinator: DesktopHostRegistrationCoordinator
@@ -208,7 +251,7 @@ final class DesktopHostRegistrationLifecycle {
   private let recoveryScopeProvider: (() async throws -> DesktopHostRegistrationRecoveryScope)?
   private var recoveryScope: DesktopHostRegistrationRecoveryScope?
   private var stateLoaded = false
-  private var publishedRegistration: PublishedRegistration?
+  private var publishedRegistrations: [PublishedRegistration] = []
   private var uncertainRegistrations: [RegistrationTarget] = []
   private var pendingRemovals: [PublishedRegistration] = []
   private var stateLoadError: Error?
@@ -228,13 +271,14 @@ final class DesktopHostRegistrationLifecycle {
 
   var hasDurableRecoveryState: Bool {
     stateStore != nil && stateLoaded && stateLoadError == nil && lastPersistenceError == nil
-      && (!uncertainRegistrations.isEmpty || publishedRegistration != nil
+      && (!uncertainRegistrations.isEmpty || !publishedRegistrations.isEmpty
         || !pendingRemovals.isEmpty)
   }
 
   var canTerminateAfterCleanupFailure: Bool {
     let hasActiveState =
-      !uncertainRegistrations.isEmpty || publishedRegistration != nil || !pendingRemovals.isEmpty
+      !uncertainRegistrations.isEmpty || !publishedRegistrations.isEmpty
+      || !pendingRemovals.isEmpty
     return !hasActiveState || hasDurableRecoveryState
   }
 
@@ -284,19 +328,16 @@ final class DesktopHostRegistrationLifecycle {
       }
     }
     uncertainRegistrations.removeAll { $0 == target }
-    if let publishedRegistration, publishedRegistration.hostID != hostID,
-      !pendingRemovals.contains(publishedRegistration)
-    {
-      pendingRemovals.append(publishedRegistration)
-    }
+    publishedRegistrations.removeAll { $0.hostID == hostID }
     pendingRemovals.removeAll { $0.hostID == hostID }
-    publishedRegistration = PublishedRegistration(
-      identity: identity,
-      hostID: hostID,
-      publicationID: target.publicationID,
-      ownershipToken: ownershipToken,
-      usesLegacyCleanup: ownershipToken == nil
-    )
+    publishedRegistrations.append(
+      PublishedRegistration(
+        identity: identity,
+        hostID: hostID,
+        publicationID: target.publicationID,
+        ownershipToken: ownershipToken,
+        usesLegacyCleanup: ownershipToken == nil
+      ))
     try persistState()
     return DesktopHostPublication(hostID: hostID, ownershipToken)
   }
@@ -332,11 +373,13 @@ final class DesktopHostRegistrationLifecycle {
       }
     }
 
-    if let publishedRegistration {
-      if !pendingRemovals.contains(publishedRegistration) {
-        pendingRemovals.append(publishedRegistration)
+    if !publishedRegistrations.isEmpty {
+      for publishedRegistration in publishedRegistrations {
+        if !pendingRemovals.contains(publishedRegistration) {
+          pendingRemovals.append(publishedRegistration)
+        }
       }
-      self.publishedRegistration = nil
+      publishedRegistrations.removeAll()
       do {
         try persistState()
       } catch {
@@ -412,12 +455,11 @@ final class DesktopHostRegistrationLifecycle {
       if let data = try stateStore.load(scope: recoveryScope) {
         let state = try JSONDecoder().decode(PersistedState.self, from: data)
         filteredLegacyState =
-          state.publishedRegistration?.usesLegacyCleanup == true
+          state.publishedRegistrations.contains { $0.usesLegacyCleanup }
           || state.pendingRemovals.contains { $0.usesLegacyCleanup }
         uncertainRegistrations = state.uncertainRegistrations
-        publishedRegistration = state.publishedRegistration
-          .map(\.registration)
-          .flatMap { $0.usesLegacyCleanup ? nil : $0 }
+        publishedRegistrations = state.publishedRegistrations.map(\.registration)
+          .filter { !$0.usesLegacyCleanup }
         pendingRemovals = state.pendingRemovals.map(\.registration)
           .filter { !$0.usesLegacyCleanup }
       }
@@ -446,14 +488,15 @@ final class DesktopHostRegistrationLifecycle {
     }
     let state = PersistedState(
       uncertainRegistrations: uncertainRegistrations,
-      publishedRegistration: publishedRegistration
-        .flatMap { $0.usesLegacyCleanup ? nil : PersistedPublishedRegistration($0) },
+      publishedRegistrations: publishedRegistrations
+        .filter { !$0.usesLegacyCleanup }
+        .map(PersistedPublishedRegistration.init),
       pendingRemovals: pendingRemovals
         .filter { !$0.usesLegacyCleanup }
         .map(PersistedPublishedRegistration.init)
     )
     let hasState =
-      !state.uncertainRegistrations.isEmpty || state.publishedRegistration != nil
+      !state.uncertainRegistrations.isEmpty || !state.publishedRegistrations.isEmpty
       || !state.pendingRemovals.isEmpty
     do {
       let data = hasState ? try JSONEncoder().encode(state) : nil
@@ -466,8 +509,59 @@ final class DesktopHostRegistrationLifecycle {
   }
 }
 
+struct PrivateMacDisplayPlan: Equatable, Sendable {
+  let display: ShareableDisplayOption
+  let index: Int
+  let port: UInt16
+
+  static func make(
+    displays: [ShareableDisplayOption],
+    selectedIDs: Set<CGDirectDisplayID>,
+    basePort: UInt16 = 5_901,
+    limit: Int = 4
+  ) -> [Self] {
+    displays.filter { selectedIDs.contains($0.id) }.prefix(limit).enumerated().map {
+      index, display in
+      Self(display: display, index: index, port: basePort + UInt16(index))
+    }
+  }
+
+  func registrationIdentity(base: TailnetIdentity) -> TailnetIdentity {
+    let baseName = base.hostName.isEmpty ? base.dnsName : base.hostName
+    let suffix = "-d\(index + 1)"
+    let baseHostID = CrabfleetDesktopRegistration.hostID(identity: base)
+    let dnsName = index == 0 ? base.dnsName : "\(baseHostID.prefix(80 - suffix.count))\(suffix)"
+    return TailnetIdentity(
+      tailnetName: base.tailnetName,
+      loginName: base.loginName,
+      dnsName: dnsName,
+      hostName: "\(baseName) — \(display.label)",
+      ipv4Address: base.ipv4Address,
+      userID: base.userID)
+  }
+}
+
 @MainActor
 final class PrivateMacShareController: ObservableObject {
+  private struct DisplayStack {
+    let plan: PrivateMacDisplayPlan
+    let capture: MacScreenCapture
+    let descriptor: CapturedDisplayDescriptor
+    let input: any RemoteInputForwarding
+    let sessionGate: RFBHostSessionGate
+    let server: TailnetRFBServer
+  }
+
+  private enum DisplayTransport: Hashable {
+    case tailnet
+    case relay
+  }
+
+  private struct DisplaySessionKey: Hashable {
+    let displayID: CGDirectDisplayID
+    let transport: DisplayTransport
+  }
+
   enum RegistryPhase: Equatable {
     case notConfigured
     case notPublished
@@ -536,10 +630,11 @@ final class PrivateMacShareController: ObservableObject {
   @Published private(set) var launchAtLoginEnabled = false
   @Published private(set) var streamStats: TailnetStreamStats?
   @Published private(set) var audioActive = false
+  @Published private(set) var connectedViewerCount = 0
 
-  @Published var selectedDisplayID: CGDirectDisplayID {
+  @Published var selectedDisplayIDs: Set<CGDirectDisplayID> {
     didSet {
-      defaults.set(Int(selectedDisplayID), forKey: Self.selectedDisplayDefaultsKey)
+      defaults.set(selectedDisplayIDs.sorted().map(Int.init), forKey: Self.selectedDisplayDefaultsKey)
     }
   }
 
@@ -552,8 +647,8 @@ final class PrivateMacShareController: ObservableObject {
   @Published var viewOnlyEnabled: Bool {
     didSet {
       defaults.set(viewOnlyEnabled, forKey: Self.viewOnlyDefaultsKey)
-      server?.setViewOnly(viewOnlyEnabled)
-      relayPublisher?.setViewOnly(viewOnlyEnabled)
+      for stack in displayStacks { stack.server.setViewOnly(viewOnlyEnabled) }
+      for publisher in relayPublishers.values { publisher.setViewOnly(viewOnlyEnabled) }
     }
   }
 
@@ -567,8 +662,13 @@ final class PrivateMacShareController: ObservableObject {
   @Published var streamAudioEnabled: Bool {
     didSet {
       defaults.set(streamAudioEnabled, forKey: Self.streamAudioDefaultsKey)
-      server?.setAudioEnabled(streamAudioEnabled)
-      relayPublisher?.setAudioEnabled(streamAudioEnabled)
+      for stack in displayStacks {
+        stack.server.setAudioEnabled(streamAudioEnabled && stack.plan.index == 0)
+      }
+      for (displayID, publisher) in relayPublishers {
+        let isPrimary = displayStacks.first { $0.plan.display.id == displayID }?.plan.index == 0
+        publisher.setAudioEnabled(streamAudioEnabled && isPrimary)
+      }
     }
   }
 
@@ -580,22 +680,24 @@ final class PrivateMacShareController: ObservableObject {
         return
       }
       let requestedMode = qualityMode
-      let previousGeneration = qualityModeChangeGeneration
-      let generation = previousGeneration &+ 1
+      let generation = qualityModeChangeGeneration &+ 1
       qualityModeChangeGeneration = generation
-      guard let server else {
+      guard !displayStacks.isEmpty else {
         confirmedQualityMode = requestedMode
         defaults.set(requestedMode.rawValue, forKey: Self.qualityModeDefaultsKey)
         return
       }
       let previousMode = confirmedQualityMode
       qualityModeChangePending = true
+      let servers = displayStacks.map(\.server)
+      let publishers = Array(relayPublishers.values)
       Task { [weak self] in
         guard let self else { return }
         let accepted = await self.applyQualityMode(
           requestedMode,
           previousMode: previousMode,
-          server: server)
+          servers: servers,
+          publishers: publishers)
         self.completeQualityModeChange(
           requestedMode,
           generation: generation,
@@ -610,19 +712,21 @@ final class PrivateMacShareController: ObservableObject {
   private let relayHostURL: ((String) -> URL?)?
   private let runnerInitializationError: Error?
   private let defaults: UserDefaults
-  private var capture: MacScreenCapture?
-  private var server: TailnetRFBServer?
+  private var displayStacks: [DisplayStack] = []
   private var isRevertingQualityMode = false
   private var qualityModeChangePending = false
   private var qualityModeChangeGeneration: UInt64 = 0
   private var confirmedQualityMode: ShareQualityMode = .auto
-  private var relayPublisher: RelayHostPublisher?
-  private var relayPublication: DesktopHostPublication?
+  private var relayPublishers: [CGDirectDisplayID: RelayHostPublisher] = [:]
+  private var relayPublications: [CGDirectDisplayID: DesktopHostPublication] = [:]
   private var clipboardBridge: HostClipboardBridge?
-  private var activeDescriptor: CapturedDisplayDescriptor?
-  private var activeInput: (any RemoteInputForwarding)?
-  private var sessionGate: RFBHostSessionGate?
   private var activeIdentity: TailnetIdentity?
+  private var activePlans: [PrivateMacDisplayPlan] = []
+  private var listeningDisplayIDs: Set<CGDirectDisplayID> = []
+  private var viewerCounts: [DisplaySessionKey: Int] = [:]
+  private var displayPeers: [DisplaySessionKey: String] = [:]
+  private var displayStats: [DisplaySessionKey: TailnetStreamStats] = [:]
+  private var audioSessionKeys: Set<DisplaySessionKey> = []
   private var lifecycleGeneration: UInt64 = 0
   private var serverGeneration: UInt64?
   private var registrationTask: Task<Void, Never>?
@@ -657,8 +761,9 @@ final class PrivateMacShareController: ObservableObject {
     }
     self.defaults = defaults
     registryPhase = desktopRegistration == nil ? .notConfigured : .notPublished
-    let savedDisplayID = defaults.object(forKey: Self.selectedDisplayDefaultsKey) as? Int
-    selectedDisplayID = savedDisplayID.map(CGDirectDisplayID.init) ?? CGMainDisplayID()
+    let savedDisplayIDs = defaults.array(forKey: Self.selectedDisplayDefaultsKey) as? [Int]
+    selectedDisplayIDs = Set(
+      savedDisplayIDs?.map(CGDirectDisplayID.init) ?? [CGMainDisplayID()])
     clipboardSyncEnabled =
       defaults.object(forKey: Self.clipboardSyncDefaultsKey) as? Bool ?? true
     viewOnlyEnabled = defaults.object(forKey: Self.viewOnlyDefaultsKey) as? Bool ?? false
@@ -685,7 +790,23 @@ final class PrivateMacShareController: ObservableObject {
   }
 
   var connectionAddress: String? {
-    identity?.vncAddress(port: Int(Self.port))
+    connectionAddresses.first
+  }
+
+  var connectionAddresses: [String] {
+    guard let identity else { return [] }
+    return activePlans.map { identity.vncAddress(port: Int($0.port)) }
+  }
+
+  func setDisplay(_ displayID: CGDirectDisplayID, selected: Bool) {
+    guard !phase.isRunning else { return }
+    if selected {
+      guard selectedDisplayIDs.count < 4 else { return }
+      selectedDisplayIDs.insert(displayID)
+    } else {
+      guard selectedDisplayIDs.count > 1 else { return }
+      selectedDisplayIDs.remove(displayID)
+    }
   }
 
   private func completeQualityModeChange(
@@ -707,15 +828,31 @@ final class PrivateMacShareController: ObservableObject {
   private func applyQualityMode(
     _ requestedMode: ShareQualityMode,
     previousMode: ShareQualityMode,
-    server: TailnetRFBServer
+    servers: [TailnetRFBServer],
+    publishers: [RelayHostPublisher]
   ) async -> Bool {
-    guard await setQualityMode(requestedMode, on: server) else { return false }
-    guard let relayPublisher else { return true }
-    guard await setQualityMode(requestedMode, on: relayPublisher) else {
-      _ = await setQualityMode(previousMode, on: server)
-      return false
+    for server in servers {
+      guard await setQualityMode(requestedMode, on: server) else {
+        await restoreQualityMode(previousMode, servers: servers, publishers: publishers)
+        return false
+      }
+    }
+    for publisher in publishers {
+      guard await setQualityMode(requestedMode, on: publisher) else {
+        await restoreQualityMode(previousMode, servers: servers, publishers: publishers)
+        return false
+      }
     }
     return true
+  }
+
+  private func restoreQualityMode(
+    _ mode: ShareQualityMode,
+    servers: [TailnetRFBServer],
+    publishers: [RelayHostPublisher]
+  ) async {
+    for server in servers { _ = await setQualityMode(mode, on: server) }
+    for publisher in publishers { _ = await setQualityMode(mode, on: publisher) }
   }
 
   private func setQualityMode(_ mode: ShareQualityMode, on server: TailnetRFBServer) async -> Bool {
@@ -865,48 +1002,81 @@ final class PrivateMacShareController: ObservableObject {
       return
     }
 
-    let capture = MacScreenCapture()
+    if availableDisplays.isEmpty { await refreshDisplays() }
+    let plans = PrivateMacDisplayPlan.make(
+      displays: availableDisplays,
+      selectedIDs: selectedDisplayIDs,
+      basePort: Self.port)
+    guard !plans.isEmpty else {
+      phase = .failed
+      notice = PrivateMacShareError.captureUnavailable.localizedDescription
+      return
+    }
+
+    let bridge = clipboardSyncEnabled ? HostClipboardBridge() : nil
+    serverGeneration = generation
+    activePlans = plans
+    clipboardBridge = bridge
+    listeningDisplayIDs.removeAll()
+    displayStacks.removeAll()
     do {
-      let descriptor = try await capture.start(displayID: selectedDisplayID)
-      guard canContinueStarting(generation) else {
-        await capture.stop()
-        return
-      }
-      let input = MacRemoteInputController(descriptor: descriptor)
-      let bridge = clipboardSyncEnabled ? HostClipboardBridge() : nil
-      let sessionGate = RFBHostSessionGate()
-      serverGeneration = generation
-      let server = TailnetRFBServer(
-        identity: identity,
-        runner: runner,
-        capture: capture,
-        descriptor: descriptor,
-        input: input,
-        clipboard: bridge,
-        port: Self.port,
-        sessionGate: sessionGate,
-        eventHandler: { [weak self] event in
-          Task { @MainActor in self?.handle(event, generation: generation) }
+      for plan in plans {
+        let capture = MacScreenCapture()
+        do {
+          let descriptor = try await capture.start(displayID: plan.display.id)
+          guard canContinueStarting(generation) else {
+            await capture.stop()
+            throw CancellationError()
+          }
+          let input = MacRemoteInputController(descriptor: descriptor)
+          let sessionGate = RFBHostSessionGate()
+          let server = TailnetRFBServer(
+            identity: identity,
+            runner: runner,
+            capture: capture,
+            descriptor: descriptor,
+            input: input,
+            clipboard: bridge,
+            port: plan.port,
+            sessionGate: sessionGate,
+            eventHandler: { [weak self] event in
+              Task { @MainActor in
+                self?.handle(
+                  event,
+                  displayID: plan.display.id,
+                  transport: .tailnet,
+                  generation: generation)
+              }
+            }
+          )
+          server.setViewOnly(viewOnlyEnabled)
+          server.setAudioEnabled(streamAudioEnabled && plan.index == 0)
+          server.setQualityMode(qualityMode)
+          try server.start()
+          displayStacks.append(
+            DisplayStack(
+              plan: plan,
+              capture: capture,
+              descriptor: descriptor,
+              input: input,
+              sessionGate: sessionGate,
+              server: server))
+        } catch {
+          await capture.stop()
+          throw error
         }
-      )
-      server.setViewOnly(viewOnlyEnabled)
-      server.setAudioEnabled(streamAudioEnabled)
-      server.setQualityMode(qualityMode)
-      try server.start()
-      self.capture = capture
-      self.server = server
-      self.clipboardBridge = bridge
-      activeDescriptor = descriptor
-      activeInput = input
-      self.sessionGate = sessionGate
+      }
       activeIdentity = identity
     } catch {
-      guard canContinueStarting(generation) else {
-        await capture.stop()
-        return
-      }
       serverGeneration = nil
-      await capture.stop()
+      for stack in displayStacks { stack.server.stop() }
+      let captures = displayStacks.map(\.capture)
+      displayStacks.removeAll()
+      for capture in captures { await capture.stop() }
+      clipboardBridge?.detachAll()
+      clipboardBridge = nil
+      activePlans.removeAll()
+      guard canContinueStarting(generation) else { return }
       phase = .failed
       notice = error.localizedDescription
     }
@@ -928,20 +1098,23 @@ final class PrivateMacShareController: ObservableObject {
     let registrationTask = self.registrationTask
     self.registrationTask = nil
     serverGeneration = nil
-    relayPublisher?.stop()
-    relayPublisher = nil
-    relayPublication = nil
-    server?.stop()
-    server = nil
-    clipboardBridge?.detach()
+    for publisher in relayPublishers.values { publisher.stop() }
+    relayPublishers.removeAll()
+    relayPublications.removeAll()
+    for stack in displayStacks { stack.server.stop() }
+    let captures = displayStacks.map(\.capture)
+    displayStacks.removeAll()
+    clipboardBridge?.detachAll()
     clipboardBridge = nil
-    activeDescriptor = nil
-    activeInput = nil
-    sessionGate = nil
-    let capture = capture
-    self.capture = nil
-    await capture?.stop()
+    for capture in captures { await capture.stop() }
     activeIdentity = nil
+    activePlans.removeAll()
+    listeningDisplayIDs.removeAll()
+    viewerCounts.removeAll()
+    displayPeers.removeAll()
+    displayStats.removeAll()
+    audioSessionKeys.removeAll()
+    connectedViewerCount = 0
     removeDesktopHost(after: registrationTask)
     guard isCurrent(generation) else { return }
     phase = .idle
@@ -1008,10 +1181,15 @@ final class PrivateMacShareController: ObservableObject {
     }
     let displays = await MacScreenCapture.availableDisplays()
     availableDisplays = displays
-    if !displays.isEmpty, !displays.contains(where: { $0.id == selectedDisplayID }) {
-      selectedDisplayID =
-        displays.first(where: { $0.id == CGMainDisplayID() })?.id ?? displays[0].id
+    guard !displays.isEmpty else { return }
+    let availableIDs = Set(displays.map(\.id))
+    var validSelection = selectedDisplayIDs.intersection(availableIDs)
+    if validSelection.isEmpty {
+      validSelection.insert(
+        displays.first(where: { $0.id == CGMainDisplayID() })?.id ?? displays[0].id)
     }
+    selectedDisplayIDs = Set(
+      displays.lazy.filter { validSelection.contains($0.id) }.prefix(4).map(\.id))
   }
 
   private func waitForRefreshCompletion() async {
@@ -1030,33 +1208,60 @@ final class PrivateMacShareController: ObservableObject {
     }
   }
 
-  private func handle(_ event: TailnetRFBServerEvent, generation: UInt64) {
+  private func handle(
+    _ event: TailnetRFBServerEvent,
+    displayID: CGDirectDisplayID,
+    transport: DisplayTransport,
+    generation: UInt64
+  ) {
     guard serverGeneration == generation else { return }
+    let key = DisplaySessionKey(displayID: displayID, transport: transport)
     switch event {
     case .listening:
+      guard transport == .tailnet else { return }
+      listeningDisplayIDs.insert(displayID)
+      guard listeningDisplayIDs.count == activePlans.count else { return }
       phase = .sharing
       notice = accessibilityGranted
         ? nil
         : "View-only sharing is ready. Allow Accessibility to enable remote control."
       registerDesktopHost(generation: generation)
     case .authorizing(let peer):
-      phase = .authorizing
-      connectedPeer = peer
-    case .connected(let peer):
+      if connectedViewerCount == 0 {
+        phase = .authorizing
+        connectedPeer = peer
+      }
+    case .connected(let peer, let count):
+      viewerCounts[key] = transport == .relay ? 1 : count
+      displayPeers[key] = peer
+      connectedViewerCount = viewerCounts.values.reduce(0, +)
       phase = .connected
-      connectedPeer = peer
-      streamStats = nil
+      connectedPeer = connectedViewerCount == 1 ? peer : nil
       notice = nil
     case .streaming(let stats):
-      streamStats = stats
+      displayStats[key] = stats
+      updateAggregateStats()
     case .audioActive(let isActive):
-      audioActive = isActive
-    case .disconnected:
-      phase = .sharing
-      connectedPeer = nil
-      streamStats = nil
-      audioActive = false
+      if isActive { audioSessionKeys.insert(key) } else { audioSessionKeys.remove(key) }
+      audioActive = !audioSessionKeys.isEmpty
+    case .disconnected(let count, let remainingPeer):
+      let normalizedCount = transport == .relay ? 0 : count
+      if normalizedCount == 0 {
+        viewerCounts.removeValue(forKey: key)
+        displayPeers.removeValue(forKey: key)
+        displayStats.removeValue(forKey: key)
+        audioSessionKeys.remove(key)
+      } else {
+        viewerCounts[key] = normalizedCount
+        if let remainingPeer { displayPeers[key] = remainingPeer }
+      }
+      connectedViewerCount = viewerCounts.values.reduce(0, +)
+      phase = connectedViewerCount == 0 ? .sharing : .connected
+      connectedPeer = connectedViewerCount == 1 ? displayPeers.values.first : nil
+      updateAggregateStats()
+      audioActive = !audioSessionKeys.isEmpty
     case .listenerFailed(let message):
+      guard transport == .tailnet else { return }
       let pendingRegistration = registrationTask
       phase = .failed
       connectedPeer = nil
@@ -1064,27 +1269,37 @@ final class PrivateMacShareController: ObservableObject {
       audioActive = false
       notice = PrivateMacShareError.listenerFailed(message).localizedDescription
       serverGeneration = nil
-      relayPublisher?.stop()
-      relayPublisher = nil
-      relayPublication = nil
-      server?.stop()
-      server = nil
-      clipboardBridge?.detach()
+      for publisher in relayPublishers.values { publisher.stop() }
+      relayPublishers.removeAll()
+      relayPublications.removeAll()
+      for stack in displayStacks { stack.server.stop() }
+      let captures = displayStacks.map(\.capture)
+      displayStacks.removeAll()
+      clipboardBridge?.detachAll()
       clipboardBridge = nil
-      activeDescriptor = nil
-      activeInput = nil
-      sessionGate = nil
-      let failedCapture = capture
-      capture = nil
-      Task { await failedCapture?.stop() }
+      Task { for capture in captures { await capture.stop() } }
       removeDesktopHost(after: pendingRegistration)
     case .sessionFailed(let message):
-      phase = .sharing
-      connectedPeer = nil
-      streamStats = nil
-      audioActive = false
+      phase = connectedViewerCount == 0 ? .sharing : .connected
       notice = message
     }
+  }
+
+  private func updateAggregateStats() {
+    guard let busiest = displayStats.values.max(by: {
+      $0.megabitsPerSecond < $1.megabitsPerSecond
+    }) else {
+      streamStats = nil
+      return
+    }
+    streamStats = TailnetStreamStats(
+      codec: busiest.codec,
+      hardwareAccelerated: busiest.hardwareAccelerated,
+      codecDetail: busiest.codecDetail,
+      targetBitrate: displayStats.values.reduce(0) { $0 + $1.targetBitrate },
+      dirtyAreaPercent: busiest.dirtyAreaPercent,
+      framesPerSecond: displayStats.values.reduce(0) { $0 + $1.framesPerSecond },
+      megabitsPerSecond: displayStats.values.reduce(0) { $0 + $1.megabitsPerSecond })
   }
 
   private func registerDesktopHost(generation: UInt64) {
@@ -1095,31 +1310,36 @@ final class PrivateMacShareController: ObservableObject {
     }
     let pendingOperation = registrationTask
     let operationGeneration = beginRegistryOperation()
+    let plans = activePlans
     publishingServerGeneration = generation
     registryPhase = .registering
     registrationTask = Task { [weak self] in
       do {
         await pendingOperation?.value
-        let publication = try await desktopRegistrationLifecycle.publish(
-          identity: identity,
-          port: Self.port
-        )
+        var publications: [CGDirectDisplayID: DesktopHostPublication] = [:]
+        for plan in plans {
+          publications[plan.display.id] = try await desktopRegistrationLifecycle.publish(
+            identity: plan.registrationIdentity(base: identity),
+            port: plan.port)
+        }
         guard
           self?.isCurrentRegistryOperation(operationGeneration) == true,
           self?.serverGeneration == generation
         else { return }
         self?.registryPhase = .registered
-        self?.relayPublication = publication
-        self?.startRelayPublisherIfPossible(generation: generation)
+        self?.relayPublications = publications
+        self?.startRelayPublishersIfPossible(generation: generation)
       } catch {
         guard
           self?.isCurrentRegistryOperation(operationGeneration) == true,
           self?.serverGeneration == generation
         else { return }
         self?.registryPhase = .failed(error.localizedDescription)
-        self?.relayPublisher?.stop()
-        self?.relayPublisher = nil
-        self?.relayPublication = nil
+        if let self {
+          for publisher in relayPublishers.values { publisher.stop() }
+          relayPublishers.removeAll()
+          relayPublications.removeAll()
+        }
       }
       if self?.publishingServerGeneration == generation {
         self?.publishingServerGeneration = nil
@@ -1129,9 +1349,9 @@ final class PrivateMacShareController: ObservableObject {
   }
 
   private func removeDesktopHost(after pendingRegistration: Task<Void, Never>?) {
-    relayPublisher?.stop()
-    relayPublisher = nil
-    relayPublication = nil
+    for publisher in relayPublishers.values { publisher.stop() }
+    relayPublishers.removeAll()
+    relayPublications.removeAll()
     guard let desktopRegistrationLifecycle else {
       registrationTask = nil
       registryPhase = desktopRegistration == nil ? .notConfigured : .notPublished
@@ -1156,46 +1376,54 @@ final class PrivateMacShareController: ObservableObject {
 
   private func updateBrowserRelay() {
     guard browserAccessEnabled else {
-      relayPublisher?.stop()
-      relayPublisher = nil
+      for publisher in relayPublishers.values { publisher.stop() }
+      relayPublishers.removeAll()
       return
     }
     guard let generation = serverGeneration else { return }
-    startRelayPublisherIfPossible(generation: generation)
+    startRelayPublishersIfPossible(generation: generation)
   }
 
-  private func startRelayPublisherIfPossible(generation: UInt64) {
+  private func startRelayPublishersIfPossible(generation: UInt64) {
     guard
       browserAccessEnabled,
-      relayPublisher == nil,
       serverGeneration == generation,
       registryPhase == .registered,
-      let publication = relayPublication,
-      let relayAccess = publication.relayAccess,
-      let endpoint = relayHostURL?(publication.hostID),
-      let capture,
-      let activeDescriptor,
-      let activeInput,
-      let sessionGate
+      let relayHostURL
     else { return }
 
-    let publisher = RelayHostPublisher(
-      endpoint: endpoint,
-      relayAccess: relayAccess,
-      capture: capture,
-      descriptor: activeDescriptor,
-      input: activeInput,
-      clipboard: clipboardBridge,
-      sessionGate: sessionGate,
-      eventHandler: { [weak self] event in
-        Task { @MainActor in self?.handle(event, generation: generation) }
-      }
-    )
-    publisher.setViewOnly(viewOnlyEnabled)
-    publisher.setAudioEnabled(streamAudioEnabled)
-    publisher.setQualityMode(qualityMode)
-    relayPublisher = publisher
-    publisher.start()
+    for stack in displayStacks where relayPublishers[stack.plan.display.id] == nil {
+      let displayID = stack.plan.display.id
+      guard
+        let publication = relayPublications[displayID],
+        let relayAccess = publication.relayAccess,
+        let endpoint = relayHostURL(publication.hostID)
+      else { continue }
+
+      let publisher = RelayHostPublisher(
+        endpoint: endpoint,
+        relayAccess: relayAccess,
+        capture: stack.capture,
+        descriptor: stack.descriptor,
+        input: stack.input,
+        clipboard: clipboardBridge,
+        sessionGate: stack.sessionGate,
+        eventHandler: { [weak self] event in
+          Task { @MainActor in
+            self?.handle(
+              event,
+              displayID: displayID,
+              transport: .relay,
+              generation: generation)
+          }
+        }
+      )
+      publisher.setViewOnly(viewOnlyEnabled)
+      publisher.setAudioEnabled(streamAudioEnabled && stack.plan.index == 0)
+      publisher.setQualityMode(qualityMode)
+      relayPublishers[displayID] = publisher
+      publisher.start()
+    }
   }
 
   @discardableResult

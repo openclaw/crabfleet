@@ -160,45 +160,84 @@ struct RFBHostSessionStreamTests {
   }
 
   @Test
-  func directStreamClaimsTheSharedGateOnlyAfterClientBytesArrive() async throws {
+  func directAndRelayStreamsShareFourSessionGate() async throws {
     let gate = RFBHostSessionGate()
     let acquired = ThreadSafeFlag()
     let released = ThreadSafeFlag()
-    let stream = DirectSessionClaimingRFBByteStream(
+    let direct = DirectSessionClaimingRFBByteStream(
       base: InMemoryRFBByteStream(incoming: Data([1, 2])),
       gate: gate,
       onAcquire: { acquired.set() },
       onRelease: { released.set() }
     )
 
-    let idleClaim = try #require(gate.acquire())
+    #expect(gate.activeCount == 0)
+    #expect(gate.reservedCount == 1)
     #expect(!acquired.value)
-    gate.release(idleClaim)
-
-    #expect(try await stream.readExactly(2) == Data([1, 2]))
+    #expect(try await direct.readExactly(2) == Data([1, 2]))
     #expect(acquired.value)
-    #expect(gate.acquire() == nil)
-    stream.finishClaim()
-    #expect(released.value)
-    let finalClaim = try #require(gate.acquire())
-    gate.release(finalClaim)
+    #expect(gate.activeCount == 1)
+    #expect(gate.reservedCount == 0)
 
-    let competingClaim = try #require(gate.acquire())
-    let losingStream = DirectSessionClaimingRFBByteStream(
-      base: InMemoryRFBByteStream(incoming: Data([3])),
+    let relayTask = RecordingHostRelayWebSocketTask(incoming: [.data(Data([3]))])
+    let relay = SessionClaimingRFBByteStream(
+      base: RelayWebSocketByteStream(task: relayTask),
       gate: gate,
-      onAcquire: { acquired.set() },
-      onRelease: { released.set() }
+      onAcquire: {},
+      onRelease: {}
     )
+    #expect(try await relay.readExactly(1) == Data([3]))
+    #expect(gate.activeCount == 2)
+
+    let third = try #require(gate.acquire())
+    let fourth = try #require(gate.acquire())
+    #expect(gate.activeCount == 4)
+
+    let rejected = DirectSessionClaimingRFBByteStream(
+      base: InMemoryRFBByteStream(incoming: Data([4])),
+      gate: gate,
+      onAcquire: {},
+      onRelease: {})
     await #expect(throws: (any Error).self) {
-      _ = try await losingStream.readExactly(1)
+      _ = try await rejected.readExactly(1)
     }
-    #expect(!losingStream.hasClaim)
-    gate.release(competingClaim)
+    #expect(!rejected.hasClaim)
+
+    direct.finishClaim()
+    relay.finishClaim()
+    gate.release(third)
+    gate.release(fourth)
+    #expect(released.value)
+    #expect(gate.activeCount == 0)
   }
 
   @Test
-  func completesAFull38HandshakeOverAnInMemoryByteStream() async throws {
+  func sharedGateSerializesResizeAndPublishesNewDimensions() throws {
+    let gate = RFBHostSessionGate()
+    let descriptor = CapturedDisplayDescriptor(
+      displayID: 7,
+      displayBounds: CGRect(x: 0, y: 0, width: 1_920, height: 1_080),
+      frameWidth: 1_280,
+      frameHeight: 720,
+      sourcePixelWidth: 1_920,
+      sourcePixelHeight: 1_080)
+    gate.configure(descriptor: descriptor)
+    let first = try #require(gate.acquire())
+    #expect(gate.beginResize())
+    #expect(gate.acquire() == nil)
+    #expect(gate.reserve() == nil)
+    gate.finishResize(width: 1_600, height: 900)
+    #expect(gate.descriptor(basedOn: descriptor).frameWidth == 1_600)
+    #expect(gate.descriptor(basedOn: descriptor).frameHeight == 900)
+
+    let second = try #require(gate.acquire())
+    #expect(!gate.beginResize())
+    gate.release(first)
+    gate.release(second)
+  }
+
+  @Test
+  func handshakeUsesLatestSharedDimensions() async throws {
     var clientHandshake = RFBVersion.serverBanner
     clientHandshake.append(1)  // None security
     clientHandshake.append(1)  // shared ClientInit
@@ -212,12 +251,15 @@ struct RFBHostSessionStreamTests {
       sourcePixelWidth: 640,
       sourcePixelHeight: 480
     )
+    let gate = RFBHostSessionGate()
+    gate.configure(descriptor: descriptor)
     let session = RFBHostSession(
       byteStream: stream,
       capture: MacScreenCapture(),
       descriptor: descriptor,
       input: HandshakeRemoteInput(),
       clipboard: nil,
+      desktopSizeProvider: { gate.descriptor(basedOn: descriptor) },
       remoteAddressOverride: "Crabfleet browser",
       skipTailnetCheck: true,
       desktopName: "Crabfleet — Test Mac",
@@ -229,6 +271,11 @@ struct RFBHostSessionStreamTests {
       eventHandler: { _ in },
       didFinish: { _ in finished.set() }
     )
+
+    let resizeClaim = try #require(gate.acquire())
+    #expect(gate.beginResize())
+    gate.finishResize(width: 800, height: 600)
+    gate.release(resizeClaim)
 
     session.start()
     let clock = ContinuousClock()
@@ -243,7 +290,7 @@ struct RFBHostSessionStreamTests {
     expected.append(contentsOf: [1, 1])
     expected.append(contentsOf: [0, 0, 0, 0])
     expected.append(
-      try RFBWire.serverInit(width: 640, height: 480, name: "Crabfleet — Test Mac")
+      try RFBWire.serverInit(width: 800, height: 600, name: "Crabfleet — Test Mac")
     )
     #expect(stream.outgoing == expected)
   }
@@ -296,6 +343,33 @@ struct HostClipboardBridgeTests {
     try await waitUntil { recorder.values == ["newer host copy"] }
 
     bridge.detach()
+  }
+
+  @Test
+  func multicastsHostAndPeerClipboardWithoutRebaselining() async throws {
+    let pasteboard = NSPasteboard(name: .init("CrabfleetMacTests.\(UUID().uuidString)"))
+    pasteboard.clearContents()
+    pasteboard.setString("initial", forType: .string)
+    let firstID = UUID()
+    let secondID = UUID()
+    let first = PushRecorder()
+    let second = PushRecorder()
+    let bridge = HostClipboardBridge(pasteboard: pasteboard, pollingInterval: 10)
+    bridge.attach(id: firstID) { first.append($0) }
+    try await Task.sleep(for: .milliseconds(30))
+
+    pasteboard.clearContents()
+    pasteboard.setString("host copy", forType: .string)
+    bridge.attach(id: secondID) { second.append($0) }
+    bridge.poll()
+    #expect(first.values == ["host copy"])
+    #expect(second.values == ["host copy"])
+
+    bridge.receiveClientText(id: firstID, text: "first viewer copy")
+    try await waitUntil { second.values == ["host copy", "first viewer copy"] }
+    #expect(first.values == ["host copy"])
+    #expect(pasteboard.string(forType: .string) == "first viewer copy")
+    bridge.detachAll()
   }
 
   @Test
@@ -522,6 +596,35 @@ private final class InMemoryRFBByteStream: RFBByteStream, @unchecked Sendable {
     if let deadline, ContinuousClock().now >= deadline { throw RFBSendExpiredError() }
     try await send(data)
   }
+
+  private func withLock<T>(_ body: () throws -> T) rethrows -> T {
+    lock.lock()
+    defer { lock.unlock() }
+    return try body()
+  }
+}
+
+private final class RecordingHostRelayWebSocketTask: RelayWebSocketTasking, @unchecked Sendable {
+  private let lock = NSLock()
+  private var incoming: [URLSessionWebSocketTask.Message]
+
+  init(incoming: [URLSessionWebSocketTask.Message]) {
+    self.incoming = incoming
+  }
+
+  func resume() {}
+
+  func receive() async throws -> URLSessionWebSocketTask.Message {
+    try withLock {
+      guard !incoming.isEmpty else {
+        throw PrivateMacShareError.protocolError("test relay ended")
+      }
+      return incoming.removeFirst()
+    }
+  }
+
+  func send(_ message: URLSessionWebSocketTask.Message) async throws {}
+  func cancel(with closeCode: URLSessionWebSocketTask.CloseCode, reason: Data?) {}
 
   private func withLock<T>(_ body: () throws -> T) rethrows -> T {
     lock.lock()

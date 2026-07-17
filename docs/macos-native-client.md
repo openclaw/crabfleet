@@ -64,15 +64,16 @@ an owner-scoped Crabfleet Worker relay for first-party browser access.
 
 1. Tailscale status must report `BackendState=Running`, a valid active tailnet,
    an online signed-in user, and a CGNAT address in `100.64.0.0/10`.
-2. The app captures the selected display (default: main) at a bounded even
-   resolution no larger than 2560×1600. Video viewers receive up to 60 frames
-   per second in Auto or Smooth mode and 30 in Sharp mode; other viewers
-   receive at most 15 Tight/JPEG frames per second. When the connected viewer
-   requests a desktop size, the host
+2. The app captures up to four selected displays (default: main), each at a
+   bounded even resolution no larger than 2560×1600. A display with any HEVC or
+   H.264 viewer captures at 60 frames per second; Tight/JPEG-only displays use
+   15 frames per second. When exactly one viewer is connected to a display, it may
+   request a desktop size and the host
    re-targets the capture to aspect-fit that request up to the display's native
    pixel resolution and the active codec's cap, so the remote desktop follows
-   the viewer window.
-3. An RFB listener binds port 5901. Binding the Tailscale address directly is
+   the viewer window. With multiple viewers, the host returns
+   ExtendedDesktopSize status 3 and leaves the shared capture size unchanged.
+3. One RFB listener per selected display binds consecutive ports beginning at 5901. Each listener admits up to four authorized viewers. Binding the Tailscale address directly is
    not viable on current macOS — accepted Network-framework child connections
    re-bind a required local endpoint and fail with `EADDRINUSE` — so instead
    every accepted connection must prove it arrived on the exact Tailscale
@@ -81,31 +82,38 @@ an owner-scoped Crabfleet Worker relay for first-party browser access.
 4. Before sending the RFB banner or any framebuffer data, the app resolves the
    peer through `tailscale whois` and requires an authorized node with the same
    user ID and login as the host.
-5. With an authenticated Crabfleet API configuration, the host registers its
-   stable endpoint in the signed-in user's private Fleet registry. The receiving
-   app discovers and directly connects that card with no VNC password. Quick
-   Connect with the displayed `vnc://100.x.y.z:5901` address remains a fallback.
-6. A token-owned registration enables the persisted "Allow browser access via
-   Crabfleet" toggle, which defaults on. The host opens an authenticated
-   WebSocket to its per-registration `DesktopRelayDO`; a signed-in owner opens
-   the matching browser viewer from Fleet. The relay treats binary messages as
-   one opaque RFB byte stream, caps each WebSocket message at 512 KiB, and
-   replaces prior sockets for the same role. The publisher chunks host writes
-   at 256 KiB, waits without timing out while no viewer is paired, and reconnects
-   with bounded backoff after transport loss. Legacy tokenless registrations
-   cannot publish a browser relay.
-7. Direct and browser transports share one session gate. The first viewer to
-   begin the client side of the server-first RFB handshake wins; the other path
-   is rejected. Closing either relay socket closes its peer, so every relay
-   connection carries exactly one RFB session.
-8. Clipboard sync with the connected peer is on by default and can be disabled
-   before starting the share. Text copied on either Mac lands on the other
-   through Extended Clipboard UTF-8 when the viewer negotiates it, with
-   ISO-8859-1 cut text as the fallback; text that cannot be represented is
-   dropped rather than mangled.
+5. With an authenticated Crabfleet API configuration, the host registers one
+   stable endpoint per display in the signed-in user's private Fleet registry.
+   The primary row keeps the host ID; additional rows use `-d2`, `-d3`, and
+   `-d4` suffixes, and every row includes the display label. The receiving app
+   discovers each display as its own card and directly connects with no VNC
+   password. The displayed `vnc://100.x.y.z:5901` and consecutive-port addresses
+   remain Quick Connect fallbacks.
+6. Every token-owned display registration enables the persisted "Allow browser
+   access via Crabfleet" toggle, which defaults on. Each display publisher opens
+   an authenticated WebSocket to its registration's `DesktopRelayDO`; a
+   signed-in owner opens the matching browser viewer from Fleet. The relay
+   treats binary messages as one opaque RFB byte stream, caps each WebSocket
+   message at 512 KiB, and replaces prior sockets for the same role. Publishers
+   chunk host writes at 256 KiB, wait without timing out while no viewer is
+   paired, and reconnect with bounded backoff after transport loss. Legacy
+   tokenless registrations cannot publish browser relays.
+7. Direct and browser transports share a four-session gate per display. Tailnet
+   sessions claim their reserved slot on the first client RFB byte; a relay
+   connection carries exactly one session and counts against the same cap.
+   Relay and tailnet viewers may coexist, and quality and view-only changes fan
+   out atomically across both transports.
+8. Clipboard sync with all connected peers is on by default and can be disabled
+   before starting the share. Host changes fan out to every viewer; viewer text
+   updates the shared pasteboard and fans out to the other viewers, last writer
+   wins. Text copied on either Mac lands on the other through Extended Clipboard
+   UTF-8 when the viewer negotiates it, with ISO-8859-1 cut text as the fallback;
+   text that cannot be represented is dropped rather than mangled.
 9. System audio streaming is on by default and can be toggled while sharing.
-   Audio capture starts only after a viewer negotiates the Crabfleet audio
-   extension; other VNC clients keep the existing video-only session.
+   Audio attaches only to primary-display sessions and capture starts when the
+   first enabled viewer negotiates the Crabfleet audio extension, then stops
+   after the last such viewer disconnects. Other VNC clients and secondary
+   displays remain video-only.
 10. "Start sharing when I log in" registers the bundled app as a login item and
     persists an auto-share preference, so the Mac comes back reachable after a
     reboot without manual setup (the equivalent of `--share-this-mac` for
@@ -243,10 +251,11 @@ no longer bundles or builds the modified D3DES source.
   their complete interoperability surfaces are enabled and tested.
 - Password authentication uses per-call CommonCrypto DES and is safe for
   concurrent sessions.
-- App-owned hosting shares one selected display at a time to a single client.
-  HEVC and Open H.264 reach 60 fps at an initial 2560×1600 cap and resize up to
-  4096×2304; Sharp mode caps video at 30 fps, and Tight/JPEG fallback remains
-  capped at 15 fps and 2560×1600.
+- App-owned hosting shares up to four displays through separate Fleet rows and
+  listeners, with up to four viewers per display. HEVC and Open H.264 capture at
+  60 fps at an initial 2560×1600 cap and resize up to 4096×2304 when only one
+  viewer is connected; Tight/JPEG fallback remains capped at 15 fps and
+  2560×1600.
 - Audio is host-to-viewer system audio only. Microphone, reverse audio,
   per-application capture, browser playback, and non-AAC codecs are unsupported.
 - A connecting peer must be another device owned by the same Tailscale user.

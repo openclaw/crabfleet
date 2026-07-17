@@ -8,11 +8,12 @@ import Foundation
 protocol HostClipboardSyncing: AnyObject, Sendable {
   /// Starts monitoring and forwards host pasteboard changes to `pusher`.
   /// The current pasteboard content is baselined, not pushed.
-  func attach(pusher: @escaping @Sendable (String) -> Void)
-  func detach()
+  func attach(id: UUID, pusher: @escaping @Sendable (String) -> Void)
+  func detach(id: UUID)
+  func detachAll()
 
   /// Applies clipboard text received from the connected viewer.
-  func receiveClientText(_ text: String)
+  func receiveClientText(id: UUID, text: String)
 
   /// Most recent host pasteboard text observed by the monitor.
   func currentText() -> String?
@@ -22,7 +23,8 @@ final class HostClipboardBridge: HostClipboardSyncing, @unchecked Sendable {
   private let pasteboard: NSPasteboard
   private let pollingInterval: TimeInterval
   private let lock = NSLock()
-  private var pusher: (@Sendable (String) -> Void)?
+  private let legacyPusherID = UUID()
+  private var pushers: [UUID: @Sendable (String) -> Void] = [:]
   private var timer: Timer?
   private var lastObservedChangeCount: Int?
   private var suppressedChangeCount: Int?
@@ -40,10 +42,13 @@ final class HostClipboardBridge: HostClipboardSyncing, @unchecked Sendable {
     timer?.invalidate()
   }
 
-  func attach(pusher: @escaping @Sendable (String) -> Void) {
-    withLock {
-      self.pusher = pusher
+  func attach(id: UUID, pusher: @escaping @Sendable (String) -> Void) {
+    let shouldStart = withLock { () -> Bool in
+      let wasEmpty = pushers.isEmpty
+      pushers[id] = pusher
+      return wasEmpty
     }
+    guard shouldStart else { return }
     DispatchQueue.main.async { [weak self] in
       guard let self else { return }
       self.withLock {
@@ -63,18 +68,40 @@ final class HostClipboardBridge: HostClipboardSyncing, @unchecked Sendable {
     }
   }
 
-  func detach() {
-    withLock {
-      pusher = nil
-      suppressedChangeCount = nil
+  func attach(pusher: @escaping @Sendable (String) -> Void) {
+    attach(id: legacyPusherID, pusher: pusher)
+  }
+
+  func detach(id: UUID) {
+    let shouldStop = withLock { () -> Bool in
+      pushers.removeValue(forKey: id)
+      return pushers.isEmpty
     }
+    guard shouldStop else { return }
     DispatchQueue.main.async { [weak self] in
-      self?.timer?.invalidate()
-      self?.timer = nil
+      guard let self, self.withLock({ self.pushers.isEmpty }) else { return }
+      self.timer?.invalidate()
+      self.timer = nil
     }
   }
 
-  func receiveClientText(_ text: String) {
+  func detachAll() {
+    withLock {
+      pushers.removeAll()
+      suppressedChangeCount = nil
+    }
+    DispatchQueue.main.async { [weak self] in
+      guard let self, self.withLock({ self.pushers.isEmpty }) else { return }
+      self.timer?.invalidate()
+      self.timer = nil
+    }
+  }
+
+  func detach() {
+    detachAll()
+  }
+
+  func receiveClientText(id: UUID, text: String) {
     guard text.utf8.count <= RFBWire.maximumClipboardBytes else { return }
     DispatchQueue.main.async { [weak self] in
       guard let self else { return }
@@ -90,12 +117,18 @@ final class HostClipboardBridge: HostClipboardSyncing, @unchecked Sendable {
       }
       self.pasteboard.clearContents()
       guard self.pasteboard.setString(text, forType: .string) else { return }
-      self.withLock {
+      let otherPushers = self.withLock { () -> [@Sendable (String) -> Void] in
         self.suppressedChangeCount = self.pasteboard.changeCount
         self.lastObservedChangeCount = self.pasteboard.changeCount
         self.lastKnownText = text
+        return self.pushers.filter { $0.key != id }.map { $0.value }
       }
+      for pusher in otherPushers { pusher(text) }
     }
+  }
+
+  func receiveClientText(_ text: String) {
+    receiveClientText(id: legacyPusherID, text: text)
   }
 
   func currentText() -> String? {
@@ -113,7 +146,7 @@ final class HostClipboardBridge: HostClipboardSyncing, @unchecked Sendable {
     guard pasteboard.changeCount == changeCount else { return }
 
     var textToPush: String?
-    var pushHandler: (@Sendable (String) -> Void)?
+    var pushHandlers: [@Sendable (String) -> Void] = []
     withLock {
       lastObservedChangeCount = changeCount
 
@@ -129,10 +162,10 @@ final class HostClipboardBridge: HostClipboardSyncing, @unchecked Sendable {
         return
       }
       textToPush = outboundText
-      pushHandler = pusher
+      pushHandlers = Array(pushers.values)
     }
-    if let textToPush, let pushHandler {
-      pushHandler(textToPush)
+    if let textToPush {
+      for pushHandler in pushHandlers { pushHandler(textToPush) }
     }
   }
 

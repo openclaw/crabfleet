@@ -353,7 +353,7 @@ struct PrivateMacShareTests {
     publish.cancel()
 
     let remove = Task {
-      try await coordinator.unregister(identity: identity, ownershipToken: "registration-token")
+      try await coordinator.unregister(identity: identity, ownershipToken: "test-ownership-token-1")
     }
     try await Task.sleep(for: .milliseconds(20))
     #expect(await registration.events == [.registerStarted])
@@ -801,6 +801,75 @@ struct PrivateMacShareTests {
       defaults: defaults)
 
     #expect(second.qualityMode == .sharp)
+  }
+
+  @Test @MainActor
+  func selectedDisplaysPersistAcrossControllers() throws {
+    let defaults = try #require(
+      UserDefaults(suiteName: "CrabfleetMacTests.\(UUID().uuidString)")
+    )
+    let first = PrivateMacShareController(
+      runner: StaticTailscaleRunner(output: statusJSON()),
+      desktopRegistration: nil,
+      defaults: defaults)
+    first.selectedDisplayIDs = [11, 22, 33]
+
+    let second = PrivateMacShareController(
+      runner: StaticTailscaleRunner(output: statusJSON()),
+      desktopRegistration: nil,
+      defaults: defaults)
+    #expect(second.selectedDisplayIDs == [11, 22, 33])
+  }
+
+  @Test
+  func displayPlansAllocateStablePortsAndRegistrationSuffixes() {
+    let displays = (1...5).map {
+      ShareableDisplayOption(id: CGDirectDisplayID($0), label: "Display \($0)", width: 100, height: 80)
+    }
+    let plans = PrivateMacDisplayPlan.make(
+      displays: displays,
+      selectedIDs: Set(displays.map(\.id)))
+    #expect(plans.map(\.port) == [5_901, 5_902, 5_903, 5_904])
+    #expect(plans.map(\.display.id) == [1, 2, 3, 4])
+
+    let identity = TailnetIdentity(
+      tailnetName: "example.com",
+      loginName: "operator@example.com",
+      dnsName: "workstation.example.ts.net",
+      hostName: "Workstation",
+      ipv4Address: "100.64.12.34",
+      userID: 42)
+    let registrations = plans.map { $0.registrationIdentity(base: identity) }
+    #expect(registrations.map(CrabfleetDesktopRegistration.hostID) == [
+      "workstation", "workstation-d2", "workstation-d3", "workstation-d4",
+    ])
+    #expect(registrations[0].hostName == "Workstation — Display 1")
+    #expect(registrations[1].hostName == "Workstation — Display 2")
+  }
+
+  @Test @MainActor
+  func registrationLifecycleKeepsMultipleDisplayRowsUntilCleanup() async throws {
+    let registration = RecordingDesktopRegistration()
+    let lifecycle = DesktopHostRegistrationLifecycle(registration: registration)
+    let first = desktopIdentity(name: "multi-display", address: "100.64.12.70")
+    let second = TailnetIdentity(
+      tailnetName: first.tailnetName,
+      loginName: first.loginName,
+      dnsName: "multi-display-d2",
+      hostName: "multi-display — External Display",
+      ipv4Address: first.ipv4Address,
+      userID: first.userID)
+
+    try await lifecycle.publish(identity: first, port: 5_901)
+    try await lifecycle.publish(identity: second, port: 5_902)
+    try await lifecycle.removePublishedIdentities()
+
+    #expect(await registration.events == [
+      .register(first.dnsName),
+      .register(second.dnsName),
+      .unregister(first.dnsName, "token:\(first.dnsName)"),
+      .unregister(second.dnsName, "token:\(second.dnsName)"),
+    ])
   }
 
   @Test @MainActor
@@ -1375,14 +1444,14 @@ struct PrivateMacShareTests {
 
     let removal = try registration.removalRequest(
       identity: identity,
-      ownershipToken: "desktop-ownership-token"
+      ownershipToken: "test-ownership-token-2"
     )
     #expect(removal.url == request.url)
     #expect(removal.httpMethod == "DELETE")
     #expect(removal.value(forHTTPHeaderField: "Cookie") == "crabbox_session=secret")
     #expect(
       removal.value(forHTTPHeaderField: "X-Crabfleet-Ownership-Token")
-        == "desktop-ownership-token"
+        == "test-ownership-token-2"
     )
     #expect(removal.httpBody == nil)
   }
@@ -1429,7 +1498,7 @@ struct PrivateMacShareTests {
     let transport = DesktopRegistrationTransport { request in
       let responseURL = try #require(request.url)
       return (
-        Data(#"{"host":{"id":"workstation"},"ownershipToken":"server-ownership-token"}"#.utf8),
+        Data(#"{"host":{"id":"workstation"},"ownershipToken":"test-ownership-token-3"}"#.utf8),
         try #require(
           HTTPURLResponse(
             url: responseURL,
@@ -1455,7 +1524,7 @@ struct PrivateMacShareTests {
         port: 5_901,
         publicationID: "publication-id"
       )
-        == "server-ownership-token"
+        == "test-ownership-token-3"
     )
   }
 
@@ -1505,7 +1574,7 @@ struct PrivateMacShareTests {
       let json = try #require(JSONSerialization.jsonObject(with: body) as? [String: Any])
       #expect(json["publicationID"] as? String == "publication-id")
       return (
-        Data(#"{"ownershipToken":"server-ownership-token"}"#.utf8),
+        Data(#"{"ownershipToken":"test-ownership-token-3"}"#.utf8),
         try #require(
           HTTPURLResponse(
             url: responseURL,
@@ -1529,7 +1598,7 @@ struct PrivateMacShareTests {
       try await registration.recover(
         identity: identity,
         publicationID: "publication-id"
-      ) == "server-ownership-token"
+      ) == "test-ownership-token-3"
     )
   }
 
@@ -2589,7 +2658,7 @@ private actor SuspendedDesktopRegistration: DesktopHostRegistering {
       registrationContinuation = continuation
     }
     events.append(.registerFinished)
-    return "registration-token"
+    return "test-ownership-token-1"
   }
 
   func recover(identity: TailnetIdentity, publicationID: String) async throws -> String? {
@@ -2597,7 +2666,7 @@ private actor SuspendedDesktopRegistration: DesktopHostRegistering {
   }
 
   func unregister(identity: TailnetIdentity, ownershipToken: String?) async throws {
-    #expect(ownershipToken == "registration-token")
+    #expect(ownershipToken == "test-ownership-token-1")
     events.append(.unregisterStarted)
   }
 
@@ -2947,7 +3016,7 @@ private actor SuspendedDesktopCleanupRegistration: DesktopHostRegistering {
     port: UInt16,
     publicationID: String
   ) async throws -> String? {
-    "slow-cleanup-token"
+    "test-ownership-token-slow"
   }
 
   func recover(identity: TailnetIdentity, publicationID: String) async throws -> String? {
@@ -2955,7 +3024,7 @@ private actor SuspendedDesktopCleanupRegistration: DesktopHostRegistering {
   }
 
   func unregister(identity: TailnetIdentity, ownershipToken: String?) async throws {
-    #expect(ownershipToken == "slow-cleanup-token")
+    #expect(ownershipToken == "test-ownership-token-slow")
     await withCheckedContinuation { continuation in
       unregistrationContinuation = continuation
     }
