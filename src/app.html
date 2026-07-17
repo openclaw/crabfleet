@@ -2397,7 +2397,8 @@
       }
       .desktop-viewer-title,
       .desktop-viewer-title > div,
-      .desktop-viewer-stats {
+      .desktop-viewer-stats,
+      .desktop-viewer-tools {
         display: flex;
         align-items: center;
       }
@@ -2442,6 +2443,20 @@
           SFMono-Regular,
           Menlo,
           monospace;
+      }
+      .desktop-viewer-tools {
+        justify-content: flex-end;
+        gap: 8px;
+        min-width: 0;
+      }
+      .desktop-tool-button {
+        min-height: 30px;
+        padding: 6px 9px;
+        border-color: rgb(255 255 255 / 0.12);
+        color: #d7dae2;
+        background: #10121a;
+        font-size: 11px;
+        white-space: nowrap;
       }
       .desktop-viewer-stats span {
         padding: 7px 9px;

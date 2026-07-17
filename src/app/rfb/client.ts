@@ -1,6 +1,11 @@
+import type { RFBAudioMessage } from "./audio.ts";
+
 export const RFB_ENCODINGS = {
+  hevc: 0x4845_5631,
   openH264: 50,
   tight: 7,
+  audio: 0x4341_4631,
+  chroma444: 0x4334_3434,
   extendedDesktopSize: -308,
   extendedClipboard: -1_063_131_698,
 } as const;
@@ -23,11 +28,11 @@ export interface RFBServerInfo {
   width: number;
   height: number;
   name: string;
-  codec: "H.264" | "JPEG";
+  codec: "HEVC" | "H.264" | "JPEG";
 }
 
 export interface RFBFrame {
-  encoding: "h264" | "jpeg";
+  encoding: "hevc" | "h264" | "jpeg";
   width: number;
   height: number;
   payload: Uint8Array;
@@ -35,7 +40,10 @@ export interface RFBFrame {
 }
 
 export interface RFBClientOptions {
+  hevc?: boolean;
   h264: boolean;
+  chroma444?: boolean;
+  audio?: boolean;
   onState?: (state: string) => void;
   onReady?: () => void;
   onServerInit?: (info: RFBServerInfo) => void;
@@ -44,6 +52,7 @@ export interface RFBClientOptions {
   onClipboard?: (text: string) => void;
   onClipboardError?: (message: string) => void;
   onTraffic?: (bytes: number) => void;
+  onAudio?: (message: RFBAudioMessage) => void;
 }
 
 interface RFBScreenLayout {
@@ -55,7 +64,7 @@ export class RFBClient {
   readonly transport: RFBTransport;
   width = 0;
   height = 0;
-  codec: "H.264" | "JPEG";
+  codec: "HEVC" | "H.264" | "JPEG";
   #options: RFBClientOptions;
   #running = false;
   #serverClipboardActions = 0;
@@ -63,13 +72,20 @@ export class RFBClient {
   #screenLayout: RFBScreenLayout | null = null;
   #pendingResize: { width: number; height: number } | null = null;
   #h264Enabled: boolean;
+  #hevcEnabled: boolean;
+  #chroma444Enabled: boolean;
+  #audioEnabled: boolean;
   #approvedClipboardText: string | null = null;
+  #forceFullRefresh = false;
 
   constructor(transport: RFBTransport, options: RFBClientOptions) {
     this.transport = transport;
     this.#options = options;
+    this.#hevcEnabled = options.hevc === true;
     this.#h264Enabled = options.h264;
-    this.codec = options.h264 ? "H.264" : "JPEG";
+    this.#chroma444Enabled = options.chroma444 === true;
+    this.#audioEnabled = options.audio === true;
+    this.codec = this.#hevcEnabled ? "HEVC" : options.h264 ? "H.264" : "JPEG";
   }
 
   async start(): Promise<void> {
@@ -95,6 +111,32 @@ export class RFBClient {
   disconnect(): void {
     this.#running = false;
     this.transport.close();
+  }
+
+  reportDecoderFailure(codec: "hevc" | "h264", _error: Error): void {
+    if (!this.#running) return;
+    const isHEVC = codec === "hevc";
+    if (isHEVC ? !this.#hevcEnabled : !this.#h264Enabled) return;
+    if (isHEVC) {
+      this.#hevcEnabled = false;
+      this.codec = this.#h264Enabled ? "H.264" : "JPEG";
+    } else {
+      this.#h264Enabled = false;
+      this.codec = "JPEG";
+    }
+    this.#forceFullRefresh = true;
+    this.transport.send(encodeSetEncodings(this.#enabledEncodings()));
+    this.#options.onState?.(
+      isHEVC
+        ? this.#h264Enabled
+          ? "HEVC unavailable; switching to H.264"
+          : "HEVC unavailable; switching to JPEG / Tight"
+        : "H.264 unavailable; switching to JPEG / Tight",
+    );
+  }
+
+  requestCodecRefresh(): void {
+    if (this.#running) this.#forceFullRefresh = true;
   }
 
   requestFramebuffer(incremental = true): void {
@@ -191,15 +233,7 @@ export class RFBClient {
       codec: this.codec,
     });
 
-    const encodings = this.#h264Enabled
-      ? [
-          RFB_ENCODINGS.openH264,
-          RFB_ENCODINGS.tight,
-          RFB_ENCODINGS.extendedDesktopSize,
-          RFB_ENCODINGS.extendedClipboard,
-        ]
-      : [RFB_ENCODINGS.tight, RFB_ENCODINGS.extendedDesktopSize, RFB_ENCODINGS.extendedClipboard];
-    this.transport.send(encodeSetEncodings(encodings));
+    this.transport.send(encodeSetEncodings(this.#enabledEncodings()));
     this.transport.send(
       cutTextFrame(
         6,
@@ -222,6 +256,12 @@ export class RFBClient {
       return;
     }
     if (type === 2) return;
+    if (type === 200) {
+      const message = await readRFBAudioMessage(this.transport);
+      this.#options.onAudio?.(message);
+      if (message.kind === "packet") this.#options.onTraffic?.(message.payload.byteLength);
+      return;
+    }
     throw new Error(`unsupported RFB server message ${type}`);
   }
 
@@ -237,36 +277,33 @@ export class RFBClient {
       const height = readUint16(rectangle, 6);
       const encoding = readInt32(rectangle, 8);
       // Crabfleet hosts send one full-frame media rectangle per requested update.
-      if (encoding === RFB_ENCODINGS.openH264) {
+      if (encoding === RFB_ENCODINGS.hevc || encoding === RFB_ENCODINGS.openH264) {
+        const isHEVC = encoding === RFB_ENCODINGS.hevc;
+        const label = isHEVC ? "HEVC" : "H.264";
         if (x !== 0 || y !== 0)
-          throw new Error("Crabfleet H.264 updates must cover the full framebuffer");
+          throw new Error(`Crabfleet ${label} updates must cover the full framebuffer`);
         const frameHeader = await this.transport.readExactly(8);
         const length = readUint32(frameHeader, 0);
-        if (length > 16 * 1_024 * 1_024) throw new Error("H.264 frame exceeds 16 MiB");
+        if (!length || length >= 16 * 1_024 * 1_024)
+          throw new Error(`${label} frame exceeds protocol bounds`);
         const payload = await this.transport.readExactly(length);
         this.#options.onTraffic?.(length);
+        if (isHEVC ? !this.#hevcEnabled : !this.#h264Enabled) {
+          forceFullRefresh = true;
+          continue;
+        }
         try {
           await this.#options.onFrame?.({
-            encoding: "h264",
+            encoding: isHEVC ? "hevc" : "h264",
             width,
             height,
             payload,
             flags: readUint32(frameHeader, 4),
           });
-          this.codec = "H.264";
+          this.codec = label;
         } catch (error) {
-          if (!this.#h264Enabled) throw error;
-          this.#h264Enabled = false;
-          this.codec = "JPEG";
+          this.reportDecoderFailure(isHEVC ? "hevc" : "h264", asError(error));
           forceFullRefresh = true;
-          this.transport.send(
-            encodeSetEncodings([
-              RFB_ENCODINGS.tight,
-              RFB_ENCODINGS.extendedDesktopSize,
-              RFB_ENCODINGS.extendedClipboard,
-            ]),
-          );
-          this.#options.onState?.("H.264 unavailable; switching to JPEG / Tight");
         }
       } else if (encoding === RFB_ENCODINGS.tight) {
         if (x !== 0 || y !== 0)
@@ -301,7 +338,11 @@ export class RFBClient {
         throw new Error(`unsupported RFB encoding ${encoding}`);
       }
     }
-    if (this.#running) this.requestFramebuffer(!forceFullRefresh);
+    if (this.#running) {
+      const requestFullRefresh = forceFullRefresh || this.#forceFullRefresh;
+      this.#forceFullRefresh = false;
+      this.requestFramebuffer(!requestFullRefresh);
+    }
   }
 
   async #readServerCutText(): Promise<void> {
@@ -361,6 +402,61 @@ export class RFBClient {
     const body = await encodeClipboardProvide(text);
     this.transport.send(cutTextFrame(6, body));
   }
+
+  #enabledEncodings(): number[] {
+    return [
+      ...(this.#hevcEnabled ? [RFB_ENCODINGS.hevc] : []),
+      ...(this.#hevcEnabled && this.#chroma444Enabled ? [RFB_ENCODINGS.chroma444] : []),
+      ...(this.#h264Enabled ? [RFB_ENCODINGS.openH264] : []),
+      RFB_ENCODINGS.tight,
+      ...(this.#audioEnabled ? [RFB_ENCODINGS.audio] : []),
+      RFB_ENCODINGS.extendedDesktopSize,
+      RFB_ENCODINGS.extendedClipboard,
+    ];
+  }
+}
+
+export async function readRFBAudioMessage(transport: RFBTransport): Promise<RFBAudioMessage> {
+  const kind = (await transport.readExactly(1))[0]!;
+  if (kind === 1) {
+    const header = await transport.readExactly(10);
+    const format = header[0]!;
+    const channels = header[1]!;
+    const sampleRate = readUint32(header, 2);
+    const length = readUint32(header, 6);
+    if (
+      format !== 1 ||
+      channels < 1 ||
+      channels > 2 ||
+      sampleRate < 8_000 ||
+      sampleRate > 192_000 ||
+      length > 64 * 1_024
+    )
+      throw new Error("invalid CAF1 audio configuration");
+    return {
+      kind: "config",
+      channels,
+      sampleRate,
+      cookie: await transport.readExactly(length),
+    };
+  }
+  if (kind === 2) {
+    const header = await transport.readExactly(10);
+    const length = readUint32(header, 6);
+    if (header[0] !== 0 || header[1] !== 0 || !length || length > 64 * 1_024)
+      throw new Error("invalid CAF1 audio packet");
+    return {
+      kind: "packet",
+      timestampMs: readUint32(header, 2),
+      payload: await transport.readExactly(length),
+    };
+  }
+  if (kind === 3) {
+    const padding = await transport.readExactly(2);
+    if (padding[0] !== 0 || padding[1] !== 0) throw new Error("invalid CAF1 audio stop");
+    return { kind: "stop" };
+  }
+  throw new Error(`invalid CAF1 audio message kind ${kind}`);
 }
 
 export function encodeSetEncodings(encodings: readonly number[]): Uint8Array {
@@ -529,4 +625,8 @@ function concat(...parts: Uint8Array[]): Uint8Array {
     offset += part.byteLength;
   }
   return result;
+}
+
+function asError(error: unknown): Error {
+  return error instanceof Error ? error : new Error(String(error));
 }

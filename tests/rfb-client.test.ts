@@ -106,6 +106,108 @@ test("H.264 decode failure renegotiates Tight and requests a full JPEG frame", a
   assert.deepEqual(transport.sent[8], framebufferRequest(true, 800, 600));
 });
 
+test("capability handshake advertises HEVC, C444, and CAF1 only when probed", async () => {
+  const name = new TextEncoder().encode("Studio");
+  const transcript = bytes(
+    new TextEncoder().encode("RFB 003.008\n"),
+    [1, 1],
+    uint32(0),
+    uint16(800),
+    uint16(600),
+    new Uint8Array(16),
+    uint32(name.byteLength),
+    name,
+  );
+  const transport = new ScriptedTransport(transcript);
+  const client = new RFBClient(transport, {
+    hevc: true,
+    h264: true,
+    chroma444: true,
+    audio: true,
+  });
+  await assert.rejects(client.start(), /scripted server ended/);
+  assert.deepEqual(
+    transport.sent[3],
+    encodeSetEncodings([
+      RFB_ENCODINGS.hevc,
+      RFB_ENCODINGS.chroma444,
+      RFB_ENCODINGS.openH264,
+      RFB_ENCODINGS.tight,
+      RFB_ENCODINGS.audio,
+      RFB_ENCODINGS.extendedDesktopSize,
+      RFB_ENCODINGS.extendedClipboard,
+    ]),
+  );
+});
+
+test("HEVC and H.264 failures renegotiate down the codec chain while retaining CAF1", async () => {
+  const name = new TextEncoder().encode("Studio");
+  const videoUpdate = (encoding: number) =>
+    bytes(
+      [0, 0],
+      uint16(1),
+      uint16(0),
+      uint16(0),
+      uint16(800),
+      uint16(600),
+      uint32(encoding),
+      uint32(3),
+      uint32(0),
+      [0, 0, 1],
+    );
+  const transcript = bytes(
+    new TextEncoder().encode("RFB 003.008\n"),
+    [1, 1],
+    uint32(0),
+    uint16(800),
+    uint16(600),
+    new Uint8Array(16),
+    uint32(name.byteLength),
+    name,
+    videoUpdate(RFB_ENCODINGS.hevc),
+    videoUpdate(RFB_ENCODINGS.openH264),
+    [0, 0, 0, 1],
+    uint16(0),
+    uint16(0),
+    uint16(800),
+    uint16(600),
+    uint32(RFB_ENCODINGS.tight),
+    [0x90, 2, 0xff, 0xd8],
+  );
+  const transport = new ScriptedTransport(transcript);
+  const frames: string[] = [];
+  const client = new RFBClient(transport, {
+    hevc: true,
+    h264: true,
+    audio: true,
+    onFrame: (frame) => {
+      frames.push(frame.encoding);
+      if (frame.encoding !== "jpeg") throw new Error("decoder failed");
+    },
+  });
+  await assert.rejects(client.start(), /scripted server ended/);
+  assert.deepEqual(frames, ["hevc", "h264", "jpeg"]);
+  assert.deepEqual(
+    transport.sent[6],
+    encodeSetEncodings([
+      RFB_ENCODINGS.openH264,
+      RFB_ENCODINGS.tight,
+      RFB_ENCODINGS.audio,
+      RFB_ENCODINGS.extendedDesktopSize,
+      RFB_ENCODINGS.extendedClipboard,
+    ]),
+  );
+  assert.deepEqual(
+    transport.sent[8],
+    encodeSetEncodings([
+      RFB_ENCODINGS.tight,
+      RFB_ENCODINGS.audio,
+      RFB_ENCODINGS.extendedDesktopSize,
+      RFB_ENCODINGS.extendedClipboard,
+    ]),
+  );
+});
+
 test("Tight compact lengths round-trip at every byte boundary", async () => {
   for (const length of [0, 1, 0x7f, 0x80, 0x3fff, 0x4000, (1 << 22) - 1]) {
     const encoded = encodeTightCompactLength(length);
