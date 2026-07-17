@@ -102,6 +102,9 @@ struct RFBPixelFormat: Equatable, Sendable {
 enum RFBWire {
   static let tightEncoding: Int32 = 7
   static let openH264Encoding: Int32 = 50
+  static let pointerPositionEncoding: Int32 = -232
+  static let cursorEncoding: Int32 = -239
+  static let cursorWithAlphaEncoding: Int32 = -314
   static let crabfleetAudioEncoding: Int32 = 0x4341_4631
   static let crabfleetHEVCEncoding: Int32 = 0x4845_5631
   static let crabfleetChroma444Encoding: Int32 = 0x4334_3434
@@ -114,6 +117,11 @@ enum RFBWire {
     case crabfleetHEVC
     case openH264
     case tight
+  }
+
+  enum CursorEncodingSelection: Equatable, Sendable {
+    case cursorWithAlpha
+    case cursor
   }
 
   /// Flags word plus the codec's bounded compressed payload.
@@ -167,6 +175,97 @@ enum RFBWire {
       encodings.contains(crabfleetChroma444Encoding)
     else { return .chroma420 }
     return .chroma444
+  }
+
+  static func preferredCursorEncoding(from encodings: [Int32]) -> CursorEncodingSelection? {
+    if encodings.contains(cursorWithAlphaEncoding) { return .cursorWithAlpha }
+    if encodings.contains(cursorEncoding) { return .cursor }
+    return nil
+  }
+
+  static func cursorWithAlphaUpdate(image: RFBCursorImage) throws -> Data {
+    try image.validate()
+
+    var data = framebufferUpdateHeader(rectangleCount: 1)
+    data.append(cursorRectangleHeader(image: image, encoding: cursorWithAlphaEncoding))
+    data.appendBigEndian(Int32(0))  // Raw encoding inside CursorWithAlpha.
+    data.append(image.rgba)
+    return data
+  }
+
+  static func cursorUpdate(image: RFBCursorImage) throws -> Data {
+    try image.validate()
+
+    var pixels = Data(capacity: image.width * image.height * 4)
+    var mask = Data(repeating: 0, count: ((image.width + 7) / 8) * image.height)
+    for row in 0..<image.height {
+      for column in 0..<image.width {
+        let source = (row * image.width + column) * 4
+        let alpha = image.rgba[source + 3]
+        let red = unpremultiply(image.rgba[source], alpha: alpha)
+        let green = unpremultiply(image.rgba[source + 1], alpha: alpha)
+        let blue = unpremultiply(image.rgba[source + 2], alpha: alpha)
+        // SetPixelFormat rejects every other format, so classic cursor pixels
+        // always use the session's enforced little-endian BGRX8888 format.
+        pixels.append(contentsOf: [blue, green, red, 0])
+        // Classic Cursor has one-bit transparency. Avoid turning faint
+        // antialiased edge pixels into saturated opaque fringes.
+        if alpha >= 0x80 {
+          let maskIndex = row * ((image.width + 7) / 8) + column / 8
+          mask[maskIndex] |= UInt8(0x80 >> (column % 8))
+        }
+      }
+    }
+
+    var data = framebufferUpdateHeader(rectangleCount: 1)
+    data.append(cursorRectangleHeader(image: image, encoding: cursorEncoding))
+    data.append(pixels)
+    data.append(mask)
+    return data
+  }
+
+  static func hiddenCursorUpdate(encoding: CursorEncodingSelection) -> Data {
+    var data = framebufferUpdateHeader(rectangleCount: 1)
+    data.append(contentsOf: [0, 0, 0, 0, 0, 0, 0, 0])
+    switch encoding {
+    case .cursorWithAlpha:
+      data.appendBigEndian(cursorWithAlphaEncoding)
+      data.appendBigEndian(Int32(0))
+    case .cursor:
+      data.appendBigEndian(cursorEncoding)
+    }
+    return data
+  }
+
+  static func pointerPositionUpdate(x: UInt16, y: UInt16) -> Data {
+    var data = framebufferUpdateHeader(rectangleCount: 1)
+    data.appendBigEndian(x)
+    data.appendBigEndian(y)
+    data.appendBigEndian(UInt16(0))
+    data.appendBigEndian(UInt16(0))
+    data.appendBigEndian(pointerPositionEncoding)
+    return data
+  }
+
+  private static func framebufferUpdateHeader(rectangleCount: UInt16) -> Data {
+    var data = Data([0, 0])
+    data.appendBigEndian(rectangleCount)
+    return data
+  }
+
+  private static func cursorRectangleHeader(image: RFBCursorImage, encoding: Int32) -> Data {
+    var data = Data(capacity: 12)
+    data.appendBigEndian(UInt16(image.hotspotX))
+    data.appendBigEndian(UInt16(image.hotspotY))
+    data.appendBigEndian(UInt16(image.width))
+    data.appendBigEndian(UInt16(image.height))
+    data.appendBigEndian(encoding)
+    return data
+  }
+
+  private static func unpremultiply(_ component: UInt8, alpha: UInt8) -> UInt8 {
+    guard alpha != 0 else { return 0 }
+    return UInt8(min(255, (Int(component) * 255 + Int(alpha) / 2) / Int(alpha)))
   }
 
   static func audioConfig(channels: UInt8, sampleRate: UInt32, magicCookie: Data) throws -> Data {

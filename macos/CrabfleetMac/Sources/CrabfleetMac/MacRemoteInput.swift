@@ -43,10 +43,12 @@ final class RemoteInputSessionGate: @unchecked Sendable {
     }
   }
 
-  func pointerEvent(buttonMask: UInt8, x: UInt16, y: UInt16) {
+  @discardableResult
+  func pointerEvent(buttonMask: UInt8, x: UInt16, y: UInt16) -> Bool {
     withLock {
-      guard acceptingInput, !viewOnly else { return }
+      guard acceptingInput, !viewOnly else { return false }
       input.pointerEvent(buttonMask: buttonMask, x: x, y: y)
+      return true
     }
   }
 

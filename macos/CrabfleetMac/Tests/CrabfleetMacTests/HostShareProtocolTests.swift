@@ -7,6 +7,85 @@ import Testing
 
 struct HostShareWireTests {
   @Test
+  func cursorPseudoEncodingsMatchRFBFixtures() throws {
+    let image = RFBCursorImage(
+      width: 2,
+      height: 1,
+      hotspotX: 1,
+      hotspotY: 0,
+      rgba: Data([
+        0x11, 0x22, 0x33, 0xFF,
+        0x20, 0x10, 0x08, 0x80,
+      ]))
+
+    #expect(
+      try RFBWire.cursorWithAlphaUpdate(image: image)
+        == Data([
+          0, 0, 0, 1,
+          0, 1, 0, 0, 0, 2, 0, 1, 0xFF, 0xFF, 0xFE, 0xC6,
+          0, 0, 0, 0,
+          0x11, 0x22, 0x33, 0xFF, 0x20, 0x10, 0x08, 0x80,
+        ]))
+    #expect(
+      try RFBWire.cursorUpdate(image: image)
+        == Data([
+          0, 0, 0, 1,
+          0, 1, 0, 0, 0, 2, 0, 1, 0xFF, 0xFF, 0xFF, 0x11,
+          0x33, 0x22, 0x11, 0,
+          0x10, 0x20, 0x40, 0,
+          0xC0,
+        ]))
+    #expect(
+      RFBWire.pointerPositionUpdate(x: 0x1234, y: 0x5678)
+        == Data([
+          0, 0, 0, 1,
+          0x12, 0x34, 0x56, 0x78, 0, 0, 0, 0, 0xFF, 0xFF, 0xFF, 0x18,
+        ]))
+    #expect(
+      RFBWire.hiddenCursorUpdate(encoding: .cursorWithAlpha)
+        == Data([
+          0, 0, 0, 1,
+          0, 0, 0, 0, 0, 0, 0, 0, 0xFF, 0xFF, 0xFE, 0xC6,
+          0, 0, 0, 0,
+        ]))
+  }
+
+  @Test
+  func classicCursorMasksFaintAntialiasingAsTransparent() throws {
+    let update = try RFBWire.cursorUpdate(
+      image: RFBCursorImage(
+        width: 1,
+        height: 1,
+        hotspotX: 0,
+        hotspotY: 0,
+        rgba: Data([0x10, 0x08, 0x04, 0x7F])))
+
+    #expect(update.last == 0)
+  }
+
+  @Test
+  func cursorWireRejectsInvalidDimensionsAndPayloads() {
+    for image in [
+      RFBCursorImage(width: 0, height: 1, hotspotX: 0, hotspotY: 0, rgba: Data()),
+      RFBCursorImage(width: 129, height: 1, hotspotX: 0, hotspotY: 0, rgba: Data(count: 516)),
+      RFBCursorImage(width: 1, height: 1, hotspotX: 1, hotspotY: 0, rgba: Data(count: 4)),
+      RFBCursorImage(width: 1, height: 1, hotspotX: 0, hotspotY: 0, rgba: Data(count: 3)),
+    ] {
+      #expect(throws: (any Error).self) { _ = try RFBWire.cursorWithAlphaUpdate(image: image) }
+      #expect(throws: (any Error).self) { _ = try RFBWire.cursorUpdate(image: image) }
+    }
+  }
+
+  @Test
+  func cursorNegotiationPrefersAlphaThenClassic() {
+    #expect(
+      RFBWire.preferredCursorEncoding(
+        from: [RFBWire.cursorEncoding, RFBWire.cursorWithAlphaEncoding]) == .cursorWithAlpha)
+    #expect(RFBWire.preferredCursorEncoding(from: [RFBWire.cursorEncoding]) == .cursor)
+    #expect(RFBWire.preferredCursorEncoding(from: [RFBWire.pointerPositionEncoding]) == nil)
+  }
+
+  @Test
   func audioMessagesMatchWireFormat() throws {
     #expect(
       try RFBWire.audioConfig(
@@ -150,6 +229,103 @@ struct HostShareWireTests {
     )
     #expect(h264.width == 4_096)
     #expect(h264.height == 2_304)
+  }
+}
+
+struct CursorPipelinePolicyTests {
+  @Test
+  func captureBakesUnlessEveryActiveSessionNegotiatedCursor() {
+    let first = UUID()
+    let second = UUID()
+    var state = CursorCaptureNegotiationState()
+
+    #expect(state.showsCursor)
+    state.join(first)
+    #expect(state.showsCursor)
+    state.setNegotiated(true, for: first)
+    #expect(!state.showsCursor)
+    state.join(second)
+    #expect(state.showsCursor)
+    state.setNegotiated(true, for: second)
+    #expect(!state.showsCursor)
+    state.setNegotiated(false, for: first)
+    #expect(state.showsCursor)
+    state.leave(first)
+    #expect(!state.showsCursor)
+    state.leave(second)
+    #expect(state.showsCursor)
+  }
+
+  @Test
+  func cursorContentHashDeduplicatesOnlyIdenticalImages() {
+    let first = RFBCursorImage(
+      width: 1, height: 1, hotspotX: 0, hotspotY: 0, rgba: Data([1, 2, 3, 4]))
+    let changed = RFBCursorImage(
+      width: 1, height: 1, hotspotX: 0, hotspotY: 0, rgba: Data([1, 2, 3, 5]))
+    var deduplicator = CursorImageDeduplicator()
+
+    let firstSend = deduplicator.shouldSend(hash: first.contentHash)
+    let duplicateSend = deduplicator.shouldSend(hash: first.contentHash)
+    let changedSend = deduplicator.shouldSend(hash: changed.contentHash)
+    #expect(firstSend)
+    #expect(!duplicateSend)
+    #expect(changedSend)
+  }
+
+  @Test
+  func pointerEchoSuppressionExpiresAfter250Milliseconds() {
+    #expect(
+      !CursorEchoPolicy.shouldSendPointerPosition(
+        positionChanged: true, lastLocalInput: 10, now: 10.249))
+    #expect(
+      CursorEchoPolicy.shouldSendPointerPosition(
+        positionChanged: true, lastLocalInput: 10, now: 10.25))
+    #expect(
+      !CursorEchoPolicy.shouldSendPointerPosition(
+        positionChanged: false, lastLocalInput: nil, now: 20))
+  }
+
+  @Test
+  func cursorCoordinatesInvertRemoteInputMapping() throws {
+    let descriptor = CapturedDisplayDescriptor(
+      displayID: 1,
+      displayBounds: CGRect(x: 100, y: 50, width: 1_440, height: 900),
+      frameWidth: 2_880,
+      frameHeight: 1_800,
+      sourcePixelWidth: 2_880,
+      sourcePixelHeight: 1_800)
+    let position = CursorCoordinateMapper.pointerPosition(
+      CGPoint(x: 820, y: 500),
+      descriptor: descriptor,
+      frameWidth: descriptor.frameWidth,
+      frameHeight: descriptor.frameHeight)
+    #expect(position?.x == 1_440)
+    #expect(position?.y == 900)
+    #expect(
+      CursorCoordinateMapper.pointerPosition(
+        CGPoint(x: 99, y: 500),
+        descriptor: descriptor,
+        frameWidth: descriptor.frameWidth,
+        frameHeight: descriptor.frameHeight) == nil)
+
+    let image = SystemCursorImage(
+      width: 32,
+      height: 32,
+      pointWidth: 16,
+      pointHeight: 16,
+      hotspot: CGPoint(x: 2, y: 3),
+      rgba: Data(repeating: 0x7F, count: 32 * 32 * 4),
+      contentHash: Data([1]))
+    let mapped = try #require(
+      CursorCoordinateMapper.cursorImage(
+        image,
+        descriptor: descriptor,
+        frameWidth: descriptor.frameWidth,
+        frameHeight: descriptor.frameHeight))
+    #expect(mapped.width == 32)
+    #expect(mapped.height == 32)
+    #expect(mapped.hotspotX == 4)
+    #expect(mapped.hotspotY == 6)
   }
 }
 
