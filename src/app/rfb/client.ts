@@ -6,6 +6,8 @@ export const RFB_ENCODINGS = {
   tight: 7,
   audio: 0x4341_4631,
   chroma444: 0x4334_3434,
+  cursorWithAlpha: -314,
+  pointerPosition: -232,
   extendedDesktopSize: -308,
   extendedClipboard: -1_063_131_698,
 } as const;
@@ -39,6 +41,14 @@ export interface RFBFrame {
   flags: number;
 }
 
+export interface RFBCursorImage {
+  width: number;
+  height: number;
+  hotspotX: number;
+  hotspotY: number;
+  rgba: Uint8Array;
+}
+
 export interface RFBClientOptions {
   hevc?: boolean;
   h264: boolean;
@@ -49,6 +59,8 @@ export interface RFBClientOptions {
   onServerInit?: (info: RFBServerInfo) => void;
   onFrame?: (frame: RFBFrame) => Promise<void> | void;
   onResize?: (width: number, height: number) => void;
+  onCursor?: (cursor: RFBCursorImage | null) => void;
+  onPointerPosition?: (position: { x: number; y: number }) => void;
   onClipboard?: (text: string) => void;
   onClipboardError?: (message: string) => void;
   onTraffic?: (bytes: number) => void;
@@ -334,6 +346,34 @@ export class RFBClient {
           if (pending) this.resize(pending.width, pending.height);
         }
         if (x === 1 && y !== 0) this.#options.onState?.(`Resize rejected (${y})`);
+      } else if (encoding === RFB_ENCODINGS.cursorWithAlpha) {
+        const nestedEncoding = readInt32(await this.transport.readExactly(4));
+        // Crabfleet's negotiated CursorWithAlpha profile fixes the nested
+        // encoding to Raw so the payload remains bounded premultiplied RGBA.
+        if (nestedEncoding !== 0) throw new Error("unsupported CursorWithAlpha encoding");
+        if (
+          width > 128 ||
+          height > 128 ||
+          (width === 0) !== (height === 0) ||
+          (width > 0 && (x >= width || y >= height))
+        ) {
+          throw new Error("invalid CursorWithAlpha rectangle");
+        }
+        if (!width) {
+          this.#options.onCursor?.(null);
+        } else {
+          const rgba = await this.transport.readExactly(width * height * 4);
+          for (let offset = 0; offset < rgba.byteLength; offset += 4) {
+            const alpha = rgba[offset + 3]!;
+            if (rgba[offset]! > alpha || rgba[offset + 1]! > alpha || rgba[offset + 2]! > alpha)
+              throw new Error("invalid premultiplied CursorWithAlpha pixels");
+          }
+          this.#options.onCursor?.({ width, height, hotspotX: x, hotspotY: y, rgba });
+        }
+      } else if (encoding === RFB_ENCODINGS.pointerPosition) {
+        if (width !== 0 || height !== 0 || x >= this.width || y >= this.height)
+          throw new Error("invalid PointerPos rectangle");
+        this.#options.onPointerPosition?.({ x, y });
       } else {
         throw new Error(`unsupported RFB encoding ${encoding}`);
       }
@@ -410,6 +450,8 @@ export class RFBClient {
       ...(this.#h264Enabled ? [RFB_ENCODINGS.openH264] : []),
       RFB_ENCODINGS.tight,
       ...(this.#audioEnabled ? [RFB_ENCODINGS.audio] : []),
+      RFB_ENCODINGS.cursorWithAlpha,
+      RFB_ENCODINGS.pointerPosition,
       RFB_ENCODINGS.extendedDesktopSize,
       RFB_ENCODINGS.extendedClipboard,
     ];

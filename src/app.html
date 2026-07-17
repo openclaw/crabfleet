@@ -2470,7 +2470,12 @@
         min-height: 0;
         overflow: hidden;
       }
+      .desktop-viewer-canvas {
+        position: absolute;
+        inset: 0;
+      }
       .desktop-viewer-stage canvas {
+        display: block;
         width: 100%;
         height: 100%;
         outline: none;
@@ -2479,6 +2484,13 @@
       }
       .desktop-viewer-stage canvas:focus {
         box-shadow: inset 0 0 0 1px rgb(240 90 112 / 0.8);
+      }
+      .desktop-cursor-overlay {
+        position: absolute;
+        z-index: 1;
+        max-width: none;
+        image-rendering: pixelated;
+        pointer-events: none;
       }
       .desktop-viewer-hint {
         position: absolute;
