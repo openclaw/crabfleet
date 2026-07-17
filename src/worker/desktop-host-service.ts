@@ -7,6 +7,9 @@ export type DesktopHostInput = {
   name?: unknown;
   address?: unknown;
   port?: unknown;
+  quicPort?: unknown;
+  quicCertHash?: unknown;
+  webtransport?: unknown;
 };
 
 export type DesktopHost = {
@@ -15,6 +18,9 @@ export type DesktopHost = {
   name: string;
   address: string;
   port: number;
+  quicPort: number | null;
+  quicCertHash: string | null;
+  webtransport: boolean;
   relayCapable: boolean;
   createdAt: number;
   updatedAt: number;
@@ -62,6 +68,12 @@ export class DesktopHostService {
     const name = boundedText(input.name, "name", 100);
     const address = tailscaleIPv4(input.address);
     const port = desktopHostPort(input.port);
+    const quicPort = optionalDesktopHostPort(input.quicPort, "quicPort");
+    const quicCertHash = optionalQUICCertHash(input.quicCertHash);
+    if ((quicPort === null) !== (quicCertHash === null)) {
+      throw badRequest("quicPort and quicCertHash must be provided together");
+    }
+    const webtransport = optionalCapability(input.webtransport, "webtransport");
     const now = this.now();
     const publicationID =
       ownershipMode === desktopHostTokenOwnershipMode
@@ -76,6 +88,9 @@ export class DesktopHostService {
       name,
       address,
       port,
+      quicPort,
+      quicCertHash,
+      webtransport,
       ownershipToken,
       publicationID,
       createdAt: now,
@@ -121,6 +136,9 @@ function presentDesktopHost(row: DesktopHostRow): DesktopHost {
     name: row.name,
     address: row.address,
     port: row.port,
+    quicPort: row.quicPort,
+    quicCertHash: row.quicCertHash,
+    webtransport: row.webtransport,
     relayCapable: row.ownershipToken.length > 0,
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
@@ -177,6 +195,28 @@ function desktopHostPort(value: unknown): number {
   if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 1 || value > 65_535) {
     throw badRequest("port must be an integer from 1 to 65535");
   }
+  return value;
+}
+
+function optionalDesktopHostPort(value: unknown, field: string): number | null {
+  if (value === undefined || value === null) return null;
+  if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 1 || value > 65_535) {
+    throw badRequest(`${field} must be an integer from 1 to 65535`);
+  }
+  return value;
+}
+
+function optionalQUICCertHash(value: unknown): string | null {
+  if (value === undefined || value === null) return null;
+  if (typeof value !== "string" || !/^[A-Za-z0-9_-]{43}$/u.test(value)) {
+    throw badRequest("quicCertHash must be an unpadded base64url SHA-256 hash");
+  }
+  return value;
+}
+
+function optionalCapability(value: unknown, field: string): boolean {
+  if (value === undefined) return false;
+  if (typeof value !== "boolean") throw badRequest(`${field} must be a boolean`);
   return value;
 }
 

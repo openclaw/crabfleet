@@ -69,6 +69,9 @@ export type DesktopHostTable = {
   name: string;
   address: string;
   port: number;
+  quic_port: number | null;
+  quic_cert_hash: string | null;
+  webtransport: Generated<number>;
   ownership_token: string;
   publication_id: string;
   publication_write_token: Generated<string>;

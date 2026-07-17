@@ -9,13 +9,17 @@ export type DesktopHostRow = {
   name: string;
   address: string;
   port: number;
+  quicPort: number | null;
+  quicCertHash: string | null;
+  webtransport: boolean;
   ownershipToken: string;
   publicationID: string;
   createdAt: number;
   updatedAt: number;
 };
 
-export type DesktopHostWrite = DesktopHostRow;
+export type DesktopHostWrite = Omit<DesktopHostRow, "quicPort" | "quicCertHash" | "webtransport"> &
+  Partial<Pick<DesktopHostRow, "quicPort" | "quicCertHash" | "webtransport">>;
 
 export interface DesktopHostStore {
   list(ownerSubject: string): Promise<DesktopHostRow[]>;
@@ -57,6 +61,9 @@ export class DesktopHostRepository implements DesktopHostStore, DesktopRelayRegi
       .orderBy("id")
       .execute();
     return rows.map((row) => ({
+      quicPort: row.quic_port ?? null,
+      quicCertHash: row.quic_cert_hash ?? null,
+      webtransport: row.webtransport === 1,
       ownerSubject: row.owner_subject,
       id: row.id,
       owner: row.owner,
@@ -102,6 +109,9 @@ export class DesktopHostRepository implements DesktopHostStore, DesktopRelayRegi
     const row = await database(this.env)
       .insertInto("desktop_hosts")
       .values({
+        quic_port: host.quicPort ?? null,
+        quic_cert_hash: host.quicCertHash ?? null,
+        webtransport: host.webtransport === true ? 1 : 0,
         owner_subject: host.ownerSubject,
         id: host.id,
         owner: host.owner,
@@ -118,6 +128,9 @@ export class DesktopHostRepository implements DesktopHostStore, DesktopRelayRegi
         const update = conflict.columns(["owner_subject", "id"]);
         return host.ownershipToken
           ? update.doUpdateSet({
+              quic_port: host.quicPort ?? null,
+              quic_cert_hash: host.quicCertHash ?? null,
+              webtransport: host.webtransport === true ? 1 : 0,
               owner: host.owner,
               name: host.name,
               address: host.address,
@@ -141,6 +154,9 @@ export class DesktopHostRepository implements DesktopHostStore, DesktopRelayRegi
       .executeTakeFirst();
     if (!row) throw desktopHostOwnershipConflict();
     return {
+      quicPort: row.quic_port ?? null,
+      quicCertHash: row.quic_cert_hash ?? null,
+      webtransport: row.webtransport === 1,
       ownerSubject: row.owner_subject,
       id: row.id,
       owner: row.owner,
