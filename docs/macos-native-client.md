@@ -31,9 +31,10 @@ app-owned private desktop host for Mac-to-Mac access.
   ScreenCaptureKit, then serves private HEVC, Open H.264, or Tight/JPEG RFB 3.8
   frames plus AAC-LC audio to Crabfleet viewers without enabling Apple's Screen
   Sharing daemon.
-- The host binds port 5901 only to a verified Tailscale `100.64.0.0/10` address,
-  requires a valid identity on the active tailnet, and admits only a
-  Tailscale-authorized peer owned by that same user.
+- The host accepts TCP on port 5901 and QUIC on port 5911 only when the local
+  address is the verified Tailscale `100.64.0.0/10` address, requires a valid
+  identity on the active tailnet, and admits only a Tailscale-authorized peer
+  owned by that same user.
 - Screen Recording is the only permission required for view-only sharing.
   Remote control is forwarded through Accessibility-authorized CGEvents when
   that optional permission is granted.
@@ -73,7 +74,12 @@ an owner-scoped Crabfleet Worker relay for first-party browser access.
    pixel resolution and the active codec's cap, so the remote desktop follows
    the viewer window. With multiple viewers, the host returns
    ExtendedDesktopSize status 3 and leaves the shared capture size unchanged.
-3. One RFB listener per selected display binds consecutive ports beginning at 5901. Each listener admits up to four authorized viewers. Binding the Tailscale address directly is
+3. Each selected display has a TCP RFB listener on consecutive ports beginning
+   at 5901 and a parallel QUIC listener on consecutive ports beginning at 5911.
+   QUIC uses ALPN `crabfleet-rfb-1` and one bidirectional stream carrying the
+   exact RFB byte stream; it intentionally retains TCP's ordered
+   head-of-line behavior in this wave. Each display admits up to four authorized
+   viewers across both transports. Binding the Tailscale address directly is
    not viable on current macOS — accepted Network-framework child connections
    re-bind a required local endpoint and fail with `EADDRINUSE` — so instead
    every accepted connection must prove it arrived on the exact Tailscale
@@ -87,8 +93,16 @@ an owner-scoped Crabfleet Worker relay for first-party browser access.
    The primary row keeps the host ID; additional rows use `-d2`, `-d3`, and
    `-d4` suffixes, and every row includes the display label. The receiving app
    discovers each display as its own card and directly connects with no VNC
-   password. The displayed `vnc://100.x.y.z:5901` and consecutive-port addresses
-   remain Quick Connect fallbacks.
+   password. Each row also carries its QUIC port and certificate SPKI hash. The
+   native viewer tries that pinned QUIC endpoint first, rejects a certificate
+   mismatch, and transparently retries the registered TCP endpoint if QUIC or
+   the RFB handshake has not completed in two seconds. Rows without both QUIC
+   fields keep the rolling-upgrade-safe TCP behavior. The displayed
+   `vnc://100.x.y.z:5901` and consecutive-port addresses remain Quick Connect
+   fallbacks. Recovery keys the publication to the existing host/display
+   endpoint, then refreshes a changed QUIC pin or availability under that same
+   publication ID so upgrades and Keychain identity rotation cannot strand the
+   token-owned Fleet row.
 6. Every token-owned display registration enables the persisted "Allow browser
    access via Crabfleet" toggle, which defaults on. Each display publisher opens
    an authenticated WebSocket to its registration's `DesktopRelayDO`; a
@@ -237,6 +251,13 @@ RFB None authentication is accepted only inside that already-authenticated
 direct channel. Browser sessions use RFB None only after the Worker has
 authenticated the ownership-token host and the registration owner's browser
 session.
+QUIC adds TLS and pins the host's self-signed certificate by the SPKI SHA-256
+hash carried opaquely in the private Fleet row. The host creates one persistent
+P-256 ECDSA key and certificate in Keychain on first share. The original design
+called for Ed25519, but the public Security.framework `SecIdentity` API required
+by Network.framework cannot create or import an Ed25519 identity; P-256 keeps
+the private key non-exported and supplies the same pinned, self-signed trust
+boundary.
 The relay never stores the registration token or RFB bytes. The direct listener
 is not reachable on Wi-Fi, Ethernet, loopback, or a public address. The host app
 must remain running, and stopping the share cancels the listener, relay
@@ -268,6 +289,12 @@ audio-drop, and jitter-depth diagnostics; the overlay is hidden by default.
 The adjacent **Auto / Sharp / Smooth** picker sends negotiated `QCTL` updates
 for this browser session only and restores the tab's per-host choice from
 `sessionStorage`.
+
+Fleet registrations also carry a `webtransport` capability boolean. It remains
+`false` and is passed through opaquely for probe-only groundwork: the browser
+does not attempt WebTransport in this wave because Cloudflare Workers
+WebTransport ingress is not generally available. Browser sessions continue to
+use the authenticated WebSocket relay.
 
 Remote clipboard reads use only the snapshot last approved with **Send to
 Mac**; loading or editing clipboard text never exposes it by itself. Reading
@@ -308,9 +335,10 @@ no longer bundles or builds the modified D3DES source.
   ExtendedDesktopSize, including Share This Mac hosts, which aspect-fit the
   request instead of adopting arbitrary layouts; multi-screen layout requests
   remain unsupported.
-- RoyalVNCKit provides raw TCP only. Generic production connections must remain
-  bound to loopback behind an authenticated SSH tunnel; Share This Mac is the
-  identity-gated tailnet exception.
+- Generic RoyalVNCKit connections use TCP and must remain bound to loopback
+  behind an authenticated SSH tunnel. Share This Mac may inject its single
+  Network.framework QUIC stream through the same byte-stream adapter after
+  Fleet SPKI verification; it is the identity-gated tailnet exception.
 - The hardened prototype negotiates standard VNC password or no-auth security
   only. The bundled ARD Diffie-Hellman path now requires a full-width
   probabilistic safe-prime group and nonzero public/shared results, but ARD,

@@ -99,10 +99,15 @@ struct PrivateMacShareSheet: View {
 
         if !controller.viewerSessions.isEmpty {
           VStack(alignment: .leading, spacing: 5) {
-            Text("Viewer quality")
+            Text("Viewer sessions")
               .font(.caption.weight(.semibold))
             ForEach(controller.viewerSessions) { viewer in
-              HStack {
+              HStack(spacing: 8) {
+                Text(viewer.transport)
+                  .font(.system(size: 9, weight: .bold, design: .monospaced))
+                  .padding(.horizontal, 6)
+                  .padding(.vertical, 3)
+                  .background(.mint.opacity(0.12), in: Capsule())
                 Text("\(viewer.display) · \(viewer.peer)")
                   .lineLimit(1)
                 Spacer()

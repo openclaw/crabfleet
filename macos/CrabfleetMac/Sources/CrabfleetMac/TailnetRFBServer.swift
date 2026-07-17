@@ -9,6 +9,7 @@ enum TailnetRFBServerEvent: Equatable, Sendable {
   case connected(String, count: Int)
   case streaming(TailnetStreamStats)
   case audioActive(Bool)
+  case sessionSnapshot([TailnetSessionDiagnostic])
   case disconnected(count: Int, remainingPeer: String?)
   case listenerFailed(String)
   case sessionFailed(String)
@@ -20,6 +21,12 @@ struct TailnetViewerSession: Equatable, Identifiable, Sendable {
   let id: UUID
   let peer: String
   let qualityMode: ShareQualityMode
+}
+
+struct TailnetSessionDiagnostic: Equatable, Sendable {
+  let id: UUID
+  let peer: String
+  let transport: DirectRFBTransport
 }
 
 struct TailnetStreamStats: Equatable, Sendable {
@@ -255,6 +262,7 @@ final class DirectSessionClaimingRFBByteStream: RFBByteStream, @unchecked Sendab
 final class TailnetRFBServer: @unchecked Sendable {
   typealias EventHandler = @Sendable (TailnetRFBServerEvent) -> Void
   static let maximumSessions = 4
+  static let maximumPendingQUICGroups = 16
 
   static func canAdmitSession(currentCount: Int) -> Bool {
     currentCount >= 0 && currentCount < maximumSessions
@@ -272,6 +280,8 @@ final class TailnetRFBServer: @unchecked Sendable {
   private let clipboard: (any HostClipboardSyncing)?
   private let peerAuthorizer: (any TailnetPeerAuthorizing)?
   private let port: UInt16
+  private let quicPort: UInt16?
+  private let quicIdentity: QUICHostIdentity?
   private let handshakeTimeout: Duration
   private let sessionGate: RFBHostSessionGate
   private let queue = DispatchQueue(label: "org.openclaw.crabfleet.rfb-listener")
@@ -279,15 +289,29 @@ final class TailnetRFBServer: @unchecked Sendable {
   private let lock = NSLock()
   private let eventHandler: EventHandler
   private var listener: NWListener?
+  private var quicListener: NWListener?
+  private var quicGroups: [ObjectIdentifier: NWConnectionGroup] = [:]
+  private var pendingQUICTimeouts: [ObjectIdentifier: Task<Void, Never>] = [:]
+  private var sessionQUICGroupIDs: [UUID: ObjectIdentifier] = [:]
   private var listenerGeneration: UUID?
+  private var readyTransports: Set<DirectRFBTransport> = []
   private var sessions: [UUID: RFBHostSession] = [:]
   private var connectedPeers: [UUID: String] = [:]
+  private var sessionTransports: [UUID: DirectRFBTransport] = [:]
   private var sessionStats: [UUID: TailnetStreamStats] = [:]
   private var sessionQualityModes: [UUID: ShareQualityMode] = [:]
   private var audioSessionIDs: Set<UUID> = []
   private var viewOnly = false
   private var audioEnabled = true
   private var qualityMode: ShareQualityMode = .auto
+
+  var quicAvailable: Bool {
+    withLock { quicListener != nil && readyTransports.contains(.quic) }
+  }
+
+  var pendingQUICGroupCount: Int {
+    withLock { pendingQUICTimeouts.count }
+  }
 
   init(
     identity: TailnetIdentity,
@@ -298,6 +322,8 @@ final class TailnetRFBServer: @unchecked Sendable {
     clipboard: (any HostClipboardSyncing)? = nil,
     peerAuthorizer: (any TailnetPeerAuthorizing)? = nil,
     port: UInt16,
+    quicPort: UInt16? = nil,
+    quicIdentity: QUICHostIdentity? = nil,
     handshakeTimeout: Duration = .seconds(10),
     sessionGate: RFBHostSessionGate = RFBHostSessionGate(),
     eventHandler: @escaping EventHandler
@@ -310,6 +336,8 @@ final class TailnetRFBServer: @unchecked Sendable {
     self.clipboard = clipboard
     self.peerAuthorizer = peerAuthorizer
     self.port = port
+    self.quicPort = quicPort
+    self.quicIdentity = quicIdentity
     self.handshakeTimeout = handshakeTimeout
     self.sessionGate = sessionGate
     self.eventHandler = eventHandler
@@ -326,49 +354,75 @@ final class TailnetRFBServer: @unchecked Sendable {
     guard let listenerPort = NWEndpoint.Port(rawValue: port) else {
       throw PrivateMacShareError.listenerFailed("invalid port")
     }
-    let listener = try NWListener(using: parameters, on: listenerPort)
-    listener.stateUpdateHandler = { [weak self] state in
-      guard let self else { return }
-      switch state {
-      case .ready:
-        emit(.listening)
-      case .failed(let error):
-        emit(.listenerFailed(error.localizedDescription))
-      case .cancelled:
-        break
-      default:
-        break
-      }
-    }
     let generation = UUID()
+    let listener = try NWListener(using: parameters, on: listenerPort)
+    configure(listener, transport: .tcp, generation: generation)
     listener.newConnectionHandler = { [weak self] connection in
-      self?.accept(connection, generation: generation)
+      self?.accept(connection, transport: .tcp, generation: generation)
+    }
+
+    var configuredQUICListener: NWListener?
+    if let quicPort, let quicIdentity {
+      if let listenerPort = NWEndpoint.Port(rawValue: quicPort) {
+        do {
+          let listener = try NWListener(
+            using: QUICParameters.server(identity: quicIdentity.identity),
+            on: listenerPort)
+          configure(listener, transport: .quic, generation: generation)
+          listener.newConnectionGroupHandler = { [weak self] group in
+            self?.accept(group, generation: generation)
+          }
+          configuredQUICListener = listener
+        } catch {
+          configuredQUICListener = nil
+        }
+      }
+    } else if quicPort != nil || quicIdentity != nil {
+      throw PrivateMacShareError.listenerFailed("incomplete QUIC listener configuration")
     }
     withLock {
       self.listener = listener
+      quicListener = configuredQUICListener
       listenerGeneration = generation
+      readyTransports.removeAll()
     }
     listener.start(queue: queue)
+    configuredQUICListener?.start(queue: queue)
   }
 
   func stop() {
-    let values = withLock { () -> (NWListener?, [(UUID, RFBHostSession)]) in
+    let values = withLock {
+      () -> (
+        NWListener?, NWListener?, [(UUID, RFBHostSession)], [NWConnectionGroup],
+        [Task<Void, Never>]
+      ) in
       if !sessions.isEmpty {
         emit(.disconnected(count: 0, remainingPeer: nil))
       }
       defer {
         listener = nil
+        quicListener = nil
         listenerGeneration = nil
+        readyTransports.removeAll()
         sessions.removeAll()
         connectedPeers.removeAll()
+        sessionTransports.removeAll()
         sessionStats.removeAll()
         sessionQualityModes.removeAll()
         audioSessionIDs.removeAll()
+        quicGroups.removeAll()
+        pendingQUICTimeouts.removeAll()
+        sessionQUICGroupIDs.removeAll()
       }
-      return (listener, Array(sessions))
+      return (
+        listener, quicListener, Array(sessions), Array(quicGroups.values),
+        Array(pendingQUICTimeouts.values))
     }
     values.0?.cancel()
-    for (_, session) in values.1 { session.stop() }
+    values.1?.cancel()
+    for (_, session) in values.2 { session.stop() }
+    for group in values.3 { group.cancel() }
+    for timeout in values.4 { timeout.cancel() }
   }
 
   func setViewOnly(_ enabled: Bool) {
@@ -422,9 +476,99 @@ final class TailnetRFBServer: @unchecked Sendable {
     }
   }
 
-  private func accept(_ connection: NWConnection, generation: UUID) {
+  private func configure(
+    _ listener: NWListener,
+    transport: DirectRFBTransport,
+    generation: UUID
+  ) {
+    listener.stateUpdateHandler = { [weak self] state in
+      guard let self else { return }
+      switch state {
+      case .ready:
+        let shouldEmit = withLock { () -> Bool in
+          guard self.listenerGeneration == generation else { return false }
+          self.readyTransports.insert(transport)
+          let expected = self.quicListener == nil ? 1 : 2
+          return self.readyTransports.count == expected
+        }
+        if shouldEmit { emit(.listening) }
+      case .failed(let error):
+        if transport == .quic {
+          let tcpIsReady = withLock { () -> Bool in
+            guard self.listenerGeneration == generation else { return false }
+            self.quicListener = nil
+            self.readyTransports.remove(.quic)
+            return self.readyTransports.contains(.tcp)
+          }
+          emit(.sessionFailed("QUIC unavailable; continuing over TCP."))
+          if tcpIsReady { emit(.listening) }
+        } else if withLock({ self.listenerGeneration == generation }) {
+          emit(.listenerFailed("TCP: \(error.localizedDescription)"))
+        }
+      case .cancelled:
+        break
+      default:
+        break
+      }
+    }
+  }
+
+  private func accept(_ group: NWConnectionGroup, generation: UUID) {
+    let groupID = ObjectIdentifier(group)
+    let timeout = Task { [weak self, weak group] in
+      try? await Task.sleep(for: .seconds(2))
+      guard !Task.isCancelled, let self, let group else { return }
+      self.expirePendingQUICGroup(group, groupID: groupID)
+    }
+    let retained = withLock { () -> Bool in
+      guard listenerGeneration == generation, quicListener != nil,
+        pendingQUICTimeouts.count < Self.maximumPendingQUICGroups
+      else { return false }
+      quicGroups[groupID] = group
+      pendingQUICTimeouts[groupID] = timeout
+      return true
+    }
+    guard retained else {
+      timeout.cancel()
+      group.cancel()
+      return
+    }
+    group.stateUpdateHandler = { [weak self, weak group] state in
+      guard let self, let group else { return }
+      switch state {
+      case .failed, .cancelled:
+        _ = self.releasePendingQUICGroup(group, groupID: groupID)
+      default:
+        break
+      }
+    }
+    group.newConnectionHandler = { [weak self, weak group] connection in
+      guard let self, let group else {
+        connection.cancel()
+        return
+      }
+      guard self.consumePendingQUICGroup(group, groupID: groupID) else {
+        connection.cancel()
+        return
+      }
+      self.accept(
+        connection,
+        transport: .quic,
+        generation: generation,
+        quicGroup: group)
+    }
+    group.start(queue: queue)
+  }
+
+  private func accept(
+    _ connection: NWConnection,
+    transport: DirectRFBTransport,
+    generation: UUID,
+    quicGroup: NWConnectionGroup? = nil
+  ) {
     guard let sessionID = sessionGate.reserve() else {
       connection.cancel()
+      if let quicGroup { discard(quicGroup) }
       return
     }
     let sessionDescriptor = sessionGate.descriptor(basedOn: descriptor)
@@ -474,11 +618,16 @@ final class TailnetRFBServer: @unchecked Sendable {
       }
     )
     let admitted = withLock { () -> Bool in
-      guard listenerGeneration == generation, listener != nil, sessions[sessionID] == nil else {
+      let transportListenerExists = transport == .tcp ? listener != nil : quicListener != nil
+      guard listenerGeneration == generation, transportListenerExists,
+        sessions[sessionID] == nil
+      else {
         return false
       }
       sessions[sessionID] = newSession
       sessionQualityModes[sessionID] = qualityMode
+      sessionTransports[sessionID] = transport
+      if let quicGroup { sessionQUICGroupIDs[sessionID] = ObjectIdentifier(quicGroup) }
       newSession.setViewOnly(viewOnly)
       newSession.setAudioEnabled(audioEnabled)
       newSession.setQualityMode(qualityMode)
@@ -488,23 +637,77 @@ final class TailnetRFBServer: @unchecked Sendable {
     guard admitted else {
       stream.finishClaim()
       connection.cancel()
+      if let quicGroup { discard(quicGroup) }
       return
     }
   }
 
   private func clear(_ finishedSession: RFBHostSession, sessionID: UUID) {
-    withLock {
-      guard sessions[sessionID] === finishedSession else { return }
+    let group = withLock { () -> NWConnectionGroup? in
+      guard sessions[sessionID] === finishedSession else { return nil }
       sessions.removeValue(forKey: sessionID)
       connectedPeers.removeValue(forKey: sessionID)
+      sessionTransports.removeValue(forKey: sessionID)
       sessionStats.removeValue(forKey: sessionID)
       sessionQualityModes.removeValue(forKey: sessionID)
       audioSessionIDs.remove(sessionID)
+      let group = sessionQUICGroupIDs.removeValue(forKey: sessionID)
+        .flatMap { quicGroups.removeValue(forKey: $0) }
       emit(
         .disconnected(
           count: connectedPeers.count,
           remainingPeer: connectedPeers.values.first))
       emit(.viewerSessionsChanged(viewerSessionsLocked()))
+      emitSessionSnapshot()
+      return group
+    }
+    group?.cancel()
+  }
+
+  private func discard(_ group: NWConnectionGroup) {
+    let timeout = withLock {
+      let timeout = pendingQUICTimeouts.removeValue(forKey: ObjectIdentifier(group))
+      quicGroups.removeValue(forKey: ObjectIdentifier(group))
+      return timeout
+    }
+    timeout?.cancel()
+    group.cancel()
+  }
+
+  private func consumePendingQUICGroup(
+    _ group: NWConnectionGroup,
+    groupID: ObjectIdentifier
+  ) -> Bool {
+    let timeout = withLock { () -> Task<Void, Never>? in
+      guard quicGroups[groupID] === group else { return nil }
+      return pendingQUICTimeouts.removeValue(forKey: groupID)
+    }
+    timeout?.cancel()
+    return timeout != nil
+  }
+
+  private func releasePendingQUICGroup(
+    _ group: NWConnectionGroup,
+    groupID: ObjectIdentifier
+  ) -> Bool {
+    let timeout = withLock { () -> Task<Void, Never>? in
+      guard quicGroups[groupID] === group,
+        let timeout = pendingQUICTimeouts.removeValue(forKey: groupID)
+      else { return nil }
+      quicGroups.removeValue(forKey: groupID)
+      return timeout
+    }
+    guard let timeout else { return false }
+    timeout.cancel()
+    return true
+  }
+
+  private func expirePendingQUICGroup(
+    _ group: NWConnectionGroup,
+    groupID: ObjectIdentifier
+  ) {
+    if releasePendingQUICGroup(group, groupID: groupID) {
+      group.cancel()
     }
   }
 
@@ -516,6 +719,7 @@ final class TailnetRFBServer: @unchecked Sendable {
         connectedPeers[sessionID] = peer
         emit(.connected(peer, count: connectedPeers.count))
         emit(.viewerSessionsChanged(viewerSessionsLocked()))
+        emitSessionSnapshot()
       }
     case .qualityModeChanged(let mode):
       withLock {
@@ -567,6 +771,18 @@ final class TailnetRFBServer: @unchecked Sendable {
       guard let mode = sessionQualityModes[sessionID] else { return nil }
       return TailnetViewerSession(id: sessionID, peer: peer, qualityMode: mode)
     }.sorted { $0.id.uuidString < $1.id.uuidString }
+  }
+
+  private func emitSessionSnapshot() {
+    let snapshot = connectedPeers.compactMap { sessionID, peer in
+      sessionTransports[sessionID].map {
+        TailnetSessionDiagnostic(id: sessionID, peer: peer, transport: $0)
+      }
+    }.sorted {
+      if $0.transport != $1.transport { return $0.transport.rawValue < $1.transport.rawValue }
+      return $0.peer < $1.peer
+    }
+    emit(.sessionSnapshot(snapshot))
   }
 
   private func beginResize(sessionID: UUID) -> Bool {

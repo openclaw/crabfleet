@@ -100,7 +100,8 @@ final class VNCSessionPool: ObservableObject {
       port: UInt16(clamping: request.port),
       username: request.username,
       password: request.password,
-      clipboardEnabled: request.clipboardEnabled
+      clipboardEnabled: request.clipboardEnabled,
+      quic: request.quic
     )
 
     if focusedSessionID == targetID {

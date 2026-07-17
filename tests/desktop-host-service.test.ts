@@ -84,6 +84,9 @@ test("desktop hosts are canonicalized and isolated to their stable owner", async
     name: "Peter's Mac Studio",
     address: "100.68.201.40",
     port: 5901,
+    quicPort: null,
+    quicCertHash: null,
+    webtransport: false,
     relayCapable: true,
     createdAt: 42,
     updatedAt: 42,
@@ -300,6 +303,52 @@ test("desktop hosts accept only bounded metadata and Tailscale IPv4 endpoints", 
   }
   await assert.rejects(service.register(alice, "studio", { ...valid, name: "bad\nname" }), /name/);
   await assert.rejects(service.register(alice, "studio", { ...valid, port: 0 }), /port/);
+  await assert.rejects(
+    service.register(alice, "studio", { ...valid, quicPort: 5911 }),
+    /provided together/,
+  );
+  await assert.rejects(
+    service.register(alice, "studio", {
+      ...valid,
+      quicPort: 5911,
+      quicCertHash: "not-a-pin",
+    }),
+    /base64url SHA-256/,
+  );
+  await assert.rejects(
+    service.register(alice, "studio", { ...valid, webtransport: "yes" }),
+    /webtransport must be a boolean/,
+  );
   await assert.rejects(service.remove(alice, "studio", ""), /ownership token/);
   await assert.rejects(service.remove(alice, "studio", "bad token"), /ownership token/);
+});
+
+test("desktop host registration round-trips QUIC and probe-only WebTransport fields", async () => {
+  const store = new MemoryDesktopHostStore();
+  const service = new DesktopHostService(
+    store,
+    () => 42,
+    () => "test-ownership-token-1",
+  );
+  const quicCertHash = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+
+  const registration = await service.register(
+    alice,
+    "quic-studio",
+    {
+      name: "QUIC Studio",
+      address: "100.64.1.2",
+      port: 5901,
+      quicPort: 5911,
+      quicCertHash,
+      webtransport: false,
+    },
+    desktopHostTokenOwnershipMode,
+    "test-publication-1",
+  );
+
+  assert.equal(registration.host.quicPort, 5911);
+  assert.equal(registration.host.quicCertHash, quicCertHash);
+  assert.equal(registration.host.webtransport, false);
+  assert.deepEqual(await service.list(alice), [registration.host]);
 });

@@ -70,6 +70,9 @@ function sqliteRuntimeEnv(sqlite: DatabaseSync): RuntimeEnv {
 test("desktop host repository scopes reads, upserts, and deletes by owner subject", async () => {
   const executions: Array<{ sql: string; parameters: unknown[] }> = [];
   const stored = {
+    quic_port: 5911,
+    quic_cert_hash: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+    webtransport: 0,
     owner_subject: "github:1",
     id: "studio",
     owner: "alice",
@@ -107,6 +110,9 @@ test("desktop host repository scopes reads, upserts, and deletes by owner subjec
 
   assert.deepEqual(await repository.list("github:1"), [
     {
+      quicPort: 5911,
+      quicCertHash: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+      webtransport: false,
       ownerSubject: "github:1",
       id: "studio",
       owner: "alice",
@@ -291,6 +297,9 @@ test("legacy desktop host writes and cleanup cannot mutate token-owned rows", as
       "utf8",
     ),
   );
+  sqlite.exec(
+    readFileSync(new URL("../migrations/0042_desktop_host_quic.sql", import.meta.url), "utf8"),
+  );
   sqlite.exec(`
     INSERT INTO desktop_hosts (
       owner_subject, id, owner, name, address, port, ownership_token, publication_id,
@@ -342,6 +351,7 @@ test("legacy desktop host writes and cleanup preserve legacy rows", async () => 
     "0033_desktop_host_ownership.sql",
     "0038_desktop_host_publication_identity.sql",
     "0041_desktop_host_ownership_errors.sql",
+    "0042_desktop_host_quic.sql",
   ]) {
     sqlite.exec(readFileSync(new URL(`../migrations/${migration}`, import.meta.url), "utf8"));
   }
@@ -381,6 +391,7 @@ test("desktop relay lookup excludes tokenless registrations", async () => {
     "0033_desktop_host_ownership.sql",
     "0038_desktop_host_publication_identity.sql",
     "0041_desktop_host_ownership_errors.sql",
+    "0042_desktop_host_quic.sql",
   ]) {
     sqlite.exec(readFileSync(new URL(`../migrations/${migration}`, import.meta.url), "utf8"));
   }
@@ -410,6 +421,7 @@ test("desktop host publication recovery matches only the current publication", a
     "0033_desktop_host_ownership.sql",
     "0038_desktop_host_publication_identity.sql",
     "0041_desktop_host_ownership_errors.sql",
+    "0042_desktop_host_quic.sql",
   ]) {
     sqlite.exec(readFileSync(new URL(`../migrations/${migration}`, import.meta.url), "utf8"));
   }
@@ -445,6 +457,7 @@ test("same-publication retries remain recoverable after the publication migratio
     "0033_desktop_host_ownership.sql",
     "0038_desktop_host_publication_identity.sql",
     "0041_desktop_host_ownership_errors.sql",
+    "0042_desktop_host_quic.sql",
   ]) {
     sqlite.exec(readFileSync(new URL(`../migrations/${migration}`, import.meta.url), "utf8"));
   }

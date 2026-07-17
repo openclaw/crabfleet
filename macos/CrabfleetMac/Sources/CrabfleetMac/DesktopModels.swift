@@ -30,6 +30,23 @@ enum DesktopScope: String, CaseIterable, Identifiable {
   }
 }
 
+struct QUICConnectionConfiguration: Equatable, Hashable, Sendable {
+  let port: Int
+  let certHash: String
+
+  init?(port: Int?, certHash: String?) {
+    guard let port, (1...65_535).contains(port), let certHash,
+      certHash.utf8.count == 43,
+      certHash.utf8.allSatisfy({
+        (0x30...0x39).contains($0) || (0x41...0x5a).contains($0)
+          || (0x61...0x7a).contains($0) || $0 == 0x2d || $0 == 0x5f
+      })
+    else { return nil }
+    self.port = port
+    self.certHash = certHash
+  }
+}
+
 struct VNCAddress: Equatable, Hashable, Sendable {
   let host: String
   let port: Int
@@ -144,6 +161,7 @@ struct DesktopTarget: Identifiable, Hashable {
   let branch: String?
   let updatedAt: Date
   let endpoint: VNCAddress?
+  let quic: QUICConnectionConfiguration?
   let desktopAvailable: Bool
   let profileID: String?
   let nativeVncSessionID: String?
@@ -160,6 +178,7 @@ struct DesktopTarget: Identifiable, Hashable {
     branch = lease.branch
     updatedAt = lease.updatedAt
     endpoint = nil
+    quic = nil
     desktopAvailable = lease.desktopAvailable
     profileID = nil
     nativeVncSessionID = lease.nativeVncSessionID
@@ -177,6 +196,7 @@ struct DesktopTarget: Identifiable, Hashable {
     branch = nil
     updatedAt = profile.lastConnectedAt ?? profile.createdAt
     endpoint = profile.address
+    quic = nil
     desktopAvailable = true
     profileID = profile.id
     nativeVncSessionID = nil
@@ -194,6 +214,7 @@ struct DesktopTarget: Identifiable, Hashable {
     branch = nil
     updatedAt = host.updatedAt
     endpoint = .init(host: host.address, port: host.port, username: "")
+    quic = QUICConnectionConfiguration(port: host.quicPort, certHash: host.quicCertHash)
     desktopAvailable = true
     profileID = nil
     nativeVncSessionID = nil
@@ -213,6 +234,7 @@ struct VNCConnectionRequest: Equatable {
   let username: String
   let password: String
   let clipboardEnabled: Bool
+  var quic: QUICConnectionConfiguration? = nil
 
   var address: VNCAddress {
     .init(host: host, port: port, username: username)

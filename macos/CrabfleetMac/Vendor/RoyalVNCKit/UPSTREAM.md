@@ -14,6 +14,8 @@ using the VNC bit-reversed-key variant; drops upstream's CryptoSwift dependency
 in favor of CommonCrypto and CryptoKit plus an in-fork pure-Swift big integer
 for Apple Remote Desktop Diffie-Hellman; suppresses clipboard echoes; releases
 held input on focus loss; exposes externally managed clipboard delivery/send;
+accepts an already-established Network.framework byte stream for Crabfleet's
+SPKI-pinned QUIC transport and can account for its stream-opening RFB banner;
 coalesces inbound clipboard delivery; paces framebuffer pulls; renders an
 attached warm framebuffer immediately; negotiates RFB 3.3/3.7/3.8 security
 framing; prefers supported Apple Remote Desktop authentication when macOS

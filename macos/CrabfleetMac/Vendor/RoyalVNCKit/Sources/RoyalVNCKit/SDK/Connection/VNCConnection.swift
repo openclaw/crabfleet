@@ -143,6 +143,9 @@ public final class VNCConnection: NSObjectOrAnyObject, @unchecked Sendable {
 									  attributes: .concurrent)
 	private let lifecycleLock = NSRecursiveLock()
 	private let credentialRequestLock = NSLock()
+	private let providedNetworkConnection: NWConnection?
+	let clientProtocolVersionAlreadySent: Bool
+	private let networkConnectionAlreadyStarted: Bool
 	private var pendingCredentialRequests = [
 		UUID: WeakCredentialRequest
 	]()
@@ -188,7 +191,11 @@ public final class VNCConnection: NSObjectOrAnyObject, @unchecked Sendable {
 		return operation()
 	}
 
-    lazy var connection: some NetworkConnection = {
+	lazy var connection: any NetworkConnection = {
+		if let providedNetworkConnection {
+			providedNetworkConnection.setStatusUpdateHandler(connectionStatusDidChange)
+			return providedNetworkConnection
+		}
         let connectionSettings = NetworkConnectionSettings(connectionTimeout: 15,
                                                            host: settings.hostname,
                                                            port: settings.port)
@@ -359,8 +366,14 @@ public final class VNCConnection: NSObjectOrAnyObject, @unchecked Sendable {
     public init(settings: Settings,
                 logger: VNCLogger,
                 framebufferAllocator: VNCFramebufferAllocator?,
-                context: UnsafeMutableRawPointer?) {
+                context: UnsafeMutableRawPointer?,
+                networkConnection: NWConnection? = nil,
+                clientProtocolVersionAlreadySent: Bool = false,
+                networkConnectionAlreadyStarted: Bool = false) {
         self.settings = settings
+			self.providedNetworkConnection = networkConnection
+			self.clientProtocolVersionAlreadySent = clientProtocolVersionAlreadySent
+			self.networkConnectionAlreadyStarted = networkConnectionAlreadyStarted
 
         logger.isDebugLoggingEnabled = settings.isDebugLoggingEnabled
 
@@ -403,6 +416,31 @@ public final class VNCConnection: NSObjectOrAnyObject, @unchecked Sendable {
         self.init(settings: settings,
                   context: nil)
 	}
+
+	#if canImport(Network)
+	/// Uses a caller-configured Network.framework connection while preserving the
+	/// exact RFB protocol and serialized send/receive machinery above transport.
+		public convenience init(
+			settings: Settings,
+			networkConnection: NWConnection,
+			clientProtocolVersionAlreadySent: Bool = false,
+			networkConnectionAlreadyStarted: Bool = false
+		) {
+	#if canImport(OSLog)
+		let logger = VNCOSLogLogger()
+	#else
+		let logger = VNCPrintLogger()
+	#endif
+		self.init(
+			settings: settings,
+			logger: logger,
+			framebufferAllocator: nil,
+				context: nil,
+				networkConnection: networkConnection,
+				clientProtocolVersionAlreadySent: clientProtocolVersionAlreadySent,
+				networkConnectionAlreadyStarted: networkConnectionAlreadyStarted)
+	}
+	#endif
 
     public convenience init(settings: Settings,
                             framebufferAllocator: VNCFramebufferAllocator?) {
@@ -458,8 +496,12 @@ extension VNCConnection {
 
 		updateConnectionState(.connecting)
 
-		connection.start(queue: queue)
-		return true
+			if networkConnectionAlreadyStarted {
+				connectionStatusDidChange(connection.status)
+			} else {
+				connection.start(queue: queue)
+			}
+			return true
 	}
 
 	func beginDisconnecting(error: Error? = nil) {

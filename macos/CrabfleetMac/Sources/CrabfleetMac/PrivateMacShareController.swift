@@ -152,16 +152,38 @@ final class DesktopHostRegistrationLifecycle {
     private let persistedIdentity: PersistedIdentity
     let hostID: String
     let port: UInt16
+    let quicPort: UInt16?
+    let quicCertHash: String?
+    let webtransport: Bool?
     let publicationID: String
 
-    init(identity: TailnetIdentity, hostID: String, port: UInt16, publicationID: String) {
+    init(
+      identity: TailnetIdentity,
+      hostID: String,
+      port: UInt16,
+      quicPort: UInt16?,
+      quicCertHash: String?,
+      webtransport: Bool,
+      publicationID: String
+    ) {
       persistedIdentity = PersistedIdentity(identity)
       self.hostID = hostID
       self.port = port
+      self.quicPort = quicPort
+      self.quicCertHash = quicCertHash
+      self.webtransport = webtransport
       self.publicationID = publicationID
     }
 
     var identity: TailnetIdentity { persistedIdentity.identity }
+
+    func hasSamePublicationIdentity(
+      identity: TailnetIdentity,
+      hostID: String,
+      port: UInt16
+    ) -> Bool {
+      self.hostID == hostID && self.identity == identity && self.port == port
+    }
   }
 
   private struct PublishedRegistration: Equatable {
@@ -283,11 +305,17 @@ final class DesktopHostRegistrationLifecycle {
   }
 
   @discardableResult
-  func publish(identity: TailnetIdentity, port: UInt16) async throws -> DesktopHostPublication {
+  func publish(
+    identity: TailnetIdentity,
+    port: UInt16,
+    quicPort: UInt16? = nil,
+    quicCertHash: String? = nil,
+    webtransport: Bool = false
+  ) async throws -> DesktopHostPublication {
     try await loadStateIfNeeded()
     let hostID = CrabfleetDesktopRegistration.hostID(identity: identity)
     let existingTarget = uncertainRegistrations.first {
-      $0.hostID == hostID && $0.identity == identity && $0.port == port
+      $0.hasSamePublicationIdentity(identity: identity, hostID: hostID, port: port)
     }
     let target =
       existingTarget
@@ -295,8 +323,20 @@ final class DesktopHostRegistrationLifecycle {
         identity: identity,
         hostID: hostID,
         port: port,
+        quicPort: quicPort,
+        quicCertHash: quicCertHash,
+        webtransport: webtransport,
         publicationID: createPublicationID()
       )
+    if existingTarget != nil {
+      try await refreshPublicationIfCurrent(
+        identity: identity,
+        port: port,
+        quicPort: quicPort,
+        quicCertHash: quicCertHash,
+        webtransport: webtransport,
+        publicationID: target.publicationID)
+    }
     if existingTarget == nil {
       uncertainRegistrations.append(target)
       try persistState()
@@ -317,6 +357,9 @@ final class DesktopHostRegistrationLifecycle {
         ownershipToken = try await coordinator.register(
           identity: identity,
           port: port,
+          quicPort: quicPort,
+          quicCertHash: quicCertHash,
+          webtransport: webtransport,
           publicationID: target.publicationID
         )
       } catch {
@@ -507,6 +550,26 @@ final class DesktopHostRegistrationLifecycle {
       throw error
     }
   }
+
+  private func refreshPublicationIfCurrent(
+    identity: TailnetIdentity,
+    port: UInt16,
+    quicPort: UInt16?,
+    quicCertHash: String?,
+    webtransport: Bool,
+    publicationID: String
+  ) async throws {
+    guard
+      try await coordinator.recover(identity: identity, publicationID: publicationID) != nil
+    else { return }
+    _ = try await coordinator.register(
+      identity: identity,
+      port: port,
+      quicPort: quicPort,
+      quicCertHash: quicCertHash,
+      webtransport: webtransport,
+      publicationID: publicationID)
+  }
 }
 
 struct PrivateMacDisplayPlan: Equatable, Sendable {
@@ -547,6 +610,7 @@ final class PrivateMacShareController: ObservableObject {
     let id: String
     let display: String
     let peer: String
+    let transport: String
     let qualityMode: ShareQualityMode
   }
   private struct DisplayStack {
@@ -615,6 +679,7 @@ final class PrivateMacShareController: ObservableObject {
   }
 
   static let port: UInt16 = 5_901
+  static let quicPort: UInt16 = 5_911
   nonisolated static let selectedDisplayDefaultsKey = "org.openclaw.crabfleet.share.display"
   nonisolated static let clipboardSyncDefaultsKey = "org.openclaw.crabfleet.share.clipboard"
   nonisolated static let autoShareDefaultsKey = "org.openclaw.crabfleet.share.auto-share"
@@ -728,6 +793,7 @@ final class PrivateMacShareController: ObservableObject {
   private var relayPublications: [CGDirectDisplayID: DesktopHostPublication] = [:]
   private var clipboardBridge: HostClipboardBridge?
   private var activeIdentity: TailnetIdentity?
+  private var activeQUICCertHash: String?
   private var activePlans: [PrivateMacDisplayPlan] = []
   private var listeningDisplayIDs: Set<CGDirectDisplayID> = []
   private var viewerCounts: [DisplaySessionKey: Int] = [:]
@@ -735,6 +801,7 @@ final class PrivateMacShareController: ObservableObject {
   private var displayPeers: [DisplaySessionKey: String] = [:]
   private var displayStats: [DisplaySessionKey: TailnetStreamStats] = [:]
   private var audioSessionKeys: Set<DisplaySessionKey> = []
+  private var directSessionSnapshots: [CGDirectDisplayID: [TailnetSessionDiagnostic]] = [:]
   private var lifecycleGeneration: UInt64 = 0
   private var serverGeneration: UInt64?
   private var registrationTask: Task<Void, Never>?
@@ -1028,6 +1095,7 @@ final class PrivateMacShareController: ObservableObject {
     listeningDisplayIDs.removeAll()
     displayStacks.removeAll()
     do {
+      let quicIdentity = try? QUICIdentityStore.loadOrCreate()
       for plan in plans {
         let capture = MacScreenCapture()
         do {
@@ -1046,6 +1114,8 @@ final class PrivateMacShareController: ObservableObject {
             input: input,
             clipboard: bridge,
             port: plan.port,
+            quicPort: quicIdentity.map { _ in Self.quicPort + UInt16(plan.index) },
+            quicIdentity: quicIdentity,
             sessionGate: sessionGate,
             eventHandler: { [weak self] event in
               Task { @MainActor in
@@ -1075,6 +1145,7 @@ final class PrivateMacShareController: ObservableObject {
         }
       }
       activeIdentity = identity
+      activeQUICCertHash = quicIdentity?.certHash
     } catch {
       serverGeneration = nil
       for stack in displayStacks { stack.server.stop() }
@@ -1084,6 +1155,7 @@ final class PrivateMacShareController: ObservableObject {
       clipboardBridge?.detachAll()
       clipboardBridge = nil
       activePlans.removeAll()
+      activeQUICCertHash = nil
       guard canContinueStarting(generation) else { return }
       phase = .failed
       notice = error.localizedDescription
@@ -1116,6 +1188,7 @@ final class PrivateMacShareController: ObservableObject {
     clipboardBridge = nil
     for capture in captures { await capture.stop() }
     activeIdentity = nil
+    activeQUICCertHash = nil
     activePlans.removeAll()
     listeningDisplayIDs.removeAll()
     viewerCounts.removeAll()
@@ -1124,6 +1197,7 @@ final class PrivateMacShareController: ObservableObject {
     displayPeers.removeAll()
     displayStats.removeAll()
     audioSessionKeys.removeAll()
+    directSessionSnapshots.removeAll()
     connectedViewerCount = 0
     removeDesktopHost(after: registrationTask)
     guard isCurrent(generation) else { return }
@@ -1263,6 +1337,10 @@ final class PrivateMacShareController: ObservableObject {
       updateViewerSessions()
     case .qualityModeChanged:
       break
+    case .sessionSnapshot(let sessions):
+      guard transport == .tailnet else { return }
+      directSessionSnapshots[displayID] = sessions
+      updateViewerSessions()
     case .disconnected(let count, let remainingPeer):
       let normalizedCount = transport == .relay ? 0 : count
       if normalizedCount == 0 {
@@ -1298,6 +1376,7 @@ final class PrivateMacShareController: ObservableObject {
       for stack in displayStacks { stack.server.stop() }
       let captures = displayStacks.map(\.capture)
       displayStacks.removeAll()
+      directSessionSnapshots.removeAll()
       clipboardBridge?.detachAll()
       clipboardBridge = nil
       Task { for capture in captures { await capture.stop() } }
@@ -1309,18 +1388,33 @@ final class PrivateMacShareController: ObservableObject {
   }
 
   private func updateViewerSessions() {
-    viewerSessions = displayViewerSessions.flatMap { key, sessions in
+    var updatedSessions: [ViewerSession] = []
+    for (key, sessions) in displayViewerSessions {
       let display = activePlans.first { $0.display.id == key.displayID }?.display.label
         ?? "Display"
-      let transport = key.transport == .relay ? "Browser" : "Tailnet"
-      return sessions.map { session in
-        ViewerSession(
-          id: "\(key.displayID)-\(transport)-\(session.id.uuidString)",
-          display: display,
-          peer: session.peer,
-          qualityMode: session.qualityMode)
+      for session in sessions {
+        let transportID: String
+        let transport: String
+        switch key.transport {
+        case .relay:
+          transportID = "relay"
+          transport = "Browser"
+        case .tailnet:
+          transportID = "tailnet"
+          let diagnostic = directSessionSnapshots[key.displayID]?.first { $0.id == session.id }
+          transport = diagnostic?.transport.label ?? "Tailnet"
+        }
+        let viewerID = String(key.displayID) + "-" + transportID + "-" + session.id.uuidString
+        updatedSessions.append(
+          ViewerSession(
+            id: viewerID,
+            display: display,
+            peer: session.peer,
+            transport: transport,
+            qualityMode: session.qualityMode))
       }
-    }.sorted { $0.id < $1.id }
+    }
+    viewerSessions = updatedSessions.sorted { $0.id < $1.id }
   }
 
   private func updateAggregateStats() {
@@ -1349,6 +1443,9 @@ final class PrivateMacShareController: ObservableObject {
     let pendingOperation = registrationTask
     let operationGeneration = beginRegistryOperation()
     let plans = activePlans
+    let quicCertHash = activeQUICCertHash
+    let quicDisplayIDs = Set(
+      displayStacks.lazy.filter(\.server.quicAvailable).map { $0.plan.display.id })
     publishingServerGeneration = generation
     registryPhase = .registering
     registrationTask = Task { [weak self] in
@@ -1356,9 +1453,13 @@ final class PrivateMacShareController: ObservableObject {
         await pendingOperation?.value
         var publications: [CGDirectDisplayID: DesktopHostPublication] = [:]
         for plan in plans {
+          let advertisesQUIC = quicDisplayIDs.contains(plan.display.id) && quicCertHash != nil
           publications[plan.display.id] = try await desktopRegistrationLifecycle.publish(
             identity: plan.registrationIdentity(base: identity),
-            port: plan.port)
+            port: plan.port,
+            quicPort: advertisesQUIC ? Self.quicPort + UInt16(plan.index) : nil,
+            quicCertHash: advertisesQUIC ? quicCertHash : nil,
+            webtransport: false)
         }
         guard
           self?.isCurrentRegistryOperation(operationGeneration) == true,

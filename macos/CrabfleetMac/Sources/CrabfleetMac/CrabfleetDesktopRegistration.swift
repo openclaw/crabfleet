@@ -15,8 +15,29 @@ protocol DesktopHostRegistering: Sendable {
     port: UInt16,
     publicationID: String
   ) async throws -> String?
+  func register(
+    identity: TailnetIdentity,
+    port: UInt16,
+    quicPort: UInt16?,
+    quicCertHash: String?,
+    webtransport: Bool,
+    publicationID: String
+  ) async throws -> String?
   func recover(identity: TailnetIdentity, publicationID: String) async throws -> String?
   func unregister(identity: TailnetIdentity, ownershipToken: String?) async throws
+}
+
+extension DesktopHostRegistering {
+  func register(
+    identity: TailnetIdentity,
+    port: UInt16,
+    quicPort: UInt16?,
+    quicCertHash: String?,
+    webtransport: Bool,
+    publicationID: String
+  ) async throws -> String? {
+    try await register(identity: identity, port: port, publicationID: publicationID)
+  }
 }
 
 protocol DesktopHostRelayEndpointProviding: Sendable {
@@ -46,6 +67,9 @@ actor DesktopHostRegistrationCoordinator {
   func register(
     identity: TailnetIdentity,
     port: UInt16,
+    quicPort: UInt16? = nil,
+    quicCertHash: String? = nil,
+    webtransport: Bool = false,
     publicationID: String
   ) async throws -> String? {
     let registration = self.registration
@@ -53,6 +77,9 @@ actor DesktopHostRegistrationCoordinator {
       try await registration.register(
         identity: identity,
         port: port,
+        quicPort: quicPort,
+        quicCertHash: quicCertHash,
+        webtransport: webtransport,
         publicationID: publicationID
       )
     }
@@ -123,6 +150,10 @@ struct CrabfleetDesktopRegistration:
     let name: String
     let address: String
     let port: UInt16
+    let quicPort: UInt16?
+    let quicCertHash: String?
+    // Probe-only until Cloudflare Workers WebTransport ingress is GA.
+    let webtransport: Bool
   }
 
   private struct RecoveryBody: Encodable {
@@ -199,9 +230,29 @@ struct CrabfleetDesktopRegistration:
     port: UInt16,
     publicationID: String
   ) async throws -> String? {
+    try await register(
+      identity: identity,
+      port: port,
+      quicPort: nil,
+      quicCertHash: nil,
+      webtransport: false,
+      publicationID: publicationID)
+  }
+
+  func register(
+    identity: TailnetIdentity,
+    port: UInt16,
+    quicPort: UInt16?,
+    quicCertHash: String?,
+    webtransport: Bool,
+    publicationID: String
+  ) async throws -> String? {
     let request = try registrationRequest(
       identity: identity,
       port: port,
+      quicPort: quicPort,
+      quicCertHash: quicCertHash,
+      webtransport: webtransport,
       publicationID: publicationID
     )
     let data: Data
@@ -326,9 +377,18 @@ struct CrabfleetDesktopRegistration:
   func registrationRequest(
     identity: TailnetIdentity,
     port: UInt16,
+    quicPort: UInt16? = nil,
+    quicCertHash: String? = nil,
+    webtransport: Bool = false,
     publicationID: String
   ) throws -> URLRequest {
     guard Self.isValidOwnershipToken(publicationID) else {
+      throw DesktopHostRegistrationError.invalidResponse
+    }
+    guard
+      (quicPort == nil && quicCertHash == nil)
+        || (quicPort != nil && quicCertHash.map(QUICCertificatePin.isValid) == true)
+    else {
       throw DesktopHostRegistrationError.invalidResponse
     }
     let hostID = Self.hostID(identity: identity)
@@ -349,7 +409,10 @@ struct CrabfleetDesktopRegistration:
       RegistrationBody(
         name: identity.hostName.isEmpty ? identity.dnsName : identity.hostName,
         address: identity.ipv4Address,
-        port: port
+        port: port,
+        quicPort: quicPort,
+        quicCertHash: quicCertHash,
+        webtransport: webtransport
       ))
     return request
   }
