@@ -359,23 +359,30 @@ export class TerminalHub {
           }
           if (frame.type === TerminalMessageType.Resize) {
             const size = tryDecodeResizePayload(frame.payload);
-            const canInput = await subscription.canInput();
-            updateTerminalInputCapability(server, subscription, canInput);
-            if (!canInput) {
-              return;
-            }
-            if (size) {
-              subscription.cols = size.cols;
-              subscription.rows = size.rows;
-              if (subscription.upstream.readyState === WebSocket.OPEN) {
-                subscription.upstream.send(JSON.stringify({ type: "resize", ...size }));
-              }
-            }
-            sendTerminalJson(server, TerminalMessageType.Event, frame.sessionId, {
-              type: "resize",
-              cols: size?.cols ?? null,
-              rows: size?.rows ?? null,
-            });
+            // Fork the canInput() authorization round-trip and the resize onto the per-subscription
+            // queue, exactly as the Input path does. Awaiting canInput() inline here would hold the
+            // shared per-connection queue for the duration of a DB call, head-of-line-blocking
+            // Input/Subscribe/Stop for every other multiplexed session on this connection.
+            subscription.inputQueue = subscription.inputQueue
+              .catch(() => undefined)
+              .then(async () => {
+                const canInput = await subscription.canInput();
+                updateTerminalInputCapability(server, subscription, canInput);
+                if (!canInput) return;
+                if (subscriptions.get(frame.sessionId) !== subscription) return;
+                if (size) {
+                  subscription.cols = size.cols;
+                  subscription.rows = size.rows;
+                  if (subscription.upstream.readyState === WebSocket.OPEN) {
+                    subscription.upstream.send(JSON.stringify({ type: "resize", ...size }));
+                  }
+                }
+                sendTerminalJson(server, TerminalMessageType.Event, frame.sessionId, {
+                  type: "resize",
+                  cols: size?.cols ?? null,
+                  rows: size?.rows ?? null,
+                });
+              });
             return;
           }
           if (frame.type === TerminalMessageType.Ack) {

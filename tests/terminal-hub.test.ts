@@ -7,6 +7,7 @@ import {
   decodeJsonPayload,
   decodeTerminalFrame,
   encodeAckPayload,
+  encodeResizePayload,
   encodeSubscribePayload,
   encodeTerminalFrame,
 } from "@openclaw/libterminal/protocol";
@@ -2244,5 +2245,114 @@ test("terminal hub: a stale upstream error does not evict a live resubscription 
     0,
     "the stale error must not surface a failure for the live session",
   );
+  server.emit("close");
+});
+
+test("terminal hub: a slow Resize auth check does not head-of-line-block other frames", async () => {
+  const client = socket();
+  const server = socket();
+  const upstream = socket();
+  let authCalls = 0;
+  let resolveResizeAuth: ((allowed: boolean) => void) | null = null;
+  const hub = new TerminalHub(
+    dependencies(client, server, upstream, {
+      // first canInput() (subscribe) resolves immediately; the Resize handler's canInput() then stays
+      // pending until we release it, standing in for a slow authorization round-trip.
+      inputGrant: () => () => {
+        authCalls += 1;
+        return authCalls === 1
+          ? Promise.resolve(true)
+          : new Promise<boolean>((resolve) => {
+              resolveResizeAuth = resolve;
+            });
+      },
+    }),
+  );
+  await hub.open(
+    new Request("https://fleet.example/api/terminal/ws", { headers: { upgrade: "websocket" } }),
+    user,
+  );
+  server.emit("message", {
+    data: encodeTerminalFrame({
+      type: TerminalMessageType.Subscribe,
+      sessionId: session.id,
+      payload: encodeSubscribePayload({ flags: 0, columns: 120, rows: 34 }),
+    }),
+  });
+  await flushQueues();
+  await flushQueues();
+  // Resize forks its canInput() onto the per-subscription queue; that auth check is now pending.
+  server.emit("message", {
+    data: encodeTerminalFrame({
+      type: TerminalMessageType.Resize,
+      sessionId: session.id,
+      payload: encodeResizePayload({ columns: 100, rows: 40 }),
+    }),
+  });
+  await flushQueues();
+  // A later frame on the SHARED connection queue must not wait behind the resize's pending auth check.
+  server.emit("message", {
+    data: encodeTerminalFrame({
+      type: TerminalMessageType.Ping,
+      sessionId: session.id,
+      payload: new Uint8Array([1, 2, 3]),
+    }),
+  });
+  await flushQueues();
+  const pongs = server.sent.filter((value) => {
+    const decoded = decodeTerminalFrame(value as Uint8Array);
+    return decoded?.type === TerminalMessageType.Pong;
+  }).length;
+  assert.equal(
+    pongs,
+    1,
+    "a Ping behind a slow Resize is answered without waiting on the resize's auth round-trip",
+  );
+  resolveResizeAuth?.(true);
+  await flushQueues();
+  server.emit("close");
+});
+
+test("terminal hub: an authorized Resize applies the size and notifies the client and upstream", async () => {
+  const client = socket();
+  const server = socket();
+  const upstream = socket();
+  const hub = new TerminalHub(dependencies(client, server, upstream));
+  await hub.open(
+    new Request("https://fleet.example/api/terminal/ws", { headers: { upgrade: "websocket" } }),
+    user,
+  );
+  server.emit("message", {
+    data: encodeTerminalFrame({
+      type: TerminalMessageType.Subscribe,
+      sessionId: session.id,
+      payload: encodeSubscribePayload({ flags: 0, columns: 120, rows: 34 }),
+    }),
+  });
+  await flushQueues();
+  await flushQueues();
+  server.emit("message", {
+    data: encodeTerminalFrame({
+      type: TerminalMessageType.Resize,
+      sessionId: session.id,
+      payload: encodeResizePayload({ columns: 100, rows: 40 }),
+    }),
+  });
+  await flushQueues();
+  await flushQueues();
+  const resizeEvents = server.sent
+    .map((value) => decodeTerminalFrame(value as Uint8Array))
+    .filter((d) => d?.type === TerminalMessageType.Event)
+    .map((d) => decodeJsonPayload(d!.payload) as { type?: string; cols?: number; rows?: number })
+    .filter((p) => p.type === "resize");
+  assert.deepEqual(
+    resizeEvents.at(-1),
+    { type: "resize", cols: 100, rows: 40 },
+    "client is told the new size",
+  );
+  const upstreamResize = upstream.sent.find(
+    (s) => typeof s === "string" && s.includes('"resize"') && s.includes("100"),
+  );
+  assert.ok(upstreamResize, "the upstream receives the resize with the new dimensions");
   server.emit("close");
 });
