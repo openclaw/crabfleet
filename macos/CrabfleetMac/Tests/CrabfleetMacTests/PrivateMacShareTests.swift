@@ -2399,36 +2399,63 @@ struct PrivateMacShareTests {
     defer { session.disconnect() }
 
     // The Extended Clipboard caps handshake must complete on the client.
-    try await waitFor { session.connection?.supportsUTF8Clipboard == true }
+    try await waitFor("extended clipboard negotiation") {
+      session.connection?.supportsUTF8Clipboard == true
+    }
+    // ExtendedDesktopSize is announced in the first framebuffer response.
+    // Let the next request complete with pixels before queueing a resize so
+    // the test does not race the initial pseudo-rectangle-only response.
+    try await waitFor("initial framebuffer update") {
+      session.framebufferUpdateCount > 0
+    }
 
     // Viewer to host: emoji only survives the extended UTF-8 path.
     viewerPasteboard.clearContents()
     viewerPasteboard.setString("client copy 🚀", forType: .string)
-    try await waitFor { hostPasteboard.string(forType: .string) == "client copy 🚀" }
+    try await waitFor("viewer-to-host clipboard") {
+      hostPasteboard.string(forType: .string) == "client copy 🚀"
+    }
 
     // Host to server-cut-text: the host push lands on the viewer pasteboard.
     hostPasteboard.clearContents()
     hostPasteboard.setString("host copy 🦀", forType: .string)
-    try await waitFor { viewerPasteboard.string(forType: .string) == "host copy 🦀" }
+    try await waitFor("host-to-viewer clipboard") {
+      viewerPasteboard.string(forType: .string) == "host copy 🦀"
+    }
 
     // The ExtendedDesktopSize announce must unlock client resize requests.
-    try await waitFor { session.requestDesktopSize(.init(width: 128, height: 128)) }
+    try await waitFor("desktop resize negotiation") {
+      session.requestDesktopSize(.init(width: 128, height: 128))
+    }
 
     // The stream must keep flowing after the resize exchange (this test
     // fixture has no live capture stream, so the server answers the resize
     // with an out-of-resources status and continues serving frames). An
     // unchanged frame is deduplicated into rectangle-free heartbeats, so new
     // content must arrive as a fresh framebuffer update.
-    let updates = session.framebufferUpdateCount
-    await capture.frameStore.update(
-      .init(jpegData: jpeg, sequence: 2, width: 64, height: 64)
-    )
-    try await waitFor { session.framebufferUpdateCount > updates }
+    let updateCount = session.framebufferUpdateCount
+    let clock = ContinuousClock()
+    let deadline = clock.now.advanced(by: .seconds(15))
+    var sequence: UInt64 = 2
+    while session.framebufferUpdateCount <= updateCount, clock.now < deadline {
+      // A real capture keeps producing frames while the resize response and
+      // an already-outstanding framebuffer request cross on the wire. Model
+      // that bounded stream instead of relying on one frame winning the race.
+      await capture.frameStore.update(
+        .init(jpegData: jpeg, sequence: sequence, width: 64, height: 64)
+      )
+      sequence &+= 1
+      try await Task.sleep(for: .milliseconds(50))
+    }
+    #expect(
+      session.framebufferUpdateCount > updateCount,
+      "Timed out waiting for post-resize framebuffer update")
     #expect(session.phase == .connected)
   }
 
   @MainActor
   private func waitFor(
+    _ phase: String = "condition",
     timeout: Duration = .seconds(15),
     _ condition: @escaping @MainActor () -> Bool
   ) async throws {
@@ -2438,7 +2465,7 @@ struct PrivateMacShareTests {
       if condition() { return }
       try await Task.sleep(for: .milliseconds(25))
     }
-    #expect(condition())
+    #expect(condition(), "Timed out waiting for \(phase)")
   }
 
   private func statusDocument() throws -> TailscaleStatusDocument {
