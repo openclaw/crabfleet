@@ -804,6 +804,75 @@ struct PrivateMacShareTests {
   }
 
   @Test @MainActor
+  func selectedDisplaysPersistAcrossControllers() throws {
+    let defaults = try #require(
+      UserDefaults(suiteName: "CrabfleetMacTests.\(UUID().uuidString)")
+    )
+    let first = PrivateMacShareController(
+      runner: StaticTailscaleRunner(output: statusJSON()),
+      desktopRegistration: nil,
+      defaults: defaults)
+    first.selectedDisplayIDs = [11, 22, 33]
+
+    let second = PrivateMacShareController(
+      runner: StaticTailscaleRunner(output: statusJSON()),
+      desktopRegistration: nil,
+      defaults: defaults)
+    #expect(second.selectedDisplayIDs == [11, 22, 33])
+  }
+
+  @Test
+  func displayPlansAllocateStablePortsAndRegistrationSuffixes() {
+    let displays = (1...5).map {
+      ShareableDisplayOption(id: CGDirectDisplayID($0), label: "Display \($0)", width: 100, height: 80)
+    }
+    let plans = PrivateMacDisplayPlan.make(
+      displays: displays,
+      selectedIDs: Set(displays.map(\.id)))
+    #expect(plans.map(\.port) == [5_901, 5_902, 5_903, 5_904])
+    #expect(plans.map(\.display.id) == [1, 2, 3, 4])
+
+    let identity = TailnetIdentity(
+      tailnetName: "example.com",
+      loginName: "operator@example.com",
+      dnsName: "workstation.example.ts.net",
+      hostName: "Workstation",
+      ipv4Address: "100.64.12.34",
+      userID: 42)
+    let registrations = plans.map { $0.registrationIdentity(base: identity) }
+    #expect(registrations.map(CrabfleetDesktopRegistration.hostID) == [
+      "workstation", "workstation-d2", "workstation-d3", "workstation-d4",
+    ])
+    #expect(registrations[0].hostName == "Workstation — Display 1")
+    #expect(registrations[1].hostName == "Workstation — Display 2")
+  }
+
+  @Test @MainActor
+  func registrationLifecycleKeepsMultipleDisplayRowsUntilCleanup() async throws {
+    let registration = RecordingDesktopRegistration()
+    let lifecycle = DesktopHostRegistrationLifecycle(registration: registration)
+    let first = desktopIdentity(name: "multi-display", address: "100.64.12.70")
+    let second = TailnetIdentity(
+      tailnetName: first.tailnetName,
+      loginName: first.loginName,
+      dnsName: "multi-display-d2",
+      hostName: "multi-display — External Display",
+      ipv4Address: first.ipv4Address,
+      userID: first.userID)
+
+    try await lifecycle.publish(identity: first, port: 5_901)
+    try await lifecycle.publish(identity: second, port: 5_902)
+    try await lifecycle.removePublishedIdentities()
+
+    #expect(await registration.events == [
+      .register(first.dnsName),
+      .register(second.dnsName),
+      .unregister(first.dnsName, "token:\(first.dnsName)"),
+      .unregister(second.dnsName, "token:\(second.dnsName)"),
+    ])
+  }
+
+  @Test @MainActor
   func applicationTerminationCancelsPendingAutoShareStartup() async throws {
     let runner = CountingTailscaleRunner(output: statusJSON())
     let defaults = try #require(
