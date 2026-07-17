@@ -568,6 +568,121 @@ struct RFBHostSessionStreamTests {
   }
 
   @Test
+  func cursorReappearingAtSamePositionResendsPointerAfterHide() async throws {
+    let descriptor = CapturedDisplayDescriptor(
+      displayID: 1,
+      displayBounds: CGRect(x: 0, y: 0, width: 100, height: 100),
+      frameWidth: 100,
+      frameHeight: 100,
+      sourcePixelWidth: 200,
+      sourcePixelHeight: 200)
+    let image = SystemCursorImage(
+      width: 2,
+      height: 2,
+      pointWidth: 2,
+      pointHeight: 2,
+      hotspot: CGPoint(x: 1, y: 1),
+      rgba: Data([
+        0xFF, 0, 0, 0xFF, 0, 0, 0xFF, 0xFF,
+        0, 0xFF, 0, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+      ]),
+      contentHash: Data([0xC0, 0xDE]))
+    let visible = SystemCursorSnapshot(image: image, position: CGPoint(x: 75, y: 25))
+    let hidden = SystemCursorSnapshot(image: nil, position: CGPoint(x: 75, y: 25))
+    let snapshots = ThreadSafeSnapshotBox(visible)
+    let capture = MacScreenCapture()
+    await capture.frameStore.update(
+      .init(jpegData: Data([0xFF, 0xD8, 0xFF, 0xD9]), sequence: 1, width: 100, height: 100))
+
+    let cursorEncodings = clientSetEncodings([
+      RFBWire.tightEncoding,
+      RFBWire.cursorWithAlphaEncoding,
+      RFBWire.pointerPositionEncoding,
+    ])
+    var incoming = RFBVersion.serverBanner
+    incoming.append(contentsOf: [1, 1])  // None security, shared ClientInit.
+    incoming.append(cursorEncodings)
+    incoming.append(clientFramebufferUpdateRequest(width: 100, height: 100))
+    incoming.append(clientFramebufferUpdateRequest(width: 100, height: 100))
+
+    let mappedImage = try #require(
+      CursorCoordinateMapper.cursorImage(
+        image,
+        descriptor: descriptor,
+        frameWidth: 100,
+        frameHeight: 100))
+    let mappedPosition = try #require(
+      CursorCoordinateMapper.pointerPosition(
+        visible.position,
+        descriptor: descriptor,
+        frameWidth: 100,
+        frameHeight: 100))
+    let shape = try RFBWire.cursorWithAlphaUpdate(image: mappedImage)
+    let pointer = RFBWire.pointerPositionUpdate(x: mappedPosition.x, y: mappedPosition.y)
+    let hiddenUpdate = RFBWire.hiddenCursorUpdate(encoding: .cursorWithAlpha)
+
+    let stream = FeedableRFBByteStream(incoming: incoming)
+    let finished = ThreadSafeFlag()
+    let session = RFBHostSession(
+      byteStream: stream,
+      capture: capture,
+      descriptor: descriptor,
+      input: HandshakeRemoteInput(),
+      clipboard: nil,
+      remoteAddressOverride: "Crabfleet browser",
+      skipTailnetCheck: true,
+      desktopName: "Crabfleet — Cursor Hide Test",
+      handshakeTimeout: .seconds(1),
+      viewOnly: false,
+      audioEnabled: false,
+      qualityMode: .auto,
+      cursorSnapshotProvider: { snapshots.value },
+      captureOutputSizeUpdater: { _, _ in },
+      didAuthorize: {},
+      eventHandler: { _ in },
+      didFinish: { _ in finished.set() })
+
+    session.start()
+    let clock = ContinuousClock()
+    let deadline = clock.now.advanced(by: .seconds(2))
+    func waitFor(_ predicate: @escaping () -> Bool) async throws {
+      while !predicate(), clock.now < deadline {
+        try await Task.sleep(for: .milliseconds(5))
+      }
+      #expect(predicate())
+    }
+
+    try await waitFor { stream.outgoing.range(of: pointer) != nil }
+    // Re-sending identical SetEncodings force-resamples the cursor provider,
+    // standing in for the 60 Hz monitor the loopback harness does not run.
+    snapshots.set(hidden)
+    stream.feed(cursorEncodings)
+    stream.feed(clientFramebufferUpdateRequest(width: 100, height: 100))
+    try await waitFor { stream.outgoing.range(of: hiddenUpdate) != nil }
+    snapshots.set(visible)
+    stream.feed(cursorEncodings)
+    stream.feed(clientFramebufferUpdateRequest(width: 100, height: 100))
+    stream.feed(clientFramebufferUpdateRequest(width: 100, height: 100))
+    try await waitFor { () -> Bool in
+      let outgoing = stream.outgoing
+      guard let hiddenRange = outgoing.range(of: hiddenUpdate) else { return false }
+      return outgoing.range(of: pointer, in: hiddenRange.upperBound..<outgoing.endIndex) != nil
+    }
+    session.stop()
+
+    let outgoing = stream.outgoing
+    let firstShape = try #require(outgoing.range(of: shape))
+    let firstPointer = try #require(
+      outgoing.range(of: pointer, in: firstShape.upperBound..<outgoing.endIndex))
+    let hiddenRange = try #require(
+      outgoing.range(of: hiddenUpdate, in: firstPointer.upperBound..<outgoing.endIndex))
+    let secondShape = try #require(
+      outgoing.range(of: shape, in: hiddenRange.upperBound..<outgoing.endIndex))
+    _ = try #require(
+      outgoing.range(of: pointer, in: secondShape.upperBound..<outgoing.endIndex))
+  }
+
+  @Test
   func resizeReplaysStationaryCursorShapeAndPointerAtNewGeometry() async throws {
     let descriptor = CapturedDisplayDescriptor(
       displayID: 1,
@@ -1005,6 +1120,57 @@ private func clientSetDesktopSize(width: UInt16, height: UInt16) -> Data {
   return message
 }
 
+private final class FeedableRFBByteStream: RFBByteStream, @unchecked Sendable {
+  private let lock = NSLock()
+  private var incoming = Data()
+  private var sent = Data()
+
+  init(incoming: Data = Data()) {
+    self.incoming = incoming
+  }
+
+  var outgoing: Data {
+    lock.lock()
+    defer { lock.unlock() }
+    return sent
+  }
+
+  func feed(_ data: Data) {
+    lock.lock()
+    incoming.append(data)
+    lock.unlock()
+  }
+
+  func readExactly(_ count: Int) async throws -> Data {
+    guard count >= 0 else {
+      throw PrivateMacShareError.protocolError("in-memory stream ended")
+    }
+    while true {
+      let chunk: Data? = {
+        lock.lock()
+        defer { lock.unlock() }
+        guard incoming.count >= count else { return nil }
+        let result = incoming.prefix(count)
+        incoming.removeFirst(count)
+        return Data(result)
+      }()
+      if let chunk { return chunk }
+      try await Task.sleep(for: .milliseconds(2))
+    }
+  }
+
+  func send(_ data: Data) async throws {
+    lock.lock()
+    sent.append(data)
+    lock.unlock()
+  }
+
+  func send(_ data: Data, deadline: ContinuousClock.Instant?) async throws {
+    if let deadline, ContinuousClock().now >= deadline { throw RFBSendExpiredError() }
+    try await send(data)
+  }
+}
+
 private final class InMemoryRFBByteStream: RFBByteStream, @unchecked Sendable {
   private let lock = NSLock()
   private var incoming: Data
@@ -1091,6 +1257,27 @@ private struct SlicedRFBByteStream: RFBByteStream {
 
   func send(_ data: Data, deadline: ContinuousClock.Instant?) async throws {
     if let deadline, ContinuousClock().now >= deadline { throw RFBSendExpiredError() }
+  }
+}
+
+private final class ThreadSafeSnapshotBox: @unchecked Sendable {
+  private let lock = NSLock()
+  private var storage: SystemCursorSnapshot
+
+  init(_ value: SystemCursorSnapshot) {
+    storage = value
+  }
+
+  var value: SystemCursorSnapshot {
+    lock.lock()
+    defer { lock.unlock() }
+    return storage
+  }
+
+  func set(_ value: SystemCursorSnapshot) {
+    lock.lock()
+    storage = value
+    lock.unlock()
   }
 }
 

@@ -1491,6 +1491,10 @@ final class RFBHostSession: @unchecked Sendable {
         guard cursorStateGeneration == state.9 else { return }
         cursorIsVisible = false
         lastCursorImageHash = nil
+        // Viewers drop their overlay on an empty shape; keeping the last
+        // position would suppress the PointerPos resend when the cursor
+        // reappears at the same coordinates, stranding the overlay hidden.
+        lastCursorPosition = nil
       }
       return true
     }
