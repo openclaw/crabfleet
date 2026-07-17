@@ -3,7 +3,13 @@ export type BrowserRFBAuthenticationOptions = {
   onVNCAuthentication(succeeded: boolean): void;
 };
 
-type BrowserCredentialStorage = Pick<Storage, "getItem" | "setItem" | "removeItem">;
+// The project's tsconfig does not pull in the DOM lib for this module, so the
+// storage surface is described structurally rather than via the DOM `Storage`.
+interface BrowserCredentialStorage {
+  getItem(key: string): string | null;
+  setItem(key: string, value: string): void;
+  removeItem(key: string): void;
+}
 
 export async function browserDirectRFBAuthentication(
   hostID: string,
