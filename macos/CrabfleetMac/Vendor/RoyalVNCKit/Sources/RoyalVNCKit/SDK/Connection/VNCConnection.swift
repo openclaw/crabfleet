@@ -223,7 +223,9 @@ public final class VNCConnection: NSObjectOrAnyObject, @unchecked Sendable {
 			VNCPseudoEncodingType.extendedDesktopSize.rawValue: VNCProtocol.ExtendedDesktopSizeEncoding(),
 			VNCPseudoEncodingType.desktopSize.rawValue: VNCProtocol.DesktopSizeEncoding(),
 			VNCPseudoEncodingType.desktopName.rawValue: VNCProtocol.DesktopNameEncoding(),
+			VNCPseudoEncodingType.cursorWithAlpha.rawValue: VNCProtocol.CursorWithAlphaEncoding(),
 			VNCPseudoEncodingType.cursor.rawValue: VNCProtocol.CursorEncoding(),
+			VNCPseudoEncodingType.pointerPosition.rawValue: VNCProtocol.PointerPositionEncoding(),
 			compressionLevelEncodingType: compressionLevelEncoding,
 			jpegQualityLevelEncodingType: jpegQualityLevelEncoding
 		]
@@ -309,7 +311,9 @@ public final class VNCConnection: NSObjectOrAnyObject, @unchecked Sendable {
 			VNCPseudoEncodingType.extendedDesktopSize.rawValue,
 			VNCPseudoEncodingType.desktopSize.rawValue,
 			VNCPseudoEncodingType.desktopName.rawValue,
+			VNCPseudoEncodingType.cursorWithAlpha.rawValue,
 			VNCPseudoEncodingType.cursor.rawValue,
+			VNCPseudoEncodingType.pointerPosition.rawValue,
 
             // TODO: Make configurable
 			VNCPseudoEncodingType.compressionLevel6.rawValue

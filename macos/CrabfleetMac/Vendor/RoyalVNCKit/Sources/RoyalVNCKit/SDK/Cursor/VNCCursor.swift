@@ -49,6 +49,7 @@ public final class VNCCursor: NSObjectOrAnyObject {
     @objc
 #endif
 	public let bytesPerRow: Int
+	let isPremultiplied: Bool
 
 #if canImport(CoreGraphics)
 	private static let rgbColorSpace = CGColorSpaceCreateDeviceRGB()
@@ -66,6 +67,7 @@ public final class VNCCursor: NSObjectOrAnyObject {
 		self.bitsPerPixel = 0
 		self.bytesPerPixel = 0
 		self.bytesPerRow = 0
+		self.isPremultiplied = false
 	}
 
 	init(imageData: Data,
@@ -73,7 +75,8 @@ public final class VNCCursor: NSObjectOrAnyObject {
 		 hotspot: VNCPoint,
 		 bitsPerComponent: Int,
 		 bitsPerPixel: Int,
-		 bytesPerPixel: Int) {
+		 bytesPerPixel: Int,
+		 isPremultiplied: Bool = false) {
 		self.isEmpty = false
 
 		self.imageData = imageData
@@ -84,6 +87,7 @@ public final class VNCCursor: NSObjectOrAnyObject {
 		self.bitsPerPixel = bitsPerPixel
 		self.bytesPerPixel = bytesPerPixel
 		self.bytesPerRow = Int(size.width) * bytesPerPixel
+		self.isPremultiplied = isPremultiplied
 	}
 }
 
@@ -130,7 +134,9 @@ public extension VNCCursor {
 			return nil
 		}
 
-		let bitmapInfo: CGBitmapInfo = .init(rawValue: CGBitmapInfo.byteOrder32Big.rawValue | CGImageAlphaInfo.last.rawValue)
+		let alphaInfo: CGImageAlphaInfo = isPremultiplied ? .premultipliedLast : .last
+		let bitmapInfo: CGBitmapInfo = .init(
+			rawValue: CGBitmapInfo.byteOrder32Big.rawValue | alphaInfo.rawValue)
 
 		let image = CGImage(width: .init(size.width),
 							height: .init(size.height),

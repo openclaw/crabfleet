@@ -28,6 +28,10 @@ protocol VNCFramebufferDelegate: AnyObject {
     func framebuffer(_ framebuffer: VNCFramebuffer,
                      didUpdateCursor cursor: VNCCursor)
 
+    /// Called when the server reports a remote pointer position.
+    func framebuffer(_ framebuffer: VNCFramebuffer,
+                     didUpdatePointerPosition position: VNCPoint)
+
     /// Called when the framebuffer's size or screen layout has changed.
     /// - Parameters:
     ///   - framebuffer: The framebuffer reporting the change.

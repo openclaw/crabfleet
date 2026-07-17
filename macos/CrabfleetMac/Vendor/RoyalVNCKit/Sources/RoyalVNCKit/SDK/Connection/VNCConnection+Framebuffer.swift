@@ -23,6 +23,11 @@ extension VNCConnection: VNCFramebufferDelegate {
 	}
 
 	func framebuffer(_ framebuffer: VNCFramebuffer,
+					 didUpdatePointerPosition position: VNCPoint) {
+		notifyDelegateAboutUpdatedPointerPosition(position)
+	}
+
+	func framebuffer(_ framebuffer: VNCFramebuffer,
 					 sizeDidChange newSize: VNCSize,
 					 screens newScreens: [VNCScreen]) {
 		recreateFramebuffer(size: newSize,

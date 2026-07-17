@@ -21,7 +21,9 @@ extension VNCProtocol.CursorEncoding {
         let width = Int(size.width)
         let height = Int(size.height)
 		guard width <= VNCProtocolLimits.maximumCursorDimension,
-			  height <= VNCProtocolLimits.maximumCursorDimension else {
+			  height <= VNCProtocolLimits.maximumCursorDimension,
+			  (width == 0) == (height == 0),
+			  width == 0 || (Int(hotspot.x) < width && Int(hotspot.y) < height) else {
 			throw VNCError.protocol(.invalidData)
 		}
 

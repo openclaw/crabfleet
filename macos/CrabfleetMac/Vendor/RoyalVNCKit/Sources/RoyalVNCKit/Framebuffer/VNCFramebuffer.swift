@@ -490,6 +490,10 @@ extension VNCFramebuffer {
 		notifyDelegateCursorDidUpdate(cursor)
 	}
 
+	func updatePointerPosition(_ position: VNCPoint) {
+		notifyDelegatePointerPositionDidUpdate(position)
+	}
+
 	func resize(to newSize: VNCSize) {
 		let newScreens: [VNCScreen] = [
 			.init(id: 0,
@@ -966,6 +970,11 @@ private extension VNCFramebuffer {
 	func notifyDelegateCursorDidUpdate(_ cursor: VNCCursor) {
 		delegate?.framebuffer(self,
 							  didUpdateCursor: cursor)
+	}
+
+	func notifyDelegatePointerPositionDidUpdate(_ position: VNCPoint) {
+		delegate?.framebuffer(self,
+							  didUpdatePointerPosition: position)
 	}
 
 	func notifyDelegateSizeDidChange(_ newSize: VNCSize,

@@ -36,10 +36,10 @@ struct HostShareWireTests {
           0xC0,
         ]))
     #expect(
-      RFBWire.pointerPositionUpdate(x: 0x1234, y: 0x5678)
+      RFBWire.pointerPositionUpdate(x: 1, y: 0)
         == Data([
           0, 0, 0, 1,
-          0x12, 0x34, 0x56, 0x78, 0, 0, 0, 0, 0xFF, 0xFF, 0xFF, 0x18,
+          0, 1, 0, 0, 0, 0, 0, 0, 0xFF, 0xFF, 0xFF, 0x18,
         ]))
     #expect(
       RFBWire.hiddenCursorUpdate(encoding: .cursorWithAlpha)

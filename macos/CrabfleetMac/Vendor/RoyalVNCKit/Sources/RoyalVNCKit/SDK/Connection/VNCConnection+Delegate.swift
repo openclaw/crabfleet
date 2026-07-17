@@ -68,6 +68,17 @@ extension VNCConnection {
 		}
 	}
 
+	func notifyDelegateAboutUpdatedPointerPosition(_ position: VNCPoint) {
+		DispatchQueue.main.async { [weak self] in
+			guard let self, let delegate = self.delegate else { return }
+#if canImport(ObjectiveC)
+			delegate.connection?(self, didUpdatePointerPositionX: position.x, y: position.y)
+#else
+			delegate.connection(self, didUpdatePointerPositionX: position.x, y: position.y)
+#endif
+		}
+	}
+
 	func notifyClipboardDelegateAboutText(_ text: String) {
 		clipboardDeliveryLock.lock()
 		pendingClipboardDelivery = text

@@ -6,7 +6,9 @@ import Foundation
 
 public enum VNCPseudoEncodingType: VNCEncodingType {
 	case lastRect = -224
+	case pointerPosition = -232
 	case cursor = -239
+	case cursorWithAlpha = -314
 	case desktopName = -307
 	case fence = -312
 	case continuousUpdates = -313
@@ -50,6 +52,10 @@ extension VNCPseudoEncodingType: CustomStringConvertible {
 				"Last Rectangle"
 			case .cursor:
 				"Cursor"
+			case .cursorWithAlpha:
+				"Cursor With Alpha"
+			case .pointerPosition:
+				"Pointer Position"
 			case .desktopName:
 				"Desktop Name"
 			case .fence:
