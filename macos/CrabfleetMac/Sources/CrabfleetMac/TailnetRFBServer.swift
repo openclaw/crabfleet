@@ -1524,6 +1524,13 @@ final class RFBHostSession: @unchecked Sendable {
         lastCursorPosition = position
         preferCursorPosition = false
       }
+      // Mirror of the shape branch's requeue: when position wins while the
+      // image also changed, the snapshot already left the arbiter and a
+      // stationary pointer would dedup every later poll, stranding the old
+      // shape. Reoffer so the next request delivers the new image.
+      if imageChanged {
+        reofferCursorSnapshotIfCurrent(snapshot)
+      }
       return true
     }
 
