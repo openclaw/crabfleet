@@ -2003,6 +2003,8 @@ struct PrivateMacShareTests {
       input: input,
       peerAuthorizer: LoopbackPeerAuthorizer(),
       port: port,
+      credentialProvider: { "test-auth-token" },
+      authThrottle: RFBAuthThrottle(),
       handshakeTimeout: .milliseconds(100),
       eventHandler: { events.append($0) }
     )
@@ -2308,6 +2310,8 @@ struct PrivateMacShareTests {
       ),
       input: NoopRemoteInput(),
       port: port,
+      credentialProvider: { "test-auth-token" },
+      authThrottle: RFBAuthThrottle(),
       eventHandler: { _ in }
     )
     try server.start()
@@ -2319,7 +2323,7 @@ struct PrivateMacShareTests {
       host: identity.ipv4Address,
       port: port,
       username: "",
-      password: "",
+      password: "test-auth-token",
       clipboardEnabled: false
     )
     defer { session.disconnect() }
@@ -2377,6 +2381,8 @@ struct PrivateMacShareTests {
       clipboard: hostClipboard,
       peerAuthorizer: LoopbackPeerAuthorizer(),
       port: port,
+      credentialProvider: { "test-auth-token" },
+      authThrottle: RFBAuthThrottle(),
       eventHandler: { _ in }
     )
     try server.start()
@@ -2394,7 +2400,7 @@ struct PrivateMacShareTests {
       host: identity.ipv4Address,
       port: port,
       username: "",
-      password: ""
+      password: "test-auth-token"
     )
     defer { session.disconnect() }
 

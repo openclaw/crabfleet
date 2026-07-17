@@ -99,11 +99,11 @@ struct SecurityAndInputTests {
     #expect(
       host.verifies(
         response: loopback.outgoing,
-        password: "test-auth-token"))
+        candidate: "test-auth-token"))
     #expect(
       !host.verifies(
         response: loopback.outgoing,
-        password: "decoy-token"))
+        candidate: "decoy-token"))
   }
 
   @Test
@@ -117,27 +117,27 @@ struct SecurityAndInputTests {
     #expect(
       VNCHostAuthentication.response(
         challenge: challenge,
-        password: "test-auth-token") == expected)
+        candidate: "test-auth-token") == expected)
     #expect(
       VNCHostAuthentication.verifies(
         response: expected,
         challenge: challenge,
-        password: "test-auth-token"))
+        candidate: "test-auth-token"))
     #expect(
       !VNCHostAuthentication.verifies(
         response: expected,
         challenge: challenge,
-        password: "decoy-token"))
+        candidate: "decoy-token"))
     #expect(
       VNCHostAuthentication.verifies(
         response: (Data([0xFF]) + expected).dropFirst(),
         challenge: challenge,
-        password: "test-auth-token"))
+        candidate: "test-auth-token"))
     #expect(
       !VNCHostAuthentication.verifies(
         response: expected + Data(repeating: 0, count: 256),
         challenge: challenge,
-        password: "test-auth-token"))
+        candidate: "test-auth-token"))
   }
 
   @Test

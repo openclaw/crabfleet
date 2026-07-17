@@ -126,7 +126,7 @@ public struct VNCARDHostAuthentication: Sendable {
 		challenge = wire
 	}
 
-	public func verifies(response: Data, password: String) -> Bool {
+	public func verifies(response: Data, candidate: String) -> Bool {
 		guard response.count == Self.responseLength else { return false }
 		let cipherText = response.prefix(128)
 		let peerKey = response.suffix(Self.keyLength)
@@ -149,7 +149,7 @@ public struct VNCARDHostAuthentication: Sendable {
 
 		let receivedCredential = clearText[64..<passwordEnd]
 		let expectedCredential = VNCProtocol.ARDAuthentication.Authentication.credentialBytes(
-			for: password)
+			for: candidate)
 		return Self.constantTimeEqual(Data(receivedCredential), expectedCredential)
 	}
 

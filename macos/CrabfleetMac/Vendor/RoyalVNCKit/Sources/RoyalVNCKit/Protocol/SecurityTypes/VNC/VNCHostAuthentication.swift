@@ -25,13 +25,13 @@ public enum VNCHostAuthentication {
     return challenge
   }
 
-  public static func response(challenge: Data, password: String) -> Data? {
+  public static func response(challenge: Data, candidate: String) -> Data? {
     guard challenge.count == challengeLength else { return nil }
-    return VNCDESEncryption.encrypt(data: challenge, key: password)
+    return VNCDESEncryption.encrypt(data: challenge, key: candidate)
   }
 
-  public static func verifies(response: Data, challenge: Data, password: String) -> Bool {
-    guard let expected = self.response(challenge: challenge, password: password),
+  public static func verifies(response: Data, challenge: Data, candidate: String) -> Bool {
+    guard let expected = self.response(challenge: challenge, candidate: candidate),
       response.count == expected.count
     else {
       return false

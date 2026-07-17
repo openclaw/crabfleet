@@ -173,8 +173,21 @@ struct PrivateMacShareSheet: View {
               }
             }
           }
+          HStack(spacing: 10) {
+            Text("Password · \(controller.accessCode)")
+              .font(.system(.body, design: .monospaced))
+              .textSelection(.enabled)
+            Spacer()
+            Button("Copy password", systemImage: "doc.on.doc") {
+              NSPasteboard.general.clearContents()
+              NSPasteboard.general.setString(controller.accessCode, forType: .string)
+            }
+            Button("Regenerate", systemImage: "arrow.clockwise") {
+              controller.regenerateAccessCode()
+            }
+          }
           Text(
-            "Open Crabfleet, choose Quick Connect, paste this address, and leave the password blank."
+            "Open Crabfleet, choose Quick Connect, paste an address, and enter this password. Existing authenticated viewers stay connected after regeneration."
           )
           .font(.caption)
           .foregroundStyle(.secondary)
