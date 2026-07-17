@@ -19,6 +19,10 @@ protocol DesktopHostRegistering: Sendable {
   func unregister(identity: TailnetIdentity, ownershipToken: String?) async throws
 }
 
+protocol DesktopHostRelayEndpointProviding: Sendable {
+  func relayHostURL(hostID: String) -> URL?
+}
+
 struct DesktopHostRegistrationResultUncertainError: LocalizedError, Equatable, Sendable {
   let message: String
 
@@ -89,6 +93,7 @@ actor DesktopHostRegistrationCoordinator {
 struct CrabfleetDesktopRegistration:
   DesktopHostRegistering,
   DesktopHostRegistrationRecoveryScoping,
+  DesktopHostRelayEndpointProviding,
   @unchecked Sendable
 {
   private struct RegistrationResponse: Decodable {
@@ -278,6 +283,29 @@ struct CrabfleetDesktopRegistration:
     let request = try removalRequest(identity: identity, ownershipToken: ownershipToken)
     let (_, http) = try await transport.data(for: request)
     try validate(response: http, for: request, acceptingNotFound: true)
+  }
+
+  func relayHostURL(hostID: String) -> URL? {
+    guard
+      (1...80).contains(hostID.count),
+      hostID.first?.isLetter == true || hostID.first?.isNumber == true,
+      hostID.last?.isLetter == true || hostID.last?.isNumber == true,
+      hostID.allSatisfy({
+        $0.isASCII && ($0.isLowercase || $0.isNumber || $0 == "." || $0 == "_" || $0 == "-")
+      })
+    else { return nil }
+    var components = URLComponents(
+      url:
+        baseURL
+        .appending(path: "api")
+        .appending(path: "desktop-hosts")
+        .appending(path: hostID)
+        .appending(path: "relay")
+        .appending(path: "host"),
+      resolvingAgainstBaseURL: false
+    )
+    components?.scheme = baseURL.scheme?.lowercased() == "https" ? "wss" : "ws"
+    return components?.url
   }
 
   private func validate(

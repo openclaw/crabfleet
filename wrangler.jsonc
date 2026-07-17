@@ -70,6 +70,10 @@
         "name": "SESSION_CONTROL",
         "class_name": "SessionControlDO",
       },
+      {
+        "name": "DESKTOP_RELAY",
+        "class_name": "DesktopRelayDO",
+      },
     ],
   },
   "migrations": [
@@ -80,6 +84,10 @@
     {
       "tag": "session-control-v1",
       "new_sqlite_classes": ["SessionControlDO"],
+    },
+    {
+      "tag": "desktop-relay-v1",
+      "new_sqlite_classes": ["DesktopRelayDO"],
     },
   ],
   "workers_dev": false,

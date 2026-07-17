@@ -153,6 +153,102 @@ struct HostShareWireTests {
   }
 }
 
+struct RFBHostSessionStreamTests {
+  @Test
+  func readsAByteFromDataWithANonzeroStartIndex() async throws {
+    #expect(try await SlicedRFBByteStream().readUInt8() == 42)
+  }
+
+  @Test
+  func directStreamClaimsTheSharedGateOnlyAfterClientBytesArrive() async throws {
+    let gate = RFBHostSessionGate()
+    let acquired = ThreadSafeFlag()
+    let released = ThreadSafeFlag()
+    let stream = DirectSessionClaimingRFBByteStream(
+      base: InMemoryRFBByteStream(incoming: Data([1, 2])),
+      gate: gate,
+      onAcquire: { acquired.set() },
+      onRelease: { released.set() }
+    )
+
+    let idleClaim = try #require(gate.acquire())
+    #expect(!acquired.value)
+    gate.release(idleClaim)
+
+    #expect(try await stream.readExactly(2) == Data([1, 2]))
+    #expect(acquired.value)
+    #expect(gate.acquire() == nil)
+    stream.finishClaim()
+    #expect(released.value)
+    let finalClaim = try #require(gate.acquire())
+    gate.release(finalClaim)
+
+    let competingClaim = try #require(gate.acquire())
+    let losingStream = DirectSessionClaimingRFBByteStream(
+      base: InMemoryRFBByteStream(incoming: Data([3])),
+      gate: gate,
+      onAcquire: { acquired.set() },
+      onRelease: { released.set() }
+    )
+    await #expect(throws: (any Error).self) {
+      _ = try await losingStream.readExactly(1)
+    }
+    #expect(!losingStream.hasClaim)
+    gate.release(competingClaim)
+  }
+
+  @Test
+  func completesAFull38HandshakeOverAnInMemoryByteStream() async throws {
+    var clientHandshake = RFBVersion.serverBanner
+    clientHandshake.append(1)  // None security
+    clientHandshake.append(1)  // shared ClientInit
+    let stream = InMemoryRFBByteStream(incoming: clientHandshake)
+    let finished = ThreadSafeFlag()
+    let descriptor = CapturedDisplayDescriptor(
+      displayID: 1,
+      displayBounds: CGRect(x: 0, y: 0, width: 640, height: 480),
+      frameWidth: 640,
+      frameHeight: 480,
+      sourcePixelWidth: 640,
+      sourcePixelHeight: 480
+    )
+    let session = RFBHostSession(
+      byteStream: stream,
+      capture: MacScreenCapture(),
+      descriptor: descriptor,
+      input: HandshakeRemoteInput(),
+      clipboard: nil,
+      remoteAddressOverride: "Crabfleet browser",
+      skipTailnetCheck: true,
+      desktopName: "Crabfleet — Test Mac",
+      handshakeTimeout: .seconds(1),
+      viewOnly: false,
+      audioEnabled: true,
+      qualityMode: .auto,
+      didAuthorize: {},
+      eventHandler: { _ in },
+      didFinish: { _ in finished.set() }
+    )
+
+    session.start()
+    let clock = ContinuousClock()
+    let deadline = clock.now.advanced(by: .seconds(1))
+    while !finished.value, clock.now < deadline {
+      try await Task.sleep(for: .milliseconds(10))
+    }
+    session.stop()
+    #expect(finished.value)
+
+    var expected = RFBVersion.serverBanner
+    expected.append(contentsOf: [1, 1])
+    expected.append(contentsOf: [0, 0, 0, 0])
+    expected.append(
+      try RFBWire.serverInit(width: 640, height: 480, name: "Crabfleet — Test Mac")
+    )
+    #expect(stream.outgoing == expected)
+  }
+}
+
 @MainActor
 struct HostClipboardBridgeTests {
   @Test
@@ -389,5 +485,82 @@ private final class DirectionEndpointRecorder: ClipboardSessionEndpoint {
 
   func sendClipboardText(_ text: String) throws {
     sentTexts.append(text)
+  }
+}
+
+private final class InMemoryRFBByteStream: RFBByteStream, @unchecked Sendable {
+  private let lock = NSLock()
+  private var incoming: Data
+  private var sent = Data()
+
+  init(incoming: Data) {
+    self.incoming = incoming
+  }
+
+  var outgoing: Data {
+    lock.lock()
+    defer { lock.unlock() }
+    return sent
+  }
+
+  func readExactly(_ count: Int) async throws -> Data {
+    try withLock {
+      guard count >= 0, incoming.count >= count else {
+        throw PrivateMacShareError.protocolError("in-memory stream ended")
+      }
+      let result = incoming.prefix(count)
+      incoming.removeFirst(count)
+      return Data(result)
+    }
+  }
+
+  func send(_ data: Data) async throws {
+    withLock { sent.append(data) }
+  }
+
+  func send(_ data: Data, deadline: ContinuousClock.Instant?) async throws {
+    if let deadline, ContinuousClock().now >= deadline { throw RFBSendExpiredError() }
+    try await send(data)
+  }
+
+  private func withLock<T>(_ body: () throws -> T) rethrows -> T {
+    lock.lock()
+    defer { lock.unlock() }
+    return try body()
+  }
+}
+
+private struct HandshakeRemoteInput: RemoteInputForwarding {
+  func keyEvent(down: Bool, keysym: UInt32) {}
+  func pointerEvent(buttonMask: UInt8, x: UInt16, y: UInt16) {}
+}
+
+private struct SlicedRFBByteStream: RFBByteStream {
+  func readExactly(_ count: Int) async throws -> Data {
+    let data = Data([0, 42])
+    return data[data.index(after: data.startIndex)...]
+  }
+
+  func send(_ data: Data) async throws {}
+
+  func send(_ data: Data, deadline: ContinuousClock.Instant?) async throws {
+    if let deadline, ContinuousClock().now >= deadline { throw RFBSendExpiredError() }
+  }
+}
+
+private final class ThreadSafeFlag: @unchecked Sendable {
+  private let lock = NSLock()
+  private var storage = false
+
+  var value: Bool {
+    lock.lock()
+    defer { lock.unlock() }
+    return storage
+  }
+
+  func set() {
+    lock.lock()
+    storage = true
+    lock.unlock()
   }
 }

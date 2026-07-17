@@ -37,6 +37,121 @@ struct TailnetStreamStats: Equatable, Sendable {
   }
 }
 
+protocol RFBByteStream: Sendable {
+  func readExactly(_ count: Int) async throws -> Data
+  func readUInt8() async throws -> UInt8
+  func send(_ data: Data) async throws
+  func send(_ data: Data, deadline: ContinuousClock.Instant?) async throws
+}
+
+extension RFBByteStream {
+  func readUInt8() async throws -> UInt8 {
+    try await readExactly(1).first!
+  }
+
+  func send(_ data: Data, timeout: Duration?) async throws {
+    try await send(
+      data,
+      deadline: timeout.map { ContinuousClock().now.advanced(by: $0) }
+    )
+  }
+
+  func send(_ data: Data, deadline: ContinuousClock.Instant) async throws {
+    try await send(data, deadline: Optional(deadline))
+  }
+}
+
+final class RFBHostSessionGate: @unchecked Sendable {
+  private let lock = NSLock()
+  private var activeClaim: UUID?
+
+  func acquire() -> UUID? {
+    lock.lock()
+    defer { lock.unlock() }
+    guard activeClaim == nil else { return nil }
+    let claim = UUID()
+    activeClaim = claim
+    return claim
+  }
+
+  func release(_ claim: UUID) {
+    lock.lock()
+    if activeClaim == claim { activeClaim = nil }
+    lock.unlock()
+  }
+
+  var isClaimed: Bool {
+    lock.lock()
+    defer { lock.unlock() }
+    return activeClaim != nil
+  }
+}
+
+final class DirectSessionClaimingRFBByteStream: RFBByteStream, @unchecked Sendable {
+  private let base: any RFBByteStream
+  private let gate: RFBHostSessionGate
+  private let onAcquire: @Sendable () -> Void
+  private let onRelease: @Sendable () -> Void
+  private let lock = NSLock()
+  private var claim: UUID?
+
+  init(
+    base: any RFBByteStream,
+    gate: RFBHostSessionGate,
+    onAcquire: @escaping @Sendable () -> Void,
+    onRelease: @escaping @Sendable () -> Void
+  ) {
+    self.base = base
+    self.gate = gate
+    self.onAcquire = onAcquire
+    self.onRelease = onRelease
+  }
+
+  var hasClaim: Bool { withLock { claim != nil } }
+
+  func readExactly(_ count: Int) async throws -> Data {
+    guard count >= 0 else { return try await base.readExactly(count) }
+    guard count > 0 else { return Data() }
+    guard !hasClaim else { return try await base.readExactly(count) }
+
+    var result = try await base.readExactly(1)
+    guard let acquired = gate.acquire() else {
+      throw PrivateMacShareError.protocolError("another desktop viewer is active")
+    }
+    withLock { claim = acquired }
+    onAcquire()
+    if count > 1 {
+      result.append(try await base.readExactly(count - 1))
+    }
+    return result
+  }
+
+  func send(_ data: Data) async throws {
+    try await base.send(data)
+  }
+
+  func send(_ data: Data, deadline: ContinuousClock.Instant?) async throws {
+    try await base.send(data, deadline: deadline)
+  }
+
+  func finishClaim() {
+    let released = withLock { () -> UUID? in
+      defer { claim = nil }
+      return claim
+    }
+    if let released {
+      onRelease()
+      gate.release(released)
+    }
+  }
+
+  private func withLock<T>(_ body: () -> T) -> T {
+    lock.lock()
+    defer { lock.unlock() }
+    return body()
+  }
+}
+
 final class TailnetRFBServer: @unchecked Sendable {
   typealias EventHandler = @Sendable (TailnetRFBServerEvent) -> Void
 
@@ -49,11 +164,13 @@ final class TailnetRFBServer: @unchecked Sendable {
   private let peerAuthorizer: (any TailnetPeerAuthorizing)?
   private let port: UInt16
   private let handshakeTimeout: Duration
+  private let sessionGate: RFBHostSessionGate
   private let queue = DispatchQueue(label: "org.openclaw.crabfleet.rfb-listener")
   private let lock = NSLock()
   private let eventHandler: EventHandler
   private var listener: NWListener?
   private var session: RFBHostSession?
+  private var directConnectionReserved = false
   private var viewOnly = false
   private var audioEnabled = true
   private var qualityMode: ShareQualityMode = .auto
@@ -68,6 +185,7 @@ final class TailnetRFBServer: @unchecked Sendable {
     peerAuthorizer: (any TailnetPeerAuthorizing)? = nil,
     port: UInt16,
     handshakeTimeout: Duration = .seconds(10),
+    sessionGate: RFBHostSessionGate = RFBHostSessionGate(),
     eventHandler: @escaping EventHandler
   ) {
     self.identity = identity
@@ -79,6 +197,7 @@ final class TailnetRFBServer: @unchecked Sendable {
     self.peerAuthorizer = peerAuthorizer
     self.port = port
     self.handshakeTimeout = handshakeTimeout
+    self.sessionGate = sessionGate
     self.eventHandler = eventHandler
   }
 
@@ -118,12 +237,12 @@ final class TailnetRFBServer: @unchecked Sendable {
       defer {
         listener = nil
         session = nil
+        directConnectionReserved = false
       }
       return (listener, session)
     }
     values.0?.cancel()
     values.1?.stop()
-    capture.setConsumerActive(false)
   }
 
   func setViewOnly(_ enabled: Bool) {
@@ -182,12 +301,22 @@ final class TailnetRFBServer: @unchecked Sendable {
   }
 
   private func accept(_ connection: NWConnection) {
-    let hasActiveSession = withLock { self.session != nil }
-    guard !hasActiveSession else {
+    let reserved = withLock { () -> Bool in
+      guard !directConnectionReserved else { return false }
+      directConnectionReserved = true
+      return true
+    }
+    guard reserved else {
       connection.cancel()
       return
     }
 
+    let stream = DirectSessionClaimingRFBByteStream(
+      base: RFBConnectionIO(connection: connection),
+      gate: sessionGate,
+      onAcquire: { [weak capture] in capture?.setConsumerActive(true) },
+      onRelease: { [weak capture] in capture?.setConsumerActive(false) }
+    )
     let authorizer =
       peerAuthorizer
       ?? TailnetPeerAuthorizer(
@@ -195,6 +324,7 @@ final class TailnetRFBServer: @unchecked Sendable {
         expectedIdentity: identity
       )
     let newSession = RFBHostSession(
+      byteStream: stream,
       connection: connection,
       authorizer: authorizer,
       capture: capture,
@@ -207,9 +337,14 @@ final class TailnetRFBServer: @unchecked Sendable {
       viewOnly: false,
       audioEnabled: false,
       qualityMode: .auto,
-      didAuthorize: { [weak capture] in capture?.setConsumerActive(true) },
-      eventHandler: eventHandler,
+      didAuthorize: {},
+      eventHandler: { [eventHandler, sessionGate] event in
+        if stream.hasClaim || !sessionGate.isClaimed {
+          eventHandler(event)
+        }
+      },
       didFinish: { [weak self] finishedSession in
+        stream.finishClaim()
         self?.clear(finishedSession)
       }
     )
@@ -226,7 +361,7 @@ final class TailnetRFBServer: @unchecked Sendable {
     withLock {
       if session === finishedSession {
         session = nil
-        capture.setConsumerActive(false)
+        directConnectionReserved = false
       }
     }
   }
@@ -238,17 +373,20 @@ final class TailnetRFBServer: @unchecked Sendable {
   }
 }
 
-private final class RFBHostSession: @unchecked Sendable {
-  private let connection: NWConnection
-  private let authorizer: any TailnetPeerAuthorizing
+final class RFBHostSession: @unchecked Sendable {
+  private let byteStream: any RFBByteStream
+  private let connection: NWConnection?
+  private let authorizer: (any TailnetPeerAuthorizing)?
   private let capture: MacScreenCapture
   private let descriptor: CapturedDisplayDescriptor
   private let input: any RemoteInputForwarding
   private let inputGate: RemoteInputSessionGate
   private let clipboard: (any HostClipboardSyncing)?
-  private let requiredLocalAddress: String
+  private let requiredLocalAddress: String?
+  private let remoteAddressOverride: String?
+  private let skipTailnetCheck: Bool
   private let desktopName: String
-  private let handshakeTimeout: Duration
+  private let handshakeTimeout: Duration?
   private let didAuthorize: @Sendable () -> Void
   private let queue = DispatchQueue(label: "org.openclaw.crabfleet.rfb-session")
   private let eventHandler: TailnetRFBServer.EventHandler
@@ -259,7 +397,7 @@ private final class RFBHostSession: @unchecked Sendable {
   private var handshakeFinished = false
   private var handshakeTimedOut = false
   private var task: Task<Void, Never>?
-  private var pushIO: RFBConnectionIO?
+  private var pushIO: (any RFBByteStream)?
 
   // Negotiated per-connection state; only the protocol task mutates it.
   private var supportsTightEncoding = false
@@ -298,15 +436,18 @@ private final class RFBHostSession: @unchecked Sendable {
     timestamp: ProcessInfo.processInfo.systemUptime)
 
   init(
-    connection: NWConnection,
-    authorizer: any TailnetPeerAuthorizing,
+    byteStream: any RFBByteStream,
+    connection: NWConnection? = nil,
+    authorizer: (any TailnetPeerAuthorizing)? = nil,
     capture: MacScreenCapture,
     descriptor: CapturedDisplayDescriptor,
     input: any RemoteInputForwarding,
     clipboard: (any HostClipboardSyncing)?,
-    requiredLocalAddress: String,
+    requiredLocalAddress: String? = nil,
+    remoteAddressOverride: String? = nil,
+    skipTailnetCheck: Bool = false,
     desktopName: String,
-    handshakeTimeout: Duration,
+    handshakeTimeout: Duration?,
     viewOnly: Bool,
     audioEnabled: Bool,
     qualityMode: ShareQualityMode,
@@ -314,6 +455,7 @@ private final class RFBHostSession: @unchecked Sendable {
     eventHandler: @escaping TailnetRFBServer.EventHandler,
     didFinish: @escaping @Sendable (RFBHostSession) -> Void
   ) {
+    self.byteStream = byteStream
     self.connection = connection
     self.authorizer = authorizer
     self.capture = capture
@@ -323,6 +465,8 @@ private final class RFBHostSession: @unchecked Sendable {
     self.audioEnabled = audioEnabled
     self.clipboard = clipboard
     self.requiredLocalAddress = requiredLocalAddress
+    self.remoteAddressOverride = remoteAddressOverride
+    self.skipTailnetCheck = skipTailnetCheck
     self.desktopName = desktopName
     self.handshakeTimeout = handshakeTimeout
     self.qualityMode = qualityMode
@@ -334,6 +478,10 @@ private final class RFBHostSession: @unchecked Sendable {
   }
 
   func start() {
+    guard let connection else {
+      beginProtocolIfNeeded()
+      return
+    }
     connection.stateUpdateHandler = { [weak self] state in
       guard let self else { return }
       switch state {
@@ -360,7 +508,7 @@ private final class RFBHostSession: @unchecked Sendable {
   }
 
   func setAudioEnabled(_ enabled: Bool) {
-    let io = withLock { () -> RFBConnectionIO? in
+    let io = withLock { () -> (any RFBByteStream)? in
       audioEnabled = enabled
       if enabled { audioPathBroken = false }
       return pushIO
@@ -492,28 +640,37 @@ private final class RFBHostSession: @unchecked Sendable {
   }
 
   private func runProtocol() async throws {
-    guard let remoteAddress = Self.address(from: connection.endpoint) else {
+    guard
+      let remoteAddress = remoteAddressOverride ?? Self.address(from: connection?.endpoint),
+      !remoteAddress.isEmpty
+    else {
       throw PrivateMacShareError.protocolError("missing peer address")
     }
 
-    // The wide port bind accepts connections from any interface; only the
-    // shared address may proceed, checked before any protocol bytes go out.
-    guard let localAddress = Self.address(from: connection.currentPath?.localEndpoint),
-      localAddress == requiredLocalAddress
-    else {
-      throw PrivateMacShareError.protocolError(
-        "connection did not arrive on the shared tailnet address")
-    }
+    if !skipTailnetCheck {
+      guard let connection, let requiredLocalAddress, let authorizer else {
+        throw PrivateMacShareError.protocolError("missing tailnet authorization context")
+      }
+      // The wide port bind accepts connections from any interface; only the
+      // shared address may proceed, checked before any protocol bytes go out.
+      guard let localAddress = Self.address(from: connection.currentPath?.localEndpoint),
+        localAddress == requiredLocalAddress
+      else {
+        throw PrivateMacShareError.protocolError(
+          "connection did not arrive on the shared tailnet address")
+      }
 
-    eventHandler(.authorizing(remoteAddress))
-    let isAuthorized = await authorizer.authorize(remoteAddress: remoteAddress)
-    try Task.checkCancellation()
-    guard isAuthorized else {
-      throw PrivateMacShareError.protocolError("peer is not another device for this Tailscale user")
+      eventHandler(.authorizing(remoteAddress))
+      let isAuthorized = await authorizer.authorize(remoteAddress: remoteAddress)
+      try Task.checkCancellation()
+      guard isAuthorized else {
+        throw PrivateMacShareError.protocolError(
+          "peer is not another device for this Tailscale user")
+      }
     }
-    didAuthorize()
+    try activateIfRunning()
 
-    let io = RFBConnectionIO(connection: connection)
+    let io = byteStream
     try await handshakeBeforeDeadline(io: io)
     withLock { pushIO = io }
     attachClipboard()
@@ -523,7 +680,17 @@ private final class RFBHostSession: @unchecked Sendable {
     try await messageLoop(io: io)
   }
 
-  private func handshake(io: RFBConnectionIO) async throws {
+  private func activateIfRunning() throws {
+    lock.lock()
+    guard !finished, !Task.isCancelled else {
+      lock.unlock()
+      throw CancellationError()
+    }
+    didAuthorize()
+    lock.unlock()
+  }
+
+  private func handshake(io: any RFBByteStream) async throws {
     try await io.send(RFBVersion.serverBanner)
     let clientBanner = try await io.readExactly(12)
     guard let version = RFBVersion(banner: clientBanner) else {
@@ -555,7 +722,12 @@ private final class RFBHostSession: @unchecked Sendable {
       ))
   }
 
-  private func handshakeBeforeDeadline(io: RFBConnectionIO) async throws {
+  private func handshakeBeforeDeadline(io: any RFBByteStream) async throws {
+    guard let handshakeTimeout else {
+      try await handshake(io: io)
+      withLock { handshakeFinished = true }
+      return
+    }
     let deadlineTask = Task { [weak self, handshakeTimeout] in
       do {
         try await Task.sleep(for: handshakeTimeout)
@@ -594,7 +766,7 @@ private final class RFBHostSession: @unchecked Sendable {
     }
   }
 
-  private func messageLoop(io: RFBConnectionIO) async throws {
+  private func messageLoop(io: any RFBByteStream) async throws {
     var hasSentJPEGFrame = false
     var lastSentJPEGSequence: UInt64 = 0
 
@@ -753,7 +925,7 @@ private final class RFBHostSession: @unchecked Sendable {
     }
   }
 
-  private func sendServerClipboardCapsIfNeeded(io: RFBConnectionIO) async throws {
+  private func sendServerClipboardCapsIfNeeded(io: any RFBByteStream) async throws {
     let clipboardNegotiated = withLock { supportsExtendedClipboard }
     guard clipboardNegotiated, clipboard != nil, !sentServerClipboardCaps else { return }
     sentServerClipboardCaps = true
@@ -763,7 +935,7 @@ private final class RFBHostSession: @unchecked Sendable {
     try await io.send(VNCExtendedClipboard.frame(messageType: 3, body: body))
   }
 
-  private func receiveClientCutText(io: RFBConnectionIO) async throws {
+  private func receiveClientCutText(io: any RFBByteStream) async throws {
     let header = try await io.readExactly(7)
     let length = Int(header.readInt32(at: 3))
 
@@ -840,7 +1012,7 @@ private final class RFBHostSession: @unchecked Sendable {
 
   // MARK: - Desktop resize
 
-  private func receiveSetDesktopSize(io: RFBConnectionIO) async throws {
+  private func receiveSetDesktopSize(io: any RFBByteStream) async throws {
     let header = try await io.readExactly(7)
     let requestedWidth = Int(header.readUInt16(at: 1))
     let requestedHeight = Int(header.readUInt16(at: 3))
@@ -939,7 +1111,7 @@ private final class RFBHostSession: @unchecked Sendable {
 
   // MARK: - Audio
 
-  private func reconcileAudioPath(io: RFBConnectionIO) async {
+  private func reconcileAudioPath(io: any RFBByteStream) async {
     await audioPipelineGate.run { [weak self] in
       guard let self else { return }
       let shouldStream = self.withLock {
@@ -956,7 +1128,7 @@ private final class RFBHostSession: @unchecked Sendable {
     }
   }
 
-  private func startAudioPath(io: RFBConnectionIO) async {
+  private func startAudioPath(io: any RFBByteStream) async {
     let encoder = MacAudioEncoder()
     let generation = withLock { () -> UInt64 in
       audioGeneration &+= 1
@@ -1030,7 +1202,7 @@ private final class RFBHostSession: @unchecked Sendable {
     }
   }
 
-  private func stopAudioPathNow(sendStop: Bool, io: RFBConnectionIO?) async {
+  private func stopAudioPathNow(sendStop: Bool, io: (any RFBByteStream)?) async {
     let previous = withLock { () -> (MacAudioEncoder?, Task<Void, Never>?, Bool) in
       defer {
         audioEncoder = nil
@@ -1154,7 +1326,7 @@ private final class RFBHostSession: @unchecked Sendable {
     mailbox?.finish()
   }
 
-  private func prepareTightFallback(io: RFBConnectionIO) async throws {
+  private func prepareTightFallback(io: any RFBByteStream) async throws {
     guard currentWidth > 2_560 || currentHeight > 1_600 else { return }
     let target = MacScreenCapture.resizedDimensions(
       requestedWidth: currentWidth,
@@ -1457,7 +1629,7 @@ private final class RFBHostSession: @unchecked Sendable {
       && CVPixelBufferGetHeight(pixelBuffer) == currentHeight
   }
 
-  private func timedSend(_ data: Data, io: RFBConnectionIO) async throws -> Double {
+  private func timedSend(_ data: Data, io: any RFBByteStream) async throws -> Double {
     let clock = ContinuousClock()
     let start = clock.now
     try await io.send(data)
@@ -1565,7 +1737,7 @@ private final class RFBHostSession: @unchecked Sendable {
       await audioPipelineGate.run { [self] in
         await stopAudioPathNow(sendStop: true, io: audioIO)
       }
-      connection.cancel()
+      connection?.cancel()
       if encoder != nil {
         try? await capture.updateFrameInterval(framesPerSecond: 15)
       }
@@ -1619,17 +1791,13 @@ extension RFBWire {
   }
 }
 
-private struct RFBConnectionIO: Sendable {
+struct RFBConnectionIO: RFBByteStream {
   let connection: NWConnection
   private let sendQueue: RFBSendQueue
 
   init(connection: NWConnection) {
     self.connection = connection
     sendQueue = RFBSendQueue(connection: connection)
-  }
-
-  func readUInt8() async throws -> UInt8 {
-    try await readExactly(1)[0]
   }
 
   func readExactly(_ count: Int) async throws -> Data {
@@ -1650,12 +1818,11 @@ private struct RFBConnectionIO: Sendable {
     return result
   }
 
-  func send(_ data: Data, timeout: Duration? = nil) async throws {
-    let deadline = timeout.map { ContinuousClock().now.advanced(by: $0) }
-    try await sendQueue.send(data, deadline: deadline)
+  func send(_ data: Data) async throws {
+    try await sendQueue.send(data, deadline: nil)
   }
 
-  func send(_ data: Data, deadline: ContinuousClock.Instant) async throws {
+  func send(_ data: Data, deadline: ContinuousClock.Instant?) async throws {
     try await sendQueue.send(data, deadline: deadline)
   }
 

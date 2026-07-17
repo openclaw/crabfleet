@@ -14,7 +14,7 @@ Crabfleet gives OpenClaw maintainers a fleet dashboard where every Codex crabbox
 - **Issue/PR lookup.** Type `#123` in search to preview matching GitHub issues or PRs across enabled OpenClaw repos and create a card from the match.
 - **Codex run control.** Start durable run attempts, track heartbeats, watch the Ghostty WASM session grid, and take over only when the selected runtime advertises that capability.
 - **Interactive Crabboxes.** Start a standalone Codex CLI workspace for manual cloud work and attach it in the same fullscreen Ghostty grid or WebVNC.
-- **Share This Mac.** Stream a selected Mac display and system audio privately over Tailscale with preferred hardware HEVC, H.264 and Tight/JPEG fallback, AAC-LC audio, dirty-rect idle suppression, live Auto/Sharp/Smooth quality modes, throughput-aware rate control, and live view-only and audio controls.
+- **Share This Mac.** Stream a selected Mac display and system audio privately over Tailscale or the owner-authenticated first-party browser relay with preferred hardware HEVC for native viewers, hardware H.264 and Tight/JPEG fallback, AAC-LC audio for native viewers, dirty-rect idle suppression, live Auto/Sharp/Smooth quality modes, throughput-aware rate control, clipboard sync, resize, and live view-only and audio controls.
 - **Steerable GitHub Actions.** Register an Actions job as a durable `github_actions` session, stream its PTY outbound into Ghostty, steer it from the browser, and report work state and Codex thread/turn IDs.
 - **Worker-owned sandbox credentials.** Built-in Cloudflare Sandbox sessions get placeholder env credentials; Worker-controlled outbound routing injects model and GitHub credentials only for approved upstream requests.
 - **Diff previews.** Card tiles show changed files and totals; the run drawer shows a compact Codiff-style patch view.
@@ -34,6 +34,7 @@ Crabfleet gives OpenClaw maintainers a fleet dashboard where every Codex crabbox
 - **Versioned lifecycle adapter** for idempotent external workspace creation, bounded status reconciliation, provider-backed deletion, terminal attachment, and authenticated transient desktop connections.
 - **Provision endpoint** at `/api/provision/interactive` for durable built-in Sandbox ownership and a bearer-authenticated standalone PTY route.
 - **SessionControlDO relay** for one outbound GitHub Actions runner and multiple authenticated Ghostty viewers per action session.
+- **DesktopRelayDO** for one ownership-token Mac publisher and one registration-owner browser RFB viewer per desktop, relaying a bounded opaque byte stream without storing secrets or frames.
 - **R2 session archives** for periodically refreshed interactive-session event NDJSON, transcripts, and summaries, finalized at terminal completion.
 - **GitHub API** for OAuth, org/team membership, and issue/PR previews across enabled repos.
 
