@@ -629,8 +629,9 @@ final class RFBHostSession: @unchecked Sendable {
   private var cursorIsVisible: Bool?
   private var lastLocalPointerInput: TimeInterval?
   private var cursorStateGeneration: UInt64 = 0
-  private var sentCursorSinceLastVideo = false
   private var preferCursorPosition = false
+  private let framebufferUpdateArbiter = FramebufferUpdateArbiter<VideoPixelSource>()
+  private var cursorEchoWakeTask: Task<Void, Never>?
 
   init(
     byteStream: any RFBByteStream,
@@ -982,7 +983,7 @@ final class RFBHostSession: @unchecked Sendable {
             }
           }
           if let snapshot = capture.currentCursorSnapshot() {
-            withLock { latestCursorSnapshot = snapshot }
+            receiveCursorSnapshot(snapshot, force: true)
           }
         } catch {
           throw PrivateMacShareError.protocolError("cursor capture reconfiguration failed")
@@ -1015,25 +1016,30 @@ final class RFBHostSession: @unchecked Sendable {
               height: currentHeight
             ))
           commitCursorFrameSize(width: currentWidth, height: currentHeight)
-          withLock { sentCursorSinceLastVideo = false }
+          framebufferUpdateArbiter.recordVideoResponse()
           continue protocolLoop
         }
-        let shouldTryCursor = !incremental || !withLock { sentCursorSinceLastVideo }
-        if shouldTryCursor, let snapshot = withLock({ latestCursorSnapshot }) {
+        let videoReady = withLock { videoPixelMailbox?.hasPendingElement == true }
+        var attemptedCursorForRequest = false
+        if let snapshot = framebufferUpdateArbiter.takeCursorIfAllowed(
+          videoReady: videoReady,
+          force: !incremental)
+        {
+          attemptedCursorForRequest = true
           do {
             if try await sendCursorSnapshot(snapshot, io: io) {
+              framebufferUpdateArbiter.recordCursorResponse()
               if incremental {
-                withLock { sentCursorSinceLastVideo = true }
                 continue protocolLoop
               }
             }
           } catch is RFBSendExpiredError {
-            // The cursor deadline expired before its write. Preserve this
-            // request for the video response below.
+            // Preserve the latest cursor for a future request, then satisfy
+            // this request with video or an idle response.
+            reofferCursorSnapshotIfCurrent(snapshot)
           }
         }
-        withLock { sentCursorSinceLastVideo = false }
-        while let codec = selectedVideoCodec {
+        videoResponseLoop: while let codec = selectedVideoCodec {
           if let encoder = activeVideoEncoder, encoder.activeChroma != selectedVideoChroma {
             await stopVideoPath(markBroken: nil)
           }
@@ -1047,11 +1053,26 @@ final class RFBHostSession: @unchecked Sendable {
           }
           if let encoder = activeVideoEncoder {
             if !incremental { requestKeyframe() }
-            switch await nextVideoUpdate(encoder: encoder) {
+            switch await nextVideoUpdate(
+              encoder: encoder,
+              allowCursor: !attemptedCursorForRequest)
+            {
+            case .cursor(let snapshot):
+              attemptedCursorForRequest = true
+              do {
+                if try await sendCursorSnapshot(snapshot, io: io) {
+                  framebufferUpdateArbiter.recordCursorResponse()
+                  if incremental { continue protocolLoop }
+                }
+              } catch is RFBSendExpiredError {
+                reofferCursorSnapshotIfCurrent(snapshot)
+              }
+              continue videoResponseLoop
             case .frame(let frame, let dirtyAreaFraction):
               guard !needsContextReset || frame.isKeyframe else {
                 requestKeyframe()
                 try await io.send(RFBWire.emptyUpdate())
+                framebufferUpdateArbiter.recordVideoResponse()
                 continue protocolLoop
               }
               let flags: UInt32 = (needsContextReset ? 0x2 : 0)
@@ -1066,11 +1087,13 @@ final class RFBHostSession: @unchecked Sendable {
                 hardwareAccelerated: encoder.isHardwareAccelerated,
                 encoder: encoder,
                 dirtyAreaFraction: dirtyAreaFraction)
+              framebufferUpdateArbiter.recordVideoResponse()
               continue protocolLoop
             case .idle:
               // Nothing changed on screen; answer the request anyway so the
               // client's request loop and input keep flowing.
               try await io.send(RFBWire.emptyUpdate())
+              framebufferUpdateArbiter.recordVideoResponse()
               emitStatsIfDue(
                 codec: videoCodecDescription(codec: codec, encoder: encoder),
                 hardwareAccelerated: encoder.isHardwareAccelerated,
@@ -1098,6 +1121,7 @@ final class RFBHostSession: @unchecked Sendable {
         // an explicit ask for the full framebuffer contents.
         if incremental, frame.sequence == lastSentJPEGSequence {
           try await io.send(RFBWire.emptyUpdate())
+          framebufferUpdateArbiter.recordVideoResponse()
           emitStatsIfDue(codec: "JPEG", hardwareAccelerated: false)
           continue
         }
@@ -1112,6 +1136,7 @@ final class RFBHostSession: @unchecked Sendable {
         dirtyAreaFraction: 1)
         lastSentJPEGSequence = frame.sequence
         hasSentJPEGFrame = true
+        framebufferUpdateArbiter.recordVideoResponse()
 
       case 4:  // KeyEvent
         let payload = try await io.readExactly(7)
@@ -1132,6 +1157,7 @@ final class RFBHostSession: @unchecked Sendable {
             lastLocalPointerInput = ProcessInfo.processInfo.systemUptime
           }
         }
+        scheduleCursorEchoWake(after: accepted ? .milliseconds(250) : .zero)
 
       case 6:  // ClientCutText
         try await receiveClientCutText(io: io)
@@ -1362,11 +1388,51 @@ final class RFBHostSession: @unchecked Sendable {
 
   private func startCursorPath() {
     capture.addCursorHandler(id: sessionID) { [weak self] snapshot in
-      self?.withLock { self?.latestCursorSnapshot = snapshot }
+      self?.receiveCursorSnapshot(snapshot)
     }
     if withLock({ finished }) {
       stopCursorPath()
     }
+  }
+
+  private func receiveCursorSnapshot(_ snapshot: SystemCursorSnapshot, force: Bool = false) {
+    withLock {
+      guard !finished else { return }
+      let changed = latestCursorSnapshot != snapshot
+      latestCursorSnapshot = snapshot
+      if force || changed {
+        framebufferUpdateArbiter.offerCursor(snapshot)
+      }
+    }
+  }
+
+  private func reofferCursorSnapshotIfCurrent(_ snapshot: SystemCursorSnapshot) {
+    withLock {
+      guard !finished, latestCursorSnapshot == snapshot else { return }
+      framebufferUpdateArbiter.offerCursor(snapshot)
+    }
+  }
+
+  private func scheduleCursorEchoWake(after delay: Duration) {
+    let task = Task { [weak self] in
+      if delay > .zero {
+        do {
+          try await Task.sleep(for: delay)
+        } catch {
+          return
+        }
+      }
+      guard !Task.isCancelled, let self else { return }
+      self.withLock {
+        guard !self.finished, let snapshot = self.latestCursorSnapshot else { return }
+        self.framebufferUpdateArbiter.offerCursor(snapshot)
+      }
+    }
+    let previous = withLock { () -> Task<Void, Never>? in
+      defer { cursorEchoWakeTask = task }
+      return cursorEchoWakeTask
+    }
+    previous?.cancel()
   }
 
   private func sendCursorSnapshot(
@@ -1658,6 +1724,7 @@ final class RFBHostSession: @unchecked Sendable {
           keyframeOwed: pendingKeyframeRequested())
       else { return }
       pixelMailbox.offer(source)
+      self.framebufferUpdateArbiter.signalVideo()
     }
     do {
       try await capture.updateFrameIntervalRequirement(
@@ -1914,6 +1981,7 @@ final class RFBHostSession: @unchecked Sendable {
   }
 
   private enum VideoUpdateOutcome {
+    case cursor(SystemCursorSnapshot)
     case frame(EncodedVideoFrame, dirtyAreaFraction: Double)
     case idle
     case chromaFallback
@@ -1923,7 +1991,10 @@ final class RFBHostSession: @unchecked Sendable {
   /// Encodes at most one captured frame for this update request. `.idle`
   /// means the screen has not changed (and no keyframe is owed), `.failed`
   /// means the encoder produced no output for a submitted frame.
-  private func nextVideoUpdate(encoder: MacVideoEncoder) async -> VideoUpdateOutcome {
+  private func nextVideoUpdate(
+    encoder: MacVideoEncoder,
+    allowCursor: Bool
+  ) async -> VideoUpdateOutcome {
     if consumeQualityModeRefreshRequest() {
       idleRefreshPolicy.rearmImmediately(timestamp: ProcessInfo.processInfo.systemUptime)
       requestKeyframe()
@@ -1935,7 +2006,16 @@ final class RFBHostSession: @unchecked Sendable {
       return .failed
     }
 
-    var source = await pixelMailbox.next(timeout: .milliseconds(100))
+    let ready = await framebufferUpdateArbiter.next(
+      videoMailbox: pixelMailbox,
+      timeout: .milliseconds(100),
+      allowCursor: allowCursor)
+    var source: VideoPixelSource?
+    switch ready {
+    case .cursor(let snapshot): return .cursor(snapshot)
+    case .video(let value): source = value
+    case .idle: source = nil
+    }
     if let candidate = source, !matchesCurrentSize(candidate.pixelBuffer) {
       source = nil  // stale capture output from before a resize
     }
@@ -2140,7 +2220,10 @@ final class RFBHostSession: @unchecked Sendable {
     let shouldRemoveCursorSession = cursorSessionRegistered
     cursorSessionRegistered = false
     pushIO = nil
+    cursorEchoWakeTask?.cancel()
+    cursorEchoWakeTask = nil
     lock.unlock()
+    framebufferUpdateArbiter.finish()
     stopCursorPath()
     capture.removeVideoFrameHandler(id: sessionID)
     invalidateFrameIntervalUpdates()

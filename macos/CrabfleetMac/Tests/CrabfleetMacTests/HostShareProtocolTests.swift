@@ -234,6 +234,72 @@ struct HostShareWireTests {
 
 struct CursorPipelinePolicyTests {
   @Test
+  func pendingStaticVideoRequestWakesForCursorRectangle() async throws {
+    let arbiter = FramebufferUpdateArbiter<Int>()
+    let videoMailbox = VideoMailbox<Int>()
+    let snapshot = SystemCursorSnapshot(image: nil, position: CGPoint(x: 7, y: 9))
+    let clock = ContinuousClock()
+    let startedAt = clock.now
+
+    async let pending = arbiter.next(videoMailbox: videoMailbox, timeout: .seconds(2))
+    try await Task.sleep(for: .milliseconds(20))
+    arbiter.offerCursor(snapshot)
+
+    guard case .cursor(let delivered) = await pending else {
+      Issue.record("pending framebuffer request did not wake for cursor")
+      return
+    }
+    #expect(delivered == snapshot)
+    #expect(startedAt.duration(to: clock.now) < .milliseconds(250))
+    #expect(
+      RFBWire.pointerPositionUpdate(x: 7, y: 9)
+        == Data([
+          0, 0, 0, 1,
+          0, 7, 0, 9, 0, 0, 0, 0, 0xFF, 0xFF, 0xFF, 0x18,
+        ]))
+  }
+
+  @Test
+  func cursorAndVideoAvailabilityAlternateWithoutBlockingStaticCursor() async {
+    let arbiter = FramebufferUpdateArbiter<Int>()
+    let videoMailbox = VideoMailbox<Int>()
+    let first = SystemCursorSnapshot(image: nil, position: CGPoint(x: 1, y: 1))
+    let second = SystemCursorSnapshot(image: nil, position: CGPoint(x: 2, y: 2))
+
+    videoMailbox.offer(1)
+    arbiter.signalVideo()
+    arbiter.offerCursor(first)
+    guard case .cursor(let deliveredFirst) =
+      await arbiter.next(videoMailbox: videoMailbox, timeout: .milliseconds(50))
+    else {
+      Issue.record("cursor did not win the first ready pair")
+      return
+    }
+    #expect(deliveredFirst == first)
+    arbiter.recordCursorResponse()
+
+    arbiter.offerCursor(second)
+    guard case .video(let deliveredVideo) =
+      await arbiter.next(videoMailbox: videoMailbox, timeout: .milliseconds(50))
+    else {
+      Issue.record("ready video did not follow cursor-only response")
+      return
+    }
+    #expect(deliveredVideo == 1)
+    arbiter.recordVideoResponse()
+
+    videoMailbox.offer(2)
+    arbiter.signalVideo()
+    guard case .cursor(let deliveredSecond) =
+      await arbiter.next(videoMailbox: videoMailbox, timeout: .milliseconds(50))
+    else {
+      Issue.record("cursor did not resume after video response")
+      return
+    }
+    #expect(deliveredSecond == second)
+  }
+
+  @Test
   func stoppedCaptureAcceptsCursorSessionLifecycle() async throws {
     let capture = MacScreenCapture()
     let sessionID = UUID()
