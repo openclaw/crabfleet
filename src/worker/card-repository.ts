@@ -477,25 +477,50 @@ export class CardRepository implements CardLifecycleStore {
   ): Promise<void> {
     const status: RunStatus =
       lane === "Done" ? "completed" : lane === "Human Review" ? "review" : "canceled";
-    const run = await database(this.env)
-      .selectFrom("run_attempts")
-      .select(["id", "card_id"])
-      .where("id", "=", runId)
-      .executeTakeFirst();
-    if (!run) return;
     const db = database(this.env);
-    await executeBatch(this.env, [
-      db
-        .updateTable("run_attempts")
-        .set({
-          status,
-          ended_at: now,
-          updated_at: now,
-          control_intent: status === "canceled" ? "cancel" : null,
-        })
-        .where("id", "=", runId),
-      eventInsert(db, run.card_id, actorName, `run ${status}`, now),
-    ]);
+    const controlIntent = status === "canceled" ? "cancel" : null;
+    // "review" is allowed in the precondition ONLY for the Done transition (review -> completed). For
+    // the Human Review / Backlog transitions the run must still be active, so a run already in
+    // "review" is never re-transitioned — a repeated or concurrent Human Review completion cannot
+    // emit a duplicate audit event or rewrite the run's terminal timing.
+    const guardStatuses =
+      status === "completed" ? [...activeRunStatuses, "review"] : [...activeRunStatuses];
+    // Transition the run and record its "run <status>" audit event in ONE atomic D1 batch — the same
+    // guarded-update + conditional-insert pattern claimRun already uses on this table:
+    //  - the UPDATE only fires for a still-pre-terminal run (active, or "review" moving to Done),
+    //    mirroring the WHERE status IN (...) precondition stall()/reconcileStalledRuns() use, so a run
+    //    a reconciler concurrently marked "stalled" during the caller's read→write window is not
+    //    overwritten;
+    //  - the event is inserted ONLY when THIS batch's UPDATE actually transitioned the run
+    //    (`(SELECT changes()) = 1` reads the row count of the immediately-preceding UPDATE), so a
+    //    stalled/terminal run gets no false completion event, an already-terminal run is not
+    //    re-announced, and two finish calls sharing the same `now` cannot each emit the event —
+    //    only the one whose UPDATE changed the row does.
+    // Because both statements share one batch, the status write and its event commit or roll back
+    // together — they can never persist separately.
+    const transition = sql`
+      UPDATE run_attempts
+        SET status = ${status},
+          ended_at = ${now},
+          updated_at = ${now},
+          control_intent = ${controlIntent}
+        WHERE id = ${runId}
+          AND status IN (${sql.join(guardStatuses)})
+    `;
+    const event = sql`
+      INSERT INTO events (card_id, actor, message, created_at)
+      SELECT card_id, ${actorName}, ${`run ${status}`}, ${now}
+      FROM run_attempts
+      WHERE id = ${runId}
+        AND status = ${status}
+        AND (SELECT changes()) = 1
+    `;
+    await this.env.DB.batch(
+      [transition, event].map((query) => {
+        const compiled = query.compile(db);
+        return this.env.DB.prepare(compiled.sql).bind(...compiled.parameters);
+      }),
+    );
   }
 
   async appendEvent(
