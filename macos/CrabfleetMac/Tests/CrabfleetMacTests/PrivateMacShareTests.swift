@@ -1,4 +1,5 @@
 import AppKit
+import Combine
 import Foundation
 import Network
 import Testing
@@ -1409,6 +1410,48 @@ struct PrivateMacShareTests {
         identityAvailable: true,
         screenRecordingGranted: false
       ))
+  }
+
+  @Test @MainActor
+  func permissionRefreshPublishesOnlyChangedValues() throws {
+    var screenRecordingGranted = false
+    var accessibilityGranted = false
+    let defaults = try #require(
+      UserDefaults(suiteName: "CrabfleetMacTests.\(UUID().uuidString)")
+    )
+    let controller = PrivateMacShareController(
+      runner: nil,
+      desktopRegistration: nil,
+      defaults: defaults,
+      screenRecordingPermissionCheck: { screenRecordingGranted },
+      accessibilityPermissionCheck: { accessibilityGranted }
+    )
+    var screenRecordingUpdates: [Bool] = []
+    var accessibilityUpdates: [Bool] = []
+    let screenRecordingSubscription = controller.$screenRecordingGranted
+      .dropFirst()
+      .sink { screenRecordingUpdates.append($0) }
+    let accessibilitySubscription = controller.$accessibilityGranted
+      .dropFirst()
+      .sink { accessibilityUpdates.append($0) }
+
+    controller.refreshPermissions()
+    #expect(screenRecordingUpdates.isEmpty)
+    #expect(accessibilityUpdates.isEmpty)
+
+    screenRecordingGranted = true
+    controller.refreshPermissions()
+    controller.refreshPermissions()
+    #expect(screenRecordingUpdates == [true])
+    #expect(accessibilityUpdates.isEmpty)
+
+    accessibilityGranted = true
+    controller.refreshPermissions()
+    controller.refreshPermissions()
+    #expect(screenRecordingUpdates == [true])
+    #expect(accessibilityUpdates == [true])
+
+    withExtendedLifetime((screenRecordingSubscription, accessibilitySubscription)) {}
   }
 
   @Test

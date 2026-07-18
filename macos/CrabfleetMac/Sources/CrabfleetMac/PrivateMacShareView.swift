@@ -4,6 +4,7 @@ import SwiftUI
 struct PrivateMacShareSheet: View {
   @ObservedObject var controller: PrivateMacShareController
   @Environment(\.dismiss) private var dismiss
+  @Environment(\.scenePhase) private var scenePhase
 
   var body: some View {
     VStack(alignment: .leading, spacing: 20) {
@@ -253,6 +254,13 @@ struct PrivateMacShareSheet: View {
     .padding(24)
     .frame(width: 590)
     .task { await controller.refresh() }
+    .onAppear { controller.startPermissionMonitoring() }
+    .onDisappear { controller.stopPermissionMonitoring() }
+    .onChange(of: scenePhase) { _, phase in
+      if phase == .active {
+        controller.refreshPermissions()
+      }
+    }
   }
 
   private var phaseDetail: String {
