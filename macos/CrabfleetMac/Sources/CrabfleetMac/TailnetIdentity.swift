@@ -746,6 +746,8 @@ enum PrivateMacShareError: LocalizedError, Equatable {
   case missingTailnetAddress
   case ipv4TailnetAddressUnavailable
   case screenRecordingDenied
+  case remoteDesktopDenied
+  case remoteDesktopIsolationFailed
   case accessibilityDenied
   case commandFailed(status: Int32, message: String)
   case commandOutputTooLarge
@@ -780,6 +782,10 @@ enum PrivateMacShareError: LocalizedError, Equatable {
       "This Mac has only a Tailscale IPv6 address. IPv6-only tailnets are not yet supported for the private desktop listener."
     case .screenRecordingDenied:
       "Crabfleet needs Screen Recording permission to stream this display."
+    case .remoteDesktopDenied:
+      "Crabfleet needs Remote Desktop permission to stream this display. Enable it in System Settings."
+    case .remoteDesktopIsolationFailed:
+      "Revoke Screen Recording before starting the isolated Remote Desktop experiment."
     case .accessibilityDenied:
       "Crabfleet needs Accessibility permission to forward keyboard and pointer input."
     case .commandFailed(let status, let message):

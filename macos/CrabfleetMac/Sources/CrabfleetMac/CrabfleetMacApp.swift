@@ -96,6 +96,11 @@ final class CrabfleetApplicationDelegate: NSObject, NSApplicationDelegate {
     }
   }
 
+  func applicationDidBecomeActive(_ notification: Notification) {
+    guard shareController.resumeRemoteDesktopPermissionProbeAfterSettings() else { return }
+    Task { await shareController.refreshCapturePermission() }
+  }
+
   func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
     autoShareTask?.cancel()
     guard terminationTask == nil else { return .terminateLater }
@@ -117,11 +122,12 @@ final class CrabfleetApplicationDelegate: NSObject, NSApplicationDelegate {
     guard !Task.isCancelled else { return }
     report(
       "private share prerequisites: tailnet \(controller.identity == nil ? "unavailable" : "ready"), "
-        + "Screen Recording \(controller.screenRecordingGranted ? "allowed" : "denied")"
+        + "\(controller.capturePermissionKind.title) "
+        + "\(controller.capturePermissionGranted ? "allowed" : "denied")"
         + (controller.notice.map { ": \($0)" } ?? "")
     )
-    if !controller.screenRecordingGranted {
-      await controller.requestScreenRecordingPermission()
+    if !controller.capturePermissionGranted {
+      await controller.requestCapturePermission()
       guard !Task.isCancelled else { return }
     }
 
@@ -153,7 +159,7 @@ final class CrabfleetApplicationDelegate: NSObject, NSApplicationDelegate {
     }
 
     let missing = [
-      controller.screenRecordingGranted ? nil : "Screen Recording",
+      controller.capturePermissionGranted ? nil : controller.capturePermissionKind.title,
     ].compactMap { $0 }
     report("private share waiting for \(missing.joined(separator: " and ")) permission")
   }

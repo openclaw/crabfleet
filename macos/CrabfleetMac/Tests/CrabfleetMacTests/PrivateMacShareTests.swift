@@ -1396,20 +1396,155 @@ struct PrivateMacShareTests {
   @Test
   func privateShareCanStartViewOnlyWithoutAccessibility() {
     #expect(
-      PrivateMacSharePermissionPolicy.canStart(
+      CapturePermissionPolicy.canStart(
         identityAvailable: true,
-        screenRecordingGranted: true
+        captureAuthorized: true
       ))
     #expect(
-      !PrivateMacSharePermissionPolicy.canStart(
+      !CapturePermissionPolicy.canStart(
         identityAvailable: false,
-        screenRecordingGranted: true
+        captureAuthorized: true
       ))
     #expect(
-      !PrivateMacSharePermissionPolicy.canStart(
+      !CapturePermissionPolicy.canStart(
         identityAvailable: true,
-        screenRecordingGranted: false
+        captureAuthorized: false
       ))
+  }
+
+  @Test
+  func capturePermissionSelectionFollowsExperimentalToggle() {
+    #expect(
+      CapturePermissionPolicy.selectedKind(experimentalRemoteDesktopEnabled: false)
+        == .screenRecording)
+    #expect(
+      CapturePermissionPolicy.selectedKind(experimentalRemoteDesktopEnabled: true)
+        == .remoteDesktop)
+    #expect(
+      CapturePermissionPolicy.allowsCaptureStart(
+        kind: .screenRecording,
+        screenRecordingAuthorized: true))
+    #expect(
+      !CapturePermissionPolicy.allowsCaptureStart(
+        kind: .screenRecording,
+        screenRecordingAuthorized: false))
+    #expect(
+      CapturePermissionPolicy.allowsCaptureStart(
+        kind: .remoteDesktop,
+        screenRecordingAuthorized: false))
+    #expect(
+      !CapturePermissionPolicy.allowsCaptureStart(
+        kind: .remoteDesktop,
+        screenRecordingAuthorized: true))
+  }
+
+  @Test
+  func capturePermissionAuthorizerChecksRequestedKind() async {
+    let screenRecordingAuthorizer = CapturePermissionAuthorizer(
+      screenRecordingCheck: { true },
+      remoteDesktopCheck: { true })
+    let remoteDesktopAuthorizer = CapturePermissionAuthorizer(
+      screenRecordingCheck: { false },
+      remoteDesktopCheck: { true })
+    var screenRecordingGrantedDuringProbe = false
+    let reauthorizedScreenRecording = CapturePermissionAuthorizer(
+      screenRecordingCheck: { screenRecordingGrantedDuringProbe },
+      remoteDesktopCheck: {
+        screenRecordingGrantedDuringProbe = true
+        return true
+      })
+
+    #expect(screenRecordingAuthorizer.isScreenRecordingAuthorized())
+    #expect(!(await screenRecordingAuthorizer.isRemoteDesktopAuthorized()))
+    #expect(await remoteDesktopAuthorizer.isRemoteDesktopAuthorized())
+    #expect(!(await reauthorizedScreenRecording.isRemoteDesktopAuthorized()))
+  }
+
+  @Test @MainActor
+  func remoteDesktopCaptureToggleDefaultsOffAndPersists() throws {
+    let suiteName = "CrabfleetMacTests.\(UUID().uuidString)"
+    let defaults = try #require(UserDefaults(suiteName: suiteName))
+    defer { defaults.removePersistentDomain(forName: suiteName) }
+
+    let initial = PrivateMacShareController(
+      runner: nil,
+      desktopRegistration: nil,
+      defaults: defaults,
+      screenRecordingPermissionCheck: { false },
+      remoteDesktopPermissionCheck: { false })
+    #expect(!initial.experimentalRemoteDesktopCaptureEnabled)
+    #expect(initial.capturePermissionKind == .screenRecording)
+
+    initial.experimentalRemoteDesktopCaptureEnabled = true
+    #expect(
+      defaults.bool(forKey: PrivateMacShareController.experimentalRemoteDesktopCaptureDefaultsKey))
+
+    let restored = PrivateMacShareController(
+      runner: nil,
+      desktopRegistration: nil,
+      defaults: defaults,
+      screenRecordingPermissionCheck: { false },
+      remoteDesktopPermissionCheck: { false })
+    #expect(restored.experimentalRemoteDesktopCaptureEnabled)
+    #expect(restored.capturePermissionKind == .remoteDesktop)
+  }
+
+  @Test @MainActor
+  func remoteDesktopCapabilityProbeWaitsForSettingsReturn() async throws {
+    let suiteName = "CrabfleetMacTests.\(UUID().uuidString)"
+    let defaults = try #require(UserDefaults(suiteName: suiteName))
+    defer { defaults.removePersistentDomain(forName: suiteName) }
+    defaults.set(
+      true,
+      forKey: PrivateMacShareController.experimentalRemoteDesktopCaptureDefaultsKey)
+    var remoteDesktopChecks = 0
+    let controller = PrivateMacShareController(
+      runner: nil,
+      desktopRegistration: nil,
+      defaults: defaults,
+      screenRecordingPermissionCheck: { false },
+      remoteDesktopPermissionCheck: {
+        remoteDesktopChecks += 1
+        return false
+      })
+
+    await controller.refreshCapturePermission()
+    #expect(remoteDesktopChecks == 0)
+
+    controller.prepareRemoteDesktopPermissionProbeAfterSettings()
+    controller.resumeRemoteDesktopPermissionProbeAfterSettings()
+    await controller.refreshCapturePermission()
+    #expect(remoteDesktopChecks == 1)
+    #expect(!controller.capturePermissionGranted)
+  }
+
+  @Test @MainActor
+  func applicationActivationResumesRemoteDesktopCapabilityProbe() async throws {
+    let suiteName = "CrabfleetMacTests.\(UUID().uuidString)"
+    let defaults = try #require(UserDefaults(suiteName: suiteName))
+    defer { defaults.removePersistentDomain(forName: suiteName) }
+    defaults.set(
+      true,
+      forKey: PrivateMacShareController.experimentalRemoteDesktopCaptureDefaultsKey)
+    var remoteDesktopChecks = 0
+    let controller = PrivateMacShareController(
+      runner: nil,
+      desktopRegistration: nil,
+      defaults: defaults,
+      screenRecordingPermissionCheck: { false },
+      remoteDesktopPermissionCheck: {
+        remoteDesktopChecks += 1
+        return false
+      })
+    let delegate = CrabfleetApplicationDelegate(
+      shareController: controller,
+      isAutoShareRequested: { false })
+
+    controller.prepareRemoteDesktopPermissionProbeAfterSettings()
+    delegate.applicationDidBecomeActive(
+      Notification(name: NSApplication.didBecomeActiveNotification))
+
+    #expect(await waitUntilAsync { remoteDesktopChecks == 1 })
   }
 
   @Test @MainActor
@@ -1428,7 +1563,7 @@ struct PrivateMacShareTests {
     )
     var screenRecordingUpdates: [Bool] = []
     var accessibilityUpdates: [Bool] = []
-    let screenRecordingSubscription = controller.$screenRecordingGranted
+    let capturePermissionSubscription = controller.$capturePermissionGranted
       .dropFirst()
       .sink { screenRecordingUpdates.append($0) }
     let accessibilitySubscription = controller.$accessibilityGranted
@@ -1451,7 +1586,7 @@ struct PrivateMacShareTests {
     #expect(screenRecordingUpdates == [true])
     #expect(accessibilityUpdates == [true])
 
-    withExtendedLifetime((screenRecordingSubscription, accessibilitySubscription)) {}
+    withExtendedLifetime((capturePermissionSubscription, accessibilitySubscription)) {}
   }
 
   @Test

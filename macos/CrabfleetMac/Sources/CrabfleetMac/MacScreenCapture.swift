@@ -138,14 +138,27 @@ final class MacScreenCapture: NSObject, @unchecked Sendable {
     max(requirements.max() ?? 15, 15)
   }
 
-  func start(displayID requestedDisplayID: CGDirectDisplayID? = nil) async throws
+  func start(
+    displayID requestedDisplayID: CGDirectDisplayID? = nil,
+    permissionKind: CapturePermissionKind = .screenRecording
+  ) async throws
     -> CapturedDisplayDescriptor
   {
-    guard CGPreflightScreenCaptureAccess() else {
-      throw PrivateMacShareError.screenRecordingDenied
+    let screenRecordingAuthorized = CGPreflightScreenCaptureAccess()
+    guard
+      CapturePermissionPolicy.allowsCaptureStart(
+        kind: permissionKind,
+        screenRecordingAuthorized: screenRecordingAuthorized)
+    else {
+      throw permissionKind == .remoteDesktop
+        ? PrivateMacShareError.remoteDesktopIsolationFailed
+        : PrivateMacShareError.screenRecordingDenied
     }
 
     let shareableContent = try await SCShareableContent.current
+    if permissionKind == .remoteDesktop, CGPreflightScreenCaptureAccess() {
+      throw PrivateMacShareError.remoteDesktopIsolationFailed
+    }
     // Fall back to the main display when a saved selection is disconnected.
     let display =
       shareableContent.displays.first(where: { $0.displayID == requestedDisplayID })

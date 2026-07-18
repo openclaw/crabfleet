@@ -61,6 +61,16 @@ recurring **prompt** becomes painful in real unattended use. Before investing, r
 empirical test: switch capture to request **Remote Desktop** permission and observe whether the
 indicator changes on macOS 26.
 
+Crabfleet now includes that test hook. In **Share This Mac → Privacy Settings**, enable **Use
+Remote Desktop permission (experimental)**, open **Remote Desktop** from the same menu, add/enable
+the signed `/Applications/Crabfleet.app`, return to Crabfleet, and wait for the readiness row to
+update. Revoke
+Crabfleet's Screen & System Audio Recording grant before comparing indicators so the
+ScreenCaptureKit capability probe cannot succeed through the old grant; Crabfleet keeps the row
+blocked until that grant is revoked. The toggle defaults off, still captures through
+ScreenCaptureKit, and does not exercise the Apple-gated
+`persistent-content-capture` entitlement.
+
 ## References
 
 - [Apple: persistent-content-capture entitlement](https://developer.apple.com/documentation/bundleresources/entitlements/com.apple.developer.persistent-content-capture)
