@@ -176,6 +176,98 @@ struct QUICTransportTests {
       })
   }
 
+  @Test(
+    .enabled(if: udpLoopbackAvailable, "UDP loopback is unavailable in this sandbox"),
+    .timeLimit(.minutes(1)))
+  @MainActor
+  func quicToTCPFallbackAuthenticatesFromTheSameSource() async throws {
+    let fixture = try QUICIdentityFixture()
+    defer { fixture.remove() }
+    let quicListener = try NWListener(
+      using: QUICParameters.server(identity: fixture.hostIdentity.identity),
+      on: .any)
+    let quicGroups = AsyncStream<NWConnectionGroup> { continuation in
+      quicListener.newConnectionGroupHandler = { continuation.yield($0) }
+    }
+    try await start(quicListener)
+    defer { quicListener.cancel() }
+
+    let tcpListener = try NWListener(using: .tcp, on: .any)
+    let tcpConnections = AsyncStream<NWConnection> { continuation in
+      tcpListener.newConnectionHandler = { continuation.yield($0) }
+    }
+    try await start(tcpListener)
+    defer { tcpListener.cancel() }
+
+    let authentication = RFBListenerAuthentication(
+      credentialProvider: { "test-auth-token" },
+      throttle: RFBAuthThrottle(),
+      challengeProvider: { Data(0..<16) })
+    let gate = QUICAuthenticationReadGate()
+    let quicServerTask = Task {
+      var groupIterator = quicGroups.makeAsyncIterator()
+      let group = try #require(await groupIterator.next())
+      let streams = AsyncStream<NWConnection> { continuation in
+        group.newConnectionHandler = { continuation.yield($0) }
+      }
+      try await start(group)
+      defer { group.cancel() }
+      var streamIterator = streams.makeAsyncIterator()
+      let connection = try #require(await streamIterator.next())
+      try await start(connection)
+      defer { connection.cancel() }
+      let stream = StallingAuthenticationRFBByteStream(
+        base: RFBConnectionIO(connection: connection),
+        gate: gate)
+      try await performAuthenticatedServerHandshake(
+        stream,
+        authentication: authentication,
+        source: "127.0.0.1")
+    }
+    let tcpServerTask = Task {
+      var iterator = tcpConnections.makeAsyncIterator()
+      let connection = try #require(await iterator.next())
+      try await start(connection)
+      try await performAuthenticatedServerHandshake(
+        RFBConnectionIO(connection: connection),
+        authentication: authentication,
+        source: "127.0.0.1")
+      return connection
+    }
+    defer {
+      gate.open()
+      quicServerTask.cancel()
+      tcpServerTask.cancel()
+    }
+
+    let controller = VNCSessionController(quicFallbackDelay: .seconds(4))
+    controller.connect(
+      host: "127.0.0.1",
+      port: try #require(tcpListener.port).rawValue,
+      username: "",
+      password: "test-auth-token",
+      clipboardEnabled: false,
+      quic: QUICConnectionConfiguration(
+        port: Int(try #require(quicListener.port).rawValue),
+        certHash: fixture.hostIdentity.certHash))
+    defer { controller.disconnect() }
+
+    let clock = ContinuousClock()
+    var deadline = clock.now.advanced(by: .seconds(3))
+    while !gate.hasReached, clock.now < deadline {
+      try await Task.sleep(for: .milliseconds(20))
+    }
+    #expect(gate.hasReached)
+    guard gate.hasReached else { return }
+
+    deadline = clock.now.advanced(by: .seconds(8))
+    while controller.phase != .connected, clock.now < deadline {
+      try await Task.sleep(for: .milliseconds(20))
+    }
+    #expect(controller.phase == .connected)
+    #expect(controller.transport == .tcp)
+  }
+
   @Test
   func rejectsMismatchedSPKIPin() throws {
     let fixture = try QUICIdentityFixture()
@@ -669,6 +761,28 @@ private func performServerHandshake(_ stream: RFBConnectionIO) async throws {
   try await stream.send(serverInit)
 }
 
+private func performAuthenticatedServerHandshake(
+  _ stream: any RFBByteStream,
+  authentication: RFBListenerAuthentication,
+  source: String
+) async throws {
+  let banner = Data("RFB 003.008\n".utf8)
+  try await stream.send(banner)
+  #expect(try await stream.readExactly(banner.count) == banner)
+  try await authentication.authenticate(
+    version: .v3Point8,
+    source: source,
+    io: stream)
+  #expect(try await stream.readExactly(1) == Data([1]))
+
+  let name = Data("Crabfleet Authenticated Fallback Test".utf8)
+  var serverInit = Data([0x02, 0x80, 0x01, 0xE0])
+  serverInit.append(Data([32, 24, 0, 1, 0, 255, 0, 255, 0, 255, 16, 8, 0, 0, 0, 0]))
+  serverInit.append(bigEndian: UInt32(name.count))
+  serverInit.append(name)
+  try await stream.send(serverInit)
+}
+
 private func performClientHandshake(
   _ stream: RFBConnectionIO,
   protocolVersionAlreadySent: Bool = false
@@ -692,5 +806,77 @@ extension Data {
     append(UInt8((value >> 16) & 0xff))
     append(UInt8((value >> 8) & 0xff))
     append(UInt8(value & 0xff))
+  }
+}
+
+private final class StallingAuthenticationRFBByteStream: RFBByteStream, @unchecked Sendable {
+  private let base: any RFBByteStream
+  private let gate: QUICAuthenticationReadGate
+  private let lock = NSLock()
+  private var didStall = false
+
+  init(base: any RFBByteStream, gate: QUICAuthenticationReadGate) {
+    self.base = base
+    self.gate = gate
+  }
+
+  func readExactly(_ count: Int) async throws -> Data {
+    let shouldStall = withLock {
+      let shouldStall = count == 16 && !didStall
+      if shouldStall { didStall = true }
+      return shouldStall
+    }
+    if shouldStall { await gate.wait() }
+    return try await base.readExactly(count)
+  }
+
+  func send(_ data: Data) async throws {
+    try await base.send(data)
+  }
+
+  func send(_ data: Data, deadline: ContinuousClock.Instant?) async throws {
+    try await base.send(data, deadline: deadline)
+  }
+
+  private func withLock<T>(_ body: () -> T) -> T {
+    lock.lock()
+    defer { lock.unlock() }
+    return body()
+  }
+}
+
+private final class QUICAuthenticationReadGate: @unchecked Sendable {
+  private let lock = NSLock()
+  private var isOpen = false
+  private var reached = false
+  private var releaseWaiters: [CheckedContinuation<Void, Never>] = []
+
+  var hasReached: Bool {
+    lock.lock()
+    defer { lock.unlock() }
+    return reached
+  }
+
+  func wait() async {
+    await withCheckedContinuation { continuation in
+      lock.lock()
+      reached = true
+      if isOpen {
+        lock.unlock()
+        continuation.resume()
+      } else {
+        releaseWaiters.append(continuation)
+        lock.unlock()
+      }
+    }
+  }
+
+  func open() {
+    lock.lock()
+    isOpen = true
+    let waiters = releaseWaiters
+    releaseWaiters.removeAll()
+    lock.unlock()
+    waiters.forEach { $0.resume() }
   }
 }

@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
 import test from "node:test";
 
 import { browserDirectRFBAuthentication } from "../src/app/rfb/browser-auth.ts";
@@ -54,4 +55,16 @@ test("browser direct auth treats unavailable session storage as best effort", as
   );
   assert.equal(noStorage.password, "test-ownership-token-2");
   assert.doesNotThrow(() => noStorage.onVNCAuthentication(true));
+});
+
+test("browser share code field avoids account-password autofill", async () => {
+  const source = await readFile(new URL("../src/app/desktop-viewer.jsx", import.meta.url), "utf8");
+  const prompt = source.slice(source.indexOf("export function requestBrowserRFBPassword"));
+
+  assert.match(prompt, /input\.type = "password"/);
+  assert.match(prompt, /input\.autocomplete = "one-time-code"/);
+  assert.match(prompt, /input\.setAttribute\("autocapitalize", "none"\)/);
+  assert.match(prompt, /input\.setAttribute\("autocorrect", "off"\)/);
+  assert.match(prompt, /input\.spellcheck = false/);
+  assert.doesNotMatch(prompt, /current-password/);
 });

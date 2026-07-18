@@ -682,7 +682,10 @@ export function requestBrowserRFBPassword() {
     description.textContent = "Enter the 12-character Crabfleet sharing password.";
     label.textContent = "Sharing password";
     input.type = "password";
-    input.autocomplete = "current-password";
+    input.autocomplete = "one-time-code";
+    input.setAttribute("autocapitalize", "none");
+    input.setAttribute("autocorrect", "off");
+    input.spellcheck = false;
     input.required = true;
     input.maxLength = 12;
     input.pattern = "[A-Za-z0-9]{12}";

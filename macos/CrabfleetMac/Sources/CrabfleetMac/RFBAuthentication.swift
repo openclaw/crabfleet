@@ -91,7 +91,7 @@ final class ShareAccessState: @unchecked Sendable {
 struct RFBAuthThrottleDecision: Equatable, Sendable {
   let delaySeconds: TimeInterval
   let lockoutSeconds: TimeInterval
-  var attemptInProgress = false
+  var concurrencyLimitReached = false
 
   var isLocked: Bool { lockoutSeconds > 0 }
 }
@@ -100,10 +100,11 @@ final class RFBAuthThrottle: @unchecked Sendable {
   private struct Entry {
     var failures: Int
     var lockedUntil: TimeInterval?
-    var inFlight: Bool
+    var inFlight: Int
   }
 
   static let defaultCapacity = 1_024
+  static let maximumConcurrentAttemptsPerSource = 16
   static let maximumFailures = 5
   static let lockoutDuration: TimeInterval = 30
 
@@ -127,7 +128,7 @@ final class RFBAuthThrottle: @unchecked Sendable {
   func decision(for source: String) -> RFBAuthThrottleDecision {
     lock.lock()
     defer { lock.unlock() }
-    guard let entry = entries[source] else {
+    guard var entry = entries[source] else {
       return RFBAuthThrottleDecision(delaySeconds: 0, lockoutSeconds: 0)
     }
     let timestamp = now()
@@ -137,14 +138,15 @@ final class RFBAuthThrottle: @unchecked Sendable {
         touch(source)
         return RFBAuthThrottleDecision(delaySeconds: 0, lockoutSeconds: remaining)
       }
-      remove(source)
+      entry.failures = 0
+      entry.lockedUntil = nil
+      if entry.inFlight == 0 {
+        remove(source)
+      } else {
+        entries[source] = entry
+        touch(source)
+      }
       return RFBAuthThrottleDecision(delaySeconds: 0, lockoutSeconds: 0)
-    }
-    if entry.inFlight {
-      return RFBAuthThrottleDecision(
-        delaySeconds: 0,
-        lockoutSeconds: 0,
-        attemptInProgress: true)
     }
     touch(source)
     let delay = pow(2, Double(max(0, entry.failures - 1)))
@@ -162,15 +164,28 @@ final class RFBAuthThrottle: @unchecked Sendable {
           touch(source)
           return RFBAuthThrottleDecision(delaySeconds: 0, lockoutSeconds: remaining)
         }
-        remove(source)
-      } else if entry.inFlight {
+        entry.failures = 0
+        entry.lockedUntil = nil
+        if entry.inFlight >= Self.maximumConcurrentAttemptsPerSource {
+          entries[source] = entry
+          touch(source)
+          return RFBAuthThrottleDecision(
+            delaySeconds: 0,
+            lockoutSeconds: 0,
+            concurrencyLimitReached: true)
+        }
+        entry.inFlight += 1
+        entries[source] = entry
+        touch(source)
+        return RFBAuthThrottleDecision(delaySeconds: 0, lockoutSeconds: 0)
+      } else if entry.inFlight >= Self.maximumConcurrentAttemptsPerSource {
         touch(source)
         return RFBAuthThrottleDecision(
           delaySeconds: 0,
           lockoutSeconds: 0,
-          attemptInProgress: true)
+          concurrencyLimitReached: true)
       } else {
-        entry.inFlight = true
+        entry.inFlight += 1
         entries[source] = entry
         touch(source)
         let delay = pow(2, Double(max(0, entry.failures - 1)))
@@ -179,7 +194,7 @@ final class RFBAuthThrottle: @unchecked Sendable {
     }
 
     while entries.count >= capacity,
-      let evictable = order.first(where: { entries[$0]?.inFlight == false })
+      let evictable = order.first(where: { entries[$0]?.inFlight == 0 })
     {
       remove(evictable)
     }
@@ -187,9 +202,9 @@ final class RFBAuthThrottle: @unchecked Sendable {
       return RFBAuthThrottleDecision(
         delaySeconds: 0,
         lockoutSeconds: 0,
-        attemptInProgress: true)
+        concurrencyLimitReached: true)
     }
-    entries[source] = Entry(failures: 0, lockedUntil: nil, inFlight: true)
+    entries[source] = Entry(failures: 0, lockedUntil: nil, inFlight: 1)
     touch(source)
     return RFBAuthThrottleDecision(delaySeconds: 0, lockoutSeconds: 0)
   }
@@ -197,9 +212,9 @@ final class RFBAuthThrottle: @unchecked Sendable {
   func recordFailure(for source: String) {
     lock.lock()
     defer { lock.unlock() }
-    var entry = entries[source] ?? Entry(failures: 0, lockedUntil: nil, inFlight: false)
+    var entry = entries[source] ?? Entry(failures: 0, lockedUntil: nil, inFlight: 0)
+    entry.inFlight = max(0, entry.inFlight - 1)
     entry.failures += 1
-    entry.inFlight = false
     if entry.failures >= Self.maximumFailures {
       entry.lockedUntil = now() + Self.lockoutDuration
     }
@@ -212,20 +227,32 @@ final class RFBAuthThrottle: @unchecked Sendable {
 
   func recordSuccess(for source: String) {
     lock.lock()
-    remove(source)
+    guard var entry = entries[source] else {
+      lock.unlock()
+      return
+    }
+    entry.inFlight = max(0, entry.inFlight - 1)
+    entry.failures = 0
+    entry.lockedUntil = nil
+    if entry.inFlight == 0 {
+      remove(source)
+    } else {
+      entries[source] = entry
+      touch(source)
+    }
     lock.unlock()
   }
 
   func cancelAttempt(for source: String) {
     lock.lock()
-    guard var entry = entries[source], entry.inFlight else {
+    guard var entry = entries[source], entry.inFlight > 0 else {
       lock.unlock()
       return
     }
-    if entry.failures == 0, entry.lockedUntil == nil {
+    entry.inFlight -= 1
+    if entry.inFlight == 0, entry.failures == 0, entry.lockedUntil == nil {
       remove(source)
     } else {
-      entry.inFlight = false
       entries[source] = entry
       touch(source)
     }
@@ -235,8 +262,8 @@ final class RFBAuthThrottle: @unchecked Sendable {
   func reset() {
     lock.lock()
     entries = entries.compactMapValues { entry in
-      entry.inFlight
-        ? Entry(failures: 0, lockedUntil: nil, inFlight: true)
+      entry.inFlight > 0
+        ? Entry(failures: 0, lockedUntil: nil, inFlight: entry.inFlight)
         : nil
     }
     order.removeAll { entries[$0] == nil }
@@ -304,12 +331,12 @@ final class RFBListenerAuthentication: RFBListenerAuthenticating, @unchecked Sen
     io: any RFBByteStream
   ) async throws {
     let decision = throttle.beginAttempt(for: source)
-    if decision.isLocked || decision.attemptInProgress {
+    if decision.isLocked || decision.concurrencyLimitReached {
       try await sendNegotiationFailure(
         version: version,
         reason: decision.isLocked
           ? "Too many authentication attempts; retry later."
-          : "Another authentication attempt is already in progress.",
+          : "Too many concurrent authentication attempts; retry later.",
         io: io)
       throw PrivateMacShareError.protocolError("RFB authentication attempt was throttled")
     }

@@ -48,21 +48,40 @@ struct RFBAuthenticationTests {
   }
 
   @Test
-  func throttleSerializesConcurrentAttemptsPerSource() {
-    let throttle = RFBAuthThrottle(capacity: 2)
-    let source = "100.64.0.20"
+  func throttleBoundsConcurrentAttemptsWithoutSingleFlight() {
+    let throttle = RFBAuthThrottle()
+    let source = "100.64.0.19"
 
-    #expect(!throttle.beginAttempt(for: source).attemptInProgress)
-    #expect(throttle.beginAttempt(for: source).attemptInProgress)
+    for _ in 0..<RFBAuthThrottle.maximumConcurrentAttemptsPerSource {
+      #expect(!throttle.beginAttempt(for: source).concurrencyLimitReached)
+    }
+    #expect(throttle.beginAttempt(for: source).concurrencyLimitReached)
+    for _ in 0..<RFBAuthThrottle.maximumConcurrentAttemptsPerSource {
+      throttle.cancelAttempt(for: source)
+    }
+    #expect(!throttle.beginAttempt(for: source).concurrencyLimitReached)
     throttle.cancelAttempt(for: source)
-    #expect(!throttle.beginAttempt(for: source).attemptInProgress)
-    throttle.recordFailure(for: source)
-    #expect(throttle.decision(for: source).delaySeconds == 1)
+  }
 
-    #expect(!throttle.beginAttempt(for: source).attemptInProgress)
-    #expect(!throttle.beginAttempt(for: "100.64.0.21").attemptInProgress)
-    #expect(throttle.beginAttempt(for: "100.64.0.22").attemptInProgress)
-    #expect(throttle.trackedSourceCount == 2)
+  @Test
+  func expiredLockoutPreservesOutstandingAttemptCount() {
+    let clock = TestAuthClock()
+    let throttle = RFBAuthThrottle(now: { clock.value })
+    let source = "100.64.0.18"
+    for _ in 0..<RFBAuthThrottle.maximumConcurrentAttemptsPerSource {
+      #expect(!throttle.beginAttempt(for: source).concurrencyLimitReached)
+    }
+    for _ in 0..<RFBAuthThrottle.maximumFailures {
+      throttle.recordFailure(for: source)
+    }
+    #expect(throttle.decision(for: source).lockoutSeconds == 30)
+
+    clock.value = 30
+    #expect(throttle.decision(for: source) == .init(delaySeconds: 0, lockoutSeconds: 0))
+    for _ in 0..<RFBAuthThrottle.maximumFailures {
+      #expect(!throttle.beginAttempt(for: source).concurrencyLimitReached)
+    }
+    #expect(throttle.beginAttempt(for: source).concurrencyLimitReached)
   }
 
   @Test
@@ -122,6 +141,77 @@ struct RFBAuthenticationTests {
     #expect(throttle.decision(for: "100.64.0.6").delaySeconds == 1)
     #expect(stream.outgoing.starts(with: Data([2, 30, 2]) + challenge + Data([0, 0, 0, 1])))
   }
+
+  @Test(.timeLimit(.minutes(1)))
+  func concurrentAuthenticationsFromOneSourceBothCheckCredentials() async throws {
+    let challenge = Data(0..<16)
+    let response = Data([
+      0x8A, 0x5F, 0xA9, 0x58, 0xF0, 0xD8, 0x19, 0xBD,
+      0xCB, 0x98, 0x1C, 0x9B, 0x47, 0x63, 0x6E, 0xD0,
+    ])
+    let gate = AuthenticationReadGate()
+    let probe = AuthenticationCredentialProbe()
+    let authentication = RFBListenerAuthentication(
+      credentialProvider: { probe.credential() },
+      throttle: RFBAuthThrottle(),
+      challengeProvider: { challenge })
+    let firstStream = AuthenticationTestStream(
+      incoming: Data([2]) + response,
+      responseGate: gate)
+    let first = Task {
+      try await authentication.authenticate(
+        version: .v3Point8,
+        source: "100.64.0.20",
+        io: firstStream)
+    }
+    defer {
+      gate.open()
+      first.cancel()
+    }
+
+    let clock = ContinuousClock()
+    let deadline = clock.now.advanced(by: .seconds(2))
+    while !gate.hasReached, clock.now < deadline {
+      try await Task.sleep(for: .milliseconds(10))
+    }
+    #expect(gate.hasReached)
+    guard gate.hasReached else { return }
+    let secondStream = AuthenticationTestStream(incoming: Data([2]) + response)
+    try await authentication.authenticate(
+      version: .v3Point8,
+      source: "100.64.0.20",
+      io: secondStream)
+    #expect(probe.count == 1)
+
+    gate.open()
+    try await first.value
+    #expect(probe.count == 2)
+  }
+
+  @Test
+  func fiveFailuresLockOutTheSixthAuthentication() async {
+    let source = "100.64.0.21"
+    let throttle = RFBAuthThrottle()
+    for _ in 0..<RFBAuthThrottle.maximumFailures {
+      throttle.recordFailure(for: source)
+    }
+    let probe = AuthenticationCredentialProbe()
+    let stream = AuthenticationTestStream(incoming: Data())
+    let authentication = RFBListenerAuthentication(
+      credentialProvider: { probe.credential() },
+      throttle: throttle)
+
+    await #expect(throws: (any Error).self) {
+      try await authentication.authenticate(
+        version: .v3Point8,
+        source: source,
+        io: stream)
+    }
+    let reason = "Too many authentication attempts; retry later."
+    #expect(stream.outgoing.first == 0)
+    #expect(stream.outgoing.suffix(reason.utf8.count) == Data(reason.utf8))
+    #expect(probe.count == 0)
+  }
 }
 
 private final class TestAuthClock: @unchecked Sendable {
@@ -144,11 +234,13 @@ private final class TestAuthClock: @unchecked Sendable {
 
 private final class AuthenticationTestStream: RFBByteStream, @unchecked Sendable {
   private let lock = NSLock()
+  private let responseGate: AuthenticationReadGate?
   private var incoming: Data
   private var sent = Data()
 
-  init(incoming: Data) {
+  init(incoming: Data, responseGate: AuthenticationReadGate? = nil) {
     self.incoming = incoming
+    self.responseGate = responseGate
   }
 
   var outgoing: Data {
@@ -158,7 +250,10 @@ private final class AuthenticationTestStream: RFBByteStream, @unchecked Sendable
   }
 
   func readExactly(_ count: Int) async throws -> Data {
-    try withLock {
+    if count == 16 {
+      await responseGate?.wait()
+    }
+    return try withLock {
       guard count >= 0, incoming.count >= count else {
         throw PrivateMacShareError.protocolError("test stream ended")
       }
@@ -180,5 +275,59 @@ private final class AuthenticationTestStream: RFBByteStream, @unchecked Sendable
     lock.lock()
     defer { lock.unlock() }
     return try body()
+  }
+}
+
+private final class AuthenticationCredentialProbe: @unchecked Sendable {
+  private let lock = NSLock()
+  private var checks = 0
+
+  var count: Int {
+    lock.lock()
+    defer { lock.unlock() }
+    return checks
+  }
+
+  func credential() -> String {
+    lock.lock()
+    checks += 1
+    lock.unlock()
+    return "test-auth-token"
+  }
+}
+
+private final class AuthenticationReadGate: @unchecked Sendable {
+  private let lock = NSLock()
+  private var isOpen = false
+  private var reached = false
+  private var releaseWaiters: [CheckedContinuation<Void, Never>] = []
+
+  var hasReached: Bool {
+    lock.lock()
+    defer { lock.unlock() }
+    return reached
+  }
+
+  func wait() async {
+    await withCheckedContinuation { continuation in
+      lock.lock()
+      reached = true
+      if isOpen {
+        lock.unlock()
+        continuation.resume()
+      } else {
+        releaseWaiters.append(continuation)
+        lock.unlock()
+      }
+    }
+  }
+
+  func open() {
+    lock.lock()
+    isOpen = true
+    let waiters = releaseWaiters
+    releaseWaiters.removeAll()
+    lock.unlock()
+    waiters.forEach { $0.resume() }
   }
 }
