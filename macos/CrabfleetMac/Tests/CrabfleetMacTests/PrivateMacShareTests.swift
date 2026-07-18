@@ -1511,7 +1511,84 @@ struct PrivateMacShareTests {
     #expect(identity.tailnetName == "example.com")
     #expect(identity.loginName == "operator@example.com")
     #expect(identity.ipv4Address == "100.64.12.34")
+    #expect(identity.ipv4Candidates == ["100.64.12.34"])
     #expect(identity.vncAddress(port: 5901) == "vnc://100.64.12.34:5901")
+  }
+
+  @Test
+  func selectsCanonicalIPv4AndExposesStableCandidates() throws {
+    let document = try tailnetStatusFixture(
+      addresses: [
+        "100.100.0.2", "100.64.12.35", "fd7a:115c:a1e0::1", "100.64.12.34",
+        "100.64.12.35",
+      ],
+      unknownField: true
+    )
+    let identity = try TailnetIdentityPolicy.identity(from: document)
+
+    #expect(identity.ipv4Address == "100.64.12.34")
+    #expect(
+      identity.ipv4Candidates == ["100.64.12.34", "100.64.12.35", "100.100.0.2"])
+  }
+
+  @Test
+  func resolvesWithoutMagicDNSAndSkipsDuplicateHeuristic() throws {
+    for dnsName in [String?.none, "", "workstation", "workstation-1"] {
+      let document = try tailnetStatusFixture(dnsName: dnsName)
+      let identity = try TailnetIdentityPolicy.identity(from: document)
+
+      #expect(identity.dnsName == "Workstation")
+      #expect(identity.hostName == "Workstation")
+      #expect(identity.vncAddress(port: 5_901) == "vnc://100.64.12.34:5901")
+      #expect(TailnetRegistrationHealthPolicy.health(from: document) == .ok)
+    }
+  }
+
+  @Test
+  func rejectsIPv6OnlyTailnetWithSpecificListenerError() throws {
+    let document = try tailnetStatusFixture(
+      addresses: ["fd7a:115c:a1e0::1234", "2001:db8::1"])
+
+    #expect(throws: PrivateMacShareError.ipv4TailnetAddressUnavailable) {
+      try TailnetIdentityPolicy.identity(from: document)
+    }
+    #expect(
+      PrivateMacShareError.ipv4TailnetAddressUnavailable.localizedDescription.contains(
+        "IPv6-only tailnets are not yet supported"))
+  }
+
+  @Test
+  func reportsActionableBackendStateErrors() throws {
+    let fixtures: [(String, PrivateMacShareError?)] = [
+      ("Running", nil),
+      ("NeedsLogin", .tailscaleNeedsLogin),
+      ("Stopped", .tailscaleStopped),
+      ("Starting", .tailscaleStarting),
+    ]
+
+    for (backendState, expectedError) in fixtures {
+      let document = try tailnetStatusFixture(backendState: backendState)
+      if let expectedError {
+        #expect(throws: expectedError) {
+          try TailnetIdentityPolicy.identity(from: document)
+        }
+      } else {
+        #expect(try TailnetIdentityPolicy.identity(from: document).ipv4Address == "100.64.12.34")
+      }
+    }
+  }
+
+  @Test
+  func rejectsMalformedAndPartialStatusWithSpecificError() throws {
+    #expect(throws: PrivateMacShareError.invalidTailscaleStatus) {
+      try TailscaleStatusDocument.decode(from: Data(#"{"BackendState": "Running""#.utf8))
+    }
+
+    let partial = try TailscaleStatusDocument.decode(
+      from: Data(#"{"CurrentTailnet":{"Name":"example.com"}}"#.utf8))
+    #expect(throws: PrivateMacShareError.invalidTailscaleStatus) {
+      try TailnetIdentityPolicy.identity(from: partial)
+    }
   }
 
   @Test
@@ -2641,6 +2718,35 @@ struct PrivateMacShareTests {
 
   private func statusDocument() throws -> TailscaleStatusDocument {
     try JSONDecoder().decode(TailscaleStatusDocument.self, from: Data(statusJSON().utf8))
+  }
+
+  private func tailnetStatusFixture(
+    backendState: String = "Running",
+    dnsName: String? = "workstation.example.ts.net.",
+    addresses: [String] = ["100.64.12.34", "fd7a:115c:a1e0::1"],
+    unknownField: Bool = false
+  ) throws -> TailscaleStatusDocument {
+    let dnsField = dnsName.map { #""DNSName": "\#($0)","# } ?? ""
+    let encodedAddresses = addresses.map { #""\#($0)""# }.joined(separator: ", ")
+    let extraField = unknownField ? #", "FutureStatusField": {"ignored": true}"# : ""
+    let json = """
+      {
+        "BackendState": "\(backendState)",
+        "CurrentTailnet": { "Name": "example.com" },
+        "Self": {
+          \(dnsField)
+          "HostName": "Workstation",
+          "Online": true,
+          "TailscaleIPs": [\(encodedAddresses)],
+          "UserID": 42
+        },
+        "User": {
+          "42": { "LoginName": "operator@example.com" }
+        }
+        \(extraField)
+      }
+      """
+    return try TailscaleStatusDocument.decode(from: Data(json.utf8))
   }
 
   private func registrationHealthDocument(

@@ -454,6 +454,7 @@ for the exact boundary and run command.
 - Named session grants are owner-managed, time-limited, and independently scoped to read-only or terminal-control access
 - Direct Share This Mac listeners require the per-run password after Tailscale peer authorization; native viewers prefer ARD (registered hosts automatically, copied addresses through the explicit Crabfleet Share toggle) and can remember it in the data-protection Keychain, while browser direct transports use VNC authentication and sessionStorage only. Owner-authenticated Worker relays retain their existing RFB None inner stream.
 - A shared folder is off by default and limited to the security-scoped folder chosen in the host sheet; traversal, absolute paths, and symlink escapes are rejected after realpath containment checks, and uploads become visible only after an atomic finish.
+- Share This Mac resolves multiple local Tailscale IPv4 addresses deterministically, works without MagicDNS by displaying the node hostname, and surfaces actionable sign-in, stopped, starting, malformed-status, and IPv6-only listener errors.
 - Merge policy is stored as intent; Crabfleet does not currently perform merges
 - Runtime tokens are scoped and short-lived
 - Secrets never logged or stored in D1/R2

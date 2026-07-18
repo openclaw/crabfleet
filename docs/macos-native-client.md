@@ -91,7 +91,13 @@ Mac-to-Mac path remains on Tailscale; a registered share can additionally use
 an owner-scoped Crabfleet Worker relay for first-party browser access.
 
 1. Tailscale status must report `BackendState=Running`, a valid active tailnet,
-   an online signed-in user, and a CGNAT address in `100.64.0.0/10`.
+   an online signed-in user, and a CGNAT address in `100.64.0.0/10`. When the
+   local node reports multiple eligible IPv4 addresses, Crabfleet sorts them
+   numerically, advertises the lowest stable candidate, and retains the full
+   candidate list for future selection. MagicDNS is optional: an absent, empty,
+   or non-FQDN `DNSName` falls back to `HostName` for display and does not trigger
+   duplicate-registration detection. IPv6-only tailnets are reported as
+   unsupported because the private desktop listener does not yet bind them.
 2. The app captures up to four selected displays (default: main), each at a
    bounded even resolution no larger than 2560×1600. A display with any HEVC or
    H.264 viewer captures at 60 frames per second; Tight/JPEG-only displays use
