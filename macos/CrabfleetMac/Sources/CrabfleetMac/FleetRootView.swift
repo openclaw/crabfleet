@@ -21,6 +21,7 @@ struct FleetRootView: View {
   @State private var showingQuickConnect = false
   @State private var showingPrivateShare = false
   @State private var didHandleLaunchConnection = false
+  @State private var keychainCleanupWarning: String?
 
   private var allTargets: [DesktopTarget] {
     let saved = connections.profiles.map(DesktopTarget.init(profile:))
@@ -105,33 +106,66 @@ struct FleetRootView: View {
     }
     .tint(.mint)
     .sheet(item: $connectionTarget) { target in
-      DesktopConnectionSheet(target: target) { request in
-        sessions.connect(targetID: target.id, request: request)
-        if let profileID = target.profileID {
-          connections.markConnected(profileID: profileID)
+      DesktopConnectionSheet(
+        target: target,
+        storedAccessCode: target.endpoint.map(connections.accessCode(for:)) ?? .missing
+      ) { request in
+        var request = request
+        request.quic = target.quic
+        sessions.connect(targetID: target.id, request: request) {
+          persistAccessCode(for: request)
+          if let profileID = target.profileID {
+            connections.markConnected(profileID: profileID)
+          }
         }
+        return true
       }
     }
     .sheet(isPresented: $showingQuickConnect) {
-      QuickConnectSheet { name, address, password, clipboardEnabled in
-        let profile = connections.save(name: name, address: address)
+      QuickConnectSheet(storedAccessCode: connections.accessCode(for:)) {
+        name, address, password, clipboardEnabled, rememberAccessCode, prefersPasswordOnlyARD in
+        let storedAccessCode = connections.accessCode(for: address)
+        guard !password.isEmpty || storedAccessCode.canSafelySubmitBlank else { return false }
+        let effectiveAccessCode = password.isEmpty ? storedAccessCode.value : password
+        let profile = connections.save(
+          name: name,
+          address: address,
+          prefersPasswordOnlyARD: prefersPasswordOnlyARD)
         let target = DesktopTarget(profile: profile)
-        sessions.connect(
-          targetID: target.id,
-          request: .init(
+        let request: VNCConnectionRequest = { password in
+          .init(
             host: address.host,
             port: address.port,
             username: address.username,
             password: password,
-            clipboardEnabled: clipboardEnabled
-          )
-        )
-        connections.markConnected(profileID: profile.id)
+            clipboardEnabled: clipboardEnabled,
+            rememberAccessCode: rememberAccessCode,
+            prefersPasswordOnlyARD: prefersPasswordOnlyARD)
+        }(effectiveAccessCode)
+        sessions.connect(
+          targetID: target.id,
+          request: request,
+          authenticationSucceeded: {
+            persistAccessCode(for: request)
+            connections.markConnected(profileID: profile.id)
+          })
         focus(target.id)
+        return true
       }
     }
     .sheet(isPresented: $showingPrivateShare) {
       PrivateMacShareSheet(controller: privateShare)
+    }
+    .alert(
+      "Keychain update incomplete",
+      isPresented: Binding(
+        get: { keychainCleanupWarning != nil },
+        set: { if !$0 { keychainCleanupWarning = nil } }
+      )
+    ) {
+      Button("OK") { keychainCleanupWarning = nil }
+    } message: {
+      Text(keychainCleanupWarning ?? "")
     }
     .onAppear(perform: connectLaunchConnectionIfNeeded)
     .onExitCommand(perform: closeFocus)
@@ -184,18 +218,8 @@ struct FleetRootView: View {
       sessions.connectCrabbox(targetID: target.id, sessionID: sessionID) {
         try await store.nativeVNCGrant(sessionID: sessionID)
       }
-    } else if target.source == .crabfleet, let endpoint = target.endpoint {
-      sessions.connect(
-        targetID: target.id,
-        request: .init(
-          host: endpoint.host,
-          port: endpoint.port,
-          username: endpoint.username,
-          password: "",
-          clipboardEnabled: false,
-          quic: target.quic
-        )
-      )
+    } else if target.endpoint != nil {
+      connectionTarget = target
     } else {
       connectionTarget = target
     }
@@ -211,17 +235,49 @@ struct FleetRootView: View {
     )
     let target = DesktopTarget(profile: profile)
     focus(target.id)
-    sessions.connect(
-      targetID: target.id,
-      request: .init(
-        host: launchConnection.host,
-        port: launchConnection.port,
-        username: launchConnection.username,
-        password: "",
-        clipboardEnabled: false
+    let savedAccessCode = connections.accessCode(for: launchConnection)
+    if savedAccessCode.value.isEmpty {
+      connectionTarget = target
+    } else {
+      let request: VNCConnectionRequest = { password in
+        .init(
+          host: launchConnection.host,
+          port: launchConnection.port,
+          username: launchConnection.username,
+          password: password,
+          clipboardEnabled: false,
+          rememberAccessCode: true,
+          prefersPasswordOnlyARD: profile.prefersPasswordOnlyARD ?? false)
+      }(savedAccessCode.value)
+      sessions.connect(
+        targetID: target.id,
+        request: request,
+        authenticationSucceeded: {
+          connections.markConnected(profileID: profile.id)
+        }
       )
-    )
-    connections.markConnected(profileID: profile.id)
+    }
+  }
+
+  private func persistAccessCode(for request: VNCConnectionRequest) {
+    let persistence = connections.rememberAccessCode(
+      request.password,
+      for: request.address,
+      enabled: request.rememberAccessCode)
+    reportPersistenceFailure(persistence)
+  }
+
+  private func reportPersistenceFailure(_ result: AccessCodePersistenceResult) {
+    switch result {
+    case .updated:
+      break
+    case .saveFailed:
+      keychainCleanupWarning =
+        "The connection opened, but its password could not be saved. Retry after Keychain is available."
+    case .cleanupFailed:
+      keychainCleanupWarning =
+        "The connection opened with the password in memory, but an older saved password could not be removed. Retry after Keychain is available."
+    }
   }
 
   private func closeFocus() {

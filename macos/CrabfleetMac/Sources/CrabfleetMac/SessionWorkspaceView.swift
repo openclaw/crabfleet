@@ -397,20 +397,38 @@ private struct FocusCanvasBackground: View {
 
 struct DesktopConnectionSheet: View {
   let target: DesktopTarget
-  let connect: (VNCConnectionRequest) -> Void
+  let connect: (VNCConnectionRequest) -> Bool
+  private let credentialAddress: String
+  private let credentialUsername: String
+  private let credentialAccessCode: String
+  private let canSafelySubmitBlank: Bool
 
   @Environment(\.dismiss) private var dismiss
   @State private var address: String
   @State private var username: String
   @State private var password = ""
+  @State private var rememberAccessCode: Bool
+  @State private var prefersPasswordOnlyARD: Bool
   @State private var clipboardEnabled = false
   @State private var validationMessage: String?
 
-  init(target: DesktopTarget, connect: @escaping (VNCConnectionRequest) -> Void) {
+  init(
+    target: DesktopTarget,
+    storedAccessCode: StoredAccessCode = .missing,
+    connect: @escaping (VNCConnectionRequest) -> Bool
+  ) {
     self.target = target
     self.connect = connect
-    _address = State(initialValue: target.endpoint?.displayValue ?? "127.0.0.1:5900")
+    let address = target.endpoint?.displayValue ?? "127.0.0.1:5900"
+    credentialAddress = address
+    credentialUsername = target.endpoint?.username ?? ""
+    credentialAccessCode = storedAccessCode.value
+    canSafelySubmitBlank = storedAccessCode == .missing
+    _address = State(initialValue: address)
     _username = State(initialValue: target.endpoint?.username ?? "")
+    _password = { password in State(initialValue: password) }(storedAccessCode.value)
+    _rememberAccessCode = State(initialValue: storedAccessCode.wasRemembered)
+    _prefersPasswordOnlyARD = State(initialValue: target.prefersPasswordOnlyARD)
   }
 
   var body: some View {
@@ -426,6 +444,8 @@ struct DesktopConnectionSheet: View {
         TextField("VNC address", text: $address, prompt: Text("host:5900 or vnc://host:5900"))
         TextField("Username (optional)", text: $username)
         SecureField("Password", text: $password)
+        Toggle("Crabfleet Share (prefer ARD)", isOn: $prefersPasswordOnlyARD)
+        Toggle("Remember password in Keychain", isOn: $rememberAccessCode)
         Toggle("Synchronize text clipboard", isOn: $clipboardEnabled)
       }
       .formStyle(.grouped)
@@ -446,7 +466,11 @@ struct DesktopConnectionSheet: View {
       }
 
       HStack {
-        Text("Passwords stay in memory and are never saved.")
+        Text(
+          rememberAccessCode
+            ? "The password is stored in this Mac’s Keychain for this host and port."
+            : "The password stays in memory for this connection only."
+        )
           .font(.caption)
           .foregroundStyle(.tertiary)
         Spacer()
@@ -459,20 +483,40 @@ struct DesktopConnectionSheet: View {
     }
     .padding(24)
     .frame(width: 540)
+    .onChange(of: address) { _, _ in refreshPasswordForCredentialIdentity() }
+    .onChange(of: username) { _, _ in refreshPasswordForCredentialIdentity() }
+  }
+
+  private func refreshPasswordForCredentialIdentity() {
+    password =
+      address == credentialAddress && username == credentialUsername
+      ? credentialAccessCode
+      : ""
   }
 
   private func submit() {
     do {
       let parsed = try VNCAddress.parse(address)
       let effectiveUsername = username.isEmpty ? parsed.username : username
-      connect(
+      let identityChanged = address != credentialAddress || effectiveUsername != credentialUsername
+      guard !password.isEmpty || (canSafelySubmitBlank && !identityChanged) else {
+        validationMessage = "Enter the password for this host and username."
+        return
+      }
+      guard connect(
         .init(
           host: parsed.host,
           port: parsed.port,
           username: effectiveUsername,
           password: password,
-          clipboardEnabled: clipboardEnabled
+          clipboardEnabled: clipboardEnabled,
+          rememberAccessCode: rememberAccessCode,
+          prefersPasswordOnlyARD: prefersPasswordOnlyARD
         ))
+      else {
+        validationMessage = "Crabfleet could not update this password in Keychain."
+        return
+      }
       password = ""
       dismiss()
     } catch {
@@ -482,7 +526,8 @@ struct DesktopConnectionSheet: View {
 }
 
 struct QuickConnectSheet: View {
-  let connect: (String, VNCAddress, String, Bool) -> Void
+  let storedAccessCode: (VNCAddress) -> StoredAccessCode
+  let connect: (String, VNCAddress, String, Bool, Bool, Bool) -> Bool
 
   @Environment(\.dismiss) private var dismiss
   @FocusState private var addressFocused: Bool
@@ -490,8 +535,11 @@ struct QuickConnectSheet: View {
   @State private var address = ""
   @State private var username = ""
   @State private var password = ""
+  @State private var rememberAccessCode = false
+  @State private var prefersPasswordOnlyARD = false
   @State private var clipboardEnabled = false
   @State private var validationMessage: String?
+  @State private var credentialIdentity: VNCAddress?
 
   var body: some View {
     VStack(alignment: .leading, spacing: 20) {
@@ -506,6 +554,8 @@ struct QuickConnectSheet: View {
         TextField("Name", text: $name, prompt: Text("Design workstation"))
         TextField("Username (optional)", text: $username)
         SecureField("Password", text: $password)
+        Toggle("Crabfleet Share (prefer ARD)", isOn: $prefersPasswordOnlyARD)
+        Toggle("Remember password in Keychain", isOn: $rememberAccessCode)
         Toggle("Synchronize text clipboard", isOn: $clipboardEnabled)
       }
       .formStyle(.grouped)
@@ -517,7 +567,11 @@ struct QuickConnectSheet: View {
           .font(.caption)
           .foregroundStyle(.red)
       } else {
-        Text("The connection is saved; the password is not.")
+        Text(
+          rememberAccessCode
+            ? "The connection is saved; the password is stored in this Mac’s Keychain."
+            : "The connection is saved; the password is not."
+        )
           .font(.caption)
           .foregroundStyle(.secondary)
       }
@@ -534,6 +588,20 @@ struct QuickConnectSheet: View {
     .padding(24)
     .frame(width: 540)
     .onAppear { addressFocused = true }
+    .onChange(of: address) { _, _ in refreshRememberedState() }
+    .onChange(of: username) { _, _ in refreshRememberedState() }
+  }
+
+  private func refreshRememberedState() {
+    guard let parsed = try? VNCAddress.parse(address) else { return }
+    let effectiveAddress = VNCAddress(
+      host: parsed.host,
+      port: parsed.port,
+      username: username.isEmpty ? parsed.username : username)
+    guard effectiveAddress != credentialIdentity else { return }
+    credentialIdentity = effectiveAddress
+    password = ""
+    rememberAccessCode = storedAccessCode(effectiveAddress).wasRemembered
   }
 
   private func submit() {
@@ -548,7 +616,18 @@ struct QuickConnectSheet: View {
         name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         ? parsed.host
         : name.trimmingCharacters(in: .whitespacesAndNewlines)
-      connect(effectiveName, effectiveAddress, password, clipboardEnabled)
+      guard
+        connect(
+          effectiveName,
+          effectiveAddress,
+          password,
+          clipboardEnabled,
+          rememberAccessCode,
+          prefersPasswordOnlyARD)
+      else {
+        validationMessage = "Crabfleet could not update this password in Keychain."
+        return
+      }
       password = ""
       dismiss()
     } catch {

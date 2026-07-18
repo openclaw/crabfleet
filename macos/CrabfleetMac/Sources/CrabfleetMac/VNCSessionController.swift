@@ -100,12 +100,16 @@ final class VNCSessionController: NSObject, ObservableObject {
   private let targetID: String
   private let defaults: UserDefaults
   private let qualityModeDefaultsKey: String
+  private let frameEncodings: [VNCFrameEncodingType]
+  private let quicFallbackDelay: Duration
   private weak var clipboardCoordinator: ClipboardCoordinator?
   private(set) var connection: VNCConnection?
   private let credentialLock = NSLock()
   private var credentialConnectionID: ObjectIdentifier?
   private var username = ""
   private var password = ""
+  private var prefersPasswordOnlyARD = false
+  private var authenticationSucceeded: (() -> Void)?
   private var thumbnailWorkItem: DispatchWorkItem?
   private var thumbnailGeneration: UInt64 = 0
   private var isPresentingLiveSurface = false
@@ -122,11 +126,17 @@ final class VNCSessionController: NSObject, ObservableObject {
   init(
     targetID: String = UUID().uuidString,
     clipboardCoordinator: ClipboardCoordinator? = nil,
-    defaults: UserDefaults = .standard
+    defaults: UserDefaults = .standard,
+    frameEncodings: [VNCFrameEncodingType]? = nil,
+    quicFallbackDelay: Duration = .seconds(2)
   ) {
     self.targetID = targetID
     self.clipboardCoordinator = clipboardCoordinator
     self.defaults = defaults
+    self.frameEncodings =
+      frameEncodings
+      ?? Self.preferredFrameEncodings(supportsHEVC444: VNCHEVC444Capability.isSupported)
+    self.quicFallbackDelay = quicFallbackDelay
     let qualityKey = "org.openclaw.crabfleet.viewer.quality-mode.\(targetID)"
     qualityModeDefaultsKey = qualityKey
     qualityMode = defaults.string(forKey: qualityKey)
@@ -140,7 +150,9 @@ final class VNCSessionController: NSObject, ObservableObject {
     username: String,
     password: String,
     clipboardEnabled: Bool = true,
-    quic: QUICConnectionConfiguration? = nil
+    quic: QUICConnectionConfiguration? = nil,
+    prefersPasswordOnlyARD: Bool = false,
+    authenticationSucceeded: (() -> Void)? = nil
   ) {
     tearDownConnection()
 
@@ -150,6 +162,7 @@ final class VNCSessionController: NSObject, ObservableObject {
     framebuffer = nil
     framebufferUpdateCount = 0
     phase = .connecting
+    self.authenticationSucceeded = authenticationSucceeded
     clipboardCoordinator?.sessionStateDidChange(self, targetID: targetID)
 
     let request = VNCConnectionRequest(
@@ -158,7 +171,8 @@ final class VNCSessionController: NSObject, ObservableObject {
       username: username,
       password: password,
       clipboardEnabled: clipboardEnabled,
-      quic: quic)
+      quic: quic,
+      prefersPasswordOnlyARD: prefersPasswordOnlyARD)
     if let quic {
       do {
         guard let quicPort = NWEndpoint.Port(rawValue: UInt16(quic.port)) else {
@@ -199,8 +213,7 @@ final class VNCSessionController: NSObject, ObservableObject {
       inputMode: .forwardKeyboardShortcutsIfNotInUseLocally,
       clipboardMode: request.clipboardEnabled ? .externallyManaged : .disabled,
       colorDepth: .depth24Bit,
-      frameEncodings: Self.preferredFrameEncodings(
-        supportsHEVC444: VNCHEVC444Capability.isSupported)
+      frameEncodings: frameEncodings
     )
     let connection = if let networkConnection {
       VNCConnection(
@@ -217,7 +230,11 @@ final class VNCSessionController: NSObject, ObservableObject {
     applyFramebufferUpdatePolicy(to: connection)
     self.connection = connection
     self.transport = transport
-    setCredentials(username: request.username, password: request.password, for: connection)
+    setCredentials(
+      username: request.username,
+      password: request.password,
+      prefersPasswordOnlyARD: request.prefersPasswordOnlyARD,
+      for: connection)
     connection.connect()
   }
 
@@ -269,8 +286,8 @@ final class VNCSessionController: NSObject, ObservableObject {
 
   private func scheduleTCPFallback(attemptID: UUID) {
     quicFallbackTask?.cancel()
-    quicFallbackTask = Task { [weak self] in
-      try? await Task.sleep(for: .seconds(2))
+    quicFallbackTask = Task { [weak self, quicFallbackDelay] in
+      try? await Task.sleep(for: quicFallbackDelay)
       guard !Task.isCancelled, let self else { return }
       self.fallbackToTCP(attemptID: attemptID)
     }
@@ -389,6 +406,7 @@ final class VNCSessionController: NSObject, ObservableObject {
     audioPlayer.stop()
     connection = nil
     transport = nil
+    authenticationSucceeded = nil
     framebuffer = nil
     framebufferRevision += 1
     clearCredentials()
@@ -401,21 +419,30 @@ final class VNCSessionController: NSObject, ObservableObject {
     credentialConnectionID = nil
     username = ""
     password = ""
+    prefersPasswordOnlyARD = false
   }
 
-  private func setCredentials(username: String, password: String, for connection: VNCConnection) {
+  private func setCredentials(
+    username: String,
+    password: String,
+    prefersPasswordOnlyARD: Bool,
+    for connection: VNCConnection
+  ) {
     credentialLock.lock()
     defer { credentialLock.unlock() }
     credentialConnectionID = ObjectIdentifier(connection)
     self.username = username
     self.password = password
+    self.prefersPasswordOnlyARD = prefersPasswordOnlyARD
   }
 
-  private func credentials(for connection: VNCConnection) -> (username: String, password: String)? {
+  private func credentials(
+    for connection: VNCConnection
+  ) -> (username: String, password: String, prefersPasswordOnlyARD: Bool)? {
     credentialLock.lock()
     defer { credentialLock.unlock() }
     guard credentialConnectionID == ObjectIdentifier(connection) else { return nil }
-    return (username, password)
+    return (username, password, prefersPasswordOnlyARD)
   }
 
   func setLiveSurfacePresented(_ isPresented: Bool) {
@@ -526,6 +553,9 @@ extension VNCSessionController: VNCConnectionDelegate {
       pendingTCPFallbackRequest = nil
       clearTCPFallbackRetry()
       phase = .connected
+      let authenticationSucceeded = self.authenticationSucceeded
+      self.authenticationSucceeded = nil
+      authenticationSucceeded?()
       _ = connection.setQualityMode(qualityMode.vncQualityMode)
     case .disconnecting:
       phase = pendingTCPFallbackRequest == nil ? .disconnecting : .connecting
@@ -583,7 +613,14 @@ extension VNCSessionController: VNCConnectionDelegate {
     _ connection: VNCConnection,
     prefersUsernameAuthentication authenticationType: VNCAuthenticationType
   ) -> Bool {
-    authenticationType.requiresUsername
+    if authenticationType == .appleRemoteDesktop {
+      let credentials = credentials(for: connection)
+      let hasUsername = !(credentials?.username.isEmpty ?? true)
+      let hasCrabfleetPassword =
+        credentials?.prefersPasswordOnlyARD == true && !(credentials?.password.isEmpty ?? true)
+      return hasUsername || hasCrabfleetPassword
+    }
+    return authenticationType.requiresUsername
       && !(credentials(for: connection)?.username.isEmpty ?? true)
   }
 

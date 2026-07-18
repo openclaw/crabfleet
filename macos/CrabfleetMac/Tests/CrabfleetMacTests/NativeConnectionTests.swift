@@ -1,11 +1,59 @@
 import Dispatch
 import Foundation
+import RoyalVNCKit
 import Testing
 
 @testable import CrabfleetMac
 
 @MainActor
 struct NativeConnectionTests {
+  @Test
+  func nativeViewerPrefersARDWithPasswordOnlyCredentials() throws {
+    let session = VNCSessionController()
+    session.connect(
+      host: "127.0.0.1",
+      port: 1,
+      username: "",
+      password: "test-auth-token",
+      clipboardEnabled: false,
+      prefersPasswordOnlyARD: true)
+    defer { session.disconnect() }
+    let connection = try #require(session.connection)
+
+    #expect(
+      session.connection(
+        connection,
+        prefersUsernameAuthentication: .appleRemoteDesktop))
+    #expect(
+      !session.connection(
+        connection,
+        prefersUsernameAuthentication: .ultraVNCMSLogonII))
+
+    session.connect(
+      host: "127.0.0.1",
+      port: 1,
+      username: "",
+      password: "test-auth-token",
+      clipboardEnabled: false)
+    let genericConnection = try #require(session.connection)
+    #expect(
+      !session.connection(
+        genericConnection,
+        prefersUsernameAuthentication: .appleRemoteDesktop))
+
+    session.connect(
+      host: "127.0.0.1",
+      port: 1,
+      username: "viewer",
+      password: "test-auth-token",
+      clipboardEnabled: false)
+    let usernameConnection = try #require(session.connection)
+    #expect(
+      session.connection(
+        usernameConnection,
+        prefersUsernameAuthentication: .appleRemoteDesktop))
+  }
+
   @Test
   func normalizesSecureDeploymentOrigins() throws {
     let production = try DeploymentOrigin("  HTTPS://Fleet.Example.test/app/  ")

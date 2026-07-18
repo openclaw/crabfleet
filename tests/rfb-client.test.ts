@@ -56,6 +56,85 @@ test("RFB 3.8 handshake records exact client bytes and paces empty updates", asy
   assert.deepEqual(transport.sent[6], framebufferRequest(true, 1280, 720));
 });
 
+test("RFB 3.8 direct handshake selects VNC auth and sends the fork vector", async () => {
+  const challenge = new Uint8Array(Array.from({ length: 16 }, (_, index) => index));
+  const name = new TextEncoder().encode("Tailnet Mac");
+  const transcript = bytes(
+    new TextEncoder().encode("RFB 003.008\n"),
+    [2, 30, 2],
+    challenge,
+    uint32(0),
+    uint16(1024),
+    uint16(768),
+    new Uint8Array(16),
+    uint32(name.byteLength),
+    name,
+  );
+  const transport = new ScriptedTransport(transcript);
+  const authenticationResults: boolean[] = [];
+  const client = new RFBClient(transport, {
+    h264: false,
+    password: "test-auth-token",
+    onVNCAuthentication: (succeeded) => authenticationResults.push(succeeded),
+  });
+
+  await assert.rejects(client.start(), /scripted server ended/);
+  assert.deepEqual(authenticationResults, [true]);
+  assert.deepEqual(transport.sent[1], new Uint8Array([2]));
+  assert.deepEqual(
+    transport.sent[2],
+    Uint8Array.from([
+      0x8a, 0x5f, 0xa9, 0x58, 0xf0, 0xd8, 0x19, 0xbd, 0xcb, 0x98, 0x1c, 0x9b, 0x47, 0x63, 0x6e,
+      0xd0,
+    ]),
+  );
+  assert.deepEqual(transport.sent[3], new Uint8Array([1]));
+});
+
+test("RFB VNC auth reports rejection so a browser can discard its cached password", async () => {
+  const reason = new TextEncoder().encode("invalid password");
+  const transport = new ScriptedTransport(
+    bytes(
+      new TextEncoder().encode("RFB 003.008\n"),
+      [1, 2],
+      new Uint8Array(16),
+      uint32(1),
+      uint32(reason.byteLength),
+      reason,
+    ),
+  );
+  const authenticationResults: boolean[] = [];
+  const client = new RFBClient(transport, {
+    h264: false,
+    password: "test-auth-token",
+    onVNCAuthentication: (succeeded) => authenticationResults.push(succeeded),
+  });
+
+  await assert.rejects(client.start(), /invalid password/);
+  assert.deepEqual(authenticationResults, [false]);
+});
+
+test("RFB 3.8 direct handshake refuses VNC auth without a password", async () => {
+  const transport = new ScriptedTransport(
+    bytes(new TextEncoder().encode("RFB 003.008\n"), [2, 30, 2]),
+  );
+  const client = new RFBClient(transport, { h264: false });
+
+  await assert.rejects(client.start(), /RFB password required/);
+  assert.equal(transport.sent.length, 1);
+});
+
+test("RFB direct credentials forbid a Security None downgrade", async () => {
+  const transport = new ScriptedTransport(bytes(new TextEncoder().encode("RFB 003.008\n"), [1, 1]));
+  const client = new RFBClient(transport, {
+    h264: false,
+    password: "test-auth-token",
+  });
+
+  await assert.rejects(client.start(), /direct connection requires VNC authentication/);
+  assert.equal(transport.sent.length, 1);
+});
+
 test("H.264 decode failure renegotiates Tight and requests a full JPEG frame", async () => {
   const name = new TextEncoder().encode("Studio");
   const transcript = bytes(

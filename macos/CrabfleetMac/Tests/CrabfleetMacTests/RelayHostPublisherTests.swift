@@ -71,6 +71,44 @@ struct RelayHostPublisherTests {
   }
 
   @Test
+  func onlyAuthenticatedRelayPublisherSessionKeepsSecurityNoneBypass() async throws {
+    var viewerHandshake = RFBVersion.serverBanner
+    viewerHandshake.append(contentsOf: [1, 1])  // None selection, shared ClientInit.
+    let task = RecordingRelayWebSocketTask(incoming: [.data(viewerHandshake)])
+    let descriptor = CapturedDisplayDescriptor(
+      displayID: 1,
+      displayBounds: CGRect(x: 0, y: 0, width: 64, height: 64),
+      frameWidth: 64,
+      frameHeight: 64,
+      sourcePixelWidth: 64,
+      sourcePixelHeight: 64)
+    let publisher = RelayHostPublisher(
+      endpoint: try #require(URL(string: "wss://fleet.example.test/relay")),
+      relayAccess: "test-auth-token",
+      capture: MacScreenCapture(),
+      descriptor: descriptor,
+      input: RelayNoopInput(),
+      clipboard: nil,
+      sessionGate: RFBHostSessionGate(),
+      eventHandler: { _ in },
+      taskFactory: { _ in task })
+
+    publisher.start()
+    defer { publisher.stop() }
+    let deadline = ContinuousClock().now.advanced(by: .seconds(2))
+    while task.sentData.count < 4, ContinuousClock().now < deadline {
+      try await Task.sleep(for: .milliseconds(10))
+    }
+
+    let sent = task.sentData
+    #expect(sent.count >= 4)
+    guard sent.count >= 4 else { return }
+    #expect(sent[0] == RFBVersion.serverBanner)
+    #expect(sent[1] == Data([1, 1]))
+    #expect(sent[2] == Data([0, 0, 0, 0]))
+  }
+
+  @Test
   func registrationBuildsSecureRelayEndpoint() throws {
     let registration = try #require(
       CrabfleetDesktopRegistration(environment: [
@@ -100,6 +138,11 @@ struct RelayHostPublisherTests {
     controller.browserAccessEnabled = false
     #expect(defaults.object(forKey: PrivateMacShareController.browserAccessDefaultsKey) as? Bool == false)
   }
+}
+
+private struct RelayNoopInput: RemoteInputForwarding {
+  func keyEvent(down: Bool, keysym: UInt32) {}
+  func pointerEvent(buttonMask: UInt8, x: UInt16, y: UInt16) {}
 }
 
 private final class RecordingRelayWebSocketTask: RelayWebSocketTasking, @unchecked Sendable {

@@ -703,6 +703,7 @@ final class PrivateMacShareController: ObservableObject {
   @Published private(set) var audioActive = false
   @Published private(set) var connectedViewerCount = 0
   @Published private(set) var viewerSessions: [ViewerSession] = []
+  @Published private(set) var accessCode = ""
 
   @Published var selectedDisplayIDs: Set<CGDirectDisplayID> {
     didSet {
@@ -809,6 +810,8 @@ final class PrivateMacShareController: ObservableObject {
   private var publishingServerGeneration: UInt64?
   private var refreshWaiters: [CheckedContinuation<Void, Never>] = []
   private let stopCoordinator = PrivateMacShareStopCoordinator()
+  private let accessState = ShareAccessState()
+  private let authThrottle = RFBAuthThrottle()
 
   init(
     runner: (any TailscaleCommandRunning)? = nil,
@@ -871,6 +874,19 @@ final class PrivateMacShareController: ObservableObject {
   var connectionAddresses: [String] {
     guard let identity else { return [] }
     return activePlans.map { identity.vncAddress(port: Int($0.port)) }
+  }
+
+  func regenerateAccessCode() {
+    guard phase.isRunning else { return }
+    do {
+      let generated = try ShareAccessCodeGenerator.generate()
+      accessState.replace(with: generated)
+      accessCode = generated
+      authThrottle.reset()
+      notice = nil
+    } catch {
+      notice = error.localizedDescription
+    }
   }
 
   func setDisplay(_ displayID: CGDirectDisplayID, selected: Bool) {
@@ -1088,6 +1104,17 @@ final class PrivateMacShareController: ObservableObject {
       return
     }
 
+    do {
+      let generated = try ShareAccessCodeGenerator.generate()
+      accessState.replace(with: generated)
+      accessCode = generated
+      authThrottle.reset()
+    } catch {
+      phase = .failed
+      notice = error.localizedDescription
+      return
+    }
+
     let bridge = clipboardSyncEnabled ? HostClipboardBridge() : nil
     serverGeneration = generation
     activePlans = plans
@@ -1095,6 +1122,10 @@ final class PrivateMacShareController: ObservableObject {
     listeningDisplayIDs.removeAll()
     displayStacks.removeAll()
     do {
+      // Cold safe-prime validation is intentionally off the main actor. Keep
+      // it ahead of listener admission so it cannot consume a handshake deadline.
+      try await RFBARDPrewarmer.shared.prepare()
+      guard canContinueStarting(generation) else { throw CancellationError() }
       let quicIdentity = try? QUICIdentityStore.loadOrCreate()
       for plan in plans {
         let capture = MacScreenCapture()
@@ -1116,6 +1147,8 @@ final class PrivateMacShareController: ObservableObject {
             port: plan.port,
             quicPort: quicIdentity.map { _ in Self.quicPort + UInt16(plan.index) },
             quicIdentity: quicIdentity,
+            credentialProvider: { [accessState] in accessState.current },
+            authThrottle: authThrottle,
             sessionGate: sessionGate,
             eventHandler: { [weak self] event in
               Task { @MainActor in
@@ -1199,6 +1232,9 @@ final class PrivateMacShareController: ObservableObject {
     audioSessionKeys.removeAll()
     directSessionSnapshots.removeAll()
     connectedViewerCount = 0
+    accessState.clear()
+    accessCode = ""
+    authThrottle.reset()
     removeDesktopHost(after: registrationTask)
     guard isCurrent(generation) else { return }
     phase = .idle

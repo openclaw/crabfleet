@@ -276,7 +276,8 @@ struct FleetModelsTests {
     let library = ConnectionLibrary(defaults: defaults, storageKey: "profiles")
     let profile = library.save(
       name: "Build box",
-      address: .init(host: "127.0.0.1", port: 5901, username: "dev")
+      address: .init(host: "127.0.0.1", port: 5901, username: "dev"),
+      prefersPasswordOnlyARD: true
     )
 
     let reloaded = ConnectionLibrary(defaults: defaults, storageKey: "profiles")
@@ -285,6 +286,117 @@ struct FleetModelsTests {
     #expect(saved.name == "Build box")
     #expect(saved.host == "127.0.0.1")
     #expect(saved.username == "dev")
+    #expect(saved.prefersPasswordOnlyARD == true)
+  }
+
+  @Test @MainActor
+  func profileUpdateWithoutAuthPreferencePreservesARDRequest() throws {
+    let suiteName = "CrabfleetMacTests.\(UUID().uuidString)"
+    let defaults = try #require(UserDefaults(suiteName: suiteName))
+    defer { defaults.removePersistentDomain(forName: suiteName) }
+    let address = VNCAddress(host: "100.64.0.8", port: 5901, username: "")
+    let library = ConnectionLibrary(defaults: defaults, storageKey: "profiles")
+
+    _ = library.save(
+      name: "Crabfleet Share",
+      address: address,
+      prefersPasswordOnlyARD: true)
+    let updated = library.save(
+      name: address.displayValue,
+      address: address,
+      favorite: true)
+
+    #expect(updated.prefersPasswordOnlyARD == true)
+    #expect(library.profiles.first?.prefersPasswordOnlyARD == true)
+    let request = VNCConnectionRequest(
+      host: updated.host,
+      port: updated.port,
+      username: updated.username,
+      password: "test-auth-token",
+      clipboardEnabled: false,
+      rememberAccessCode: true,
+      prefersPasswordOnlyARD: updated.prefersPasswordOnlyARD ?? false)
+    #expect(request.prefersPasswordOnlyARD)
+  }
+
+  @Test @MainActor
+  func remembersDirectViewerAccessCodeOutsideProfileStorage() throws {
+    let suiteName = "CrabfleetMacTests.\(UUID().uuidString)"
+    let defaults = try #require(UserDefaults(suiteName: suiteName))
+    defer { defaults.removePersistentDomain(forName: suiteName) }
+    let keychain = RecordingVNCKeychainStore()
+    let address = VNCAddress(host: "100.64.0.8", port: 5901, username: "")
+    let library = ConnectionLibrary(
+      defaults: defaults,
+      storageKey: "profiles",
+      keychain: keychain)
+
+    #expect(library.accessCode(for: address) == .missing)
+    #expect(
+      library.rememberAccessCode("test-auth-token", for: address, enabled: true) == .updated)
+    #expect(library.accessCode(for: address) == .available("test-auth-token"))
+    #expect(defaults.data(forKey: "profiles") == nil)
+    #expect(
+      library.rememberAccessCode("test-auth-token", for: address, enabled: false) == .updated)
+    #expect(library.accessCode(for: address) == .missing)
+  }
+
+  @Test @MainActor
+  func separatesRememberedAccessCodesByUsername() throws {
+    let defaults = try #require(UserDefaults(suiteName: "CrabfleetMacTests.\(UUID().uuidString)"))
+    let keychain = RecordingVNCKeychainStore()
+    let library = ConnectionLibrary(
+      defaults: defaults,
+      storageKey: "profiles",
+      keychain: keychain)
+    let first = VNCAddress(host: "viewer.test", port: 5900, username: "alice")
+    let second = VNCAddress(host: "viewer.test", port: 5900, username: "bob")
+
+    #expect(
+      library.rememberAccessCode("test-auth-token-1", for: first, enabled: true) == .updated)
+    #expect(
+      library.rememberAccessCode("test-auth-token-2", for: second, enabled: true) == .updated)
+    #expect(library.accessCode(for: first) == .available("test-auth-token-1"))
+    #expect(library.accessCode(for: second) == .available("test-auth-token-2"))
+
+    let differentlyCased = VNCAddress(host: "viewer.test", port: 5900, username: "Alice")
+    #expect(library.accessCode(for: differentlyCased) == .missing)
+  }
+
+  @Test @MainActor
+  func distinguishesKeychainReadFailureFromMissingCredential() throws {
+    let defaults = try #require(UserDefaults(suiteName: "CrabfleetMacTests.\(UUID().uuidString)"))
+    let library = ConnectionLibrary(
+      defaults: defaults,
+      storageKey: "profiles",
+      keychain: FailingVNCKeychainStore())
+
+    #expect(
+      library.accessCode(for: .init(host: "viewer.test", port: 5900, username: ""))
+        == .unavailable)
+  }
+
+  @Test @MainActor
+  func memoryOnlyAccessCodeDoesNotDependOnKeychainCleanup() throws {
+    let defaults = try #require(UserDefaults(suiteName: "CrabfleetMacTests.\(UUID().uuidString)"))
+    let library = ConnectionLibrary(
+      defaults: defaults,
+      storageKey: "profiles",
+      keychain: FailingVNCKeychainStore())
+    let address = VNCAddress(host: "viewer.test", port: 5900, username: "")
+
+    #expect(
+      library.rememberAccessCode("test-auth-token", for: address, enabled: false)
+        == .cleanupFailed)
+    #expect(
+      library.rememberAccessCode("test-auth-token", for: address, enabled: true) == .saveFailed)
+  }
+
+  @Test
+  func remembersOnlyPreviouslyStoredAccessCodesByDefault() {
+    #expect(!StoredAccessCode.missing.wasRemembered)
+    #expect(!StoredAccessCode.unavailable.wasRemembered)
+    #expect(StoredAccessCode.available("test-auth-token").wasRemembered)
   }
 
   @Test
@@ -490,4 +602,44 @@ struct FleetModelsTests {
     }
     return condition()
   }
+}
+
+private final class RecordingVNCKeychainStore: VNCKeychainStoring, @unchecked Sendable {
+  private let lock = NSLock()
+  private var values: [String: String] = [:]
+
+  func load(for address: VNCAddress) throws -> String? {
+    withLock { values[key(for: address)] }
+  }
+
+  func save(_ value: String, for address: VNCAddress) -> Bool {
+    withLock { values[key(for: address)] = value }
+    return true
+  }
+
+  func remove(for address: VNCAddress) -> Bool {
+    withLock { _ = values.removeValue(forKey: key(for: address)) }
+    return true
+  }
+
+  private func key(for address: VNCAddress) -> String {
+    "\(address.host.lowercased()):\(address.port)|\(address.username)"
+  }
+
+  private func withLock<T>(_ body: () -> T) -> T {
+    lock.lock()
+    defer { lock.unlock() }
+    return body()
+  }
+}
+
+private struct FailingVNCKeychainStore: VNCKeychainStoring {
+  struct ReadFailure: Error {}
+
+  func load(for address: VNCAddress) throws -> String? {
+    throw ReadFailure()
+  }
+
+  func save(_ value: String, for address: VNCAddress) -> Bool { false }
+  func remove(for address: VNCAddress) -> Bool { false }
 }

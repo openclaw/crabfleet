@@ -2003,12 +2003,16 @@ struct PrivateMacShareTests {
       input: input,
       peerAuthorizer: LoopbackPeerAuthorizer(),
       port: port,
+      credentialProvider: { "test-auth-token" },
+      authThrottle: RFBAuthThrottle(),
       handshakeTimeout: .milliseconds(100),
       eventHandler: { events.append($0) }
     )
     try server.start()
     defer { server.stop() }
-    try await Task.sleep(for: .milliseconds(100))
+    try await waitFor(timeout: .seconds(30)) {
+      events.values.contains(.listening)
+    }
 
     let connection = NWConnection(
       host: "127.0.0.1",
@@ -2294,6 +2298,7 @@ struct PrivateMacShareTests {
     )
 
     let port: UInt16 = 5_909
+    let events = RFBEventRecorder()
     let server = TailnetRFBServer(
       identity: identity,
       runner: runner,
@@ -2308,18 +2313,22 @@ struct PrivateMacShareTests {
       ),
       input: NoopRemoteInput(),
       port: port,
-      eventHandler: { _ in }
+      credentialProvider: { "test-auth-token" },
+      authThrottle: RFBAuthThrottle(),
+      eventHandler: { events.append($0) }
     )
     try server.start()
     defer { server.stop() }
-    try await Task.sleep(for: .milliseconds(250))
+    try await waitFor(timeout: .seconds(30)) {
+      events.values.contains(.listening)
+    }
 
     let session = VNCSessionController()
     session.connect(
       host: identity.ipv4Address,
       port: port,
       username: "",
-      password: "",
+      password: "test-auth-token",
       clipboardEnabled: false
     )
     defer { session.disconnect() }
@@ -2361,6 +2370,7 @@ struct PrivateMacShareTests {
     let hostClipboard = HostClipboardBridge(pasteboard: hostPasteboard, pollingInterval: 0.02)
 
     let port: UInt16 = 5_921
+    let events = RFBEventRecorder()
     let server = TailnetRFBServer(
       identity: identity,
       runner: StaticTailscaleRunner(output: ""),
@@ -2377,24 +2387,34 @@ struct PrivateMacShareTests {
       clipboard: hostClipboard,
       peerAuthorizer: LoopbackPeerAuthorizer(),
       port: port,
-      eventHandler: { _ in }
+      credentialProvider: { "test-auth-token" },
+      authThrottle: RFBAuthThrottle(),
+      eventHandler: { events.append($0) }
     )
     try server.start()
     defer { server.stop() }
-    try await Task.sleep(for: .milliseconds(250))
+    try await waitFor(timeout: .seconds(30)) {
+      events.values.contains(.listening)
+    }
 
     let viewerPasteboard = NSPasteboard(
       name: .init("CrabfleetMacTests.viewer.\(UUID().uuidString)")
     )
     viewerPasteboard.clearContents()
     let coordinator = ClipboardCoordinator(pasteboard: viewerPasteboard, pollingInterval: 0.02)
-    let session = VNCSessionController(targetID: "smoke", clipboardCoordinator: coordinator)
+    let session = VNCSessionController(
+      targetID: "smoke",
+      clipboardCoordinator: coordinator,
+      frameEncodings: [.tight, .hextile])
     coordinator.focus(session: session, targetID: "smoke")
+    var authenticationSuccessCount = 0
     session.connect(
       host: identity.ipv4Address,
       port: port,
       username: "",
-      password: ""
+      password: "test-auth-token",
+      prefersPasswordOnlyARD: true,
+      authenticationSucceeded: { authenticationSuccessCount += 1 }
     )
     defer { session.disconnect() }
 
@@ -2408,6 +2428,7 @@ struct PrivateMacShareTests {
     try await waitFor("initial framebuffer update") {
       session.framebufferUpdateCount > 0
     }
+    #expect(authenticationSuccessCount == 1)
 
     // Viewer to host: emoji only survives the extended UTF-8 path.
     viewerPasteboard.clearContents()

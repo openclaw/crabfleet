@@ -43,9 +43,16 @@ final class VNCSessionPool: ObservableObject {
     return session
   }
 
-  func connect(targetID: String, request: VNCConnectionRequest) {
+  func connect(
+    targetID: String,
+    request: VNCConnectionRequest,
+    authenticationSucceeded: (() -> Void)? = nil
+  ) {
     stopCrabboxBridge(targetID: targetID)
-    connectDirect(targetID: targetID, request: request)
+    connectDirect(
+      targetID: targetID,
+      request: request,
+      authenticationSucceeded: authenticationSucceeded)
   }
 
   func connectCrabbox(
@@ -89,7 +96,11 @@ final class VNCSessionPool: ObservableObject {
     crabboxBridgeTasks[targetID] = task
   }
 
-  private func connectDirect(targetID: String, request: VNCConnectionRequest) {
+  private func connectDirect(
+    targetID: String,
+    request: VNCConnectionRequest,
+    authenticationSucceeded: (() -> Void)? = nil
+  ) {
     enforceLiveSessionBudget(excluding: targetID)
     clipboardCoordinator.reset(targetID: targetID)
 
@@ -101,7 +112,9 @@ final class VNCSessionPool: ObservableObject {
       username: request.username,
       password: request.password,
       clipboardEnabled: request.clipboardEnabled,
-      quic: request.quic
+      quic: request.quic,
+      prefersPasswordOnlyARD: request.prefersPasswordOnlyARD,
+      authenticationSucceeded: authenticationSucceeded
     )
 
     if focusedSessionID == targetID {

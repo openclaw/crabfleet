@@ -121,6 +121,7 @@ struct VNCConnectionProfile: Identifiable, Codable, Hashable {
   var port: Int
   var username: String
   var favorite: Bool
+  var prefersPasswordOnlyARD: Bool?
   var createdAt: Date
   var lastConnectedAt: Date?
 
@@ -131,6 +132,7 @@ struct VNCConnectionProfile: Identifiable, Codable, Hashable {
     port: Int,
     username: String = "",
     favorite: Bool = false,
+    prefersPasswordOnlyARD: Bool? = nil,
     createdAt: Date = .now,
     lastConnectedAt: Date? = nil
   ) {
@@ -140,6 +142,7 @@ struct VNCConnectionProfile: Identifiable, Codable, Hashable {
     self.port = port
     self.username = username
     self.favorite = favorite
+    self.prefersPasswordOnlyARD = prefersPasswordOnlyARD
     self.createdAt = createdAt
     self.lastConnectedAt = lastConnectedAt
   }
@@ -165,6 +168,7 @@ struct DesktopTarget: Identifiable, Hashable {
   let desktopAvailable: Bool
   let profileID: String?
   let nativeVncSessionID: String?
+  let prefersPasswordOnlyARD: Bool
 
   init(lease: CrabboxLease) {
     id = "fleet:\(lease.id)"
@@ -182,6 +186,7 @@ struct DesktopTarget: Identifiable, Hashable {
     desktopAvailable = lease.desktopAvailable
     profileID = nil
     nativeVncSessionID = lease.nativeVncSessionID
+    prefersPasswordOnlyARD = false
   }
 
   init(profile: VNCConnectionProfile) {
@@ -200,6 +205,7 @@ struct DesktopTarget: Identifiable, Hashable {
     desktopAvailable = true
     profileID = profile.id
     nativeVncSessionID = nil
+    prefersPasswordOnlyARD = profile.prefersPasswordOnlyARD ?? false
   }
 
   init(host: RegisteredDesktopHost) {
@@ -218,6 +224,7 @@ struct DesktopTarget: Identifiable, Hashable {
     desktopAvailable = true
     profileID = nil
     nativeVncSessionID = nil
+    prefersPasswordOnlyARD = true
   }
 
   func matches(_ query: String) -> Bool {
@@ -234,7 +241,29 @@ struct VNCConnectionRequest: Equatable {
   let username: String
   let password: String
   let clipboardEnabled: Bool
-  var quic: QUICConnectionConfiguration? = nil
+  let rememberAccessCode: Bool
+  var quic: QUICConnectionConfiguration?
+  let prefersPasswordOnlyARD: Bool
+
+  init(
+    host: String,
+    port: Int,
+    username: String,
+    password: String,
+    clipboardEnabled: Bool,
+    rememberAccessCode: Bool = false,
+    quic: QUICConnectionConfiguration? = nil,
+    prefersPasswordOnlyARD: Bool = false
+  ) {
+    self.host = host
+    self.port = port
+    self.username = username
+    self.password = password
+    self.clipboardEnabled = clipboardEnabled
+    self.rememberAccessCode = rememberAccessCode
+    self.quic = quic
+    self.prefersPasswordOnlyARD = prefersPasswordOnlyARD
+  }
 
   var address: VNCAddress {
     .init(host: host, port: port, username: username)

@@ -593,6 +593,7 @@ struct RFBHostSessionStreamTests {
       desktopSizeProvider: { gate.descriptor(basedOn: descriptor) },
       remoteAddressOverride: "Crabfleet browser",
       skipTailnetCheck: true,
+      security: .listener(TestLegacyNoneAuthentication()),
       desktopName: "Crabfleet — Test Mac",
       handshakeTimeout: .seconds(1),
       viewOnly: false,
@@ -670,6 +671,7 @@ struct RFBHostSessionStreamTests {
       clipboard: nil,
       remoteAddressOverride: "Crabfleet browser",
       skipTailnetCheck: true,
+      security: .listener(TestLegacyNoneAuthentication()),
       desktopName: "Crabfleet — Cursor Fairness Test",
       handshakeTimeout: .seconds(1),
       viewOnly: false,
@@ -779,6 +781,7 @@ struct RFBHostSessionStreamTests {
       clipboard: nil,
       remoteAddressOverride: "Crabfleet browser",
       skipTailnetCheck: true,
+      security: .listener(TestLegacyNoneAuthentication()),
       desktopName: "Crabfleet — Cursor Hide Test",
       handshakeTimeout: .seconds(1),
       viewOnly: false,
@@ -923,6 +926,7 @@ struct RFBHostSessionStreamTests {
       clipboard: nil,
       remoteAddressOverride: "Crabfleet browser",
       skipTailnetCheck: true,
+      security: .listener(TestLegacyNoneAuthentication()),
       desktopName: "Crabfleet — Cursor Resize Test",
       handshakeTimeout: .seconds(1),
       viewOnly: false,
@@ -1278,6 +1282,7 @@ private func qualitySession(
     clipboard: nil,
     remoteAddressOverride: "Test viewer",
     skipTailnetCheck: true,
+    security: .listener(TestLegacyNoneAuthentication()),
     desktopName: "Crabfleet quality test",
     handshakeTimeout: .seconds(1),
     viewOnly: false,
@@ -1320,6 +1325,28 @@ private func clientSetDesktopSize(width: UInt16, height: UInt16) -> Data {
   message.appendBigEndian(height)
   message.appendBigEndian(UInt32(0))  // Flags.
   return message
+}
+
+private struct TestLegacyNoneAuthentication: RFBListenerAuthenticating {
+  func authenticate(
+    version: RFBVersion,
+    source: String,
+    io: any RFBByteStream
+  ) async throws {
+    if version == .v3Point3 {
+      var security = Data()
+      security.appendBigEndian(UInt32(1))
+      try await io.send(security)
+      return
+    }
+    try await io.send(Data([1, 1]))
+    guard try await io.readUInt8() == 1 else {
+      throw PrivateMacShareError.protocolError("test security selection failed")
+    }
+    if version >= .v3Point8 {
+      try await io.send(Data([0, 0, 0, 0]))
+    }
+  }
 }
 
 private final class FeedableRFBByteStream: RFBByteStream, @unchecked Sendable {

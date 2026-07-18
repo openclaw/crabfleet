@@ -1,5 +1,9 @@
 import Foundation
 
+struct AuthenticatedRelayRFBBypass: Sendable {
+  fileprivate init() {}
+}
+
 protocol RelayWebSocketTasking: AnyObject, Sendable {
   func resume()
   func receive() async throws -> URLSessionWebSocketTask.Message
@@ -287,6 +291,7 @@ final class RelayHostPublisher: @unchecked Sendable {
         },
         remoteAddressOverride: "Crabfleet browser",
         skipTailnetCheck: true,
+        security: .relay(AuthenticatedRelayRFBBypass()),
         desktopName: "Crabfleet — \(Host.current().localizedName ?? "Mac")",
         handshakeTimeout: nil,
         viewOnly: true,

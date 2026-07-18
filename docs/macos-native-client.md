@@ -22,10 +22,12 @@ app-owned private desktop host for Mac-to-Mac access.
   background previews capped at 4 fps, and all sessions capped at 0.5 fps while
   the app is inactive. Cards retain coalesced, materialized 640×360 previews.
 - Generic addresses accept `host`, `host:port`, `vnc://user@host:port`, and
-  bracketed IPv6. Saved profiles contain metadata only; passwords remain in
-  memory for the connection attempt.
+  bracketed IPv6. Saved profiles contain metadata only. Direct-connection
+  passwords stay in memory unless the user opts into the macOS data-protection
+  Keychain, keyed by host, port, and case-sensitive username.
 - RFB 3.3, 3.7, and 3.8 framing is supported, including server-selected RFB
-  3.3 None and VNC-password authentication.
+  3.3 VNC-password authentication. The native viewer prefers ARD when a
+  password is present and the server explicitly offers it.
 - Client-side fit scaling and rendering use RoyalVNCKit's IOSurface/Metal path.
 - Share This Mac captures a selected display and optional system audio with
   ScreenCaptureKit, then serves private HEVC, Open H.264, or Tight/JPEG RFB 3.8
@@ -59,7 +61,11 @@ unsupported text is rejected instead of silently becoming empty data.
 ## Share This Mac
 
 The host path is deliberately app-owned. It does not start, configure, proxy,
-or depend on `screensharingd`, Remote Management, or a VNC password. The direct
+or depend on `screensharingd` or Remote Management. Each share run generates a
+random 12-character alphanumeric password with `SecRandomCopyBytes`; it is
+shown with copy and regenerate controls, retained only in memory, and required
+for every new direct listener session. Regeneration does not disconnect
+existing viewers. The direct
 Mac-to-Mac path remains on Tailscale; a registered share can additionally use
 an owner-scoped Crabfleet Worker relay for first-party browser access.
 
@@ -92,12 +98,13 @@ an owner-scoped Crabfleet Worker relay for first-party browser access.
    stable endpoint per display in the signed-in user's private Fleet registry.
    The primary row keeps the host ID; additional rows use `-d2`, `-d3`, and
    `-d4` suffixes, and every row includes the display label. The receiving app
-   discovers each display as its own card and directly connects with no VNC
-   password. Each row also carries its QUIC port and certificate SPKI hash. The
-   native viewer tries that pinned QUIC endpoint first, rejects a certificate
-   mismatch, and transparently retries the registered TCP endpoint if QUIC or
-   the RFB handshake has not completed in two seconds. Rows without both QUIC
-   fields keep the rolling-upgrade-safe TCP behavior. The displayed
+   discovers each display as its own card and prompts for the share password on
+   direct connection. Each row also carries its QUIC port and certificate SPKI
+   hash. The native viewer tries that pinned QUIC endpoint first, rejects a
+   certificate mismatch, performs the same RFB password handshake as TCP, and
+   transparently retries the registered TCP endpoint if QUIC or the RFB
+   handshake has not completed in two seconds. Rows without both QUIC fields
+   keep the rolling-upgrade-safe TCP behavior. The displayed
    `vnc://100.x.y.z:5901` and consecutive-port addresses remain Quick Connect
    fallbacks. Recovery keys the publication to the existing host/display
    endpoint, then refreshes a changed QUIC pin or availability under that same
@@ -246,18 +253,45 @@ Accessibility is not required to start the listener. Without it, Crabfleet
 serves a view-only desktop. The persisted View only toggle can also discard
 remote keyboard and pointer events live even when Accessibility is available.
 
-Tailscale supplies the encrypted, ACL-controlled transport and peer identity;
-RFB None authentication is accepted only inside that already-authenticated
-direct channel. Browser sessions use RFB None only after the Worker has
-authenticated the ownership-token host and the registration owner's browser
-session.
-QUIC adds TLS and pins the host's self-signed certificate by the SPKI SHA-256
-hash carried opaquely in the private Fleet row. The host creates one persistent
-P-256 ECDSA key and certificate in Keychain on first share. The original design
-called for Ed25519, but the public Security.framework `SecIdentity` API required
-by Network.framework cannot create or import an Ed25519 identity; P-256 keeps
-the private key non-exported and supplies the same pinned, self-signed trust
-boundary.
+### Threat model
+
+Tailscale supplies encrypted transport, device and user identity, reachability,
+and ACL enforcement. Crabfleet additionally resolves each source with
+`tailscale whois`, requires the host's Tailscale owner, and then requires RFB
+authentication. RFB 3.7/3.8 direct listeners offer ARD (type 30) followed by
+VNC authentication (type 2); RFB 3.3 selects VNC authentication. Security None
+is never offered on a tailnet listener. Native Crabfleet viewers prefer ARD,
+which uses the full share password through validated safe-prime Diffie-Hellman.
+Registered Fleet hosts carry that provenance automatically. For a copied share
+address entered through Quick Connect, enable **Crabfleet Share (prefer ARD)**;
+the saved profile remembers that explicit choice without guessing from an IP
+range or credential shape.
+Compatibility clients may select classic VNC DES; that protocol standard uses
+only the first eight ISO-8859-1 password bytes, so ARD is preferred when
+available.
+
+Failed direct authentication is damped per source IP in a bounded in-memory
+table: delays increase exponentially, and the fifth failure locks that source
+out for 30 seconds. The relay has a separate trust boundary. Only byte streams
+constructed by `RelayHostPublisher` may bypass listener authentication, and
+they retain the existing RFB None exchange after the Worker authenticates both
+the ownership-token publisher and the registration owner's browser session.
+No relay protocol changed.
+
+RFB authentication adds a per-share secret if a tailnet device, identity, or
+ACL is compromised, but it does not encrypt or authenticate the complete RFB
+byte stream. Future VeNCrypt/TLS would add RFB-layer server authentication,
+confidentiality, and integrity, including protection independent of the
+underlying network. It remains out of scope here.
+
+QUIC additionally uses TLS and pins the host's self-signed certificate by the
+SPKI SHA-256 hash carried opaquely in the private Fleet row. The host creates
+one persistent P-256 ECDSA key and certificate in Keychain on first share. The
+public Security.framework `SecIdentity` API required by Network.framework
+cannot create or import an Ed25519 identity; P-256 keeps the private key
+non-exported and supplies the pinned, self-signed trust boundary. Future
+VeNCrypt would bring an RFB-layer TLS boundary to TCP and other transports too.
+
 The relay never stores the registration token or RFB bytes. The direct listener
 is not reachable on Wi-Fi, Ethernet, loopback, or a public address. The host app
 must remain running, and stopping the share cancels the listener, relay
@@ -274,6 +308,17 @@ RExt 4:4:4 probe. Decoder failure renegotiates HEVC to H.264 to Tight without
 affecting older hosts or clients. Framebuffer requests remain paced one at a
 time, including empty updates, and ExtendedDesktopSize requests are debounced
 until the host announces its screen layout.
+
+When the browser RFB client is used with a direct tailnet transport, it selects
+VNC authentication. A direct-transport embedding awaits the exported
+`browserDirectRFBAuthentication` helper before opening its byte transport; the
+helper uses a masked password dialog and remembers a successful value only in
+the current tab's `sessionStorage`. The input uses one-time-code autofill
+semantics rather than account-password storage or autofill. A rejected value is
+removed before the next attempt. The shipped Fleet browser action remains an
+owner-authenticated Worker relay because browsers cannot open the listener's raw
+TCP socket. Relay sessions continue selecting Security None and deliberately do
+not invoke the direct credential helper.
 
 The viewer renders aspect-fit at device pixel ratio, forwards bounded pointer
 and keyboard input, renders negotiated CursorWithAlpha shapes locally, uses
@@ -339,11 +384,11 @@ no longer bundles or builds the modified D3DES source.
   behind an authenticated SSH tunnel. Share This Mac may inject its single
   Network.framework QUIC stream through the same byte-stream adapter after
   Fleet SPKI verification; it is the identity-gated tailnet exception.
-- The hardened prototype negotiates standard VNC password or no-auth security
-  only. The bundled ARD Diffie-Hellman path now requires a full-width
-  probabilistic safe-prime group and nonzero public/shared results, but ARD,
-  UltraVNC MS Logon II, Tight security, and TLS remain disabled in the app until
-  their complete interoperability surfaces are enabled and tested.
+- Direct Share This Mac listeners negotiate ARD followed by standard VNC
+  password authentication and never offer Security None. The bundled ARD
+  Diffie-Hellman path requires a full-width probabilistic safe-prime group and
+  nonzero public/shared results. UltraVNC MS Logon II, Tight security, VeNCrypt,
+  and other RFB-layer TLS modes remain disabled.
 - Password authentication uses per-call CommonCrypto DES and is safe for
   concurrent sessions.
 - App-owned hosting shares up to four displays through separate Fleet rows and

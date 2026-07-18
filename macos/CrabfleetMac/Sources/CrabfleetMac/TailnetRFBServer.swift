@@ -284,6 +284,7 @@ final class TailnetRFBServer: @unchecked Sendable {
   private let quicIdentity: QUICHostIdentity?
   private let handshakeTimeout: Duration
   private let sessionGate: RFBHostSessionGate
+  private let listenerAuthentication: any RFBListenerAuthenticating
   private let queue = DispatchQueue(label: "org.openclaw.crabfleet.rfb-listener")
   private let eventQueue = DispatchQueue(label: "org.openclaw.crabfleet.rfb-events")
   private let lock = NSLock()
@@ -295,6 +296,7 @@ final class TailnetRFBServer: @unchecked Sendable {
   private var sessionQUICGroupIDs: [UUID: ObjectIdentifier] = [:]
   private var listenerGeneration: UUID?
   private var readyTransports: Set<DirectRFBTransport> = []
+  private var listenerPreparation: Task<Void, Never>?
   private var sessions: [UUID: RFBHostSession] = [:]
   private var connectedPeers: [UUID: String] = [:]
   private var sessionTransports: [UUID: DirectRFBTransport] = [:]
@@ -324,6 +326,8 @@ final class TailnetRFBServer: @unchecked Sendable {
     port: UInt16,
     quicPort: UInt16? = nil,
     quicIdentity: QUICHostIdentity? = nil,
+    credentialProvider: @escaping @Sendable () -> String,
+    authThrottle: RFBAuthThrottle,
     handshakeTimeout: Duration = .seconds(10),
     sessionGate: RFBHostSessionGate = RFBHostSessionGate(),
     eventHandler: @escaping EventHandler
@@ -338,6 +342,9 @@ final class TailnetRFBServer: @unchecked Sendable {
     self.port = port
     self.quicPort = quicPort
     self.quicIdentity = quicIdentity
+    listenerAuthentication = RFBListenerAuthentication(
+      credentialProvider: credentialProvider,
+      throttle: authThrottle)
     self.handshakeTimeout = handshakeTimeout
     self.sessionGate = sessionGate
     self.eventHandler = eventHandler
@@ -386,15 +393,56 @@ final class TailnetRFBServer: @unchecked Sendable {
       listenerGeneration = generation
       readyTransports.removeAll()
     }
-    listener.start(queue: queue)
-    configuredQUICListener?.start(queue: queue)
+    let preparation = Task { [weak self, weak listener] in
+      guard let self, let listener else { return }
+      do {
+        try await RFBARDPrewarmer.shared.prepare()
+      } catch {
+        let failedListeners = withLock { () -> (NWListener, NWListener?)? in
+          guard self.listenerGeneration == generation, self.listener === listener else {
+            return nil
+          }
+          self.listener = nil
+          let failedQUICListener = self.quicListener
+          self.quicListener = nil
+          self.listenerGeneration = nil
+          self.listenerPreparation = nil
+          self.readyTransports.removeAll()
+          return (listener, failedQUICListener)
+        }
+        if let failedListeners {
+          failedListeners.0.cancel()
+          failedListeners.1?.cancel()
+          emit(.listenerFailed(error.localizedDescription))
+        }
+        return
+      }
+      let isCurrent = withLock {
+        guard !Task.isCancelled, self.listenerGeneration == generation,
+          self.listener === listener
+        else { return false }
+        self.listenerPreparation = nil
+        return true
+      }
+      if isCurrent {
+        listener.start(queue: queue)
+        configuredQUICListener?.start(queue: queue)
+      }
+    }
+    withLock {
+      if listenerGeneration == generation {
+        listenerPreparation = preparation
+      } else {
+        preparation.cancel()
+      }
+    }
   }
 
   func stop() {
     let values = withLock {
       () -> (
-        NWListener?, NWListener?, [(UUID, RFBHostSession)], [NWConnectionGroup],
-        [Task<Void, Never>]
+        NWListener?, NWListener?, Task<Void, Never>?, [(UUID, RFBHostSession)],
+        [NWConnectionGroup], [Task<Void, Never>]
       ) in
       if !sessions.isEmpty {
         emit(.disconnected(count: 0, remainingPeer: nil))
@@ -404,6 +452,7 @@ final class TailnetRFBServer: @unchecked Sendable {
         quicListener = nil
         listenerGeneration = nil
         readyTransports.removeAll()
+        listenerPreparation = nil
         sessions.removeAll()
         connectedPeers.removeAll()
         sessionTransports.removeAll()
@@ -415,14 +464,15 @@ final class TailnetRFBServer: @unchecked Sendable {
         sessionQUICGroupIDs.removeAll()
       }
       return (
-        listener, quicListener, Array(sessions), Array(quicGroups.values),
-        Array(pendingQUICTimeouts.values))
+        listener, quicListener, listenerPreparation, Array(sessions),
+        Array(quicGroups.values), Array(pendingQUICTimeouts.values))
     }
     values.0?.cancel()
     values.1?.cancel()
-    for (_, session) in values.2 { session.stop() }
-    for group in values.3 { group.cancel() }
-    for timeout in values.4 { timeout.cancel() }
+    values.2?.cancel()
+    for (_, session) in values.3 { session.stop() }
+    for group in values.4 { group.cancel() }
+    for timeout in values.5 { timeout.cancel() }
   }
 
   func setViewOnly(_ enabled: Bool) {
@@ -598,6 +648,7 @@ final class TailnetRFBServer: @unchecked Sendable {
         sessionGate.descriptor(basedOn: descriptor)
       },
       requiredLocalAddress: identity.ipv4Address,
+      security: .listener(listenerAuthentication),
       desktopName: "Crabfleet — \(identity.hostName)",
       handshakeTimeout: handshakeTimeout,
       viewOnly: false,
@@ -817,6 +868,7 @@ final class RFBHostSession: @unchecked Sendable {
   private let requiredLocalAddress: String?
   private let remoteAddressOverride: String?
   private let skipTailnetCheck: Bool
+  private let security: RFBSessionSecurity
   private let desktopName: String
   private let handshakeTimeout: Duration?
   private let didAuthorize: @Sendable () -> Void
@@ -899,6 +951,7 @@ final class RFBHostSession: @unchecked Sendable {
     requiredLocalAddress: String? = nil,
     remoteAddressOverride: String? = nil,
     skipTailnetCheck: Bool = false,
+    security: RFBSessionSecurity,
     desktopName: String,
     handshakeTimeout: Duration?,
     viewOnly: Bool,
@@ -931,6 +984,7 @@ final class RFBHostSession: @unchecked Sendable {
     self.requiredLocalAddress = requiredLocalAddress
     self.remoteAddressOverride = remoteAddressOverride
     self.skipTailnetCheck = skipTailnetCheck
+    self.security = security
     self.desktopName = desktopName
     self.handshakeTimeout = handshakeTimeout
     self.qualityMode = qualityMode
@@ -1108,7 +1162,7 @@ final class RFBHostSession: @unchecked Sendable {
     try activateIfRunning()
 
     let io = byteStream
-    try await handshakeBeforeDeadline(io: io)
+    try await handshakeBeforeDeadline(io: io, source: remoteAddress)
     try await capture.addCursorSession(id: sessionID)
     let registered = withLock { () -> Bool in
       guard !finished, !Task.isCancelled else { return false }
@@ -1139,27 +1193,18 @@ final class RFBHostSession: @unchecked Sendable {
     lock.unlock()
   }
 
-  private func handshake(io: any RFBByteStream) async throws {
+  private func handshake(io: any RFBByteStream, source: String) async throws {
     try await io.send(RFBVersion.serverBanner)
     let clientBanner = try await io.readExactly(12)
     guard let version = RFBVersion(banner: clientBanner) else {
       throw PrivateMacShareError.protocolError("unsupported RFB version")
     }
 
-    if version == .v3Point3 {
-      var security = Data()
-      security.appendBigEndian(UInt32(1))
-      try await io.send(security)
-    } else {
-      try await io.send(Data([1, 1]))
-      guard try await io.readUInt8() == 1 else {
-        throw PrivateMacShareError.protocolError("unsupported security selection")
-      }
-      if version >= .v3Point8 {
-        var securityResult = Data()
-        securityResult.appendBigEndian(UInt32(0))
-        try await io.send(securityResult)
-      }
+    switch security {
+    case .listener(let authentication):
+      try await authentication.authenticate(version: version, source: source, io: io)
+    case .relay:
+      try await negotiateRelaySecurity(version: version, io: io)
     }
 
     _ = try await io.readUInt8()  // ClientInit shared flag
@@ -1177,9 +1222,27 @@ final class RFBHostSession: @unchecked Sendable {
     commitCursorFrameSize(width: currentWidth, height: currentHeight)
   }
 
-  private func handshakeBeforeDeadline(io: any RFBByteStream) async throws {
+  private func negotiateRelaySecurity(version: RFBVersion, io: any RFBByteStream) async throws {
+    if version == .v3Point3 {
+      var security = Data()
+      security.appendBigEndian(UInt32(1))
+      try await io.send(security)
+    } else {
+      try await io.send(Data([1, 1]))
+      guard try await io.readUInt8() == 1 else {
+        throw PrivateMacShareError.protocolError("unsupported security selection")
+      }
+      if version >= .v3Point8 {
+        var securityResult = Data()
+        securityResult.appendBigEndian(UInt32(0))
+        try await io.send(securityResult)
+      }
+    }
+  }
+
+  private func handshakeBeforeDeadline(io: any RFBByteStream, source: String) async throws {
     guard let handshakeTimeout else {
-      try await handshake(io: io)
+      try await handshake(io: io, source: source)
       withLock { handshakeFinished = true }
       return
     }
@@ -1192,7 +1255,7 @@ final class RFBHostSession: @unchecked Sendable {
       self?.expireHandshake()
     }
     do {
-      try await handshake(io: io)
+      try await handshake(io: io, source: source)
       deadlineTask.cancel()
       let timedOut = withLock { () -> Bool in
         handshakeFinished = true
