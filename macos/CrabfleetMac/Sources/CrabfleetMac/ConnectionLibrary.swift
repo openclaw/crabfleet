@@ -141,7 +141,7 @@ final class ConnectionLibrary: ObservableObject {
     name: String,
     address: VNCAddress,
     favorite: Bool = false,
-    prefersPasswordOnlyARD: Bool = false
+    prefersPasswordOnlyARD: Bool? = nil
   ) -> VNCConnectionProfile {
     if let index = profiles.firstIndex(where: {
       $0.host.caseInsensitiveCompare(address.host) == .orderedSame && $0.port == address.port
@@ -149,7 +149,9 @@ final class ConnectionLibrary: ObservableObject {
       profiles[index].name = name
       profiles[index].username = address.username
       profiles[index].favorite = favorite || profiles[index].favorite
-      profiles[index].prefersPasswordOnlyARD = prefersPasswordOnlyARD
+      if let prefersPasswordOnlyARD {
+        profiles[index].prefersPasswordOnlyARD = prefersPasswordOnlyARD
+      }
       persist()
       return profiles[index]
     }
@@ -160,7 +162,7 @@ final class ConnectionLibrary: ObservableObject {
       port: address.port,
       username: address.username,
       favorite: favorite,
-      prefersPasswordOnlyARD: prefersPasswordOnlyARD
+      prefersPasswordOnlyARD: prefersPasswordOnlyARD ?? false
     )
     profiles.append(profile)
     sortProfiles()

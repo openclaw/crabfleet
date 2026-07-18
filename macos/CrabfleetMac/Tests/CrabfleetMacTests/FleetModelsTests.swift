@@ -290,6 +290,36 @@ struct FleetModelsTests {
   }
 
   @Test @MainActor
+  func profileUpdateWithoutAuthPreferencePreservesARDRequest() throws {
+    let suiteName = "CrabfleetMacTests.\(UUID().uuidString)"
+    let defaults = try #require(UserDefaults(suiteName: suiteName))
+    defer { defaults.removePersistentDomain(forName: suiteName) }
+    let address = VNCAddress(host: "100.64.0.8", port: 5901, username: "")
+    let library = ConnectionLibrary(defaults: defaults, storageKey: "profiles")
+
+    _ = library.save(
+      name: "Crabfleet Share",
+      address: address,
+      prefersPasswordOnlyARD: true)
+    let updated = library.save(
+      name: address.displayValue,
+      address: address,
+      favorite: true)
+
+    #expect(updated.prefersPasswordOnlyARD == true)
+    #expect(library.profiles.first?.prefersPasswordOnlyARD == true)
+    let request = VNCConnectionRequest(
+      host: updated.host,
+      port: updated.port,
+      username: updated.username,
+      password: "test-auth-token",
+      clipboardEnabled: false,
+      rememberAccessCode: true,
+      prefersPasswordOnlyARD: updated.prefersPasswordOnlyARD ?? false)
+    #expect(request.prefersPasswordOnlyARD)
+  }
+
+  @Test @MainActor
   func remembersDirectViewerAccessCodeOutsideProfileStorage() throws {
     let suiteName = "CrabfleetMacTests.\(UUID().uuidString)"
     let defaults = try #require(UserDefaults(suiteName: suiteName))
