@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Blend the macOS title bar into the desktop deck, align its unified top band, and add hover, focus, refresh-progress, and empty-state interaction polish.
 - Keep Share This Mac permission status and start availability synchronized with Screen Recording and Accessibility grants made in System Settings while the sheet is open.
 - Add bilaterally negotiated `QCTL` per-viewer Auto/Sharp/Smooth quality control with strict fail-closed message parsing, independent session rate and chroma policy, per-host native and session-scoped browser pickers, host default fallback for older peers, and active viewer-mode diagnostics.
 - Add SPKI-pinned QUIC-first direct tailnet viewing on per-display ports 5911+, with the unchanged single-stream RFB protocol, a transparent two-second TCP fallback, shared session accounting, stable same-publication capability refresh across host recovery, host and viewer transport diagnostics, and opaque Fleet capability forwarding for future WebTransport probing.

@@ -102,6 +102,7 @@ struct FleetRootView: View {
           )
         }
         .background(DeckBackground())
+        .ignoresSafeArea(.container, edges: .top)
       }
     }
     .tint(.mint)
@@ -310,6 +311,8 @@ private struct DesktopSourceRail: View {
   let shareThisMac: () -> Void
   let quickConnect: () -> Void
 
+  @State private var isSourcePickerHovering = false
+
   var body: some View {
     VStack(alignment: .leading, spacing: 0) {
       HStack(spacing: 11) {
@@ -334,7 +337,7 @@ private struct DesktopSourceRail: View {
         }
       }
       .padding(.horizontal, 17)
-      .padding(.top, 18)
+      .padding(.top, 34)
       .padding(.bottom, 20)
 
       VStack(spacing: 4) {
@@ -383,9 +386,17 @@ private struct DesktopSourceRail: View {
         }
         .padding(.horizontal, 10)
         .frame(height: 40)
-        .background(.white.opacity(0.045), in: RoundedRectangle(cornerRadius: 8))
+        .background(
+          .white.opacity(isSourcePickerHovering ? 0.07 : 0.045),
+          in: RoundedRectangle(cornerRadius: 8)
+        )
       }
       .menuStyle(.borderlessButton)
+      .onHover { hovering in
+        withAnimation(.easeOut(duration: 0.12)) {
+          isSourcePickerHovering = hovering
+        }
+      }
       .padding(.horizontal, 12)
       .padding(.bottom, 10)
 
@@ -435,7 +446,11 @@ private struct DesktopSourceRail: View {
       .padding(12)
     }
     .frame(width: 224)
-    .background(Color(red: 0.052, green: 0.058, blue: 0.062).opacity(0.98))
+    .background(
+      Color(red: 0.052, green: 0.058, blue: 0.062)
+        .opacity(0.98)
+        .ignoresSafeArea(edges: .top)
+    )
   }
 
   private func count(for scope: DesktopScope) -> Int {
@@ -455,6 +470,8 @@ private struct SourceRailButton: View {
   let isSelected: Bool
   let action: () -> Void
 
+  @State private var isHovering = false
+
   var body: some View {
     Button(action: action) {
       HStack(spacing: 9) {
@@ -472,7 +489,11 @@ private struct SourceRailButton: View {
       .frame(height: 34)
       .background(
         RoundedRectangle(cornerRadius: 8, style: .continuous)
-          .fill(isSelected ? Color.white.opacity(0.08) : .clear)
+          .fill(
+            isSelected
+              ? Color.mint.opacity(0.09)
+              : (isHovering ? Color.white.opacity(0.04) : .clear)
+          )
       )
       .overlay(alignment: .leading) {
         if isSelected {
@@ -481,6 +502,11 @@ private struct SourceRailButton: View {
       }
     }
     .buttonStyle(.plain)
+    .onHover { hovering in
+      withAnimation(.easeOut(duration: 0.12)) {
+        isHovering = hovering
+      }
+    }
   }
 }
 
@@ -494,6 +520,8 @@ private struct DesktopDeck: View {
   let refresh: () -> Void
   let quickConnect: () -> Void
   let focus: (DesktopTarget.ID) -> Void
+
+  @FocusState private var isSearchFocused: Bool
 
   private let columns = [
     GridItem(.adaptive(minimum: 292, maximum: 440), spacing: 17, alignment: .top)
@@ -518,6 +546,7 @@ private struct DesktopDeck: View {
           TextField("Search computers", text: $query)
             .textFieldStyle(.plain)
             .frame(width: 176)
+            .focused($isSearchFocused)
           if !query.isEmpty {
             Button {
               query = ""
@@ -532,12 +561,27 @@ private struct DesktopDeck: View {
         .padding(.horizontal, 10)
         .frame(height: 32)
         .background(.white.opacity(0.055), in: RoundedRectangle(cornerRadius: 8))
+        .overlay {
+          RoundedRectangle(cornerRadius: 8)
+            .stroke(
+              isSearchFocused ? Color.mint.opacity(0.4) : .clear,
+              lineWidth: 1
+            )
+        }
 
         Button(action: refresh) {
-          Image(systemName: "arrow.clockwise")
-            .opacity(isRefreshing ? 0.45 : 1)
+          Group {
+            if isRefreshing {
+              ProgressView()
+                .controlSize(.small)
+            } else {
+              Image(systemName: "arrow.clockwise")
+            }
+          }
+          .frame(width: 16, height: 16)
         }
         .buttonStyle(.borderless)
+        .disabled(isRefreshing)
         .help("Refresh Crabfleet")
 
         Button("Connect", systemImage: "plus", action: quickConnect)
@@ -545,16 +589,21 @@ private struct DesktopDeck: View {
           .controlSize(.small)
       }
       .padding(.horizontal, 22)
-      .padding(.vertical, 17)
+      .padding(.top, 20)
+      .padding(.bottom, 14)
 
       Divider().overlay(.white.opacity(0.055))
 
       if targets.isEmpty {
-        ContentUnavailableView(
-          "No desktops here",
-          systemImage: "rectangle.slash",
-          description: Text("Change the source or add a VNC connection.")
-        )
+        ContentUnavailableView {
+          Label("No desktops here", systemImage: "rectangle.slash")
+        } description: {
+          Text("Change the source or add a VNC connection.")
+        } actions: {
+          Button("Quick Connect", systemImage: "plus", action: quickConnect)
+            .buttonStyle(.borderedProminent)
+            .controlSize(.regular)
+        }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
       } else {
         ScrollView {

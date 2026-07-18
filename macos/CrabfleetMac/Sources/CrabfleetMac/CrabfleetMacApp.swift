@@ -183,6 +183,7 @@ struct CrabfleetMacApp: App {
     }
     .defaultSize(width: 1_360, height: 860)
     .windowResizability(.contentMinSize)
+    .windowStyle(.hiddenTitleBar)
     .commands {
       CommandGroup(replacing: .newItem) {}
 
@@ -248,6 +249,7 @@ private struct CrabfleetAppRoot: View {
         )
       }
     }
+    .background(WindowConfigurator())
     .frame(minWidth: 1_080, minHeight: 680)
     .preferredColorScheme(.dark)
     .task(id: localOnly) {
@@ -266,4 +268,24 @@ private struct CrabfleetAppRoot: View {
     }
     localOnly = false
   }
+}
+
+private struct WindowConfigurator: NSViewRepresentable {
+  func makeNSView(context: Context) -> NSView {
+    let view = NSView()
+    DispatchQueue.main.async {
+      guard let window = view.window else { return }
+      window.backgroundColor = NSColor(
+        srgbRed: 0.018,
+        green: 0.023,
+        blue: 0.026,
+        alpha: 1
+      )
+      window.titlebarSeparatorStyle = .none
+      window.isOpaque = true
+    }
+    return view
+  }
+
+  func updateNSView(_ nsView: NSView, context: Context) {}
 }
