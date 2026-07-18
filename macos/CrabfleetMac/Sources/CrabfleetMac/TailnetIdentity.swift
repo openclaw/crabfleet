@@ -380,11 +380,11 @@ private final class TailscaleCommandExecution: @unchecked Sendable {
 
 struct TailscaleStatusDocument: Decodable, Sendable {
   struct Node: Decodable, Sendable {
-    let dnsName: String
-    let hostName: String
-    let online: Bool
+    let dnsName: String?
+    let hostName: String?
+    let online: Bool?
     let tailscaleIPs: [String]
-    let userID: Int64
+    let userID: Int64?
 
     enum CodingKeys: String, CodingKey {
       case dnsName = "DNSName"
@@ -393,10 +393,20 @@ struct TailscaleStatusDocument: Decodable, Sendable {
       case tailscaleIPs = "TailscaleIPs"
       case userID = "UserID"
     }
+
+    init(from decoder: any Decoder) throws {
+      let container = try decoder.container(keyedBy: CodingKeys.self)
+      dnsName = try container.decodeIfPresent(String.self, forKey: .dnsName)
+      hostName = try container.decodeIfPresent(String.self, forKey: .hostName)
+      online = try container.decodeIfPresent(Bool.self, forKey: .online)
+      tailscaleIPs =
+        try container.decodeIfPresent([String].self, forKey: .tailscaleIPs) ?? []
+      userID = try container.decodeIfPresent(Int64.self, forKey: .userID)
+    }
   }
 
   struct Tailnet: Decodable, Sendable {
-    let name: String
+    let name: String?
 
     enum CodingKeys: String, CodingKey {
       case name = "Name"
@@ -404,7 +414,7 @@ struct TailscaleStatusDocument: Decodable, Sendable {
   }
 
   struct User: Decodable, Sendable {
-    let loginName: String
+    let loginName: String?
 
     enum CodingKeys: String, CodingKey {
       case loginName = "LoginName"
@@ -419,7 +429,7 @@ struct TailscaleStatusDocument: Decodable, Sendable {
     }
   }
 
-  let backendState: String
+  let backendState: String?
   let currentTailnet: Tailnet?
   let selfNode: Node?
   let peerNodes: [String: PeerNode]
@@ -435,11 +445,19 @@ struct TailscaleStatusDocument: Decodable, Sendable {
 
   init(from decoder: any Decoder) throws {
     let container = try decoder.container(keyedBy: CodingKeys.self)
-    backendState = try container.decode(String.self, forKey: .backendState)
+    backendState = try container.decodeIfPresent(String.self, forKey: .backendState)
     currentTailnet = try container.decodeIfPresent(Tailnet.self, forKey: .currentTailnet)
     selfNode = try container.decodeIfPresent(Node.self, forKey: .selfNode)
-    users = try container.decode([String: User].self, forKey: .users)
+    users = try container.decodeIfPresent([String: User].self, forKey: .users) ?? [:]
     peerNodes = (try? container.decode([String: PeerNode].self, forKey: .peerNodes)) ?? [:]
+  }
+
+  static func decode(from data: Data) throws -> Self {
+    do {
+      return try JSONDecoder().decode(Self.self, from: data)
+    } catch {
+      throw PrivateMacShareError.invalidTailscaleStatus
+    }
   }
 }
 
@@ -454,9 +472,14 @@ enum TailnetRegistrationHealth: Equatable, Sendable {
 
 enum TailnetRegistrationHealthPolicy {
   static func health(from document: TailscaleStatusDocument) -> TailnetRegistrationHealth {
-    guard let node = document.selfNode else { return .ok }
-    var dnsName = node.dnsName
+    guard
+      let node = document.selfNode,
+      var dnsName = node.dnsName?.trimmingCharacters(in: .whitespacesAndNewlines),
+      !dnsName.isEmpty,
+      let hostName = node.hostName
+    else { return .ok }
     while dnsName.last == "." { dnsName.removeLast() }
+    guard dnsName.contains(".") else { return .ok }
     guard
       let firstLabel = dnsName.split(separator: ".", omittingEmptySubsequences: false).first,
       !firstLabel.isEmpty,
@@ -469,17 +492,17 @@ enum TailnetRegistrationHealthPolicy {
       !base.isEmpty,
       !suffix.isEmpty,
       suffix.utf8.allSatisfy({ (48...57).contains($0) }),
-      String(base).caseInsensitiveCompare(node.hostName) == .orderedSame
+      String(base).caseInsensitiveCompare(hostName) == .orderedSame
     else { return .ok }
 
-    let advertised = node.tailscaleIPs.first(where: TailnetIdentityPolicy.isTailscaleIPv4)
+    let advertised = TailnetIdentityPolicy.tailscaleIPv4Candidates(in: node.tailscaleIPs).first
     let matchingPeerPresent = document.peerNodes.values.contains { peer in
       guard let peerHostName = peer.hostName else { return false }
       return peerHostName.caseInsensitiveCompare(String(base)) == .orderedSame
     }
     return .duplicateHostname(
       advertised: advertised,
-      hostName: node.hostName,
+      hostName: hostName,
       matchingPeerPresent: matchingPeerPresent
     )
   }
@@ -491,7 +514,27 @@ struct TailnetIdentity: Equatable, Sendable {
   let dnsName: String
   let hostName: String
   let ipv4Address: String
+  /// Numerically sorted, de-duplicated CGNAT addresses reported for this node.
+  let ipv4Candidates: [String]
   let userID: Int64
+
+  init(
+    tailnetName: String,
+    loginName: String,
+    dnsName: String,
+    hostName: String,
+    ipv4Address: String,
+    ipv4Candidates: [String]? = nil,
+    userID: Int64
+  ) {
+    self.tailnetName = tailnetName
+    self.loginName = loginName
+    self.dnsName = dnsName
+    self.hostName = hostName
+    self.ipv4Address = ipv4Address
+    self.ipv4Candidates = ipv4Candidates ?? [ipv4Address]
+    self.userID = userID
+  }
 
   func vncAddress(port: Int) -> String {
     "vnc://\(ipv4Address):\(port)"
@@ -502,7 +545,18 @@ enum TailnetIdentityPolicy {
   static func identity(from document: TailscaleStatusDocument) throws
     -> TailnetIdentity
   {
-    guard document.backendState == "Running" else {
+    switch document.backendState {
+    case "Running":
+      break
+    case "NeedsLogin":
+      throw PrivateMacShareError.tailscaleNeedsLogin
+    case "Stopped":
+      throw PrivateMacShareError.tailscaleStopped
+    case "Starting":
+      throw PrivateMacShareError.tailscaleStarting
+    case nil:
+      throw PrivateMacShareError.invalidTailscaleStatus
+    default:
       throw PrivateMacShareError.tailscaleNotRunning
     }
     guard
@@ -512,26 +566,50 @@ enum TailnetIdentityPolicy {
       throw PrivateMacShareError.invalidTailnetIdentity
     }
     let tailnetName = rawTailnetName.trimmingCharacters(in: .whitespacesAndNewlines)
-    guard let node = document.selfNode, node.online else {
+    guard let node = document.selfNode else {
+      throw PrivateMacShareError.invalidTailscaleStatus
+    }
+    guard let online = node.online else {
+      throw PrivateMacShareError.invalidTailscaleStatus
+    }
+    guard online else {
       throw PrivateMacShareError.tailscaleOffline
     }
     guard
-      let user = document.users[String(node.userID)],
-      isValidLogin(user.loginName)
+      let userID = node.userID,
+      let loginName = document.users[String(userID)]?.loginName,
+      isValidLogin(loginName)
     else {
       throw PrivateMacShareError.invalidTailnetUser
     }
-    guard let ipv4Address = node.tailscaleIPs.first(where: isTailscaleIPv4) else {
+    let ipv4Candidates = tailscaleIPv4Candidates(in: node.tailscaleIPs)
+    guard let ipv4Address = ipv4Candidates.first else {
+      if node.tailscaleIPs.contains(where: isTailscaleIPv6) {
+        throw PrivateMacShareError.ipv4TailnetAddressUnavailable
+      }
       throw PrivateMacShareError.missingTailnetAddress
     }
+    guard
+      let rawHostName = node.hostName,
+      isValidHostName(rawHostName)
+    else {
+      throw PrivateMacShareError.invalidTailscaleStatus
+    }
+    let hostName = rawHostName.trimmingCharacters(in: .whitespacesAndNewlines)
+    let trimmedDNSName =
+      node.dnsName?
+      .trimmingCharacters(in: .whitespacesAndNewlines)
+      .trimmingCharacters(in: CharacterSet(charactersIn: ".")) ?? ""
+    let dnsName = trimmedDNSName.contains(".") ? trimmedDNSName : hostName
 
     return TailnetIdentity(
       tailnetName: tailnetName,
-      loginName: user.loginName.trimmingCharacters(in: .whitespacesAndNewlines),
-      dnsName: node.dnsName.trimmingCharacters(in: CharacterSet(charactersIn: ".")),
-      hostName: node.hostName,
+      loginName: loginName.trimmingCharacters(in: .whitespacesAndNewlines),
+      dnsName: dnsName,
+      hostName: hostName,
       ipv4Address: ipv4Address,
-      userID: node.userID
+      ipv4Candidates: ipv4Candidates,
+      userID: userID
     )
   }
 
@@ -543,11 +621,43 @@ enum TailnetIdentityPolicy {
     isValidIdentityField(value, maximumUTF8Bytes: 320)
   }
 
+  static func tailscaleIPv4Candidates(in addresses: [String]) -> [String] {
+    // Tailscale status ordering is not an identity contract. Numeric sorting gives
+    // every caller the same canonical address while preserving all viable choices.
+    Array(Set(addresses.filter(isTailscaleIPv4))).sorted {
+      ipv4SortKey($0) < ipv4SortKey($1)
+    }
+  }
+
   static func isTailscaleIPv4(_ value: String) -> Bool {
     let parts = value.split(separator: ".", omittingEmptySubsequences: false)
     guard parts.count == 4 else { return false }
     let octets = parts.compactMap { UInt8($0) }
     return octets.count == 4 && octets[0] == 100 && (64...127).contains(octets[1])
+  }
+
+  static func isTailscaleIPv6(_ value: String) -> Bool {
+    var address = in6_addr()
+    guard value.withCString({ inet_pton(AF_INET6, $0, &address) }) == 1 else {
+      return false
+    }
+    return withUnsafeBytes(of: &address) { bytes in
+      bytes.count == 16
+        && bytes[0] == 0xfd
+        && bytes[1] == 0x7a
+        && bytes[2] == 0x11
+        && bytes[3] == 0x5c
+        && bytes[4] == 0xa1
+        && bytes[5] == 0xe0
+    }
+  }
+
+  private static func ipv4SortKey(_ value: String) -> UInt32 {
+    value.split(separator: ".").reduce(0) { ($0 << 8) | UInt32(UInt8($1) ?? 0) }
+  }
+
+  private static func isValidHostName(_ value: String) -> Bool {
+    isValidIdentityField(value, maximumUTF8Bytes: 253)
   }
 
   private static func isValidIdentityField(_ value: String, maximumUTF8Bytes: Int) -> Bool {
@@ -626,10 +736,15 @@ struct TailnetPeerAuthorizer: TailnetPeerAuthorizing, Sendable {
 enum PrivateMacShareError: LocalizedError, Equatable {
   case tailscaleNotInstalled
   case tailscaleNotRunning
+  case tailscaleNeedsLogin
+  case tailscaleStopped
+  case tailscaleStarting
   case tailscaleOffline
+  case invalidTailscaleStatus
   case invalidTailnetIdentity
   case invalidTailnetUser
   case missingTailnetAddress
+  case ipv4TailnetAddressUnavailable
   case screenRecordingDenied
   case accessibilityDenied
   case commandFailed(status: Int32, message: String)
@@ -645,14 +760,24 @@ enum PrivateMacShareError: LocalizedError, Equatable {
       "Tailscale is not installed. Install Tailscale first."
     case .tailscaleNotRunning:
       "Tailscale is not running."
+    case .tailscaleNeedsLogin:
+      "Tailscale needs you to sign in. Open Tailscale and log in, then try again."
+    case .tailscaleStopped:
+      "Tailscale is stopped. Open Tailscale and connect, then try again."
+    case .tailscaleStarting:
+      "Tailscale is still starting. Wait for it to connect, then try again."
     case .tailscaleOffline:
       "This Mac is offline in Tailscale."
+    case .invalidTailscaleStatus:
+      "Tailscale returned incomplete or malformed status information."
     case .invalidTailnetIdentity:
       "Tailscale did not report a valid active tailnet."
     case .invalidTailnetUser:
       "Tailscale did not report a valid signed-in user."
     case .missingTailnetAddress:
       "Tailscale did not provide a private 100.64.0.0/10 address for this Mac."
+    case .ipv4TailnetAddressUnavailable:
+      "This Mac has only a Tailscale IPv6 address. IPv6-only tailnets are not yet supported for the private desktop listener."
     case .screenRecordingDenied:
       "Crabfleet needs Screen Recording permission to stream this display."
     case .accessibilityDenied:

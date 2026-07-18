@@ -1412,8 +1412,7 @@ final class PrivateMacShareController: ObservableObject {
       throw runnerInitializationError ?? PrivateMacShareError.tailscaleNotInstalled
     }
     let result = try await runner.run(arguments: ["status", "--json"])
-    let document = try JSONDecoder().decode(
-      TailscaleStatusDocument.self,
+    let document = try TailscaleStatusDocument.decode(
       from: Data(result.standardOutput.utf8)
     )
     return (
