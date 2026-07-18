@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Add the Crabfleet Connect foundation with a shared Go RFB 3.8 host core, per-run VNC-DES authentication, Tight/JPEG and client-side cursor/input support, a CI-safe synthetic backend, and a Linux X11 MIT-SHM/XFixes/XTest backend plus cross-compiled CLI, while documenting deferred codecs, Wayland, ARD, audio, and hardware validation.
 - Warn without blocking Share This Mac when Tailscale reports a numerically suffixed duplicate registration, while continuing to advertise the current `Self` node address.
 - Blend the macOS title bar into the desktop deck, align its unified top band, and add hover, focus, refresh-progress, and empty-state interaction polish.
 - Keep Share This Mac permission status and start availability synchronized with Screen Recording and Accessibility grants made in System Settings while the sheet is open.

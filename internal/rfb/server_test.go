@@ -12,9 +12,11 @@ import (
 )
 
 type blockingBackend struct {
-	mu      sync.Mutex
-	calls   int
-	blocked chan struct{}
+	mu        sync.Mutex
+	calls     int
+	blocked   chan struct{}
+	closed    chan struct{}
+	closeOnce sync.Once
 }
 
 func (backend *blockingBackend) Capture(ctx context.Context) (connect.Frame, error) {
@@ -24,8 +26,8 @@ func (backend *blockingBackend) Capture(ctx context.Context) (connect.Frame, err
 	backend.mu.Unlock()
 	if call > 1 {
 		close(backend.blocked)
-		<-ctx.Done()
-		return connect.Frame{}, ctx.Err()
+		<-backend.closed
+		return connect.Frame{}, connect.ErrClosed
 	}
 	return connect.Frame{
 		Width: 2, Height: 2, Stride: 8,
@@ -38,11 +40,14 @@ func (backend *blockingBackend) Capture(ctx context.Context) (connect.Frame, err
 
 func (*blockingBackend) Pointer(context.Context, connect.PointerEvent) error { return nil }
 func (*blockingBackend) Key(context.Context, connect.KeyEvent) error         { return nil }
-func (*blockingBackend) Close() error                                        { return nil }
+func (backend *blockingBackend) Close() error {
+	backend.closeOnce.Do(func() { close(backend.closed) })
+	return nil
+}
 
 func TestServerCloseCancelsBlockedCapture(t *testing.T) {
 	t.Parallel()
-	backend := &blockingBackend{blocked: make(chan struct{})}
+	backend := &blockingBackend{blocked: make(chan struct{}), closed: make(chan struct{})}
 	server, err := NewServer(ServerConfig{Session: SessionConfig{
 		Backend: backend, Password: sessionFixturePassword(), ChallengeReader: &repeatReader{},
 	}})

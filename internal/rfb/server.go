@@ -153,13 +153,24 @@ func (server *Server) Close() error {
 		for _, connection := range connections {
 			_ = connection.Close()
 		}
-		server.wg.Wait()
 		cleanupContext, cleanupCancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
-		server.inputs.releaseAll(cleanupContext)
+		cleanupDone := make(chan struct{})
+		go func() {
+			server.inputs.releaseAll(cleanupContext)
+			close(cleanupDone)
+		}()
+		select {
+		case <-cleanupDone:
+		case <-cleanupContext.Done():
+		}
 		cleanupCancel()
 		if err := server.config.Session.Backend.Close(); server.closeErr == nil {
 			server.closeErr = err
 		}
+		// Backend close must precede the wait: a platform capture call may be
+		// blocked in an OS round trip that ignores Go context cancellation.
+		server.wg.Wait()
+		<-cleanupDone
 	})
 	return server.closeErr
 }
