@@ -2402,7 +2402,10 @@ struct PrivateMacShareTests {
     )
     viewerPasteboard.clearContents()
     let coordinator = ClipboardCoordinator(pasteboard: viewerPasteboard, pollingInterval: 0.02)
-    let session = VNCSessionController(targetID: "smoke", clipboardCoordinator: coordinator)
+    let session = VNCSessionController(
+      targetID: "smoke",
+      clipboardCoordinator: coordinator,
+      frameEncodings: [.tight, .hextile])
     coordinator.focus(session: session, targetID: "smoke")
     var authenticationSuccessCount = 0
     session.connect(
@@ -2410,6 +2413,7 @@ struct PrivateMacShareTests {
       port: port,
       username: "",
       password: "test-auth-token",
+      prefersPasswordOnlyARD: true,
       authenticationSucceeded: { authenticationSuccessCount += 1 }
     )
     defer { session.disconnect() }

@@ -105,6 +105,77 @@ struct QUICTransportTests {
     server.cancel()
   }
 
+  @Test(
+    .enabled(if: udpLoopbackAvailable, "UDP loopback is unavailable in this sandbox"),
+    .timeLimit(.minutes(1)))
+  @MainActor
+  func tailnetQUICListenerAuthenticatesWithARD() async throws {
+    let fixture = try QUICIdentityFixture()
+    defer { fixture.remove() }
+    let tcpPort = try availableLoopbackPort(socketType: SOCK_STREAM)
+    let quicPort = try availableLoopbackPort(socketType: SOCK_DGRAM)
+    let events = QUICEventLog()
+    let server = TailnetRFBServer(
+      identity: .init(
+        tailnetName: "example.test",
+        loginName: "tester@example.test",
+        dnsName: "test-host.example.test",
+        hostName: "Test Host",
+        ipv4Address: "127.0.0.1",
+        userID: 42),
+      runner: QUICNoopTailscaleRunner(),
+      capture: MacScreenCapture(),
+      descriptor: .init(
+        displayID: 0,
+        displayBounds: CGRect(x: 0, y: 0, width: 64, height: 64),
+        frameWidth: 64,
+        frameHeight: 64,
+        sourcePixelWidth: 64,
+        sourcePixelHeight: 64),
+      input: QUICNoopRemoteInput(),
+      peerAuthorizer: QUICLoopbackPeerAuthorizer(),
+      port: tcpPort,
+      quicPort: quicPort,
+      quicIdentity: fixture.hostIdentity,
+      credentialProvider: { "test-auth-token" },
+      authThrottle: RFBAuthThrottle(),
+      eventHandler: { events.append($0) })
+    try server.start()
+    defer { server.stop() }
+
+    let clock = ContinuousClock()
+    var deadline = clock.now.advanced(by: .seconds(30))
+    while !server.quicAvailable, clock.now < deadline {
+      try await Task.sleep(for: .milliseconds(10))
+    }
+    #expect(server.quicAvailable)
+
+    let controller = VNCSessionController(quicFallbackDelay: .seconds(30))
+    controller.connect(
+      host: "127.0.0.1",
+      port: tcpPort,
+      username: "",
+      password: "test-auth-token",
+      clipboardEnabled: false,
+      quic: QUICConnectionConfiguration(
+        port: Int(quicPort),
+        certHash: fixture.hostIdentity.certHash),
+      prefersPasswordOnlyARD: true)
+    defer { controller.disconnect() }
+
+    deadline = clock.now.advanced(by: .seconds(30))
+    while controller.phase != .connected, clock.now < deadline {
+      try await Task.sleep(for: .milliseconds(20))
+    }
+    #expect(controller.phase == .connected)
+    #expect(controller.transport == .quic)
+    #expect(
+      events.values.contains {
+        if case .connected = $0 { return true }
+        return false
+      })
+  }
+
   @Test
   func rejectsMismatchedSPKIPin() throws {
     let fixture = try QUICIdentityFixture()
@@ -274,6 +345,8 @@ struct QUICTransportTests {
       port: tcpPort,
       quicPort: blocker.port,
       quicIdentity: fixture.hostIdentity,
+      credentialProvider: { "test-ownership-token-1" },
+      authThrottle: RFBAuthThrottle(),
       eventHandler: { events.append($0) })
     try server.start()
     defer { server.stop() }
@@ -319,6 +392,8 @@ struct QUICTransportTests {
       port: tcpPort,
       quicPort: quicPort,
       quicIdentity: fixture.hostIdentity,
+      credentialProvider: { "test-ownership-token-1" },
+      authThrottle: RFBAuthThrottle(),
       sessionGate: gate,
       eventHandler: { events.append($0) })
     try server.start()
@@ -440,6 +515,12 @@ private struct QUICNoopTailscaleRunner: TailscaleCommandRunning {
 private struct QUICNoopRemoteInput: RemoteInputForwarding {
   func keyEvent(down: Bool, keysym: UInt32) {}
   func pointerEvent(buttonMask: UInt8, x: UInt16, y: UInt16) {}
+}
+
+private struct QUICLoopbackPeerAuthorizer: TailnetPeerAuthorizing {
+  func authorize(remoteAddress: String) async -> Bool {
+    remoteAddress == "127.0.0.1"
+  }
 }
 
 private final class QUICEventLog: @unchecked Sendable {

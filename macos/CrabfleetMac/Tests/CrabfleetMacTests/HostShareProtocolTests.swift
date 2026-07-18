@@ -1282,6 +1282,7 @@ private func qualitySession(
     clipboard: nil,
     remoteAddressOverride: "Test viewer",
     skipTailnetCheck: true,
+    security: .listener(TestLegacyNoneAuthentication()),
     desktopName: "Crabfleet quality test",
     handshakeTimeout: .seconds(1),
     viewOnly: false,

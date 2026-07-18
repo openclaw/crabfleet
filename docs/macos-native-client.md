@@ -387,7 +387,7 @@ no longer bundles or builds the modified D3DES source.
   password authentication and never offer Security None. The bundled ARD
   Diffie-Hellman path requires a full-width probabilistic safe-prime group and
   nonzero public/shared results. UltraVNC MS Logon II, Tight security, VeNCrypt,
-  and TLS remain disabled.
+  and other RFB-layer TLS modes remain disabled.
 - Password authentication uses per-call CommonCrypto DES and is safe for
   concurrent sessions.
 - App-owned hosting shares up to four displays through separate Fleet rows and

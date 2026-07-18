@@ -100,6 +100,8 @@ final class VNCSessionController: NSObject, ObservableObject {
   private let targetID: String
   private let defaults: UserDefaults
   private let qualityModeDefaultsKey: String
+  private let frameEncodings: [VNCFrameEncodingType]
+  private let quicFallbackDelay: Duration
   private weak var clipboardCoordinator: ClipboardCoordinator?
   private(set) var connection: VNCConnection?
   private let credentialLock = NSLock()
@@ -124,11 +126,17 @@ final class VNCSessionController: NSObject, ObservableObject {
   init(
     targetID: String = UUID().uuidString,
     clipboardCoordinator: ClipboardCoordinator? = nil,
-    defaults: UserDefaults = .standard
+    defaults: UserDefaults = .standard,
+    frameEncodings: [VNCFrameEncodingType]? = nil,
+    quicFallbackDelay: Duration = .seconds(2)
   ) {
     self.targetID = targetID
     self.clipboardCoordinator = clipboardCoordinator
     self.defaults = defaults
+    self.frameEncodings =
+      frameEncodings
+      ?? Self.preferredFrameEncodings(supportsHEVC444: VNCHEVC444Capability.isSupported)
+    self.quicFallbackDelay = quicFallbackDelay
     let qualityKey = "org.openclaw.crabfleet.viewer.quality-mode.\(targetID)"
     qualityModeDefaultsKey = qualityKey
     qualityMode = defaults.string(forKey: qualityKey)
@@ -205,8 +213,7 @@ final class VNCSessionController: NSObject, ObservableObject {
       inputMode: .forwardKeyboardShortcutsIfNotInUseLocally,
       clipboardMode: request.clipboardEnabled ? .externallyManaged : .disabled,
       colorDepth: .depth24Bit,
-      frameEncodings: Self.preferredFrameEncodings(
-        supportsHEVC444: VNCHEVC444Capability.isSupported)
+      frameEncodings: frameEncodings
     )
     let connection = if let networkConnection {
       VNCConnection(
@@ -279,8 +286,8 @@ final class VNCSessionController: NSObject, ObservableObject {
 
   private func scheduleTCPFallback(attemptID: UUID) {
     quicFallbackTask?.cancel()
-    quicFallbackTask = Task { [weak self] in
-      try? await Task.sleep(for: .seconds(2))
+    quicFallbackTask = Task { [weak self, quicFallbackDelay] in
+      try? await Task.sleep(for: quicFallbackDelay)
       guard !Task.isCancelled, let self else { return }
       self.fallbackToTCP(attemptID: attemptID)
     }
