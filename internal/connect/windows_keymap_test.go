@@ -56,3 +56,17 @@ func TestWindowsRuneRejectsNonCharacterKeysyms(t *testing.T) {
 		}
 	}
 }
+
+func TestWindowsShortcutModifiersExcludeShift(t *testing.T) {
+	t.Parallel()
+	for _, virtualKey := range []uint16{windowsVKShift, windowsVKLShift, windowsVKRShift} {
+		if windowsVirtualKeyIsShortcutModifier(virtualKey) {
+			t.Fatalf("treated Shift virtual key %#x as a shortcut modifier", virtualKey)
+		}
+	}
+	for _, virtualKey := range []uint16{windowsVKLControl, windowsVKRMenu, windowsVKLWin} {
+		if !windowsVirtualKeyIsShortcutModifier(virtualKey) {
+			t.Fatalf("did not treat virtual key %#x as a shortcut modifier", virtualKey)
+		}
+	}
+}

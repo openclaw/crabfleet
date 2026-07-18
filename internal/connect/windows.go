@@ -518,8 +518,7 @@ func (backend *WindowsBackend) explicitShiftInputsExcept(except uint32) []window
 func (backend *WindowsBackend) shortcutModifierHeld() bool {
 	for _, held := range backend.heldKeys {
 		if len(held.unicodeUnits) == 0 &&
-			(windowsVirtualKeyIsShift(held.binding.virtualKey) ||
-				windowsVirtualKeyIsShortcutModifier(held.binding.virtualKey)) {
+			windowsVirtualKeyIsShortcutModifier(held.binding.virtualKey) {
 			return true
 		}
 	}
