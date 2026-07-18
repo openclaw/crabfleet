@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Warn without blocking Share This Mac when Tailscale reports a numerically suffixed duplicate registration, while continuing to advertise the current `Self` node address.
 - Blend the macOS title bar into the desktop deck, align its unified top band, and add hover, focus, refresh-progress, and empty-state interaction polish.
 - Keep Share This Mac permission status and start availability synchronized with Screen Recording and Accessibility grants made in System Settings while the sheet is open.
 - Add bilaterally negotiated `QCTL` per-viewer Auto/Sharp/Smooth quality control with strict fail-closed message parsing, independent session rate and chroma policy, per-host native and session-scoped browser pickers, host default fallback for older peers, and active viewer-mode diagnostics.

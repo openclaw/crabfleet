@@ -65,6 +65,13 @@ struct PrivateMacShareSheet: View {
       }
       .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
 
+      if let warning = controller.tailnetWarning {
+        Label(warning, systemImage: "exclamationmark.triangle.fill")
+          .font(.caption)
+          .foregroundStyle(.orange)
+          .fixedSize(horizontal: false, vertical: true)
+      }
+
       VStack(alignment: .leading, spacing: 10) {
         if !controller.availableDisplays.isEmpty {
           VStack(alignment: .leading, spacing: 6) {

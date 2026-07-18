@@ -689,6 +689,7 @@ final class PrivateMacShareController: ObservableObject {
   nonisolated static let browserAccessDefaultsKey = "org.openclaw.crabfleet.share.browser-access"
 
   @Published private(set) var identity: TailnetIdentity?
+  @Published private(set) var tailnetRegistrationHealth: TailnetRegistrationHealth = .ok
   @Published private(set) var phase: Phase = .idle
   @Published private(set) var screenRecordingGranted: Bool
   @Published private(set) var accessibilityGranted: Bool
@@ -883,6 +884,21 @@ final class PrivateMacShareController: ObservableObject {
     connectionAddresses.first
   }
 
+  var tailnetWarning: String? {
+    guard
+      case .duplicateHostname(let advertised, let hostName, let matchingPeerPresent) =
+        tailnetRegistrationHealth
+    else { return nil }
+    guard let advertised = advertised ?? identity?.ipv4Address else { return nil }
+    let peerDetail = matchingPeerPresent
+      ? " Another registered node also uses the hostname \(hostName)."
+      : ""
+    return
+      "This Mac appears registered more than once in your tailnet (advertising \(advertised))."
+      + peerDetail
+      + " If viewers can’t connect, remove the duplicate node in the Tailscale admin console or re-authenticate this Mac."
+  }
+
   var connectionAddresses: [String] {
     guard let identity else { return [] }
     return activePlans.map { identity.vncAddress(port: Int($0.port)) }
@@ -1003,9 +1019,12 @@ final class PrivateMacShareController: ObservableObject {
     defer { finishRefresh() }
     notice = nil
     do {
-      identity = try await fetchIdentity()
+      let resolution = try await fetchIdentity()
+      identity = resolution.identity
+      tailnetRegistrationHealth = resolution.registrationHealth
     } catch {
       identity = nil
+      tailnetRegistrationHealth = .ok
       notice = error.localizedDescription
     }
     refreshPermissions()
@@ -1095,12 +1114,14 @@ final class PrivateMacShareController: ObservableObject {
     await waitForRefreshCompletion()
     guard canContinueStarting(generation) else { return }
     do {
-      let loadedIdentity = try await fetchIdentity()
+      let resolution = try await fetchIdentity()
       guard canContinueStarting(generation) else { return }
-      identity = loadedIdentity
+      identity = resolution.identity
+      tailnetRegistrationHealth = resolution.registrationHealth
     } catch {
       guard canContinueStarting(generation) else { return }
       identity = nil
+      tailnetRegistrationHealth = .ok
       phase = .failed
       notice = error.localizedDescription
       return
@@ -1310,7 +1331,10 @@ final class PrivateMacShareController: ObservableObject {
     case accessibility
   }
 
-  private func fetchIdentity() async throws -> TailnetIdentity {
+  private func fetchIdentity() async throws -> (
+    identity: TailnetIdentity,
+    registrationHealth: TailnetRegistrationHealth
+  ) {
     guard let runner else {
       throw runnerInitializationError ?? PrivateMacShareError.tailscaleNotInstalled
     }
@@ -1319,7 +1343,10 @@ final class PrivateMacShareController: ObservableObject {
       TailscaleStatusDocument.self,
       from: Data(result.standardOutput.utf8)
     )
-    return try TailnetIdentityPolicy.identity(from: document)
+    return (
+      try TailnetIdentityPolicy.identity(from: document),
+      TailnetRegistrationHealthPolicy.health(from: document)
+    )
   }
 
   func refreshPermissions() {
