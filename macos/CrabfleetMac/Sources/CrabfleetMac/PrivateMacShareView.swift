@@ -6,30 +6,42 @@ struct PrivateMacShareSheet: View {
   @Environment(\.dismiss) private var dismiss
   @Environment(\.scenePhase) private var scenePhase
 
+  @State private var contentHeight: CGFloat = 0
+
   var body: some View {
-    VStack(alignment: .leading, spacing: 16) {
-      header
-      readinessSection
+    ScrollView {
+      VStack(alignment: .leading, spacing: 16) {
+        header
+        readinessSection
 
-      if let warning = controller.tailnetWarning {
-        Label(warning, systemImage: "exclamationmark.triangle.fill")
-          .font(.caption)
-          .foregroundStyle(.orange)
-          .fixedSize(horizontal: false, vertical: true)
+        if let warning = controller.tailnetWarning {
+          Label(warning, systemImage: "exclamationmark.triangle.fill")
+            .font(.caption)
+            .foregroundStyle(.orange)
+            .fixedSize(horizontal: false, vertical: true)
+        }
+
+        sharingSection
+        optionsSection
+
+        if controller.phase.isRunning, !controller.connectionAddresses.isEmpty {
+          connectSection
+        }
+
+        assurance
+        footer
       }
-
-      sharingSection
-      optionsSection
-
-      if controller.phase.isRunning, !controller.connectionAddresses.isEmpty {
-        connectSection
+      .padding(24)
+      .background {
+        GeometryReader { proxy in
+          Color.clear.preference(key: SheetContentHeightKey.self, value: proxy.size.height)
+        }
       }
-
-      assurance
-      footer
     }
-    .padding(24)
+    .scrollBounceBehavior(.basedOnSize)
+    .onPreferenceChange(SheetContentHeightKey.self) { contentHeight = $0 }
     .frame(width: 600)
+    .frame(height: contentHeight > 0 ? min(contentHeight, Self.maxSheetHeight) : nil)
     .background {
       LinearGradient(
         colors: [
@@ -39,6 +51,7 @@ struct PrivateMacShareSheet: View {
         startPoint: .topLeading,
         endPoint: .bottomTrailing)
     }
+    .preferredColorScheme(.dark)
     .tint(.mint)
     .toggleStyle(ShareToggleStyle())
     .task { await controller.refresh() }
@@ -479,6 +492,12 @@ struct PrivateMacShareSheet: View {
     }
   }
 
+  // Sheets cannot be moved on screen, so cap height below common laptop displays
+  // and let the content scroll instead of clipping the footer controls.
+  private static var maxSheetHeight: CGFloat {
+    max(480, (NSScreen.main?.visibleFrame.height ?? 900) - 120)
+  }
+
   private var phaseDetail: String {
     let viewers =
       controller.connectedViewerCount == 1
@@ -500,6 +519,13 @@ struct PrivateMacShareSheet: View {
       return "\(controller.phase.title) · \(peer)"
     }
     return controller.phase.title
+  }
+}
+
+private struct SheetContentHeightKey: PreferenceKey {
+  static var defaultValue: CGFloat = 0
+  static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
+    value = max(value, nextValue())
   }
 }
 
