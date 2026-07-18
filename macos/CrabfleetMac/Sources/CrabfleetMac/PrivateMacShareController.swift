@@ -690,9 +690,8 @@ final class PrivateMacShareController: ObservableObject {
 
   @Published private(set) var identity: TailnetIdentity?
   @Published private(set) var phase: Phase = .idle
-  @Published private(set) var screenRecordingGranted = CGPreflightScreenCaptureAccess()
-  @Published private(set) var accessibilityGranted = MacRemoteInputController
-    .isAccessibilityGranted
+  @Published private(set) var screenRecordingGranted: Bool
+  @Published private(set) var accessibilityGranted: Bool
   @Published private(set) var connectedPeer: String?
   @Published private(set) var notice: String?
   @Published private(set) var isRefreshing = false
@@ -785,6 +784,9 @@ final class PrivateMacShareController: ObservableObject {
   private let relayHostURL: ((String) -> URL?)?
   private let runnerInitializationError: Error?
   private let defaults: UserDefaults
+  private let screenRecordingPermissionCheck: () -> Bool
+  private let accessibilityPermissionCheck: () -> Bool
+  private var permissionMonitoringTask: Task<Void, Never>?
   private var displayStacks: [DisplayStack] = []
   private var isRevertingQualityMode = false
   private var qualityModeChangePending = false
@@ -817,8 +819,18 @@ final class PrivateMacShareController: ObservableObject {
     runner: (any TailscaleCommandRunning)? = nil,
     desktopRegistration: (any DesktopHostRegistering)? = CrabfleetDesktopRegistration(),
     registrationLifecycle: DesktopHostRegistrationLifecycle? = nil,
-    defaults: UserDefaults = .standard
+    defaults: UserDefaults = .standard,
+    screenRecordingPermissionCheck: @escaping () -> Bool = {
+      CGPreflightScreenCaptureAccess()
+    },
+    accessibilityPermissionCheck: @escaping () -> Bool = {
+      MacRemoteInputController.isAccessibilityGranted
+    }
   ) {
+    self.screenRecordingPermissionCheck = screenRecordingPermissionCheck
+    self.accessibilityPermissionCheck = accessibilityPermissionCheck
+    screenRecordingGranted = screenRecordingPermissionCheck()
+    accessibilityGranted = accessibilityPermissionCheck()
     self.desktopRegistration = desktopRegistration
     let registrationStateStore = UserDefaultsDesktopHostRegistrationStateStore(defaults: defaults)
     let recoveryScopeProvider = (desktopRegistration as? any DesktopHostRegistrationRecoveryScoping)
@@ -1048,6 +1060,27 @@ final class PrivateMacShareController: ObservableObject {
     if !accessibilityGranted {
       notice = PrivateMacShareError.accessibilityDenied.localizedDescription
     }
+  }
+
+  func startPermissionMonitoring() {
+    guard permissionMonitoringTask == nil else { return }
+    refreshPermissions()
+    permissionMonitoringTask = Task { [weak self] in
+      while !Task.isCancelled {
+        do {
+          try await Task.sleep(for: .seconds(1))
+        } catch {
+          return
+        }
+        guard let self, !Task.isCancelled else { return }
+        self.refreshPermissions()
+      }
+    }
+  }
+
+  func stopPermissionMonitoring() {
+    permissionMonitoringTask?.cancel()
+    permissionMonitoringTask = nil
   }
 
   func start() async {
@@ -1289,9 +1322,16 @@ final class PrivateMacShareController: ObservableObject {
     return try TailnetIdentityPolicy.identity(from: document)
   }
 
-  private func refreshPermissions() {
-    screenRecordingGranted = CGPreflightScreenCaptureAccess()
-    accessibilityGranted = MacRemoteInputController.isAccessibilityGranted
+  func refreshPermissions() {
+    let screenRecordingGranted = screenRecordingPermissionCheck()
+    if self.screenRecordingGranted != screenRecordingGranted {
+      self.screenRecordingGranted = screenRecordingGranted
+    }
+
+    let accessibilityGranted = accessibilityPermissionCheck()
+    if self.accessibilityGranted != accessibilityGranted {
+      self.accessibilityGranted = accessibilityGranted
+    }
   }
 
   private func refreshDisplays() async {
