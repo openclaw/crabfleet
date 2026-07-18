@@ -25,6 +25,9 @@ app-owned private desktop host for Mac-to-Mac access.
   bracketed IPv6. Saved profiles contain metadata only. Direct-connection
   passwords stay in memory unless the user opts into the macOS data-protection
   Keychain, keyed by host, port, and case-sensitive username.
+- Saved connections may include a Wake-on-LAN MAC address, optional directed
+  broadcast address, manual Wake action, and an opt-in wake-and-retry after the
+  initial TCP transport attempt fails.
 - RFB 3.3, 3.7, and 3.8 framing is supported, including server-selected RFB
   3.3 VNC-password authentication. The native viewer prefers ARD when a
   password is present and the server explicitly offers it.
@@ -80,6 +83,29 @@ compatibility, but ARD host authentication fails closed and viewers must select
 VNC password authentication. H.264/HEVC encoding, Wayland/PipeWire, audio,
 multi-group XKB input, clipboard synchronization, service packaging, and
 real-hardware validation remain follow-up work.
+
+## Wake-on-LAN
+
+Quick Connect and saved-connection settings accept colon-separated,
+hyphen-separated, or compact 12-digit MAC addresses. A saved card with a MAC
+address exposes **Wake** in its context menu. Crabfleet sends the standard
+102-byte magic packet to UDP ports 9 and 7, using `255.255.255.255` unless the
+profile supplies a subnet broadcast address. Send failures are notices and do
+not change or remove the saved connection.
+
+Automatic wake is off by default. When enabled, only a Network-framework TCP
+transport failure triggers the magic packet; authentication and RFB protocol
+errors do not. Crabfleet waits two seconds, retries TCP once, and does not wake
+again if that retry fails. QUIC-capable saved hosts retain their existing
+QUIC-first and TCP-fallback path; automatic wake begins only after the TCP
+fallback is exhausted.
+
+Wake-on-LAN normally works only on the same layer-2 network, and the target
+hardware, firmware, network adapter, and operating system must allow it. A
+different subnet requires a router explicitly configured to forward directed
+broadcasts. A tailnet address is not itself a Wake-on-LAN path: waking across
+Tailscale requires an online subnet-router relay on the target LAN that is
+configured to emit the local broadcast packet.
 
 ## Share This Mac
 

@@ -501,7 +501,7 @@ private struct FocusCanvasBackground: View {
 
 struct DesktopConnectionSheet: View {
   let target: DesktopTarget
-  let connect: (VNCConnectionRequest) -> Bool
+  let connect: (VNCConnectionRequest, WakeOnLan.ProfileSettings?) -> Bool
   private let credentialAddress: String
   private let credentialUsername: String
   private let credentialAccessCode: String
@@ -514,12 +514,15 @@ struct DesktopConnectionSheet: View {
   @State private var rememberAccessCode: Bool
   @State private var prefersPasswordOnlyARD: Bool
   @State private var clipboardEnabled = false
+  @State private var macAddress: String
+  @State private var wakeOnLanBroadcast: String
+  @State private var wakeOnLanAutomatically: Bool
   @State private var validationMessage: String?
 
   init(
     target: DesktopTarget,
     storedAccessCode: StoredAccessCode = .missing,
-    connect: @escaping (VNCConnectionRequest) -> Bool
+    connect: @escaping (VNCConnectionRequest, WakeOnLan.ProfileSettings?) -> Bool
   ) {
     self.target = target
     self.connect = connect
@@ -533,6 +536,9 @@ struct DesktopConnectionSheet: View {
     _password = { password in State(initialValue: password) }(storedAccessCode.value)
     _rememberAccessCode = State(initialValue: storedAccessCode.wasRemembered)
     _prefersPasswordOnlyARD = State(initialValue: target.prefersPasswordOnlyARD)
+    _macAddress = State(initialValue: target.macAddress ?? "")
+    _wakeOnLanBroadcast = State(initialValue: target.wakeOnLanBroadcast ?? "")
+    _wakeOnLanAutomatically = State(initialValue: target.wakeOnLanAutomatically)
   }
 
   var body: some View {
@@ -551,6 +557,23 @@ struct DesktopConnectionSheet: View {
         Toggle("Crabfleet Share (prefer ARD)", isOn: $prefersPasswordOnlyARD)
         Toggle("Remember password in Keychain", isOn: $rememberAccessCode)
         Toggle("Synchronize text clipboard", isOn: $clipboardEnabled)
+        if target.profileID != nil {
+          Section("Wake-on-LAN") {
+            TextField(
+              "MAC address (optional)", text: $macAddress,
+              prompt: Text("aa:bb:cc:dd:ee:ff"))
+            TextField(
+              "Broadcast address", text: $wakeOnLanBroadcast,
+              prompt: Text(WakeOnLan.defaultBroadcastAddress)
+            )
+            .disabled(macAddress.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            Toggle("Wake after the initial TCP connection fails", isOn: $wakeOnLanAutomatically)
+              .disabled(macAddress.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            Text("Wake-on-LAN normally reaches only devices on the same local network.")
+              .font(.caption)
+              .foregroundStyle(.secondary)
+          }
+        }
       }
       .formStyle(.grouped)
 
@@ -607,6 +630,14 @@ struct DesktopConnectionSheet: View {
         validationMessage = "Enter the password for this host and username."
         return
       }
+      let wakeOnLan: WakeOnLan.ProfileSettings? = if target.profileID != nil {
+        try WakeOnLan.ProfileSettings(
+          macAddress: macAddress,
+          broadcastAddress: wakeOnLanBroadcast,
+          automaticallyWakeOnFailure: wakeOnLanAutomatically)
+      } else {
+        nil
+      }
       guard connect(
         .init(
           host: parsed.host,
@@ -616,7 +647,8 @@ struct DesktopConnectionSheet: View {
           clipboardEnabled: clipboardEnabled,
           rememberAccessCode: rememberAccessCode,
           prefersPasswordOnlyARD: prefersPasswordOnlyARD
-        ))
+        ),
+        wakeOnLan)
       else {
         validationMessage = "Crabfleet could not update this password in Keychain."
         return
@@ -631,7 +663,8 @@ struct DesktopConnectionSheet: View {
 
 struct QuickConnectSheet: View {
   let storedAccessCode: (VNCAddress) -> StoredAccessCode
-  let connect: (String, VNCAddress, String, Bool, Bool, Bool) -> Bool
+  let connect:
+    (String, VNCAddress, String, Bool, Bool, Bool, WakeOnLan.ProfileSettings?) -> Bool
 
   @Environment(\.dismiss) private var dismiss
   @FocusState private var addressFocused: Bool
@@ -642,6 +675,9 @@ struct QuickConnectSheet: View {
   @State private var rememberAccessCode = false
   @State private var prefersPasswordOnlyARD = false
   @State private var clipboardEnabled = false
+  @State private var macAddress = ""
+  @State private var wakeOnLanBroadcast = ""
+  @State private var wakeOnLanAutomatically = false
   @State private var validationMessage: String?
   @State private var credentialIdentity: VNCAddress?
 
@@ -661,6 +697,21 @@ struct QuickConnectSheet: View {
         Toggle("Crabfleet Share (prefer ARD)", isOn: $prefersPasswordOnlyARD)
         Toggle("Remember password in Keychain", isOn: $rememberAccessCode)
         Toggle("Synchronize text clipboard", isOn: $clipboardEnabled)
+        Section("Wake-on-LAN") {
+          TextField(
+            "MAC address (optional)", text: $macAddress,
+            prompt: Text("aa:bb:cc:dd:ee:ff"))
+          TextField(
+            "Broadcast address", text: $wakeOnLanBroadcast,
+            prompt: Text(WakeOnLan.defaultBroadcastAddress)
+          )
+          .disabled(macAddress.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+          Toggle("Wake after the initial TCP connection fails", isOn: $wakeOnLanAutomatically)
+            .disabled(macAddress.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+          Text("Wake-on-LAN normally reaches only devices on the same local network.")
+            .font(.caption)
+            .foregroundStyle(.secondary)
+        }
       }
       .formStyle(.grouped)
 
@@ -720,6 +771,16 @@ struct QuickConnectSheet: View {
         name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         ? parsed.host
         : name.trimmingCharacters(in: .whitespacesAndNewlines)
+      let hasWakeOnLanInput =
+        !macAddress.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        || !wakeOnLanBroadcast.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        || wakeOnLanAutomatically
+      let wakeOnLan = try hasWakeOnLanInput
+        ? WakeOnLan.ProfileSettings(
+          macAddress: macAddress,
+          broadcastAddress: wakeOnLanBroadcast,
+          automaticallyWakeOnFailure: wakeOnLanAutomatically)
+        : nil
       guard
         connect(
           effectiveName,
@@ -727,7 +788,8 @@ struct QuickConnectSheet: View {
           password,
           clipboardEnabled,
           rememberAccessCode,
-          prefersPasswordOnlyARD)
+          prefersPasswordOnlyARD,
+          wakeOnLan)
       else {
         validationMessage = "Crabfleet could not update this password in Keychain."
         return

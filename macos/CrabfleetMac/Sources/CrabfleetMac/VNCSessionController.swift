@@ -124,6 +124,7 @@ final class VNCSessionController: NSObject, ObservableObject {
   private let qualityModeDefaultsKey: String
   private let frameEncodings: [VNCFrameEncodingType]
   private let quicFallbackDelay: Duration
+  private let wakeRetryDelay: Duration
   private weak var clipboardCoordinator: ClipboardCoordinator?
   private(set) var connection: VNCConnection?
   private let credentialLock = NSLock()
@@ -143,6 +144,10 @@ final class VNCSessionController: NSObject, ObservableObject {
   private var pendingTCPFallbackRequest: VNCConnectionRequest?
   private var tcpFallbackRetryState: TCPFallbackRetryState?
   private var tcpFallbackRetryTask: Task<Void, Never>?
+  private var wakeOnInitialTCPFailure: (@MainActor () async throws -> Void)?
+  private var wakeRetryRequest: VNCConnectionRequest?
+  private var wakeRetryAttemptID: UUID?
+  private var wakeRetryTask: Task<Void, Never>?
   private let audioPlayer = RemoteAudioPlayer()
   private var nextFileRequestID: UInt32 = 1
   private var pendingFileRequests: [
@@ -154,7 +159,8 @@ final class VNCSessionController: NSObject, ObservableObject {
     clipboardCoordinator: ClipboardCoordinator? = nil,
     defaults: UserDefaults = .standard,
     frameEncodings: [VNCFrameEncodingType]? = nil,
-    quicFallbackDelay: Duration = .seconds(2)
+    quicFallbackDelay: Duration = .seconds(2),
+    wakeRetryDelay: Duration = .seconds(2)
   ) {
     self.targetID = targetID
     self.clipboardCoordinator = clipboardCoordinator
@@ -163,6 +169,7 @@ final class VNCSessionController: NSObject, ObservableObject {
       frameEncodings
       ?? Self.preferredFrameEncodings(supportsHEVC444: VNCHEVC444Capability.isSupported)
     self.quicFallbackDelay = quicFallbackDelay
+    self.wakeRetryDelay = wakeRetryDelay
     let qualityKey = "org.openclaw.crabfleet.viewer.quality-mode.\(targetID)"
     qualityModeDefaultsKey = qualityKey
     qualityMode = defaults.string(forKey: qualityKey)
@@ -178,6 +185,7 @@ final class VNCSessionController: NSObject, ObservableObject {
     clipboardEnabled: Bool = true,
     quic: QUICConnectionConfiguration? = nil,
     prefersPasswordOnlyARD: Bool = false,
+    wakeOnInitialTCPFailure: (@MainActor () async throws -> Void)? = nil,
     authenticationSucceeded: (() -> Void)? = nil
   ) {
     tearDownConnection()
@@ -199,6 +207,8 @@ final class VNCSessionController: NSObject, ObservableObject {
       clipboardEnabled: clipboardEnabled,
       quic: quic,
       prefersPasswordOnlyARD: prefersPasswordOnlyARD)
+    self.wakeOnInitialTCPFailure = wakeOnInitialTCPFailure
+    wakeRetryRequest = wakeOnInitialTCPFailure == nil ? nil : request
     if let quic {
       do {
         guard let quicPort = NWEndpoint.Port(rawValue: UInt16(quic.port)) else {
@@ -386,6 +396,61 @@ final class VNCSessionController: NSObject, ObservableObject {
     tcpFallbackRetryState = nil
   }
 
+  nonisolated static func isWakeEligibleTCPFailure(_ error: any Error) -> Bool {
+    guard let error = error as? VNCError,
+      case .connection(.failed(let underlyingError)) = error
+    else { return false }
+    return underlyingError is NWError
+  }
+
+  private func scheduleWakeRetry(after error: any Error, connection: VNCConnection) -> Bool {
+    guard self.connection === connection,
+      transport == .tcp,
+      wakeRetryAttemptID == nil,
+      Self.isWakeEligibleTCPFailure(error),
+      let wakeOnInitialTCPFailure,
+      let wakeRetryRequest
+    else { return false }
+
+    let attemptID = UUID()
+    wakeRetryAttemptID = attemptID
+    connection.delegate = nil
+    connection.clipboardDelegate = nil
+    connection.audioDelegate = nil
+    connection.disconnect()
+    self.connection = nil
+    clearCredentials()
+    phase = .connecting
+    errorMessage = "Sending a Wake-on-LAN packet before one TCP retry…"
+
+    wakeRetryTask = Task { [weak self, wakeRetryDelay] in
+      do {
+        try await wakeOnInitialTCPFailure()
+        try await Task.sleep(for: wakeRetryDelay)
+        guard !Task.isCancelled, let self, self.wakeRetryAttemptID == attemptID else { return }
+        self.wakeRetryTask = nil
+        self.startConnection(request: wakeRetryRequest, transport: .tcp)
+      } catch is CancellationError {
+        return
+      } catch {
+        guard let self, self.wakeRetryAttemptID == attemptID else { return }
+        self.clearWakeRetry()
+        self.phase = .failed
+        self.errorMessage = "Wake-on-LAN failed: \(error.localizedDescription)"
+        self.clipboardCoordinator?.sessionStateDidChange(self, targetID: self.targetID)
+      }
+    }
+    return true
+  }
+
+  private func clearWakeRetry() {
+    wakeRetryAttemptID = nil
+    wakeRetryTask?.cancel()
+    wakeRetryTask = nil
+    wakeRetryRequest = nil
+    wakeOnInitialTCPFailure = nil
+  }
+
   func beginConnecting(endpoint: String) {
     tearDownConnection()
     endpointDescription = endpoint
@@ -405,6 +470,7 @@ final class VNCSessionController: NSObject, ObservableObject {
 
   func disconnect() {
     clearTCPFallbackRetry()
+    clearWakeRetry()
     quicFallbackTask?.cancel()
     quicFallbackTask = nil
     quicAttemptID = nil
@@ -423,6 +489,7 @@ final class VNCSessionController: NSObject, ObservableObject {
 
   private func tearDownConnection() {
     clearTCPFallbackRetry()
+    clearWakeRetry()
     quicFallbackTask?.cancel()
     quicFallbackTask = nil
     quicAttemptID = nil
@@ -791,6 +858,7 @@ final class VNCSessionController: NSObject, ObservableObject {
   deinit {
     quicFallbackTask?.cancel()
     tcpFallbackRetryTask?.cancel()
+    wakeRetryTask?.cancel()
     pendingQUICStream?.stateUpdateHandler = nil
     pendingQUICStream?.cancel()
     thumbnailWorkItem?.cancel()
@@ -818,6 +886,11 @@ extension VNCSessionController: VNCConnectionDelegate {
       quicAttemptID = nil
       pendingTCPFallbackRequest = nil
       clearTCPFallbackRetry()
+      wakeRetryTask?.cancel()
+      wakeRetryTask = nil
+      wakeRetryAttemptID = nil
+      wakeRetryRequest = nil
+      wakeOnInitialTCPFailure = nil
       phase = .connected
       let authenticationSucceeded = self.authenticationSucceeded
       self.authenticationSucceeded = nil
@@ -834,6 +907,13 @@ extension VNCSessionController: VNCConnectionDelegate {
         clipboardCoordinator?.sessionStateDidChange(self, targetID: targetID)
         return
       }
+      if let error = connectionState.error,
+        scheduleWakeRetry(after: error, connection: connection)
+      {
+        clipboardCoordinator?.sessionStateDidChange(self, targetID: targetID)
+        return
+      }
+      clearWakeRetry()
       framebuffer = nil
       self.connection = nil
       audioPlayer.stop()

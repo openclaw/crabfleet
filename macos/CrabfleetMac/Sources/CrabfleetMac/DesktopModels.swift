@@ -122,6 +122,9 @@ struct VNCConnectionProfile: Identifiable, Codable, Hashable {
   var username: String
   var favorite: Bool
   var prefersPasswordOnlyARD: Bool?
+  var macAddress: String?
+  var wakeOnLanBroadcast: String?
+  var wakeOnLanAutomatically: Bool?
   var createdAt: Date
   var lastConnectedAt: Date?
 
@@ -133,6 +136,9 @@ struct VNCConnectionProfile: Identifiable, Codable, Hashable {
     username: String = "",
     favorite: Bool = false,
     prefersPasswordOnlyARD: Bool? = nil,
+    macAddress: String? = nil,
+    wakeOnLanBroadcast: String? = nil,
+    wakeOnLanAutomatically: Bool? = nil,
     createdAt: Date = .now,
     lastConnectedAt: Date? = nil
   ) {
@@ -143,12 +149,57 @@ struct VNCConnectionProfile: Identifiable, Codable, Hashable {
     self.username = username
     self.favorite = favorite
     self.prefersPasswordOnlyARD = prefersPasswordOnlyARD
+    self.macAddress = macAddress
+    self.wakeOnLanBroadcast = wakeOnLanBroadcast
+    self.wakeOnLanAutomatically = wakeOnLanAutomatically
     self.createdAt = createdAt
     self.lastConnectedAt = lastConnectedAt
   }
 
+  private enum CodingKeys: String, CodingKey {
+    case id
+    case name
+    case host
+    case port
+    case username
+    case favorite
+    case prefersPasswordOnlyARD
+    case macAddress
+    case wakeOnLanBroadcast
+    case wakeOnLanAutomatically
+    case createdAt
+    case lastConnectedAt
+  }
+
+  init(from decoder: any Decoder) throws {
+    let container = try decoder.container(keyedBy: CodingKeys.self)
+    id = try container.decode(String.self, forKey: .id)
+    name = try container.decode(String.self, forKey: .name)
+    host = try container.decode(String.self, forKey: .host)
+    port = try container.decode(Int.self, forKey: .port)
+    username = try container.decode(String.self, forKey: .username)
+    favorite = try container.decode(Bool.self, forKey: .favorite)
+    prefersPasswordOnlyARD = try container.decodeIfPresent(
+      Bool.self, forKey: .prefersPasswordOnlyARD)
+    macAddress = try container.decodeIfPresent(String.self, forKey: .macAddress)
+    wakeOnLanBroadcast = try container.decodeIfPresent(
+      String.self, forKey: .wakeOnLanBroadcast)
+    wakeOnLanAutomatically = try container.decodeIfPresent(
+      Bool.self, forKey: .wakeOnLanAutomatically)
+    createdAt = try container.decode(Date.self, forKey: .createdAt)
+    lastConnectedAt = try container.decodeIfPresent(Date.self, forKey: .lastConnectedAt)
+  }
+
   var address: VNCAddress {
     .init(host: host, port: port, username: username)
+  }
+
+  var effectiveWakeOnLanBroadcast: String {
+    WakeOnLan.effectiveBroadcastAddress(wakeOnLanBroadcast)
+  }
+
+  var wakesAutomatically: Bool {
+    macAddress != nil && wakeOnLanAutomatically == true
   }
 }
 
@@ -169,6 +220,9 @@ struct DesktopTarget: Identifiable, Hashable {
   let profileID: String?
   let nativeVncSessionID: String?
   let prefersPasswordOnlyARD: Bool
+  let macAddress: String?
+  let wakeOnLanBroadcast: String?
+  let wakeOnLanAutomatically: Bool
 
   init(lease: CrabboxLease) {
     id = "fleet:\(lease.id)"
@@ -187,6 +241,9 @@ struct DesktopTarget: Identifiable, Hashable {
     profileID = nil
     nativeVncSessionID = lease.nativeVncSessionID
     prefersPasswordOnlyARD = false
+    macAddress = nil
+    wakeOnLanBroadcast = nil
+    wakeOnLanAutomatically = false
   }
 
   init(profile: VNCConnectionProfile) {
@@ -206,6 +263,9 @@ struct DesktopTarget: Identifiable, Hashable {
     profileID = profile.id
     nativeVncSessionID = nil
     prefersPasswordOnlyARD = profile.prefersPasswordOnlyARD ?? false
+    macAddress = profile.macAddress
+    wakeOnLanBroadcast = profile.wakeOnLanBroadcast
+    wakeOnLanAutomatically = profile.wakesAutomatically
   }
 
   init(host: RegisteredDesktopHost) {
@@ -225,6 +285,9 @@ struct DesktopTarget: Identifiable, Hashable {
     profileID = nil
     nativeVncSessionID = nil
     prefersPasswordOnlyARD = true
+    macAddress = nil
+    wakeOnLanBroadcast = nil
+    wakeOnLanAutomatically = false
   }
 
   func matches(_ query: String) -> Bool {
