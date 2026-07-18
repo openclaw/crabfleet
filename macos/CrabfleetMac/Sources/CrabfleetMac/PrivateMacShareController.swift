@@ -2,16 +2,8 @@ import AppKit
 import CoreGraphics
 import CryptoKit
 import Foundation
+import ScreenCaptureKit
 import ServiceManagement
-
-enum PrivateMacSharePermissionPolicy {
-  static func canStart(
-    identityAvailable: Bool,
-    screenRecordingGranted: Bool
-  ) -> Bool {
-    identityAvailable && screenRecordingGranted
-  }
-}
 
 @MainActor
 final class PrivateMacShareStopCoordinator {
@@ -691,11 +683,13 @@ final class PrivateMacShareController: ObservableObject {
     "org.openclaw.crabfleet.share.folder-bookmark"
   nonisolated static let sharedFolderWritesDefaultsKey =
     "org.openclaw.crabfleet.share.folder-writes"
+  nonisolated static let experimentalRemoteDesktopCaptureDefaultsKey =
+    "org.openclaw.crabfleet.experimental.remote-desktop-capture"
 
   @Published private(set) var identity: TailnetIdentity?
   @Published private(set) var tailnetRegistrationHealth: TailnetRegistrationHealth = .ok
   @Published private(set) var phase: Phase = .idle
-  @Published private(set) var screenRecordingGranted: Bool
+  @Published private(set) var capturePermissionGranted: Bool
   @Published private(set) var accessibilityGranted: Bool
   @Published private(set) var connectedPeer: String?
   @Published private(set) var notice: String?
@@ -713,6 +707,24 @@ final class PrivateMacShareController: ObservableObject {
   @Published var allowRemoteFolderWrites: Bool {
     didSet {
       defaults.set(allowRemoteFolderWrites, forKey: Self.sharedFolderWritesDefaultsKey)
+    }
+  }
+
+  @Published var experimentalRemoteDesktopCaptureEnabled: Bool {
+    didSet {
+      defaults.set(
+        experimentalRemoteDesktopCaptureEnabled,
+        forKey: Self.experimentalRemoteDesktopCaptureDefaultsKey)
+      guard experimentalRemoteDesktopCaptureEnabled != oldValue else { return }
+      clearCapturePermissionNotice()
+      capturePermissionGranted = false
+      if capturePermissionKind == .screenRecording {
+        refreshPermissions()
+        Task { await refreshDisplays() }
+      } else {
+        remoteDesktopProbeEnabled = false
+        waitingForRemoteDesktopSettingsReturn = false
+      }
     }
   }
 
@@ -796,9 +808,11 @@ final class PrivateMacShareController: ObservableObject {
   private let relayHostURL: ((String) -> URL?)?
   private let runnerInitializationError: Error?
   private let defaults: UserDefaults
-  private let screenRecordingPermissionCheck: () -> Bool
+  private let capturePermissionAuthorizer: CapturePermissionAuthorizer
   private let accessibilityPermissionCheck: () -> Bool
   private var permissionMonitoringTask: Task<Void, Never>?
+  private var remoteDesktopProbeEnabled = false
+  private var waitingForRemoteDesktopSettingsReturn = false
   private var displayStacks: [DisplayStack] = []
   private var isRevertingQualityMode = false
   private var qualityModeChangePending = false
@@ -836,13 +850,24 @@ final class PrivateMacShareController: ObservableObject {
     screenRecordingPermissionCheck: @escaping () -> Bool = {
       CGPreflightScreenCaptureAccess()
     },
+    remoteDesktopPermissionCheck: @escaping () async -> Bool = {
+      guard let content = try? await SCShareableContent.current else { return false }
+      return !content.displays.isEmpty
+    },
     accessibilityPermissionCheck: @escaping () -> Bool = {
       MacRemoteInputController.isAccessibilityGranted
     }
   ) {
-    self.screenRecordingPermissionCheck = screenRecordingPermissionCheck
+    capturePermissionAuthorizer = CapturePermissionAuthorizer(
+      screenRecordingCheck: screenRecordingPermissionCheck,
+      remoteDesktopCheck: remoteDesktopPermissionCheck)
     self.accessibilityPermissionCheck = accessibilityPermissionCheck
-    screenRecordingGranted = screenRecordingPermissionCheck()
+    let experimentalRemoteDesktopCaptureEnabled =
+      defaults.object(forKey: Self.experimentalRemoteDesktopCaptureDefaultsKey) as? Bool ?? false
+    self.experimentalRemoteDesktopCaptureEnabled = experimentalRemoteDesktopCaptureEnabled
+    capturePermissionGranted = experimentalRemoteDesktopCaptureEnabled
+      ? false
+      : screenRecordingPermissionCheck()
     accessibilityGranted = accessibilityPermissionCheck()
     self.desktopRegistration = desktopRegistration
     let registrationStateStore = UserDefaultsDesktopHostRegistrationStateStore(defaults: defaults)
@@ -1064,10 +1089,25 @@ final class PrivateMacShareController: ObservableObject {
 
   var canStart: Bool {
     phase == .idle && !isRefreshing
-      && PrivateMacSharePermissionPolicy.canStart(
+      && CapturePermissionPolicy.canStart(
         identityAvailable: identity != nil,
-        screenRecordingGranted: screenRecordingGranted
+        captureAuthorized: capturePermissionGranted
       )
+  }
+
+  var capturePermissionKind: CapturePermissionKind {
+    CapturePermissionPolicy.selectedKind(
+      experimentalRemoteDesktopEnabled: experimentalRemoteDesktopCaptureEnabled)
+  }
+
+  var capturePermissionDetail: String {
+    if capturePermissionGranted { return "Capture available" }
+    if capturePermissionKind == .remoteDesktop,
+      capturePermissionAuthorizer.isScreenRecordingAuthorized()
+    {
+      return "Revoke Screen Recording to isolate this test"
+    }
+    return "Permission required"
   }
 
   func refresh() async {
@@ -1088,7 +1128,11 @@ final class PrivateMacShareController: ObservableObject {
       tailnetRegistrationHealth = .ok
       notice = error.localizedDescription
     }
-    refreshPermissions()
+    if capturePermissionKind == .screenRecording {
+      refreshPermissions()
+    } else {
+      await refreshCapturePermission()
+    }
     await refreshDisplays()
     launchAtLoginEnabled = SMAppService.mainApp.status == .enabled
   }
@@ -1124,19 +1168,44 @@ final class PrivateMacShareController: ObservableObject {
     return true
   }
 
-  func requestScreenRecordingPermission() async {
-    guard !screenRecordingGranted else { return }
-    _ = CGRequestScreenCaptureAccess()
-    refreshPermissions()
-    if !screenRecordingGranted {
-      notice = PrivateMacShareError.screenRecordingDenied.localizedDescription
+  func requestCapturePermission() async {
+    guard !capturePermissionGranted else { return }
+    switch capturePermissionKind {
+    case .screenRecording:
+      _ = CGRequestScreenCaptureAccess()
+      await refreshCapturePermission()
+      if !capturePermissionGranted {
+        notice = capturePermissionError.localizedDescription
+      }
+    case .remoteDesktop:
+      openRemoteDesktopSettingsForExperiment()
     }
+  }
+
+  func openRemoteDesktopSettingsForExperiment() {
+    prepareRemoteDesktopPermissionProbeAfterSettings()
+    openPrivacySettings(.remoteDesktop)
+  }
+
+  func prepareRemoteDesktopPermissionProbeAfterSettings() {
+    remoteDesktopProbeEnabled = false
+    waitingForRemoteDesktopSettingsReturn = true
+  }
+
+  @discardableResult
+  func resumeRemoteDesktopPermissionProbeAfterSettings() -> Bool {
+    guard capturePermissionKind == .remoteDesktop,
+      waitingForRemoteDesktopSettingsReturn
+    else { return false }
+    waitingForRemoteDesktopSettingsReturn = false
+    remoteDesktopProbeEnabled = true
+    return true
   }
 
   func requestAccessibilityPermission() {
     guard !accessibilityGranted else { return }
     _ = MacRemoteInputController.requestAccessibility()
-    refreshPermissions()
+    refreshAccessibilityPermission()
     if !accessibilityGranted {
       notice = PrivateMacShareError.accessibilityDenied.localizedDescription
     }
@@ -1144,8 +1213,8 @@ final class PrivateMacShareController: ObservableObject {
 
   func startPermissionMonitoring() {
     guard permissionMonitoringTask == nil else { return }
-    refreshPermissions()
     permissionMonitoringTask = Task { [weak self] in
+      await self?.refreshCapturePermission()
       while !Task.isCancelled {
         do {
           try await Task.sleep(for: .seconds(1))
@@ -1153,7 +1222,7 @@ final class PrivateMacShareController: ObservableObject {
           return
         }
         guard let self, !Task.isCancelled else { return }
-        self.refreshPermissions()
+        await self.refreshCapturePermission()
       }
     }
   }
@@ -1187,17 +1256,17 @@ final class PrivateMacShareController: ObservableObject {
       notice = error.localizedDescription
       return
     }
-    refreshPermissions()
+    await refreshCapturePermission()
 
     guard let identity else {
       phase = .failed
       notice = notice ?? PrivateMacShareError.invalidTailnetIdentity.localizedDescription
       return
     }
-    guard screenRecordingGranted else {
+    guard capturePermissionGranted else {
       phase = .idle
       registryPhase = desktopRegistration == nil ? .notConfigured : .notPublished
-      notice = PrivateMacShareError.screenRecordingDenied.localizedDescription
+      notice = capturePermissionError.localizedDescription
       return
     }
     guard let runner else {
@@ -1254,7 +1323,9 @@ final class PrivateMacShareController: ObservableObject {
       for plan in plans {
         let capture = MacScreenCapture()
         do {
-          let descriptor = try await capture.start(displayID: plan.display.id)
+          let descriptor = try await capture.start(
+            displayID: plan.display.id,
+            permissionKind: capturePermissionKind)
           guard canContinueStarting(generation) else {
             await capture.stop()
             throw CancellationError()
@@ -1388,6 +1459,8 @@ final class PrivateMacShareController: ObservableObject {
     switch pane {
     case .screenRecording:
       value = "Privacy_ScreenCapture"
+    case .remoteDesktop:
+      value = "Privacy_RemoteDesktop"
     case .accessibility:
       value = "Privacy_Accessibility"
     }
@@ -1401,6 +1474,7 @@ final class PrivateMacShareController: ObservableObject {
 
   enum PrivacyPane {
     case screenRecording
+    case remoteDesktop
     case accessibility
   }
 
@@ -1422,11 +1496,45 @@ final class PrivateMacShareController: ObservableObject {
   }
 
   func refreshPermissions() {
-    let screenRecordingGranted = screenRecordingPermissionCheck()
-    if self.screenRecordingGranted != screenRecordingGranted {
-      self.screenRecordingGranted = screenRecordingGranted
+    if capturePermissionKind == .screenRecording {
+      let capturePermissionGranted =
+        capturePermissionAuthorizer.isScreenRecordingAuthorized()
+      if self.capturePermissionGranted != capturePermissionGranted {
+        self.capturePermissionGranted = capturePermissionGranted
+      }
+    }
+    refreshAccessibilityPermission()
+  }
+
+  func refreshCapturePermission() async {
+    let capturePermissionKind = capturePermissionKind
+    let capturePermissionGranted: Bool
+    switch capturePermissionKind {
+    case .screenRecording:
+      capturePermissionGranted = capturePermissionAuthorizer.isScreenRecordingAuthorized()
+    case .remoteDesktop:
+      guard remoteDesktopProbeEnabled else {
+        refreshAccessibilityPermission()
+        return
+      }
+      capturePermissionGranted = await capturePermissionAuthorizer.isRemoteDesktopAuthorized()
+    }
+    let permissionChanged = self.capturePermissionKind == capturePermissionKind
+      && self.capturePermissionGranted != capturePermissionGranted
+    if permissionChanged {
+      self.capturePermissionGranted = capturePermissionGranted
+      if capturePermissionGranted,
+        notice == capturePermissionError.localizedDescription
+      {
+        notice = nil
+      }
+      await refreshDisplays()
     }
 
+    refreshAccessibilityPermission()
+  }
+
+  private func refreshAccessibilityPermission() {
     let accessibilityGranted = accessibilityPermissionCheck()
     if self.accessibilityGranted != accessibilityGranted {
       self.accessibilityGranted = accessibilityGranted
@@ -1434,7 +1542,7 @@ final class PrivateMacShareController: ObservableObject {
   }
 
   private func refreshDisplays() async {
-    guard screenRecordingGranted else {
+    guard capturePermissionGranted else {
       availableDisplays = []
       return
     }
@@ -1449,6 +1557,21 @@ final class PrivateMacShareController: ObservableObject {
     }
     selectedDisplayIDs = Set(
       displays.lazy.filter { validSelection.contains($0.id) }.prefix(4).map(\.id))
+  }
+
+  private var capturePermissionError: PrivateMacShareError {
+    switch capturePermissionKind {
+    case .screenRecording: .screenRecordingDenied
+    case .remoteDesktop: .remoteDesktopDenied
+    }
+  }
+
+  private func clearCapturePermissionNotice() {
+    let permissionErrors = [
+      PrivateMacShareError.screenRecordingDenied.localizedDescription,
+      PrivateMacShareError.remoteDesktopDenied.localizedDescription,
+    ]
+    if let notice, permissionErrors.contains(notice) { self.notice = nil }
   }
 
   private func waitForRefreshCompletion() async {

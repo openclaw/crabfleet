@@ -37,7 +37,9 @@ app-owned private desktop host for Mac-to-Mac access.
   address is the verified Tailscale `100.64.0.0/10` address, requires a valid
   identity on the active tailnet, and admits only a Tailscale-authorized peer
   owned by that same user.
-- Screen Recording is the only permission required for view-only sharing.
+- Screen Recording is the default permission required for view-only sharing.
+  An experimental Privacy Settings toggle can instead probe Remote Desktop
+  authorization for on-device indicator research; it is off by default.
   Remote control is forwarded through Accessibility-authorized CGEvents when
   that optional permission is granted.
 
@@ -288,6 +290,17 @@ the share. Ad-hoc development signatures do not provide a stable TCC identity,
 so a rebuilt prototype may need permission again. Sign every iterative build
 with the same Apple Development or Developer ID identity to preserve the app's
 code requirement and permission identity.
+
+For the Remote Desktop experiment, open the Share This Mac sheet, choose
+Privacy Settings, enable **Use Remote Desktop permission (experimental)**, then
+use **Remote Desktop** in that menu to open the matching Privacy & Security
+pane. macOS exposes no public request or preflight API for that TCC category, so
+Crabfleet begins polling ScreenCaptureKit capability once per second after you
+return from that pane and updates the readiness row when capture becomes available. Revoke Screen Recording during an
+isolated test; Crabfleet keeps the experimental readiness row blocked while that
+grant remains active because either grant could otherwise satisfy the capability
+probe. Capture still uses ScreenCaptureKit, and this switch does not add Apple's
+restricted persistent-content-capture entitlement.
 
 Accessibility is not required to start the listener. Without it, Crabfleet
 serves a view-only desktop. The persisted View only toggle can also discard

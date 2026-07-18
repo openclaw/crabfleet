@@ -35,12 +35,14 @@ struct PrivateMacShareSheet: View {
           isReady: controller.identity != nil
         )
         ShareStatusRow(
-          title: "Screen Recording",
-          detail: controller.screenRecordingGranted ? "Allowed" : "Permission required",
-          isReady: controller.screenRecordingGranted,
-          actionTitle: controller.screenRecordingGranted ? nil : "Allow"
+          title: controller.capturePermissionKind.title,
+          detail: controller.capturePermissionDetail,
+          isReady: controller.capturePermissionGranted,
+          actionTitle: controller.capturePermissionGranted
+            ? nil
+            : (controller.capturePermissionKind == .remoteDesktop ? "Open Settings" : "Allow")
         ) {
-          Task { await controller.requestScreenRecordingPermission() }
+          Task { await controller.requestCapturePermission() }
         }
         ShareStatusRow(
           title: "Remote control",
@@ -256,9 +258,18 @@ struct PrivateMacShareSheet: View {
           Button("Screen Recording") {
             controller.openPrivacySettings(.screenRecording)
           }
+          Button("Remote Desktop") {
+            controller.openRemoteDesktopSettingsForExperiment()
+          }
           Button("Accessibility") {
             controller.openPrivacySettings(.accessibility)
           }
+          Divider()
+          Toggle(
+            "Use Remote Desktop permission (experimental)",
+            isOn: $controller.experimentalRemoteDesktopCaptureEnabled
+          )
+          .disabled(controller.phase.isRunning)
         }
 
         Button("Refresh") {
