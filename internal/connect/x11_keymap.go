@@ -65,10 +65,17 @@ func buildX11Keymap(
 	for keyOffset := 0; keyOffset < count; keyOffset++ {
 		keycode := byte(int(minimum) + keyOffset)
 		rawLevels := keysyms[keyOffset*perKeycode : (keyOffset+1)*perKeycode]
-		if !x11GroupsEquivalent(rawLevels) {
-			return x11Keymap{}, errors.New("X11 multiple keyboard groups require XKB support")
-		}
 		levels := normalizedX11Levels(rawLevels)
+		if !x11GroupsEquivalent(rawLevels) {
+			// Extra XKB keyboard groups (secondary layouts) cannot be
+			// disambiguated from AltGr levels through the core protocol, so bind
+			// only the primary group's base and shift levels. Standard typing
+			// and — critically — screen capture keep working instead of the
+			// whole backend falling back to the synthetic test pattern.
+			// (Active-group-aware XKB mapping is a follow-up.)
+			primary := normalizedX11Levels(rawLevels[:2])
+			levels = []uint32{primary[0], primary[1], primary[0], primary[1]}
+		}
 		symbolsByKeycode[keycode] = levels
 		for level, keysym := range levels[:2] {
 			if keysym == 0 {

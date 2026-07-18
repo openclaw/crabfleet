@@ -35,20 +35,36 @@ func TestBuildX11KeymapPreservesRequiredLevels(t *testing.T) {
 	}
 }
 
-func TestBuildX11KeymapRejectsMultipleGroups(t *testing.T) {
+func TestBuildX11KeymapBindsPrimaryGroupIgnoringSecondary(t *testing.T) {
 	t.Parallel()
-	if _, err := buildX11Keymap([]uint32{'a', 'A', 0x06c1, 0x06e1}, 20, 1, 4, x11ModifierMap{}); err == nil {
-		t.Fatal("accepted an XKB multi-group keymap")
+	// A second XKB group (Arabic here) must not disable the keymap; the primary
+	// group's base and shift bind, and the secondary group's keysyms are ignored.
+	keymap, err := buildX11Keymap([]uint32{'a', 'A', 0x06c1, 0x06e1}, 20, 1, 4, x11ModifierMap{})
+	if err != nil {
+		t.Fatalf("multi-group keymap must build: %v", err)
+	}
+	if b, ok := keymap.bindings['a']; !ok || b.keycode != 20 || b.shift {
+		t.Fatalf("primary base binding missing/wrong: %+v ok=%v", b, ok)
+	}
+	if _, ok := keymap.bindings[0x06c1]; ok {
+		t.Fatal("secondary-group keysym must not be bound")
 	}
 }
 
-func TestBuildX11KeymapRejectsThirdGroup(t *testing.T) {
+func TestBuildX11KeymapIgnoresDifferingThirdGroup(t *testing.T) {
 	t.Parallel()
-	if _, err := buildX11Keymap(
+	keymap, err := buildX11Keymap(
 		[]uint32{'a', 'A', 'a', 'A', 0x06c1, 0x06e1},
 		20, 1, 6, x11ModifierMap{},
-	); err == nil {
-		t.Fatal("accepted a differing third XKB group")
+	)
+	if err != nil {
+		t.Fatalf("keymap with a differing third group must build: %v", err)
+	}
+	if _, ok := keymap.bindings['a']; !ok {
+		t.Fatal("primary base binding missing")
+	}
+	if _, ok := keymap.bindings[0x06c1]; ok {
+		t.Fatal("differing third-group keysym must not be bound")
 	}
 }
 
