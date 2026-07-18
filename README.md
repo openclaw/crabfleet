@@ -427,6 +427,25 @@ Full documentation available at [docs.crabfleet.ai](https://docs.crabfleet.ai):
 - [API](https://docs.crabfleet.ai/api) – REST and WebSocket APIs
 - [Spec](https://docs.crabfleet.ai/spec) – Complete product specification
 
+## Crabfleet Connect for Linux
+
+`crabfleet-connect` is the first cross-platform host foundation for sharing a
+Linux machine to the native macOS viewer or browser client. It provides a Go
+RFB 3.8 server, a fresh per-run VNC password, Tight/JPEG frames, client-side
+cursor updates, remote input, a synthetic test backend, and a Linux X11
+MIT-SHM/XFixes/XTest backend. The X11 backend cross-compiles in CI but has not
+been validated on physical Linux hardware yet.
+
+The CLI listens on loopback by default because VNC-DES does not encrypt RFB
+traffic. Remote use requires an explicit `--bind` on an already protected
+private path.
+
+This increment does not provide ARD host authentication, H.264 or HEVC
+encoding, Wayland/PipeWire capture, multi-group XKB input, audio, clipboard
+synchronization, or service packaging. See
+[`cmd/crabfleet-connect/README.md`](cmd/crabfleet-connect/README.md)
+for the exact boundary and run command.
+
 ## Security
 
 - All state-changing operations require authentication
