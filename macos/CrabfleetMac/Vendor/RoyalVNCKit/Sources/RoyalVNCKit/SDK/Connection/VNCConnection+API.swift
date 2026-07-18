@@ -166,6 +166,54 @@ public extension VNCConnection {
 }
 
 extension VNCConnection {
+	@discardableResult
+	public func requestSharedFolderList(id: UInt32, path: String) throws -> Bool {
+		try enqueueFileSharing(VNCProtocol.FileSharingRequest.list(id: id, path: path))
+	}
+
+	@discardableResult
+	public func requestSharedFolderChunk(
+		id: UInt32, path: String, offset: UInt64, length: UInt32
+	) throws -> Bool {
+		try enqueueFileSharing(
+			VNCProtocol.FileSharingRequest.get(id: id, path: path, offset: offset, length: length))
+	}
+
+	@discardableResult
+	public func beginSharedFolderUpload(id: UInt32, path: String, size: UInt64) throws -> Bool {
+		try enqueueFileSharing(VNCProtocol.FileSharingRequest.putBegin(id: id, path: path, size: size))
+	}
+
+	@discardableResult
+	public func sendSharedFolderUploadChunk(id: UInt32, bytes: Data) throws -> Bool {
+		try enqueueFileSharing(VNCProtocol.FileSharingRequest.putChunk(id: id, bytes: bytes))
+	}
+
+	@discardableResult
+	public func finishSharedFolderUpload(id: UInt32) -> Bool {
+		enqueueFileSharing(VNCProtocol.FileSharingRequest.putEnd(id: id))
+	}
+
+	@discardableResult
+	public func abortSharedFolderUpload(id: UInt32) -> Bool {
+		enqueueFileSharing(VNCProtocol.FileSharingRequest.putAbort(id: id))
+	}
+
+	@discardableResult
+	public func createSharedFolderDirectory(id: UInt32, path: String) throws -> Bool {
+		try enqueueFileSharing(VNCProtocol.FileSharingRequest.mkdir(id: id, path: path))
+	}
+
+	private func enqueueFileSharing(_ message: VNCProtocol.FileSharingRequest) -> Bool {
+		guard settings.frameEncodings.contains(.crabfleetFileSharing),
+			connectionState.status == .connected
+		else { return false }
+		enqueueClientToServerMessage(message)
+		return true
+	}
+}
+
+extension VNCConnection {
 	private func requestPixelFormatTransition(_ pixelFormat: VNCProtocol.PixelFormat) {
 		framebufferRequestLock.lock()
 		pendingPixelFormatTransition = pixelFormat

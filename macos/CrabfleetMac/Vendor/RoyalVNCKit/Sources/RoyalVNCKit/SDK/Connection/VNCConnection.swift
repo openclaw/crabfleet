@@ -64,6 +64,19 @@ public final class VNCConnection: NSObjectOrAnyObject, @unchecked Sendable {
 		}
 	}
 
+	public var fileSharingDelegate: VNCFileSharingDelegate? {
+		get {
+			fileSharingDelegateLock.lock()
+			defer { fileSharingDelegateLock.unlock() }
+			return _fileSharingDelegate
+		}
+		set {
+			fileSharingDelegateLock.lock()
+			defer { fileSharingDelegateLock.unlock() }
+			_fileSharingDelegate = newValue
+		}
+	}
+
 #if canImport(ObjectiveC)
 	@objc
 #endif
@@ -112,6 +125,8 @@ public final class VNCConnection: NSObjectOrAnyObject, @unchecked Sendable {
 	private weak var _clipboardDelegate: VNCClipboardDelegate?
 	private let audioDelegateLock = NSLock()
 	private weak var _audioDelegate: VNCAudioDelegate?
+	private let fileSharingDelegateLock = NSLock()
+	private weak var _fileSharingDelegate: VNCFileSharingDelegate?
 	private let framebufferLock = NSLock()
 	private var _framebuffer: VNCFramebuffer?
 	let framebufferDeliveryLock = NSLock()
@@ -477,6 +492,7 @@ public final class VNCConnection: NSObjectOrAnyObject, @unchecked Sendable {
 		_self.cancelPendingCredentialRequests()
 		_self.clipboardMonitor.delegate = nil
 		_self.clipboardDelegate = nil
+		_self.fileSharingDelegate = nil
 
 		stopMonitoringClipboard()
 	}

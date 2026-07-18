@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Add opt-in single-folder sharing to Share This Mac with security-scoped bookmark persistence, negotiated `FSH1` browsing, bounded native and browser download/upload streams, strict realpath containment, 512 MiB file and 256 KiB chunk limits, root-local temporary uploads with atomic rename and teardown cleanup, and host-controlled remote writes.
 - Warn without blocking Share This Mac when Tailscale reports a numerically suffixed duplicate registration, while continuing to advertise the current `Self` node address.
 - Blend the macOS title bar into the desktop deck, align its unified top band, and add hover, focus, refresh-progress, and empty-state interaction polish.
 - Keep Share This Mac permission status and start availability synchronized with Screen Recording and Accessibility grants made in System Settings while the sheet is open.

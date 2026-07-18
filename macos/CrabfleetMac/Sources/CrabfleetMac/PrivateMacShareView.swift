@@ -134,6 +134,38 @@ struct PrivateMacShareSheet: View {
         .disabled(controller.phase.isRunning)
         .help("Text copied on either Mac is available on the other while connected.")
 
+        HStack(spacing: 10) {
+          Toggle(
+            "Share a folder",
+            isOn: Binding(
+              get: { controller.sharedFolderName != nil },
+              set: { enabled in
+                if enabled { controller.chooseSharedFolder() } else { controller.stopSharingFolder() }
+              }
+            )
+          )
+          .disabled(controller.phase.isRunning)
+          Spacer()
+          if let name = controller.sharedFolderName {
+            Label(name, systemImage: "folder.fill")
+              .foregroundStyle(.secondary)
+              .lineLimit(1)
+            Button("Change") { controller.chooseSharedFolder() }
+              .disabled(controller.phase.isRunning)
+            Button("Stop sharing folder", role: .destructive) {
+              controller.stopSharingFolder()
+            }
+            .disabled(controller.phase.isRunning)
+          }
+        }
+        .help("Lets capable viewers browse, download, and upload only inside this folder.")
+
+        if controller.sharedFolderName != nil {
+          Toggle("Allow remote uploads and new folders", isOn: $controller.allowRemoteFolderWrites)
+            .disabled(controller.phase.isRunning)
+            .help("Uploads use a temporary file and become visible only after an atomic finish.")
+        }
+
         Toggle(
           "Allow browser access via Crabfleet",
           isOn: $controller.browserAccessEnabled

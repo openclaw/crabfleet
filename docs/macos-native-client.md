@@ -136,7 +136,20 @@ an owner-scoped Crabfleet Worker relay for first-party browser access.
    first enabled viewer negotiates the Crabfleet audio extension, then stops
    after the last such viewer disconnects. Other VNC clients and secondary
    displays remain video-only.
-10. "Start sharing when I log in" registers the bundled app as a login item and
+10. Folder sharing is off by default. **Share a folder** opens a directory-only
+    picker and persists that selection as a security-scoped bookmark under
+    `org.openclaw.crabfleet.share.folder-bookmark`. While the share runs, the
+    host resolves the bookmark and holds security-scoped access. Capable native
+    and browser viewers get a file panel for browsing and bounded downloads;
+    **Allow remote uploads and new folders** defaults on and gates upload and
+    mkdir operations. Every relative path is capped at 4 KiB, rejects absolute
+    paths and `..`, and must remain under the selected root after resolving
+    symlinks. Files are capped at 512 MiB and stream in chunks no larger than
+    256 KiB. Each session permits one upload at a time, writes a temporary file
+    in the shared root, atomically renames it only after the declared size has
+    arrived, and removes partial files on failure or disconnect. DELETE is not
+    implemented.
+11. "Start sharing when I log in" registers the bundled app as a login item and
     persists an auto-share preference, so the Mac comes back reachable after a
     reboot without manual setup (the equivalent of `--share-this-mac` for
     unattended hosts).
@@ -335,6 +348,15 @@ The adjacent **Auto / Sharp / Smooth** picker sends negotiated `QCTL` updates
 for this browser session only and restores the tab's per-host choice from
 `sessionStorage`.
 
+When the host and browser negotiate `FSH1` (`0x46534831`), server message 202
+announces the shared-folder display name and write policy. The browser **Files**
+panel issues bounded LIST and GET requests, assembles each download into a Blob,
+and sends selected or dropped files with PUT_BEGIN, PUT_CHUNK, and PUT_END. A
+local source failure sends PUT_ABORT so the host removes the partial temporary
+file and admits the next upload. The
+host does not emit message 202 unless both a folder is active and the viewer
+advertised `FSH1`, so older peers retain their existing byte stream.
+
 Fleet registrations also carry a `webtransport` capability boolean. It remains
 `false` and is passed through opaquely for probe-only groundwork: the browser
 does not attempt WebTransport in this wave because Cloudflare Workers
@@ -369,6 +391,9 @@ no longer bundles or builds the modified D3DES source.
 
 ## Current viewer limits
 
+- Shared folders are browsable transfer surfaces, not continuous synchronization.
+  Live bidirectional folder sync, conflict resolution, remote delete, recursive
+  directory upload, and transfers larger than 512 MiB are follow-up work.
 - Text clipboard only. UTF-8 flows end to end when the server negotiates the
   Extended Clipboard extension; image and file clipboard formats are not
   implemented, and servers without the extension remain limited to ISO-8859-1.

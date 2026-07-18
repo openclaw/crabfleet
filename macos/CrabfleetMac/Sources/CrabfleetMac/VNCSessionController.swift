@@ -4,6 +4,20 @@ import Network
 import RoyalVNCKit
 import SwiftUI
 
+private enum NativeFileTransferError: Error, LocalizedError {
+  case unavailable
+  case unexpectedResponse
+  case sizeMismatch
+
+  var errorDescription: String? {
+    switch self {
+    case .unavailable: "The shared folder is unavailable."
+    case .unexpectedResponse: "The host returned an unexpected file-transfer response."
+    case .sizeMismatch: "The transferred file size did not match."
+    }
+  }
+}
+
 struct VNCViewportSize: Equatable {
   let width: UInt16
   let height: UInt16
@@ -44,6 +58,7 @@ final class VNCSessionController: NSObject, ObservableObject {
     var encodings: [VNCFrameEncodingType] = [
       .crabfleetHEVC, .openH264, .tight, .hextile, .crabfleetAudio,
       .crabfleetQualityControl,
+      .crabfleetFileSharing,
     ]
     if supportsHEVC444 { encodings.insert(.crabfleetChroma444, at: 1) }
     return encodings
@@ -89,6 +104,13 @@ final class VNCSessionController: NSObject, ObservableObject {
   @Published private(set) var thumbnail: NSImage?
   @Published private(set) var clipboardEnabled = false
   @Published private(set) var isAudioMuted = false
+  @Published private(set) var sharedFolderName: String?
+  @Published private(set) var sharedFolderWritesAllowed = false
+  @Published private(set) var sharedFolderEntries: [VNCFileEntry] = []
+  @Published private(set) var sharedFolderPath = ""
+  @Published private(set) var fileTransferStatus: String?
+  @Published private(set) var fileTransferProgress: Double?
+  @Published var isFileBrowserVisible = false
   @Published var qualityMode: ShareQualityMode {
     didSet {
       defaults.set(qualityMode.rawValue, forKey: qualityModeDefaultsKey)
@@ -122,6 +144,10 @@ final class VNCSessionController: NSObject, ObservableObject {
   private var tcpFallbackRetryState: TCPFallbackRetryState?
   private var tcpFallbackRetryTask: Task<Void, Never>?
   private let audioPlayer = RemoteAudioPlayer()
+  private var nextFileRequestID: UInt32 = 1
+  private var pendingFileRequests: [
+    UInt32: CheckedContinuation<VNCFileSharingMessage, any Error>
+  ] = [:]
 
   init(
     targetID: String = UUID().uuidString,
@@ -227,6 +253,7 @@ final class VNCSessionController: NSObject, ObservableObject {
     connection.delegate = self
     connection.clipboardDelegate = self
     connection.audioDelegate = self
+    connection.fileSharingDelegate = self
     applyFramebufferUpdatePolicy(to: connection)
     self.connection = connection
     self.transport = transport
@@ -299,9 +326,11 @@ final class VNCSessionController: NSObject, ObservableObject {
     pendingTCPFallbackRequest = nil
     quicFallbackTask?.cancel()
     quicFallbackTask = nil
+    resetFileSharing(error: NativeFileTransferError.unavailable)
     connection?.delegate = nil
     connection?.clipboardDelegate = nil
     connection?.audioDelegate = nil
+    connection?.fileSharingDelegate = nil
     connection?.disconnect()
     pendingQUICStream?.stateUpdateHandler = nil
     pendingQUICStream?.cancel()
@@ -328,9 +357,11 @@ final class VNCSessionController: NSObject, ObservableObject {
     state.retriesRemaining -= 1
     state.attempt += 1
     tcpFallbackRetryState = state
+    resetFileSharing(error: NativeFileTransferError.unavailable)
     connection.delegate = nil
     connection.clipboardDelegate = nil
     connection.audioDelegate = nil
+    connection.fileSharingDelegate = nil
     self.connection = nil
     clearCredentials()
     phase = .connecting
@@ -402,6 +433,7 @@ final class VNCSessionController: NSObject, ObservableObject {
     connection?.delegate = nil
     connection?.clipboardDelegate = nil
     connection?.audioDelegate = nil
+    connection?.fileSharingDelegate = nil
     connection?.disconnect()
     audioPlayer.stop()
     connection = nil
@@ -411,6 +443,7 @@ final class VNCSessionController: NSObject, ObservableObject {
     framebufferRevision += 1
     clearCredentials()
     cancelThumbnailCapture()
+    resetFileSharing(error: NativeFileTransferError.unavailable)
   }
 
   private func clearCredentials() {
@@ -494,6 +527,238 @@ final class VNCSessionController: NSObject, ObservableObject {
     audioPlayer.setMuted(isAudioMuted || !isFocused || !isApplicationActive)
   }
 
+  func showFileBrowser() {
+    guard sharedFolderName != nil else { return }
+    isFileBrowserVisible.toggle()
+    if isFileBrowserVisible { refreshSharedFolder() }
+  }
+
+  func refreshSharedFolder(path: String? = nil) {
+    let requestedPath = path ?? sharedFolderPath
+    Task { [weak self] in
+      guard let self else { return }
+      do {
+        let message = try await requestFile { connection, id in
+          try connection.requestSharedFolderList(id: id, path: requestedPath)
+        }
+        guard case .list(_, let entries) = message else {
+          throw NativeFileTransferError.unexpectedResponse
+        }
+        sharedFolderPath = requestedPath
+        sharedFolderEntries = entries
+        fileTransferStatus = nil
+      } catch {
+        fileTransferStatus = error.localizedDescription
+      }
+    }
+  }
+
+  func openSharedFolderEntry(_ entry: VNCFileEntry) {
+    let path = sharedFolderPath.isEmpty ? entry.name : "\(sharedFolderPath)/\(entry.name)"
+    if entry.isDirectory {
+      refreshSharedFolder(path: path)
+    } else {
+      downloadSharedFile(path: path, entry: entry)
+    }
+  }
+
+  func navigateSharedFolderUp() {
+    guard !sharedFolderPath.isEmpty else { return }
+    refreshSharedFolder(path: sharedFolderPath.split(separator: "/").dropLast().joined(separator: "/"))
+  }
+
+  func chooseFilesToUpload() {
+    guard sharedFolderWritesAllowed else { return }
+    let panel = NSOpenPanel()
+    panel.title = "Upload to \(sharedFolderName ?? "shared folder")"
+    panel.prompt = "Upload"
+    panel.canChooseDirectories = false
+    panel.canChooseFiles = true
+    panel.allowsMultipleSelection = true
+    guard panel.runModal() == .OK else { return }
+    uploadSharedFiles(panel.urls)
+  }
+
+  func createSharedFolderDirectory() {
+    guard sharedFolderWritesAllowed else { return }
+    let field = NSTextField(string: "")
+    field.placeholderString = "Folder name"
+    field.frame = NSRect(x: 0, y: 0, width: 280, height: 24)
+    let alert = NSAlert()
+    alert.messageText = "New folder"
+    alert.informativeText = "Create a folder inside \(sharedFolderName ?? "the shared folder")."
+    alert.accessoryView = field
+    alert.addButton(withTitle: "Create")
+    alert.addButton(withTitle: "Cancel")
+    guard alert.runModal() == .alertFirstButtonReturn else { return }
+    let name = field.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !name.isEmpty, !name.contains("/"), name != ".", name != ".." else {
+      fileTransferStatus = "Choose a single folder name."
+      return
+    }
+    let path = sharedFolderPath.isEmpty ? name : "\(sharedFolderPath)/\(name)"
+    Task { [weak self] in
+      guard let self else { return }
+      do {
+        let message = try await requestFile { connection, id in
+          try connection.createSharedFolderDirectory(id: id, path: path)
+        }
+        guard case .operation(_, 6) = message else {
+          throw NativeFileTransferError.unexpectedResponse
+        }
+        refreshSharedFolder()
+      } catch {
+        fileTransferStatus = error.localizedDescription
+      }
+    }
+  }
+
+  func uploadSharedFiles(_ urls: [URL]) {
+    guard sharedFolderWritesAllowed, !urls.isEmpty else { return }
+    Task { [weak self] in
+      guard let self else { return }
+      for url in urls {
+        do { try await uploadSharedFile(url) } catch {
+          fileTransferStatus = error.localizedDescription
+          return
+        }
+      }
+      refreshSharedFolder()
+    }
+  }
+
+  private func downloadSharedFile(path: String, entry: VNCFileEntry) {
+    let panel = NSSavePanel()
+    panel.nameFieldStringValue = entry.name
+    panel.canCreateDirectories = true
+    guard panel.runModal() == .OK, let destination = panel.url else { return }
+    Task { [weak self] in
+      guard let self else { return }
+      let temporary = destination.deletingLastPathComponent().appendingPathComponent(
+        ".crabfleet-download-\(UUID().uuidString).tmp")
+      do {
+        guard FileManager.default.createFile(atPath: temporary.path, contents: nil) else {
+          throw CocoaError(.fileWriteUnknown)
+        }
+        let handle = try FileHandle(forWritingTo: temporary)
+        var offset: UInt64 = 0
+        fileTransferStatus = "Downloading \(entry.name)…"
+        do {
+          while offset < entry.size || (entry.size == 0 && offset == 0) {
+            let length = UInt32(min(UInt64(256 * 1_024), max(1, entry.size - offset)))
+            let message = try await requestFile { connection, id in
+              try connection.requestSharedFolderChunk(
+                id: id, path: path, offset: offset, length: length)
+            }
+            guard case .chunk(_, let receivedOffset, let bytes, let endOfFile) = message,
+              receivedOffset == offset
+            else { throw NativeFileTransferError.unexpectedResponse }
+            try handle.write(contentsOf: bytes)
+            offset += UInt64(bytes.count)
+            fileTransferProgress = entry.size == 0 ? 1 : Double(offset) / Double(entry.size)
+            if endOfFile { break }
+            guard !bytes.isEmpty else { throw NativeFileTransferError.sizeMismatch }
+          }
+          guard offset == entry.size else { throw NativeFileTransferError.sizeMismatch }
+          try handle.synchronize()
+          try handle.close()
+        } catch {
+          try? handle.close()
+          throw error
+        }
+        if FileManager.default.fileExists(atPath: destination.path) {
+          _ = try FileManager.default.replaceItemAt(destination, withItemAt: temporary)
+        } else {
+          try FileManager.default.moveItem(at: temporary, to: destination)
+        }
+        fileTransferProgress = nil
+        fileTransferStatus = "Downloaded \(entry.name)"
+      } catch {
+        try? FileManager.default.removeItem(at: temporary)
+        fileTransferProgress = nil
+        fileTransferStatus = error.localizedDescription
+      }
+    }
+  }
+
+  private func uploadSharedFile(_ url: URL) async throws {
+    let values = try url.resourceValues(forKeys: [.fileSizeKey, .isRegularFileKey])
+    guard values.isRegularFile == true, let byteCount = values.fileSize, byteCount >= 0,
+      UInt64(byteCount) <= 512 * 1_024 * 1_024
+    else { throw NativeFileTransferError.unavailable }
+    let path = sharedFolderPath.isEmpty ? url.lastPathComponent : "\(sharedFolderPath)/\(url.lastPathComponent)"
+    let id = allocateFileRequestID()
+    let handle = try FileHandle(forReadingFrom: url)
+    defer { try? handle.close() }
+    fileTransferStatus = "Uploading \(url.lastPathComponent)…"
+    let begin = try await requestFile(id: id) { connection, id in
+      try connection.beginSharedFolderUpload(id: id, path: path, size: UInt64(byteCount))
+    }
+    guard case .operation(_, 3) = begin else { throw NativeFileTransferError.unexpectedResponse }
+    do {
+      var sent: UInt64 = 0
+      while let bytes = try handle.read(upToCount: 256 * 1_024), !bytes.isEmpty {
+        let chunk = try await requestFile(id: id) { connection, id in
+          try connection.sendSharedFolderUploadChunk(id: id, bytes: bytes)
+        }
+        guard case .operation(_, 4) = chunk else { throw NativeFileTransferError.unexpectedResponse }
+        sent += UInt64(bytes.count)
+        fileTransferProgress = byteCount == 0 ? 1 : Double(sent) / Double(byteCount)
+      }
+      let end = try await requestFile(id: id) { connection, id in
+        connection.finishSharedFolderUpload(id: id)
+      }
+      guard case .operation(_, 5) = end else { throw NativeFileTransferError.unexpectedResponse }
+    } catch {
+      _ = try? await requestFile(id: id) { connection, id in
+        connection.abortSharedFolderUpload(id: id)
+      }
+      throw error
+    }
+    fileTransferProgress = nil
+    fileTransferStatus = "Uploaded \(url.lastPathComponent)"
+  }
+
+  private func requestFile(
+    id: UInt32? = nil,
+    send: (VNCConnection, UInt32) throws -> Bool
+  ) async throws -> VNCFileSharingMessage {
+    guard let connection, sharedFolderName != nil else { throw NativeFileTransferError.unavailable }
+    let requestID = id ?? allocateFileRequestID()
+    return try await withCheckedThrowingContinuation { continuation in
+      pendingFileRequests[requestID] = continuation
+      do {
+        guard try send(connection, requestID) else {
+          pendingFileRequests.removeValue(forKey: requestID)
+          continuation.resume(throwing: NativeFileTransferError.unavailable)
+          return
+        }
+      } catch {
+        pendingFileRequests.removeValue(forKey: requestID)
+        continuation.resume(throwing: error)
+      }
+    }
+  }
+
+  private func allocateFileRequestID() -> UInt32 {
+    defer {
+      nextFileRequestID &+= 1
+      if nextFileRequestID == 0 { nextFileRequestID = 1 }
+    }
+    return nextFileRequestID
+  }
+
+  private func resetFileSharing(error: any Error) {
+    sharedFolderName = nil
+    sharedFolderWritesAllowed = false
+    sharedFolderEntries = []
+    sharedFolderPath = ""
+    isFileBrowserVisible = false
+    fileTransferProgress = nil
+    for continuation in pendingFileRequests.values { continuation.resume(throwing: error) }
+    pendingFileRequests.removeAll()
+  }
+
   private func scheduleThumbnailCapture(delay: TimeInterval = 0.35) {
     guard !isPresentingLiveSurface, thumbnailWorkItem == nil else { return }
 
@@ -532,6 +797,7 @@ final class VNCSessionController: NSObject, ObservableObject {
     connection?.delegate = nil
     connection?.clipboardDelegate = nil
     connection?.audioDelegate = nil
+    connection?.fileSharingDelegate = nil
     connection?.disconnect()
     audioPlayer.stop()
   }
@@ -571,6 +837,7 @@ extension VNCSessionController: VNCConnectionDelegate {
       framebuffer = nil
       self.connection = nil
       audioPlayer.stop()
+      resetFileSharing(error: NativeFileTransferError.unavailable)
       clearCredentials()
       cancelThumbnailCapture()
       if let error = connectionState.error {
@@ -676,6 +943,28 @@ extension VNCSessionController: VNCAudioDelegate {
   func connection(_ connection: VNCConnection, didReceiveAudio message: VNCAudioMessage) {
     guard self.connection === connection else { return }
     audioPlayer.receive(message)
+  }
+}
+
+extension VNCSessionController: VNCFileSharingDelegate {
+  func connection(
+    _ connection: VNCConnection,
+    didReceiveFileSharing message: VNCFileSharingMessage
+  ) {
+    guard self.connection === connection else { return }
+    switch message {
+    case .capability(let displayName, let allowWrites):
+      sharedFolderName = displayName
+      sharedFolderWritesAllowed = allowWrites
+      refreshSharedFolder(path: "")
+    case .list(let id, _), .chunk(let id, _, _, _), .operation(let id, _):
+      pendingFileRequests.removeValue(forKey: id)?.resume(returning: message)
+    case .error(let id, let message):
+      pendingFileRequests.removeValue(forKey: id)?.resume(
+        throwing: NSError(
+          domain: "org.openclaw.crabfleet.file-transfer", code: 1,
+          userInfo: [NSLocalizedDescriptionKey: message]))
+    }
   }
 }
 

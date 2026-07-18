@@ -2524,6 +2524,85 @@
         background: rgb(0 0 0 / 0.65);
         pointer-events: none;
       }
+      .desktop-file-panel {
+        position: absolute;
+        z-index: 3;
+        inset: 12px 12px 12px auto;
+        display: grid;
+        grid-template-rows: auto minmax(0, 1fr) auto auto auto;
+        width: min(380px, calc(100% - 24px));
+        overflow: hidden;
+        border: 1px solid rgb(255 255 255 / 0.14);
+        border-radius: 10px;
+        background: rgb(10 11 17 / 0.96);
+        box-shadow: 0 18px 55px rgb(0 0 0 / 0.55);
+        backdrop-filter: blur(18px);
+      }
+      .desktop-file-panel > header {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 10px;
+        padding: 12px;
+        border-bottom: 1px solid rgb(255 255 255 / 0.1);
+      }
+      .desktop-file-panel > header div {
+        display: grid;
+        min-width: 0;
+      }
+      .desktop-file-panel > header span {
+        overflow: hidden;
+        color: var(--muted);
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      .desktop-file-list {
+        overflow: auto;
+        padding: 6px;
+      }
+      .desktop-file-entry {
+        display: grid;
+        grid-template-columns: 18px minmax(0, 1fr) auto;
+        align-items: center;
+        gap: 7px;
+        width: 100%;
+        padding: 9px 8px;
+        border: 0;
+        background: transparent;
+        text-align: left;
+      }
+      .desktop-file-entry:hover {
+        background: rgb(52 211 153 / 0.1);
+      }
+      .desktop-file-entry strong {
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      .desktop-file-entry small,
+      .desktop-file-empty,
+      .desktop-file-readonly,
+      .desktop-file-status,
+      .desktop-file-upload span {
+        color: var(--muted);
+      }
+      .desktop-file-empty,
+      .desktop-file-readonly,
+      .desktop-file-status {
+        margin: 0;
+        padding: 10px 12px;
+      }
+      .desktop-file-upload {
+        display: flex;
+        align-items: center;
+        gap: 9px;
+        padding: 10px 12px;
+        border-top: 1px solid rgb(255 255 255 / 0.1);
+      }
+      .desktop-file-panel progress {
+        width: calc(100% - 24px);
+        margin: 4px 12px;
+      }
       .desktop-clipboard {
         display: grid;
         grid-template-columns: auto minmax(200px, 520px) auto auto minmax(0, 1fr);
