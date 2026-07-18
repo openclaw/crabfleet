@@ -83,6 +83,7 @@ compatibility, but ARD host authentication fails closed and viewers must select
 VNC password authentication. H.264/HEVC encoding, Wayland/PipeWire, audio,
 multi-group XKB input, clipboard synchronization, service packaging, and
 real-hardware validation remain follow-up work.
+
 ## Wake-on-LAN
 
 Quick Connect and saved-connection settings accept colon-separated,
