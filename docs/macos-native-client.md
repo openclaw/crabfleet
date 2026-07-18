@@ -63,26 +63,31 @@ full UTF-8 text with servers that negotiate it; against servers without the
 extension, standard cut text must encode losslessly as ISO-8859-1 and
 unsupported text is rejected instead of silently becoming empty data.
 
-## Linux Connect foundation
+## Linux and Windows Connect foundation
 
 The native viewer can also connect directly to the first
-`crabfleet-connect` Linux host foundation. That Go host speaks RFB 3.8 with a
-fresh per-run VNC-DES password, Tight/JPEG full-frame updates, client-side
-cursor rectangles, and pointer/key input. Its synthetic backend provides the
-portable CI and protocol-test path. The Linux-only backend implements X11
-capture with MIT-SHM `XShmGetImage`, cursor images with XFixes, and input with
-XTest; it cross-compiles for amd64 and arm64 but has not been exercised on
-physical Linux hardware in this increment.
+`crabfleet-connect` Linux and Windows host foundation. That Go host speaks RFB
+3.8 with a fresh per-run VNC-DES password, Tight/JPEG full-frame updates,
+client-side cursor rectangles, and pointer/key input. Its synthetic backend
+provides the portable CI and protocol-test path. The Linux backend implements
+X11 capture with MIT-SHM `XShmGetImage`, cursor images with XFixes, and input
+with XTest. The pure-Go Windows backend captures the primary display into RGBA
+frames with synchronized GDI `BitBlt` and injects absolute pointer, wheel, and
+keyboard input with `SendInput`; named keys and active-layout shortcuts use
+virtual keys, while text uses Unicode injection plus canonical legacy X11
+keysym conversion. Both native paths cross-compile for amd64 and arm64. Neither
+has been exercised on physical target hardware in these increments.
 
 The Connect listener defaults to loopback because VNC-DES does not encrypt RFB
 traffic. A remote listener requires an explicit private bind on a separately
 protected network path.
 
-The Linux host still advertises the direct-listener ARD security type for wire
+The Connect host still advertises the direct-listener ARD security type for wire
 compatibility, but ARD host authentication fails closed and viewers must select
 VNC password authentication. H.264/HEVC encoding, Wayland/PipeWire, audio,
-multi-group XKB input, clipboard synchronization, service packaging, and
-real-hardware validation remain follow-up work.
+Windows DXGI Desktop Duplication, Windows multi-monitor and per-monitor-DPI
+support, multi-group XKB input, clipboard synchronization, service packaging,
+and real-hardware validation remain follow-up work.
 
 ## Wake-on-LAN
 
