@@ -411,16 +411,77 @@ struct TailscaleStatusDocument: Decodable, Sendable {
     }
   }
 
+  struct PeerNode: Decodable, Sendable {
+    let hostName: String?
+
+    enum CodingKeys: String, CodingKey {
+      case hostName = "HostName"
+    }
+  }
+
   let backendState: String
   let currentTailnet: Tailnet?
   let selfNode: Node?
+  let peerNodes: [String: PeerNode]
   let users: [String: User]
 
   enum CodingKeys: String, CodingKey {
     case backendState = "BackendState"
     case currentTailnet = "CurrentTailnet"
     case selfNode = "Self"
+    case peerNodes = "Peer"
     case users = "User"
+  }
+
+  init(from decoder: any Decoder) throws {
+    let container = try decoder.container(keyedBy: CodingKeys.self)
+    backendState = try container.decode(String.self, forKey: .backendState)
+    currentTailnet = try container.decodeIfPresent(Tailnet.self, forKey: .currentTailnet)
+    selfNode = try container.decodeIfPresent(Node.self, forKey: .selfNode)
+    users = try container.decode([String: User].self, forKey: .users)
+    peerNodes = (try? container.decode([String: PeerNode].self, forKey: .peerNodes)) ?? [:]
+  }
+}
+
+enum TailnetRegistrationHealth: Equatable, Sendable {
+  case ok
+  case duplicateHostname(
+    advertised: String?,
+    hostName: String,
+    matchingPeerPresent: Bool
+  )
+}
+
+enum TailnetRegistrationHealthPolicy {
+  static func health(from document: TailscaleStatusDocument) -> TailnetRegistrationHealth {
+    guard let node = document.selfNode else { return .ok }
+    var dnsName = node.dnsName
+    while dnsName.last == "." { dnsName.removeLast() }
+    guard
+      let firstLabel = dnsName.split(separator: ".", omittingEmptySubsequences: false).first,
+      !firstLabel.isEmpty,
+      let suffixSeparator = firstLabel.lastIndex(of: "-")
+    else { return .ok }
+
+    let base = firstLabel[..<suffixSeparator]
+    let suffix = firstLabel[firstLabel.index(after: suffixSeparator)...]
+    guard
+      !base.isEmpty,
+      !suffix.isEmpty,
+      suffix.utf8.allSatisfy({ (48...57).contains($0) }),
+      String(base).caseInsensitiveCompare(node.hostName) == .orderedSame
+    else { return .ok }
+
+    let advertised = node.tailscaleIPs.first(where: TailnetIdentityPolicy.isTailscaleIPv4)
+    let matchingPeerPresent = document.peerNodes.values.contains { peer in
+      guard let peerHostName = peer.hostName else { return false }
+      return peerHostName.caseInsensitiveCompare(String(base)) == .orderedSame
+    }
+    return .duplicateHostname(
+      advertised: advertised,
+      hostName: node.hostName,
+      matchingPeerPresent: matchingPeerPresent
+    )
   }
 }
 

@@ -1515,6 +1515,113 @@ struct PrivateMacShareTests {
   }
 
   @Test
+  func reportsHealthyNormalTailnetRegistration() throws {
+    let document = try registrationHealthDocument(
+      dnsName: "miniclaw.example.ts.net.",
+      hostName: "miniclaw"
+    )
+
+    #expect(TailnetRegistrationHealthPolicy.health(from: document) == .ok)
+  }
+
+  @Test
+  func detectsSuffixedDuplicateTailnetRegistrationAndMatchingPeer() throws {
+    let document = try registrationHealthDocument(
+      dnsName: "miniclaw-1.example.ts.net.",
+      hostName: "miniclaw",
+      peerHostNames: ["MINICLAW"]
+    )
+
+    #expect(
+      TailnetRegistrationHealthPolicy.health(from: document)
+        == .duplicateHostname(
+          advertised: "100.83.142.121",
+          hostName: "miniclaw",
+          matchingPeerPresent: true
+        )
+    )
+  }
+
+  @Test
+  func detectsSuffixedDuplicateWithoutAnIPv4Address() throws {
+    let json = registrationHealthJSON(
+      dnsName: "miniclaw-1.example.ts.net.",
+      hostName: "miniclaw"
+    ).replacingOccurrences(
+      of: #""TailscaleIPs": ["100.83.142.121", "fd7a:115c:a1e0::1"]"#,
+      with: #""TailscaleIPs": ["fd7a:115c:a1e0::1"]"#
+    )
+    let document = try JSONDecoder().decode(
+      TailscaleStatusDocument.self,
+      from: Data(json.utf8)
+    )
+
+    #expect(
+      TailnetRegistrationHealthPolicy.health(from: document)
+        == .duplicateHostname(
+          advertised: nil,
+          hostName: "miniclaw",
+          matchingPeerPresent: false
+        )
+    )
+  }
+
+  @Test
+  func acceptsHostnameThatLegitimatelyEndsInNumericSuffix() throws {
+    let document = try registrationHealthDocument(
+      dnsName: "miniclaw-1.example.ts.net.",
+      hostName: "miniclaw-1"
+    )
+
+    #expect(TailnetRegistrationHealthPolicy.health(from: document) == .ok)
+  }
+
+  @Test
+  func acceptsMalformedOrEmptyTailnetDNSName() throws {
+    for dnsName in ["", ".", ".miniclaw-1.example.ts.net."] {
+      let document = try registrationHealthDocument(
+        dnsName: dnsName,
+        hostName: "miniclaw",
+        peerHostNames: ["miniclaw"]
+      )
+      #expect(TailnetRegistrationHealthPolicy.health(from: document) == .ok)
+    }
+  }
+
+  @Test @MainActor
+  func refreshPublishesDuplicateTailnetWarningWithoutChangingIdentity() async throws {
+    let output = registrationHealthJSON(
+      dnsName: "miniclaw-1.example.ts.net.",
+      hostName: "miniclaw",
+      peerHostNames: ["miniclaw"]
+    )
+    let defaults = try #require(
+      UserDefaults(suiteName: "CrabfleetMacTests.\(UUID().uuidString)")
+    )
+    let controller = PrivateMacShareController(
+      runner: StaticTailscaleRunner(output: output),
+      desktopRegistration: nil,
+      defaults: defaults,
+      screenRecordingPermissionCheck: { false },
+      accessibilityPermissionCheck: { false }
+    )
+
+    await controller.refresh()
+
+    #expect(controller.identity?.ipv4Address == "100.83.142.121")
+    #expect(
+      controller.tailnetRegistrationHealth
+        == .duplicateHostname(
+          advertised: "100.83.142.121",
+          hostName: "miniclaw",
+          matchingPeerPresent: true
+        )
+    )
+    #expect(controller.tailnetWarning?.contains("appears registered more than once") == true)
+    #expect(controller.tailnetWarning?.contains("advertising 100.83.142.121") == true)
+  }
+
+  @Test
   func derivesGenericStableDesktopHostID() {
     let identity = TailnetIdentity(
       tailnetName: "example.com",
@@ -2534,6 +2641,50 @@ struct PrivateMacShareTests {
 
   private func statusDocument() throws -> TailscaleStatusDocument {
     try JSONDecoder().decode(TailscaleStatusDocument.self, from: Data(statusJSON().utf8))
+  }
+
+  private func registrationHealthDocument(
+    dnsName: String,
+    hostName: String,
+    peerHostNames: [String] = []
+  ) throws -> TailscaleStatusDocument {
+    try JSONDecoder().decode(
+      TailscaleStatusDocument.self,
+      from: Data(
+        registrationHealthJSON(
+          dnsName: dnsName,
+          hostName: hostName,
+          peerHostNames: peerHostNames
+        ).utf8
+      )
+    )
+  }
+
+  private func registrationHealthJSON(
+    dnsName: String,
+    hostName: String,
+    peerHostNames: [String] = []
+  ) -> String {
+    let peers = peerHostNames.enumerated().map { index, peerHostName in
+      "\"peer-\(index)\": { \"HostName\": \"\(peerHostName)\" }"
+    }.joined(separator: ",")
+    return """
+      {
+        "BackendState": "Running",
+        "CurrentTailnet": { "Name": "example.com" },
+        "Self": {
+          "DNSName": "\(dnsName)",
+          "HostName": "\(hostName)",
+          "Online": true,
+          "TailscaleIPs": ["100.83.142.121", "fd7a:115c:a1e0::1"],
+          "UserID": 42
+        },
+        "Peer": { \(peers) },
+        "User": {
+          "42": { "LoginName": "operator@example.com" }
+        }
+      }
+      """
   }
 
   private func desktopIdentity(name: String, address: String) -> TailnetIdentity {
