@@ -687,6 +687,10 @@ final class PrivateMacShareController: ObservableObject {
   nonisolated static let streamAudioDefaultsKey = "org.openclaw.crabfleet.share.audio"
   nonisolated static let qualityModeDefaultsKey = "org.openclaw.crabfleet.share.quality-mode"
   nonisolated static let browserAccessDefaultsKey = "org.openclaw.crabfleet.share.browser-access"
+  nonisolated static let sharedFolderBookmarkDefaultsKey =
+    "org.openclaw.crabfleet.share.folder-bookmark"
+  nonisolated static let sharedFolderWritesDefaultsKey =
+    "org.openclaw.crabfleet.share.folder-writes"
 
   @Published private(set) var identity: TailnetIdentity?
   @Published private(set) var tailnetRegistrationHealth: TailnetRegistrationHealth = .ok
@@ -704,6 +708,13 @@ final class PrivateMacShareController: ObservableObject {
   @Published private(set) var connectedViewerCount = 0
   @Published private(set) var viewerSessions: [ViewerSession] = []
   @Published private(set) var accessCode = ""
+  @Published private(set) var sharedFolderName: String?
+
+  @Published var allowRemoteFolderWrites: Bool {
+    didSet {
+      defaults.set(allowRemoteFolderWrites, forKey: Self.sharedFolderWritesDefaultsKey)
+    }
+  }
 
   @Published var selectedDisplayIDs: Set<CGDirectDisplayID> {
     didSet {
@@ -796,6 +807,7 @@ final class PrivateMacShareController: ObservableObject {
   private var relayPublishers: [CGDirectDisplayID: RelayHostPublisher] = [:]
   private var relayPublications: [CGDirectDisplayID: DesktopHostPublication] = [:]
   private var clipboardBridge: HostClipboardBridge?
+  private var activeSharedFolder: SecurityScopedSharedFolder?
   private var activeIdentity: TailnetIdentity?
   private var activeQUICCertHash: String?
   private var activePlans: [PrivateMacDisplayPlan] = []
@@ -865,6 +877,14 @@ final class PrivateMacShareController: ObservableObject {
     confirmedQualityMode = savedQualityMode
     browserAccessEnabled =
       defaults.object(forKey: Self.browserAccessDefaultsKey) as? Bool ?? true
+    allowRemoteFolderWrites =
+      defaults.object(forKey: Self.sharedFolderWritesDefaultsKey) as? Bool ?? true
+    let savedFolderBookmark = defaults.data(forKey: Self.sharedFolderBookmarkDefaultsKey)
+    let savedFolderName = Self.folderName(from: savedFolderBookmark)
+    sharedFolderName = savedFolderName
+    if savedFolderBookmark != nil, savedFolderName == nil {
+      defaults.removeObject(forKey: Self.sharedFolderBookmarkDefaultsKey)
+    }
     launchAtLoginEnabled = SMAppService.mainApp.status == .enabled
     if let runner {
       self.runner = runner
@@ -915,6 +935,47 @@ final class PrivateMacShareController: ObservableObject {
     } catch {
       notice = error.localizedDescription
     }
+  }
+
+  func chooseSharedFolder() {
+    guard !phase.isRunning else { return }
+    let panel = NSOpenPanel()
+    panel.title = "Choose a folder to share"
+    panel.prompt = "Share Folder"
+    panel.canChooseDirectories = true
+    panel.canChooseFiles = false
+    panel.allowsMultipleSelection = false
+    panel.canCreateDirectories = true
+    guard panel.runModal() == .OK, let url = panel.url else { return }
+    do {
+      let bookmark = try url.bookmarkData(
+        options: [.withSecurityScope], includingResourceValuesForKeys: nil, relativeTo: nil)
+      defaults.set(bookmark, forKey: Self.sharedFolderBookmarkDefaultsKey)
+      sharedFolderName = url.lastPathComponent
+      notice = nil
+    } catch {
+      notice = "Could not remember the shared folder: \(error.localizedDescription)"
+    }
+  }
+
+  func stopSharingFolder() {
+    guard !phase.isRunning else { return }
+    defaults.removeObject(forKey: Self.sharedFolderBookmarkDefaultsKey)
+    sharedFolderName = nil
+  }
+
+  private nonisolated static func folderName(from bookmark: Data?) -> String? {
+    guard let bookmark else { return nil }
+    var stale = false
+    guard
+      let url = try? URL(
+        resolvingBookmarkData: bookmark,
+        options: [.withSecurityScope, .withoutUI],
+        relativeTo: nil,
+        bookmarkDataIsStale: &stale),
+      !stale
+    else { return nil }
+    return url.lastPathComponent
   }
 
   func setDisplay(_ displayID: CGDirectDisplayID, selected: Bool) {
@@ -1170,6 +1231,15 @@ final class PrivateMacShareController: ObservableObject {
     }
 
     let bridge = clipboardSyncEnabled ? HostClipboardBridge() : nil
+    do {
+      activeSharedFolder = try defaults.data(forKey: Self.sharedFolderBookmarkDefaultsKey).map {
+        try SecurityScopedSharedFolder(bookmark: $0, allowWrites: allowRemoteFolderWrites)
+      }
+    } catch {
+      phase = .failed
+      notice = error.localizedDescription
+      return
+    }
     serverGeneration = generation
     activePlans = plans
     clipboardBridge = bridge
@@ -1198,6 +1268,7 @@ final class PrivateMacShareController: ObservableObject {
             descriptor: descriptor,
             input: input,
             clipboard: bridge,
+            sharedFolder: activeSharedFolder?.configuration,
             port: plan.port,
             quicPort: quicIdentity.map { _ in Self.quicPort + UInt16(plan.index) },
             quicIdentity: quicIdentity,
@@ -1241,6 +1312,7 @@ final class PrivateMacShareController: ObservableObject {
       for capture in captures { await capture.stop() }
       clipboardBridge?.detachAll()
       clipboardBridge = nil
+      activeSharedFolder = nil
       activePlans.removeAll()
       activeQUICCertHash = nil
       guard canContinueStarting(generation) else { return }
@@ -1273,6 +1345,7 @@ final class PrivateMacShareController: ObservableObject {
     displayStacks.removeAll()
     clipboardBridge?.detachAll()
     clipboardBridge = nil
+    activeSharedFolder = nil
     for capture in captures { await capture.stop() }
     activeIdentity = nil
     activeQUICCertHash = nil
@@ -1649,6 +1722,7 @@ final class PrivateMacShareController: ObservableObject {
         descriptor: stack.descriptor,
         input: stack.input,
         clipboard: clipboardBridge,
+        sharedFolder: activeSharedFolder?.configuration,
         sessionGate: stack.sessionGate,
         eventHandler: { [weak self] event in
           Task { @MainActor in

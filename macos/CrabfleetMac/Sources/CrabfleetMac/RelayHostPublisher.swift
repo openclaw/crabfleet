@@ -105,6 +105,7 @@ final class RelayHostPublisher: @unchecked Sendable {
   private let descriptor: CapturedDisplayDescriptor
   private let input: any RemoteInputForwarding
   private let clipboard: (any HostClipboardSyncing)?
+  private let sharedFolder: SharedFolderConfiguration?
   private let sessionGate: RFBHostSessionGate
   private let eventHandler: EventHandler
   private let taskFactory: TaskFactory
@@ -128,6 +129,7 @@ final class RelayHostPublisher: @unchecked Sendable {
     descriptor: CapturedDisplayDescriptor,
     input: any RemoteInputForwarding,
     clipboard: (any HostClipboardSyncing)?,
+    sharedFolder: SharedFolderConfiguration? = nil,
     sessionGate: RFBHostSessionGate,
     eventHandler: @escaping EventHandler,
     taskFactory: @escaping TaskFactory = { URLSession.shared.webSocketTask(with: $0) }
@@ -138,6 +140,7 @@ final class RelayHostPublisher: @unchecked Sendable {
     self.descriptor = descriptor
     self.input = input
     self.clipboard = clipboard
+    self.sharedFolder = sharedFolder
     self.sessionGate = sessionGate
     self.eventHandler = eventHandler
     self.taskFactory = taskFactory
@@ -286,6 +289,7 @@ final class RelayHostPublisher: @unchecked Sendable {
         descriptor: descriptor,
         input: input,
         clipboard: clipboard,
+        sharedFolder: sharedFolder,
         desktopSizeProvider: { [sessionGate, descriptor] in
           sessionGate.descriptor(basedOn: descriptor)
         },

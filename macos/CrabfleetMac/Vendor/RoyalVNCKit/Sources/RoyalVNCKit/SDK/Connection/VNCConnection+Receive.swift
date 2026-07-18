@@ -64,6 +64,9 @@ private extension VNCConnection {
 			case VNCProtocol.QualityControlCapability.messageType:
 				try await handleQualityControlCapabilityMessage()
 
+			case VNCProtocol.FileSharing.messageType:
+				try await handleFileSharingMessage()
+
 			default:
 				throw VNCError.protocol(.unsupportedServerToClientMessage(messageType: messageType))
 		}
@@ -80,6 +83,14 @@ private extension VNCConnection {
 				enqueueClientToServerMessage(VNCProtocol.QualityControl(mode: requestedQualityMode))
 			}
 		}
+	}
+
+	func handleFileSharingMessage() async throws {
+		guard settings.frameEncodings.contains(.crabfleetFileSharing) else {
+			throw VNCError.protocol(.invalidData)
+		}
+		let message = try await VNCProtocol.FileSharing.receive(connection: connection).message
+		await notifyFileSharingDelegateAboutMessage(message)
 	}
 
 	func handleFramebufferUpdateMessage() async throws {
