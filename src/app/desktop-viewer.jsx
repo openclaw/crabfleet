@@ -51,6 +51,12 @@ function unpremultiply(component, alpha) {
   return Math.min(255, Math.round((component * 255) / alpha));
 }
 
+function formatFileSize(bytes) {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KiB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MiB`;
+}
+
 export function DesktopViewer({ host, onExit }) {
   const canvasRef = useRef(null);
   const stageRef = useRef(null);
@@ -60,6 +66,7 @@ export function DesktopViewer({ host, onExit }) {
   const pointerRef = useRef({ x: 0, y: 0, buttonsDown: false });
   const pendingResizeRef = useRef(null);
   const audioRef = useRef(null);
+  const uploadInputRef = useRef(null);
   const audioEnabledRef = useRef(false);
   const [connectionState, setConnectionState] = useState("Preparing decoder");
   const [serverName, setServerName] = useState(host?.name || host?.id || "Desktop");
@@ -84,6 +91,12 @@ export function DesktopViewer({ host, onExit }) {
   const [hasPointerFocus, setHasPointerFocus] = useState(false);
   const [framebufferSize, setFramebufferSize] = useState({ width: 1, height: 1 });
   const [stageSize, setStageSize] = useState({ width: 1, height: 1 });
+  const [fileSharing, setFileSharing] = useState(null);
+  const [filePanelOpen, setFilePanelOpen] = useState(false);
+  const [filePath, setFilePath] = useState("");
+  const [fileEntries, setFileEntries] = useState([]);
+  const [fileStatus, setFileStatus] = useState("");
+  const [fileProgress, setFileProgress] = useState(null);
 
   const noteLocalPointer = (point, convergedRemote = true) => {
     setLocalPointer(point);
@@ -142,6 +155,12 @@ export function DesktopViewer({ host, onExit }) {
     setRemotePointer(null);
     setLocalPointer(null);
     setHasPointerFocus(false);
+    setFileSharing(null);
+    setFilePanelOpen(false);
+    setFilePath("");
+    setFileEntries([]);
+    setFileStatus("");
+    setFileProgress(null);
     let disposed = false;
     let h264Decoder = null;
     let hevcDecoder = null;
@@ -281,6 +300,20 @@ export function DesktopViewer({ host, onExit }) {
           }
         },
         onClipboardError: setClipboardNotice,
+        fileSharing: true,
+        onFileSharing: (capability) => {
+          setFileSharing(capability);
+          if (!capability) {
+            setFilePanelOpen(false);
+            setFileEntries([]);
+            return;
+          }
+          void client
+            ?.listFiles("")
+            .then(setFileEntries)
+            .catch((error) => setFileStatus(error.message));
+        },
+        onFileTransferProgress: setFileProgress,
       });
       sessionRef.current = client;
       try {
@@ -439,6 +472,77 @@ export function DesktopViewer({ host, onExit }) {
     sessionRef.current?.setQualityMode(mode);
   };
 
+  const loadFiles = async (path) => {
+    const session = sessionRef.current;
+    if (!session) return;
+    setFileStatus("Loading…");
+    try {
+      setFileEntries(await session.listFiles(path));
+      setFilePath(path);
+      setFileStatus("");
+    } catch (error) {
+      setFileStatus(error instanceof Error ? error.message : String(error));
+    }
+  };
+
+  const downloadFile = async (entry) => {
+    const session = sessionRef.current;
+    if (!session) return;
+    const path = filePath ? `${filePath}/${entry.name}` : entry.name;
+    setFileStatus(`Downloading ${entry.name}…`);
+    try {
+      const blob = await session.downloadFile(path, entry.size);
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = entry.name;
+      link.click();
+      URL.revokeObjectURL(url);
+      setFileStatus(`Downloaded ${entry.name}`);
+    } catch (error) {
+      setFileStatus(error instanceof Error ? error.message : String(error));
+    } finally {
+      setFileProgress(null);
+    }
+  };
+
+  const uploadFiles = async (files) => {
+    const session = sessionRef.current;
+    if (!session || !fileSharing?.allowWrites) return;
+    let completed = true;
+    for (const file of files) {
+      const path = filePath ? `${filePath}/${file.name}` : file.name;
+      setFileStatus(`Uploading ${file.name}…`);
+      try {
+        await session.uploadFile(path, file);
+        setFileStatus(`Uploaded ${file.name}`);
+      } catch (error) {
+        setFileStatus(error instanceof Error ? error.message : String(error));
+        completed = false;
+        break;
+      } finally {
+        setFileProgress(null);
+      }
+    }
+    if (completed) await loadFiles(filePath);
+  };
+
+  const createDirectory = async () => {
+    const name = window.prompt("New folder name");
+    if (!name) return;
+    if (name.includes("/") || name === "." || name === "..") {
+      setFileStatus("Choose a single folder name");
+      return;
+    }
+    const path = filePath ? `${filePath}/${name}` : name;
+    try {
+      await sessionRef.current?.createDirectory(path);
+      await loadFiles(filePath);
+    } catch (error) {
+      setFileStatus(error instanceof Error ? error.message : String(error));
+    }
+  };
+
   const showCursorOverlay =
     cursorImage &&
     remotePointer &&
@@ -495,6 +599,15 @@ export function DesktopViewer({ host, onExit }) {
           {audioAvailable ? (
             <button class="desktop-tool-button" onClick={toggleAudio}>
               {audioMuted ? "Unmute audio" : "Mute audio"}
+            </button>
+          ) : null}
+          {fileSharing ? (
+            <button
+              class="desktop-tool-button"
+              aria-pressed={filePanelOpen}
+              onClick={() => setFilePanelOpen((open) => !open)}
+            >
+              {filePanelOpen ? "Hide files" : `Files · ${fileSharing.displayName}`}
             </button>
           ) : null}
         </div>
@@ -634,6 +747,76 @@ export function DesktopViewer({ host, onExit }) {
             />
           )}
         </div>
+        {fileSharing && filePanelOpen ? (
+          <aside
+            class="desktop-file-panel"
+            onDragOver={(event) => {
+              if (fileSharing.allowWrites) event.preventDefault();
+            }}
+            onDrop={(event) => {
+              if (!fileSharing.allowWrites) return;
+              event.preventDefault();
+              void uploadFiles(Array.from(event.dataTransfer.files));
+            }}
+          >
+            <header>
+              <div>
+                <strong>{fileSharing.displayName}</strong>
+                <span>/{filePath}</span>
+              </div>
+              <button
+                disabled={!filePath}
+                onClick={() => void loadFiles(filePath.split("/").slice(0, -1).join("/"))}
+              >
+                Up
+              </button>
+            </header>
+            <div class="desktop-file-list" role="list" aria-label="Shared folder files">
+              {fileEntries.length ? (
+                fileEntries.map((entry) => (
+                  <button
+                    key={entry.name}
+                    class="desktop-file-entry"
+                    onClick={() =>
+                      entry.isDirectory
+                        ? void loadFiles(filePath ? `${filePath}/${entry.name}` : entry.name)
+                        : void downloadFile(entry)
+                    }
+                  >
+                    <span aria-hidden="true">{entry.isDirectory ? "▸" : "↓"}</span>
+                    <strong>{entry.name}</strong>
+                    <small>{entry.isDirectory ? "Folder" : formatFileSize(entry.size)}</small>
+                  </button>
+                ))
+              ) : (
+                <p class="desktop-file-empty">This folder is empty.</p>
+              )}
+            </div>
+            {fileSharing.allowWrites ? (
+              <div class="desktop-file-upload">
+                <input
+                  ref={uploadInputRef}
+                  type="file"
+                  multiple
+                  hidden
+                  onChange={(event) => {
+                    void uploadFiles(Array.from(event.currentTarget.files || []));
+                    event.currentTarget.value = "";
+                  }}
+                />
+                <button onClick={() => uploadInputRef.current?.click()}>Upload files</button>
+                <button onClick={() => void createDirectory()}>New folder</button>
+                <span>or drop files here</span>
+              </div>
+            ) : (
+              <p class="desktop-file-readonly">Uploads disabled by host</p>
+            )}
+            {fileProgress ? (
+              <progress value={fileProgress.completed} max={Math.max(1, fileProgress.total)} />
+            ) : null}
+            {fileStatus ? <p class="desktop-file-status">{fileStatus}</p> : null}
+          </aside>
+        ) : null}
         <div class="desktop-viewer-hint">Click display to capture keyboard · Esc sends to Mac</div>
       </section>
       <aside class="desktop-clipboard">

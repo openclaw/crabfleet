@@ -31,6 +31,14 @@ struct DesktopFocusView: View {
           FocusCanvasBackground()
           FocusPlaceholder(target: target, session: session, connect: connect)
         }
+        if session.isFileBrowserVisible, session.sharedFolderName != nil {
+          HStack {
+            Spacer()
+            NativeSharedFolderPanel(session: session)
+              .frame(width: 360)
+              .padding(12)
+          }
+        }
       }
       .frame(maxWidth: .infinity, maxHeight: .infinity)
       .matchedGeometryEffect(id: "desktop-\(target.id)", in: namespace, isSource: false)
@@ -140,6 +148,16 @@ private struct FocusToolbar: View {
         } else {
           FocusControlPill(icon: "clipboard", title: "Clipboard off", color: .secondary)
         }
+        if let folderName = session.sharedFolderName {
+          Button { session.showFileBrowser() } label: {
+            FocusControlPill(
+              icon: "folder.fill",
+              title: session.isFileBrowserVisible ? "Hide \(folderName)" : folderName,
+              color: .mint)
+          }
+          .buttonStyle(.plain)
+          .help("Browse and transfer files in the host's shared folder")
+        }
         FocusControlPill(
           icon: "rectangle.arrowtriangle.2.outward",
           title: "Fit",
@@ -184,6 +202,92 @@ private struct FocusToolbar: View {
     case .remoteAvailable: .orange
     case .synced: .mint
     default: .secondary
+    }
+  }
+}
+
+private struct NativeSharedFolderPanel: View {
+  @ObservedObject var session: VNCSessionController
+
+  var body: some View {
+    VStack(alignment: .leading, spacing: 0) {
+      HStack {
+        VStack(alignment: .leading, spacing: 2) {
+          Text(session.sharedFolderName ?? "Shared folder")
+            .font(.headline)
+          Text("/\(session.sharedFolderPath)")
+            .font(.caption.monospaced())
+            .foregroundStyle(.secondary)
+            .lineLimit(1)
+        }
+        Spacer()
+        Button("Up", systemImage: "chevron.up") { session.navigateSharedFolderUp() }
+          .disabled(session.sharedFolderPath.isEmpty)
+        Button("Close", systemImage: "xmark") { session.showFileBrowser() }
+          .labelStyle(.iconOnly)
+      }
+      .padding(12)
+
+      Divider()
+
+      if session.sharedFolderEntries.isEmpty {
+        ContentUnavailableView(
+          "Folder is empty", systemImage: "folder",
+          description: Text("Files shared by the host appear here."))
+          .frame(maxHeight: .infinity)
+      } else {
+        List(session.sharedFolderEntries) { entry in
+          Button { session.openSharedFolderEntry(entry) } label: {
+            HStack(spacing: 9) {
+              Image(systemName: entry.isDirectory ? "folder.fill" : "doc.fill")
+                .foregroundStyle(entry.isDirectory ? .mint : .secondary)
+              Text(entry.name).lineLimit(1)
+              Spacer()
+              Text(entry.isDirectory ? "" : ByteCountFormatter.string(
+                fromByteCount: Int64(entry.size), countStyle: .file))
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            }
+          }
+          .buttonStyle(.plain)
+        }
+        .listStyle(.plain)
+      }
+
+      if let progress = session.fileTransferProgress {
+        ProgressView(value: progress).padding(.horizontal, 12)
+      }
+      if let status = session.fileTransferStatus {
+        Text(status)
+          .font(.caption)
+          .foregroundStyle(.secondary)
+          .padding(.horizontal, 12)
+          .padding(.top, 6)
+      }
+
+      if session.sharedFolderWritesAllowed {
+        HStack {
+          Button("Upload Files…", systemImage: "arrow.up.doc") {
+            session.chooseFilesToUpload()
+          }
+          Button("New Folder", systemImage: "folder.badge.plus") {
+            session.createSharedFolderDirectory()
+          }
+        }
+        .padding(12)
+      } else {
+        Text("Uploads disabled by host")
+          .font(.caption)
+          .foregroundStyle(.secondary)
+          .padding(12)
+      }
+    }
+    .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 12))
+    .overlay(RoundedRectangle(cornerRadius: 12).stroke(.white.opacity(0.12)))
+    .dropDestination(for: URL.self) { urls, _ in
+      guard session.sharedFolderWritesAllowed else { return false }
+      session.uploadSharedFiles(urls)
+      return true
     }
   }
 }

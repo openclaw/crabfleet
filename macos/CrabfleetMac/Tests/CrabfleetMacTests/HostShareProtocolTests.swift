@@ -438,6 +438,74 @@ struct RFBHostSessionStreamTests {
   }
 
   @Test
+  func negotiatedFileSharingLoopbackListsGetsAndPuts() async throws {
+    let container = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    let root = container.appendingPathComponent("Fixture")
+    try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: container) }
+    try Data("fixture".utf8).write(to: root.appendingPathComponent("file.txt"))
+
+    var incoming = RFBVersion.serverBanner
+    incoming.append(contentsOf: [1, 1])  // None security, shared ClientInit.
+    incoming.append(clientSetEncodings([RFBWire.crabfleetFileSharingEncoding]))
+    incoming.append(try RFBFileSharingWire.listRequest(id: 1, path: ""))
+    incoming.append(
+      try RFBFileSharingWire.getRequest(id: 2, path: "file.txt", offset: 0, length: 256))
+    incoming.append(
+      try RFBFileSharingWire.putBeginRequest(id: 3, path: "received.txt", size: 8))
+    incoming.append(
+      try RFBFileSharingWire.putChunkRequest(id: 3, bytes: Data("uploaded".utf8)))
+    incoming.append(RFBFileSharingWire.putEndRequest(id: 3))
+    incoming.append(try RFBFileSharingWire.mkdirRequest(id: 4, path: "New Folder"))
+    let stream = InMemoryRFBByteStream(incoming: incoming)
+    let finished = ThreadSafeFlag()
+    let descriptor = CapturedDisplayDescriptor(
+      displayID: 1,
+      displayBounds: CGRect(x: 0, y: 0, width: 100, height: 100),
+      frameWidth: 100,
+      frameHeight: 100,
+      sourcePixelWidth: 100,
+      sourcePixelHeight: 100)
+    let session = RFBHostSession(
+      byteStream: stream,
+      capture: MacScreenCapture(),
+      descriptor: descriptor,
+      input: HandshakeRemoteInput(),
+      clipboard: nil,
+      sharedFolder: SharedFolderConfiguration(
+        rootURL: root, displayName: "Fixture", allowWrites: true),
+      remoteAddressOverride: "Test viewer",
+      skipTailnetCheck: true,
+      security: .listener(TestLegacyNoneAuthentication()),
+      desktopName: "Crabfleet file test",
+      handshakeTimeout: .seconds(1),
+      viewOnly: false,
+      audioEnabled: false,
+      qualityMode: .auto,
+      didAuthorize: {},
+      eventHandler: { _ in },
+      didFinish: { _ in finished.set() })
+
+    session.start()
+    try await waitForFinish(finished)
+
+    let capability = try RFBFileSharingWire.capability(
+      displayName: "Fixture", allowWrites: true)
+    #expect(stream.outgoing.range(of: capability) != nil)
+    #expect(stream.outgoing.range(of: Data("fixture".utf8)) != nil)
+    #expect(
+      try String(
+        contentsOf: root.appendingPathComponent("received.txt"), encoding: .utf8)
+        == "uploaded")
+    var isDirectory: ObjCBool = false
+    #expect(
+      FileManager.default.fileExists(
+        atPath: root.appendingPathComponent("New Folder").path,
+        isDirectory: &isDirectory))
+    #expect(isDirectory.boolValue)
+  }
+
+  @Test
   func negotiatedQualityControlAppliesIndependentRateBoundsPerSession() async throws {
     let sharp = qualitySession(
       messages: clientSetEncodings([RFBWire.crabfleetQualityControlEncoding])

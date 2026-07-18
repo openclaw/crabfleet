@@ -109,6 +109,7 @@ enum RFBWire {
   static let crabfleetHEVCEncoding: Int32 = 0x4845_5631
   static let crabfleetChroma444Encoding: Int32 = 0x4334_3434
   static let crabfleetQualityControlEncoding: Int32 = 0x5143_544c
+  static let crabfleetFileSharingEncoding: Int32 = RFBFileSharingWire.encoding
   static let extendedDesktopSizeEncoding: Int32 = -308
   static let extendedClipboardEncoding = Int32(bitPattern: 0xc0a1_e5ce)
   static let maximumClipboardBytes = 1 * 1_024 * 1_024

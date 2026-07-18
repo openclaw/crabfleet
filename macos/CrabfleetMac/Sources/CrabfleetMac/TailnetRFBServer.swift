@@ -278,6 +278,7 @@ final class TailnetRFBServer: @unchecked Sendable {
   private let descriptor: CapturedDisplayDescriptor
   private let input: any RemoteInputForwarding
   private let clipboard: (any HostClipboardSyncing)?
+  private let sharedFolder: SharedFolderConfiguration?
   private let peerAuthorizer: (any TailnetPeerAuthorizing)?
   private let port: UInt16
   private let quicPort: UInt16?
@@ -322,6 +323,7 @@ final class TailnetRFBServer: @unchecked Sendable {
     descriptor: CapturedDisplayDescriptor,
     input: any RemoteInputForwarding,
     clipboard: (any HostClipboardSyncing)? = nil,
+    sharedFolder: SharedFolderConfiguration? = nil,
     peerAuthorizer: (any TailnetPeerAuthorizing)? = nil,
     port: UInt16,
     quicPort: UInt16? = nil,
@@ -338,6 +340,7 @@ final class TailnetRFBServer: @unchecked Sendable {
     self.descriptor = descriptor
     self.input = input
     self.clipboard = clipboard
+    self.sharedFolder = sharedFolder
     self.peerAuthorizer = peerAuthorizer
     self.port = port
     self.quicPort = quicPort
@@ -644,6 +647,7 @@ final class TailnetRFBServer: @unchecked Sendable {
       descriptor: sessionDescriptor,
       input: input,
       clipboard: clipboard,
+      sharedFolder: sharedFolder,
       desktopSizeProvider: { [sessionGate, descriptor] in
         sessionGate.descriptor(basedOn: descriptor)
       },
@@ -864,6 +868,8 @@ final class RFBHostSession: @unchecked Sendable {
   private let input: any RemoteInputForwarding
   private let inputGate: RemoteInputSessionGate
   private let clipboard: (any HostClipboardSyncing)?
+  private let sharedFolder: SharedFolderConfiguration?
+  private let sharedFolderSession: SharedFolderSession?
   private let desktopSizeProvider: @Sendable () -> CapturedDisplayDescriptor?
   private let requiredLocalAddress: String?
   private let remoteAddressOverride: String?
@@ -896,6 +902,7 @@ final class RFBHostSession: @unchecked Sendable {
   private var supportsExtendedClipboard = false
   private var supportsCrabfleetAudio = false
   private var supportsCrabfleetQualityControl = false
+  private var supportsCrabfleetFileSharing = false
   private var sentServerClipboardCaps = false
   private var needsDesktopSizeAnnounce = false
   private var clientClipboardCaps: VNCExtendedClipboardCaps?
@@ -947,6 +954,7 @@ final class RFBHostSession: @unchecked Sendable {
     descriptor: CapturedDisplayDescriptor,
     input: any RemoteInputForwarding,
     clipboard: (any HostClipboardSyncing)?,
+    sharedFolder: SharedFolderConfiguration? = nil,
     desktopSizeProvider: @escaping @Sendable () -> CapturedDisplayDescriptor? = { nil },
     requiredLocalAddress: String? = nil,
     remoteAddressOverride: String? = nil,
@@ -980,6 +988,8 @@ final class RFBHostSession: @unchecked Sendable {
     inputGate = RemoteInputSessionGate(input: input, viewOnly: viewOnly)
     self.audioEnabled = audioEnabled
     self.clipboard = clipboard
+    self.sharedFolder = sharedFolder
+    sharedFolderSession = sharedFolder.map { SharedFolderSession(configuration: $0) }
     self.desktopSizeProvider = desktopSizeProvider
     self.requiredLocalAddress = requiredLocalAddress
     self.remoteAddressOverride = remoteAddressOverride
@@ -1312,6 +1322,9 @@ final class RFBHostSession: @unchecked Sendable {
         supportsOpenH264 = encodings.contains(RFBWire.openH264Encoding)
         let nextSupportsQualityControl = encodings.contains(
           RFBWire.crabfleetQualityControlEncoding)
+        let nextSupportsFileSharing = sharedFolder != nil
+          && encodings.contains(RFBWire.crabfleetFileSharingEncoding)
+        let shouldAnnounceFileSharing = nextSupportsFileSharing && !supportsCrabfleetFileSharing
         let shouldAcknowledgeQualityControl =
           nextSupportsQualityControl && !supportsCrabfleetQualityControl
         if supportsCrabfleetQualityControl, !nextSupportsQualityControl,
@@ -1320,6 +1333,7 @@ final class RFBHostSession: @unchecked Sendable {
           throw PrivateMacShareError.protocolError("quality reconfiguration failed")
         }
         supportsCrabfleetQualityControl = nextSupportsQualityControl
+        supportsCrabfleetFileSharing = nextSupportsFileSharing
         let nextCursorEncoding = RFBWire.preferredCursorEncoding(from: encodings)
         let nextSupportsPointerPosition = encodings.contains(RFBWire.pointerPositionEncoding)
         if encodings.contains(RFBWire.extendedDesktopSizeEncoding),
@@ -1371,6 +1385,12 @@ final class RFBHostSession: @unchecked Sendable {
         if shouldAcknowledgeQualityControl {
           try await io.send(RFBWire.qualityControlCapability())
         }
+        if shouldAnnounceFileSharing, let sharedFolder {
+          try await io.send(
+            try RFBFileSharingWire.capability(
+              displayName: sharedFolder.displayName,
+              allowWrites: sharedFolder.allowWrites))
+        }
         try await sendServerClipboardCapsIfNeeded(io: io)
         await reconcileAudioPath(io: io)
 
@@ -1388,6 +1408,19 @@ final class RFBHostSession: @unchecked Sendable {
         guard setViewerQualityMode(mode) else {
           throw PrivateMacShareError.protocolError("quality reconfiguration failed")
         }
+
+      case RFBFileSharingWire.messageType:
+        guard supportsCrabfleetFileSharing, let sharedFolderSession else {
+          throw PrivateMacShareError.protocolError("file sharing was not negotiated")
+        }
+        let request: RFBFileSharingWire.Request
+        do {
+          request = try await RFBFileSharingWire.readRequest(from: io)
+        } catch {
+          throw PrivateMacShareError.protocolError(
+            error.localizedDescription.isEmpty ? "invalid file-sharing request" : error.localizedDescription)
+        }
+        try await io.send(await sharedFolderSession.handle(request))
 
       case 3:  // FramebufferUpdateRequest
         let payload = try await io.readExactly(9)
@@ -2646,6 +2679,7 @@ final class RFBHostSession: @unchecked Sendable {
     inputGate.finish()
     clipboard?.detach(id: sessionID)
     Task { [self] in
+      await sharedFolderSession?.abort()
       if shouldRemoveCursorSession {
         try? await capture.removeCursorSession(id: sessionID)
       }

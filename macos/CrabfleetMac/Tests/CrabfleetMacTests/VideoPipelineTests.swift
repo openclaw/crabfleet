@@ -452,6 +452,9 @@ struct VideoPipelineTests {
     #expect(
       VNCSessionController.preferredFrameEncodings(supportsHEVC444: false)
         .contains(.crabfleetQualityControl))
+    #expect(
+      VNCSessionController.preferredFrameEncodings(supportsHEVC444: false)
+        .contains(.crabfleetFileSharing))
   }
 
   @Test

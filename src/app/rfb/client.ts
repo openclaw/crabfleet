@@ -1,4 +1,19 @@
 import type { RFBAudioMessage } from "./audio.ts";
+import {
+  encodeFileGetRequest,
+  encodeFileListRequest,
+  encodeFileMkdirRequest,
+  encodeFilePutAbortRequest,
+  encodeFilePutBeginRequest,
+  encodeFilePutChunkRequest,
+  encodeFilePutEndRequest,
+  fileSharingEncoding,
+  maximumFileSharingChunkBytes,
+  maximumFileSharingFileBytes,
+  readFileSharingMessage,
+  type RFBFileEntry,
+  type RFBFileSharingMessage,
+} from "./file-sharing.ts";
 import { vncChallengeResponse } from "./vnc-auth.ts";
 
 export const RFB_ENCODINGS = {
@@ -8,6 +23,7 @@ export const RFB_ENCODINGS = {
   audio: 0x4341_4631,
   chroma444: 0x4334_3434,
   qualityControl: 0x5143_544c,
+  fileSharing: fileSharingEncoding,
   cursorWithAlpha: -314,
   pointerPosition: -232,
   extendedDesktopSize: -308,
@@ -72,6 +88,14 @@ export interface RFBClientOptions {
   onClipboardError?: (message: string) => void;
   onTraffic?: (bytes: number) => void;
   onAudio?: (message: RFBAudioMessage) => void;
+  fileSharing?: boolean;
+  onFileSharing?: (capability: { displayName: string; allowWrites: boolean } | null) => void;
+  onFileTransferProgress?: (progress: {
+    operation: "download" | "upload";
+    name: string;
+    completed: number;
+    total: number;
+  }) => void;
 }
 
 export type RFBQualityMode = "auto" | "sharp" | "smooth";
@@ -100,6 +124,14 @@ export class RFBClient {
   #forceFullRefresh = false;
   #qualityMode: RFBQualityMode | undefined;
   #qualityControlNegotiated = false;
+  #fileSharingEnabled: boolean;
+  #fileSharingNegotiated = false;
+  #fileSharingWritesAllowed = false;
+  #nextFileRequestID = 1;
+  #pendingFileRequests = new Map<
+    number,
+    { resolve: (message: RFBFileSharingMessage) => void; reject: (error: Error) => void }
+  >();
 
   constructor(transport: RFBTransport, options: RFBClientOptions) {
     this.transport = transport;
@@ -109,6 +141,7 @@ export class RFBClient {
     this.#chroma444Enabled = options.chroma444 === true;
     this.#audioEnabled = options.audio === true;
     this.#qualityMode = options.qualityMode;
+    this.#fileSharingEnabled = options.fileSharing !== false;
     this.codec = this.#hevcEnabled ? "HEVC" : options.h264 ? "H.264" : "JPEG";
   }
 
@@ -136,7 +169,106 @@ export class RFBClient {
   disconnect(): void {
     this.#running = false;
     this.#qualityControlNegotiated = false;
+    this.#resetFileSharing(new Error("file transfer disconnected"));
     this.transport.close();
+  }
+
+  async listFiles(path = ""): Promise<RFBFileEntry[]> {
+    this.#requireFileSharing();
+    const response = await this.#requestFile((id) => encodeFileListRequest(id, path));
+    if (response.kind !== "list") throw new Error("unexpected FSH1 list response");
+    return response.entries;
+  }
+
+  async downloadFile(
+    path: string,
+    size: number,
+    onProgress?: (completed: number, total: number) => void,
+  ): Promise<Blob> {
+    this.#requireFileSharing();
+    if (!Number.isSafeInteger(size) || size < 0 || size > maximumFileSharingFileBytes)
+      throw new Error("file exceeds the 512 MiB transfer limit");
+    const parts: ArrayBuffer[] = [];
+    let offset = 0;
+    while (offset < size || (size === 0 && offset === 0)) {
+      const length = Math.min(maximumFileSharingChunkBytes, Math.max(1, size - offset));
+      const response = await this.#requestFile((id) =>
+        encodeFileGetRequest(id, path, offset, length),
+      );
+      if (response.kind !== "chunk" || response.offset !== offset)
+        throw new Error("unexpected FSH1 download response");
+      parts.push(response.bytes.slice().buffer);
+      offset += response.bytes.byteLength;
+      onProgress?.(offset, size);
+      this.#options.onFileTransferProgress?.({
+        operation: "download",
+        name: path,
+        completed: offset,
+        total: size,
+      });
+      if (response.endOfFile) break;
+      if (!response.bytes.byteLength) throw new Error("FSH1 download made no progress");
+    }
+    if (offset !== size) throw new Error("FSH1 download size mismatch");
+    return new Blob(parts);
+  }
+
+  async uploadFile(
+    path: string,
+    file: Blob,
+    onProgress?: (completed: number, total: number) => void,
+  ): Promise<void> {
+    this.#requireFileSharing(true);
+    if (file.size > maximumFileSharingFileBytes)
+      throw new Error("file exceeds the 512 MiB transfer limit");
+    const uploadID = this.#allocateFileRequestID();
+    let began = false;
+    try {
+      const begin = await this.#requestFile(
+        (id) => encodeFilePutBeginRequest(id, path, file.size),
+        uploadID,
+      );
+      if (begin.kind !== "operation" || begin.operation !== 3)
+        throw new Error("unexpected FSH1 upload response");
+      began = true;
+      let offset = 0;
+      while (offset < file.size) {
+        const bytes = new Uint8Array(
+          await file.slice(offset, offset + maximumFileSharingChunkBytes).arrayBuffer(),
+        );
+        const chunk = await this.#requestFile(
+          (id) => encodeFilePutChunkRequest(id, bytes),
+          uploadID,
+        );
+        if (chunk.kind !== "operation" || chunk.operation !== 4)
+          throw new Error("unexpected FSH1 upload response");
+        offset += bytes.byteLength;
+        onProgress?.(offset, file.size);
+        this.#options.onFileTransferProgress?.({
+          operation: "upload",
+          name: path,
+          completed: offset,
+          total: file.size,
+        });
+      }
+      const end = await this.#requestFile((id) => encodeFilePutEndRequest(id), uploadID);
+      if (end.kind !== "operation" || end.operation !== 5)
+        throw new Error("unexpected FSH1 upload response");
+    } catch (error) {
+      if (began) {
+        try {
+          await this.#requestFile((id) => encodeFilePutAbortRequest(id), uploadID);
+        } catch {}
+      }
+      throw error;
+    }
+  }
+
+  async createDirectory(path: string): Promise<void> {
+    this.#requireFileSharing(true);
+    const response = await this.#requestFile((id) => encodeFileMkdirRequest(id, path));
+    if (response.kind !== "operation" || response.operation !== 6)
+      throw new Error("unexpected FSH1 mkdir response");
   }
 
   setQualityMode(mode: RFBQualityMode): void {
@@ -320,6 +452,24 @@ export class RFBClient {
       if (this.#qualityMode) this.transport.send(encodeQualityControl(this.#qualityMode));
       return;
     }
+    if (type === 202) {
+      const message = await readFileSharingMessage(this.transport);
+      if (message.kind === "capability") {
+        if (!this.#fileSharingEnabled || this.#fileSharingNegotiated)
+          throw new Error("unexpected FSH1 capability acknowledgement");
+        this.#fileSharingNegotiated = true;
+        this.#fileSharingWritesAllowed = message.allowWrites;
+        this.#options.onFileSharing?.(message);
+      } else {
+        const pending = this.#pendingFileRequests.get(message.id);
+        if (!pending) throw new Error("unexpected FSH1 response id");
+        this.#pendingFileRequests.delete(message.id);
+        if (message.kind === "error")
+          pending.reject(new Error(message.message || "file transfer failed"));
+        else pending.resolve(message);
+      }
+      return;
+    }
     throw new Error(`unsupported RFB server message ${type}`);
   }
 
@@ -497,11 +647,47 @@ export class RFBClient {
       RFB_ENCODINGS.tight,
       ...(this.#audioEnabled ? [RFB_ENCODINGS.audio] : []),
       RFB_ENCODINGS.qualityControl,
+      ...(this.#fileSharingEnabled ? [RFB_ENCODINGS.fileSharing] : []),
       RFB_ENCODINGS.cursorWithAlpha,
       RFB_ENCODINGS.pointerPosition,
       RFB_ENCODINGS.extendedDesktopSize,
       RFB_ENCODINGS.extendedClipboard,
     ];
+  }
+
+  #requireFileSharing(write = false): void {
+    if (!this.#fileSharingNegotiated) throw new Error("this host is not sharing a folder");
+    if (write && !this.#fileSharingWritesAllowed) throw new Error("remote uploads are disabled");
+  }
+
+  #allocateFileRequestID(): number {
+    const id = this.#nextFileRequestID++ >>> 0;
+    if (!id) this.#nextFileRequestID = 1;
+    return id;
+  }
+
+  #requestFile(
+    encode: (id: number) => Uint8Array,
+    requestID = this.#allocateFileRequestID(),
+  ): Promise<RFBFileSharingMessage> {
+    const id = requestID;
+    return new Promise((resolve, reject) => {
+      this.#pendingFileRequests.set(id, { resolve, reject });
+      try {
+        this.transport.send(encode(id));
+      } catch (error) {
+        this.#pendingFileRequests.delete(id);
+        reject(asError(error));
+      }
+    });
+  }
+
+  #resetFileSharing(error: Error): void {
+    this.#fileSharingNegotiated = false;
+    this.#fileSharingWritesAllowed = false;
+    this.#options.onFileSharing?.(null);
+    for (const pending of this.#pendingFileRequests.values()) pending.reject(error);
+    this.#pendingFileRequests.clear();
   }
 }
 
