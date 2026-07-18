@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Fix the Crabfleet Connect Linux X11 backend disabling capture entirely on keyboards with multiple XKB groups: bind only the primary group's base/shift levels so real screen capture and input injection work instead of silently falling back to the synthetic test pattern (validated on a headless Xvfb X server: real 1920x1080 Tight framebuffer + XTest pointer injection).
+
 - Add opt-in single-folder sharing to Share This Mac with security-scoped bookmark persistence, negotiated `FSH1` browsing, bounded native and browser download/upload streams, strict realpath containment, 512 MiB file and 256 KiB chunk limits, root-local temporary uploads with atomic rename and teardown cleanup, and host-controlled remote writes.
 - Add a pure-Go Windows Crabfleet Connect backend with synchronized GDI BitBlt primary-display capture, full-frame RGBA dirty updates, SendInput absolute pointer, wheel, and keyboard injection, active-layout shortcuts, Unicode and legacy X11 keysym text mapping, retry-safe teardown, and amd64/arm64 cross-build proof, while deferring DXGI, multi-monitor, per-monitor-DPI, packaging, and real-hardware validation.
 - Add the Crabfleet Connect foundation with a shared Go RFB 3.8 host core, per-run VNC-DES authentication, Tight/JPEG and client-side cursor/input support, a CI-safe synthetic backend, and a Linux X11 MIT-SHM/XFixes/XTest backend plus cross-compiled CLI, while documenting deferred codecs, Wayland, ARD, audio, and hardware validation.
