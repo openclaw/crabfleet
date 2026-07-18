@@ -10,6 +10,7 @@ import (
 	"net"
 	"os"
 	"os/signal"
+	"runtime"
 	"strconv"
 	"strings"
 	"syscall"
@@ -68,7 +69,7 @@ func run(ctx context.Context, arguments []string, stdout, stderr io.Writer) erro
 	}
 	hostname, err := os.Hostname()
 	if err != nil || hostname == "" {
-		hostname = "Linux"
+		hostname = runtime.GOOS
 	}
 	server, err := rfb.NewServer(rfb.ServerConfig{Session: rfb.SessionConfig{
 		Backend:     backend,
@@ -95,7 +96,7 @@ func selectBackend(forceSynthetic bool, display string, stderr io.Writer) (conne
 	if !forceSynthetic {
 		backend, err := connect.NewPlatformBackend(display)
 		if err == nil {
-			return backend, "Linux X11 (MIT-SHM capture + XTest input)", nil
+			return backend, nativeBackendDescription(), nil
 		}
 		fmt.Fprintf(stderr, "Native capture unavailable (%v); using synthetic test pattern.\n", err)
 	}
@@ -104,6 +105,17 @@ func selectBackend(forceSynthetic bool, display string, stderr io.Writer) (conne
 		return nil, "", fmt.Errorf("create synthetic backend: %w", err)
 	}
 	return backend, "synthetic test pattern", nil
+}
+
+func nativeBackendDescription() string {
+	switch runtime.GOOS {
+	case "linux":
+		return "Linux X11 (MIT-SHM capture + XTest input)"
+	case "windows":
+		return "Windows GDI BitBlt capture + SendInput"
+	default:
+		return "native capture + input"
+	}
 }
 
 func generateSharePassword() (string, error) {
