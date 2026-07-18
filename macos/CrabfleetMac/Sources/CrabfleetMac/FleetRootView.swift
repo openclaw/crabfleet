@@ -11,6 +11,7 @@ struct FleetRootView: View {
   let accountLabel: String
   let disconnectLabel: String
   let disconnectDeployment: () -> Void
+  private let wakeOnLan = WakeOnLan()
   @Namespace private var desktopTransition
   @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
@@ -22,6 +23,7 @@ struct FleetRootView: View {
   @State private var showingPrivateShare = false
   @State private var didHandleLaunchConnection = false
   @State private var keychainCleanupWarning: String?
+  @State private var wakeNotice: WakeNotice?
 
   private var allTargets: [DesktopTarget] {
     let saved = connections.profiles.map(DesktopTarget.init(profile:))
@@ -98,6 +100,7 @@ struct FleetRootView: View {
             sessions: sessions,
             refresh: { Task { await store.refresh() } },
             quickConnect: { showingQuickConnect = true },
+            wake: wake,
             focus: focus
           )
         }
@@ -110,12 +113,26 @@ struct FleetRootView: View {
       DesktopConnectionSheet(
         target: target,
         storedAccessCode: target.endpoint.map(connections.accessCode(for:)) ?? .missing
-      ) { request in
+      ) { request, wakeSettings in
         var request = request
         request.quic = target.quic
-        sessions.connect(targetID: target.id, request: request) {
+        let updatedProfile = target.profileID.flatMap { profileID in
+          wakeSettings.flatMap {
+            connections.updateWakeOnLan(profileID: profileID, settings: $0)
+          }
+        }
+        let wakeConfiguration = wakeSettings?.configuration ?? wakeConfiguration(for: target)
+        let automaticallyWake =
+          wakeSettings?.automaticallyWakeOnFailure ?? target.wakeOnLanAutomatically
+        sessions.connect(
+          targetID: target.id,
+          request: request,
+          wakeOnInitialTCPFailure: automaticWakeAction(
+            configuration: wakeConfiguration,
+            enabled: automaticallyWake)
+        ) {
           persistAccessCode(for: request)
-          if let profileID = target.profileID {
+          if let profileID = updatedProfile?.id ?? target.profileID {
             connections.markConnected(profileID: profileID)
           }
         }
@@ -124,14 +141,16 @@ struct FleetRootView: View {
     }
     .sheet(isPresented: $showingQuickConnect) {
       QuickConnectSheet(storedAccessCode: connections.accessCode(for:)) {
-        name, address, password, clipboardEnabled, rememberAccessCode, prefersPasswordOnlyARD in
+        name, address, password, clipboardEnabled, rememberAccessCode, prefersPasswordOnlyARD,
+        wakeOnLan in
         let storedAccessCode = connections.accessCode(for: address)
         guard !password.isEmpty || storedAccessCode.canSafelySubmitBlank else { return false }
         let effectiveAccessCode = password.isEmpty ? storedAccessCode.value : password
         let profile = connections.save(
           name: name,
           address: address,
-          prefersPasswordOnlyARD: prefersPasswordOnlyARD)
+          prefersPasswordOnlyARD: prefersPasswordOnlyARD,
+          wakeOnLan: wakeOnLan)
         let target = DesktopTarget(profile: profile)
         let request: VNCConnectionRequest = { password in
           .init(
@@ -146,6 +165,9 @@ struct FleetRootView: View {
         sessions.connect(
           targetID: target.id,
           request: request,
+          wakeOnInitialTCPFailure: automaticWakeAction(
+            configuration: wakeOnLan?.configuration ?? wakeConfiguration(for: target),
+            enabled: wakeOnLan?.automaticallyWakeOnFailure ?? profile.wakesAutomatically),
           authenticationSucceeded: {
             persistAccessCode(for: request)
             connections.markConnected(profileID: profile.id)
@@ -167,6 +189,12 @@ struct FleetRootView: View {
       Button("OK") { keychainCleanupWarning = nil }
     } message: {
       Text(keychainCleanupWarning ?? "")
+    }
+    .alert(item: $wakeNotice) { notice in
+      Alert(
+        title: Text(notice.title),
+        message: Text(notice.message),
+        dismissButton: .default(Text("OK")))
     }
     .onAppear(perform: connectLaunchConnectionIfNeeded)
     .onExitCommand(perform: closeFocus)
@@ -253,6 +281,9 @@ struct FleetRootView: View {
       sessions.connect(
         targetID: target.id,
         request: request,
+        wakeOnInitialTCPFailure: automaticWakeAction(
+          configuration: wakeConfiguration(for: target),
+          enabled: profile.wakesAutomatically),
         authenticationSucceeded: {
           connections.markConnected(profileID: profile.id)
         }
@@ -266,6 +297,46 @@ struct FleetRootView: View {
       for: request.address,
       enabled: request.rememberAccessCode)
     reportPersistenceFailure(persistence)
+  }
+
+  private func wakeConfiguration(for target: DesktopTarget) -> WakeOnLan.Configuration? {
+    target.macAddress.map {
+      WakeOnLan.Configuration(macAddress: $0, broadcastAddress: target.wakeOnLanBroadcast)
+    }
+  }
+
+  private func automaticWakeAction(
+    configuration: WakeOnLan.Configuration?,
+    enabled: Bool
+  ) -> (@MainActor () async throws -> Void)? {
+    guard enabled, let configuration else { return nil }
+    return {
+      do {
+        try await wakeOnLan.send(configuration)
+      } catch {
+        wakeNotice = WakeNotice(
+          title: "Wake-on-LAN failed",
+          message: error.localizedDescription)
+        throw error
+      }
+    }
+  }
+
+  private func wake(_ target: DesktopTarget) {
+    guard let configuration = wakeConfiguration(for: target) else { return }
+    Task {
+      do {
+        try await wakeOnLan.send(configuration)
+        wakeNotice = WakeNotice(
+          title: "Wake packet sent",
+          message:
+            "Sent to \(configuration.effectiveBroadcastAddress) on UDP ports 9 and 7.")
+      } catch {
+        wakeNotice = WakeNotice(
+          title: "Wake-on-LAN failed",
+          message: error.localizedDescription)
+      }
+    }
   }
 
   private func reportPersistenceFailure(_ result: AccessCodePersistenceResult) {
@@ -297,6 +368,12 @@ struct FleetRootView: View {
 private struct DesktopTargetConnectionState: Equatable {
   let id: String
   let nativeVncSessionID: String?
+}
+
+private struct WakeNotice: Identifiable {
+  let id = UUID()
+  let title: String
+  let message: String
 }
 
 private struct DesktopSourceRail: View {
@@ -519,6 +596,7 @@ private struct DesktopDeck: View {
   @ObservedObject var sessions: VNCSessionPool
   let refresh: () -> Void
   let quickConnect: () -> Void
+  let wake: (DesktopTarget) -> Void
   let focus: (DesktopTarget.ID) -> Void
 
   @FocusState private var isSearchFocused: Bool
@@ -612,7 +690,8 @@ private struct DesktopDeck: View {
               DesktopCard(
                 target: target,
                 session: sessions.session(for: target.id),
-                namespace: namespace
+                namespace: namespace,
+                wake: target.macAddress == nil ? nil : { wake(target) }
               ) {
                 focus(target.id)
               }
@@ -631,6 +710,7 @@ private struct DesktopCard: View {
   let target: DesktopTarget
   @ObservedObject var session: VNCSessionController
   let namespace: Namespace.ID
+  let wake: (() -> Void)?
   let open: () -> Void
 
   @State private var isHovering = false
@@ -709,6 +789,11 @@ private struct DesktopCard: View {
       }
     }
     .accessibilityLabel("Open \(target.title)")
+    .contextMenu {
+      if let wake {
+        Button("Wake", systemImage: "power") { wake() }
+      }
+    }
   }
 }
 

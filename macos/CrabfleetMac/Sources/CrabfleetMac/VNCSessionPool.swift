@@ -46,12 +46,14 @@ final class VNCSessionPool: ObservableObject {
   func connect(
     targetID: String,
     request: VNCConnectionRequest,
+    wakeOnInitialTCPFailure: (@MainActor () async throws -> Void)? = nil,
     authenticationSucceeded: (() -> Void)? = nil
   ) {
     stopCrabboxBridge(targetID: targetID)
     connectDirect(
       targetID: targetID,
       request: request,
+      wakeOnInitialTCPFailure: wakeOnInitialTCPFailure,
       authenticationSucceeded: authenticationSucceeded)
   }
 
@@ -99,6 +101,7 @@ final class VNCSessionPool: ObservableObject {
   private func connectDirect(
     targetID: String,
     request: VNCConnectionRequest,
+    wakeOnInitialTCPFailure: (@MainActor () async throws -> Void)? = nil,
     authenticationSucceeded: (() -> Void)? = nil
   ) {
     enforceLiveSessionBudget(excluding: targetID)
@@ -114,6 +117,7 @@ final class VNCSessionPool: ObservableObject {
       clipboardEnabled: request.clipboardEnabled,
       quic: request.quic,
       prefersPasswordOnlyARD: request.prefersPasswordOnlyARD,
+      wakeOnInitialTCPFailure: wakeOnInitialTCPFailure,
       authenticationSucceeded: authenticationSucceeded
     )
 

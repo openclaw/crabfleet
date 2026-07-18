@@ -1,4 +1,6 @@
 import Foundation
+import Network
+import RoyalVNCKit
 import Testing
 
 @testable import CrabfleetMac
@@ -122,5 +124,99 @@ struct WakeOnLanTests {
     #expect(profile.effectiveWakeOnLanBroadcast == "255.255.255.255")
     #expect(WakeOnLan.effectiveBroadcastAddress(nil) == "255.255.255.255")
     #expect(WakeOnLan.effectiveBroadcastAddress("   ") == "255.255.255.255")
+  }
+
+  @Test
+  func validatesAndCanonicalizesProfileSettings() throws {
+    let settings = try WakeOnLan.ProfileSettings(
+      macAddress: "AABBCCDDEEFF",
+      broadcastAddress: " 192.0.2.255 ",
+      automaticallyWakeOnFailure: true)
+
+    #expect(settings.macAddress == "aa:bb:cc:dd:ee:ff")
+    #expect(settings.broadcastAddress == "192.0.2.255")
+    #expect(settings.automaticallyWakeOnFailure)
+    #expect(settings.configuration?.effectiveBroadcastAddress == "192.0.2.255")
+
+    #expect(throws: WakeOnLan.WakeError.invalidBroadcastAddress) {
+      try WakeOnLan.ProfileSettings(
+        macAddress: "aa:bb:cc:dd:ee:ff",
+        broadcastAddress: "not-an-address",
+        automaticallyWakeOnFailure: false)
+    }
+  }
+
+  @Test
+  func emptyMACDisablesWakeSettings() throws {
+    let settings = try WakeOnLan.ProfileSettings(
+      macAddress: " ",
+      broadcastAddress: "192.0.2.255",
+      automaticallyWakeOnFailure: true)
+
+    #expect(settings.macAddress == nil)
+    #expect(settings.broadcastAddress == nil)
+    #expect(!settings.automaticallyWakeOnFailure)
+    #expect(settings.configuration == nil)
+  }
+
+  @Test @MainActor
+  func libraryPersistsAndClearsWakeSettings() throws {
+    let suiteName = "CrabfleetMacTests.\(UUID().uuidString)"
+    let defaults = try #require(UserDefaults(suiteName: suiteName))
+    defer { defaults.removePersistentDomain(forName: suiteName) }
+    let library = ConnectionLibrary(defaults: defaults, storageKey: "wake-profiles")
+    let settings = try WakeOnLan.ProfileSettings(
+      macAddress: "aa-bb-cc-dd-ee-ff",
+      broadcastAddress: "192.0.2.255",
+      automaticallyWakeOnFailure: true)
+
+    let profile = library.save(
+      name: "Sleeping workstation",
+      address: .init(host: "192.0.2.40", port: 5900, username: ""),
+      wakeOnLan: settings)
+    let reloaded = ConnectionLibrary(defaults: defaults, storageKey: "wake-profiles")
+    #expect(reloaded.profiles.first?.macAddress == "aa:bb:cc:dd:ee:ff")
+    #expect(reloaded.profiles.first?.wakeOnLanAutomatically == true)
+
+    let cleared = try WakeOnLan.ProfileSettings(
+      macAddress: "",
+      broadcastAddress: "",
+      automaticallyWakeOnFailure: true)
+    let updated = try #require(library.updateWakeOnLan(profileID: profile.id, settings: cleared))
+    #expect(updated.macAddress == nil)
+    #expect(updated.wakeOnLanBroadcast == nil)
+    #expect(updated.wakeOnLanAutomatically == nil)
+  }
+
+  @Test @MainActor
+  func saveWithoutWakeInputPreservesExistingSettings() throws {
+    let suiteName = "CrabfleetMacTests.\(UUID().uuidString)"
+    let defaults = try #require(UserDefaults(suiteName: suiteName))
+    defer { defaults.removePersistentDomain(forName: suiteName) }
+    let library = ConnectionLibrary(defaults: defaults, storageKey: "wake-profiles")
+    let address = VNCAddress(host: "192.0.2.41", port: 5900, username: "")
+    let settings = try WakeOnLan.ProfileSettings(
+      macAddress: "00:11:22:33:44:55",
+      broadcastAddress: "192.0.2.255",
+      automaticallyWakeOnFailure: true)
+
+    _ = library.save(name: "Sleeping workstation", address: address, wakeOnLan: settings)
+    let updated = library.save(name: "Quick Connect", address: address)
+
+    #expect(updated.macAddress == "00:11:22:33:44:55")
+    #expect(updated.wakeOnLanBroadcast == "192.0.2.255")
+    #expect(updated.wakeOnLanAutomatically == true)
+  }
+
+  @Test
+  func retriesOnlyNetworkTransportFailures() {
+    let networkFailure = VNCError.connection(
+      .failed(NWError.posix(.ECONNREFUSED)))
+    let authenticationFailure = VNCError.authentication(.ardAuthenticationFailed)
+    let protocolFailure = VNCError.protocol(.invalidData)
+
+    #expect(VNCSessionController.isWakeEligibleTCPFailure(networkFailure))
+    #expect(!VNCSessionController.isWakeEligibleTCPFailure(authenticationFailure))
+    #expect(!VNCSessionController.isWakeEligibleTCPFailure(protocolFailure))
   }
 }

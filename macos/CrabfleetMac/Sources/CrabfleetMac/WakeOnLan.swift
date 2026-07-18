@@ -14,6 +14,44 @@ struct WakeOnLan: Sendable {
     }
   }
 
+  struct ProfileSettings: Equatable, Sendable {
+    let macAddress: String?
+    let broadcastAddress: String?
+    let automaticallyWakeOnFailure: Bool
+
+    init(
+      macAddress: String,
+      broadcastAddress: String,
+      automaticallyWakeOnFailure: Bool
+    ) throws {
+      let trimmedMAC = macAddress.trimmingCharacters(in: .whitespacesAndNewlines)
+      guard !trimmedMAC.isEmpty else {
+        self.macAddress = nil
+        self.broadcastAddress = nil
+        self.automaticallyWakeOnFailure = false
+        return
+      }
+
+      self.macAddress = try WakeOnLan.canonicalMACAddress(trimmedMAC)
+      let trimmedBroadcast = broadcastAddress.trimmingCharacters(in: .whitespacesAndNewlines)
+      if trimmedBroadcast.isEmpty {
+        self.broadcastAddress = nil
+      } else {
+        guard WakeOnLan.isIPv4Address(trimmedBroadcast) else {
+          throw WakeError.invalidBroadcastAddress
+        }
+        self.broadcastAddress = trimmedBroadcast
+      }
+      self.automaticallyWakeOnFailure = automaticallyWakeOnFailure
+    }
+
+    var configuration: Configuration? {
+      macAddress.map {
+        Configuration(macAddress: $0, broadcastAddress: broadcastAddress)
+      }
+    }
+  }
+
   enum WakeError: Error, Equatable, LocalizedError, Sendable {
     case invalidMACAddress
     case invalidBroadcastAddress
@@ -100,7 +138,7 @@ struct WakeOnLan: Sendable {
     }
   }
 
-  private static func isIPv4Address(_ value: String) -> Bool {
+  fileprivate static func isIPv4Address(_ value: String) -> Bool {
     var address = in_addr()
     return value.withCString { inet_pton(AF_INET, $0, &address) } == 1
   }

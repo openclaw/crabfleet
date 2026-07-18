@@ -141,7 +141,8 @@ final class ConnectionLibrary: ObservableObject {
     name: String,
     address: VNCAddress,
     favorite: Bool = false,
-    prefersPasswordOnlyARD: Bool? = nil
+    prefersPasswordOnlyARD: Bool? = nil,
+    wakeOnLan: WakeOnLan.ProfileSettings? = nil
   ) -> VNCConnectionProfile {
     if let index = profiles.firstIndex(where: {
       $0.host.caseInsensitiveCompare(address.host) == .orderedSame && $0.port == address.port
@@ -151,6 +152,9 @@ final class ConnectionLibrary: ObservableObject {
       profiles[index].favorite = favorite || profiles[index].favorite
       if let prefersPasswordOnlyARD {
         profiles[index].prefersPasswordOnlyARD = prefersPasswordOnlyARD
+      }
+      if let wakeOnLan {
+        apply(wakeOnLan, to: &profiles[index])
       }
       persist()
       return profiles[index]
@@ -162,7 +166,10 @@ final class ConnectionLibrary: ObservableObject {
       port: address.port,
       username: address.username,
       favorite: favorite,
-      prefersPasswordOnlyARD: prefersPasswordOnlyARD ?? false
+      prefersPasswordOnlyARD: prefersPasswordOnlyARD ?? false,
+      macAddress: wakeOnLan?.macAddress,
+      wakeOnLanBroadcast: wakeOnLan?.broadcastAddress,
+      wakeOnLanAutomatically: wakeOnLan?.automaticallyWakeOnFailure == true ? true : nil
     )
     profiles.append(profile)
     sortProfiles()
@@ -184,6 +191,17 @@ final class ConnectionLibrary: ObservableObject {
     persist()
   }
 
+  @discardableResult
+  func updateWakeOnLan(
+    profileID: String,
+    settings: WakeOnLan.ProfileSettings
+  ) -> VNCConnectionProfile? {
+    guard let index = profiles.firstIndex(where: { $0.id == profileID }) else { return nil }
+    apply(settings, to: &profiles[index])
+    persist()
+    return profiles[index]
+  }
+
   func remove(profileID: String) {
     profiles.removeAll { $0.id == profileID }
     persist()
@@ -199,5 +217,15 @@ final class ConnectionLibrary: ObservableObject {
   private func persist() {
     guard let data = try? encoder.encode(profiles) else { return }
     defaults.set(data, forKey: storageKey)
+  }
+
+  private func apply(
+    _ settings: WakeOnLan.ProfileSettings,
+    to profile: inout VNCConnectionProfile
+  ) {
+    profile.macAddress = settings.macAddress
+    profile.wakeOnLanBroadcast = settings.broadcastAddress
+    profile.wakeOnLanAutomatically =
+      settings.automaticallyWakeOnFailure ? true : nil
   }
 }
