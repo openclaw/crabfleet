@@ -1,6 +1,144 @@
 import AppKit
 import SwiftUI
 
+private struct SheetContentHeightKey: PreferenceKey {
+  static var defaultValue: CGFloat = 0
+
+  static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
+    value = max(value, nextValue())
+  }
+}
+
+struct ShareSheetContainer<Content: View>: View {
+  let width: CGFloat
+  @ViewBuilder let content: Content
+
+  @State private var contentHeight: CGFloat = 0
+
+  init(width: CGFloat = 600, @ViewBuilder content: () -> Content) {
+    self.width = width
+    self.content = content()
+  }
+
+  var body: some View {
+    ScrollView {
+      content
+        .padding(24)
+        .background {
+          GeometryReader { proxy in
+            Color.clear.preference(key: SheetContentHeightKey.self, value: proxy.size.height)
+          }
+        }
+    }
+    .scrollBounceBehavior(.basedOnSize)
+    .onPreferenceChange(SheetContentHeightKey.self) { contentHeight = $0 }
+    .frame(width: width)
+    .frame(height: contentHeight > 0 ? min(contentHeight, maxSheetHeight) : nil)
+    .background {
+      LinearGradient(
+        colors: [
+          Color(red: 0.035, green: 0.041, blue: 0.045),
+          Color(red: 0.018, green: 0.023, blue: 0.026),
+        ],
+        startPoint: .topLeading,
+        endPoint: .bottomTrailing)
+    }
+    .preferredColorScheme(.dark)
+    .tint(.mint)
+    .toggleStyle(ShareToggleStyle())
+  }
+
+  // Sheets cannot be moved on screen, so cap height below common laptop displays
+  // and let the content scroll instead of clipping the footer controls.
+  private var maxSheetHeight: CGFloat {
+    max(480, (NSScreen.main?.visibleFrame.height ?? 900) - 120)
+  }
+}
+
+struct ShareSheetHeader<Trailing: View>: View {
+  let systemImage: String
+  let title: String
+  let subtitle: String
+  @ViewBuilder let trailing: Trailing
+
+  init(
+    systemImage: String,
+    title: String,
+    subtitle: String,
+    @ViewBuilder trailing: () -> Trailing
+  ) {
+    self.systemImage = systemImage
+    self.title = title
+    self.subtitle = subtitle
+    self.trailing = trailing()
+  }
+
+  var body: some View {
+    HStack(spacing: 12) {
+      ZStack {
+        RoundedRectangle(cornerRadius: 12, style: .continuous)
+          .fill(
+            LinearGradient(
+              colors: [.mint.opacity(0.28), .mint.opacity(0.08)],
+              startPoint: .topLeading,
+              endPoint: .bottomTrailing))
+        RoundedRectangle(cornerRadius: 12, style: .continuous)
+          .strokeBorder(.mint.opacity(0.35), lineWidth: 1)
+        Image(systemName: systemImage)
+          .font(.system(size: 19, weight: .medium))
+          .foregroundStyle(.mint)
+      }
+      .frame(width: 44, height: 44)
+
+      VStack(alignment: .leading, spacing: 2) {
+        Text(title)
+          .font(.title3.weight(.semibold))
+        Text(subtitle)
+          .font(.system(size: 11.5, design: .rounded))
+          .foregroundStyle(.secondary)
+      }
+
+      Spacer()
+      trailing
+    }
+  }
+}
+
+extension ShareSheetHeader where Trailing == EmptyView {
+  init(systemImage: String, title: String, subtitle: String) {
+    self.init(systemImage: systemImage, title: title, subtitle: subtitle) {
+      EmptyView()
+    }
+  }
+}
+
+struct ShareFieldRow<Field: View>: View {
+  let title: String
+  @ViewBuilder let field: Field
+
+  init(title: String, @ViewBuilder field: () -> Field) {
+    self.title = title
+    self.field = field()
+  }
+
+  var body: some View {
+    HStack(spacing: 12) {
+      Text(title)
+        .font(.system(size: 12, weight: .medium, design: .rounded))
+        .foregroundStyle(.secondary)
+        .frame(width: 130, alignment: .leading)
+        .accessibilityHidden(true)
+      field
+        .textFieldStyle(.plain)
+        .font(.system(size: 12.5, design: .rounded))
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .accessibilityLabel(title)
+    }
+    .padding(.horizontal, 14)
+    .padding(.vertical, 9)
+  }
+}
+
 struct ShareCard<Content: View>: View {
   enum Tone {
     case standard
@@ -142,6 +280,7 @@ private struct ShareToggleBody: View {
     .onHover { hovering in
       isHovering = isEnabled && hovering
     }
+    .accessibilityElement(children: .combine)
     .accessibilityValue(configuration.isOn ? "On" : "Off")
   }
 
@@ -287,5 +426,34 @@ struct ShareIconTile: View {
         in: RoundedRectangle(cornerRadius: 7, style: .continuous)
       )
       .animation(.easeOut(duration: 0.18), value: isActive)
+  }
+}
+
+struct ShareToggleLabel: View {
+  let systemName: String
+  var fallbackSystemName: String?
+  let title: String
+  var caption: String?
+  let isActive: Bool
+
+  var body: some View {
+    HStack(spacing: 10) {
+      ShareIconTile(
+        systemName: systemName,
+        fallbackSystemName: fallbackSystemName,
+        isActive: isActive)
+      VStack(alignment: .leading, spacing: 2) {
+        Text(title)
+          .font(.system(size: 12.5, weight: .medium, design: .rounded))
+          .foregroundStyle(.primary)
+          .lineLimit(1)
+        if let caption {
+          Text(caption)
+            .font(.system(size: 10.5, design: .rounded))
+            .foregroundStyle(.secondary)
+            .lineLimit(1)
+        }
+      }
+    }
   }
 }

@@ -542,74 +542,137 @@ struct DesktopConnectionSheet: View {
   }
 
   var body: some View {
-    VStack(alignment: .leading, spacing: 20) {
-      ConnectionSheetHeader(
-        title: "Connect to \(target.title)",
-        subtitle: target.source == .crabfleet
-          ? "Use the loopback endpoint from the Crabbox tunnel."
-          : "Open a direct VNC connection with the native viewer."
-      )
+    ShareSheetContainer(width: 560) {
+      VStack(alignment: .leading, spacing: 16) {
+        ShareSheetHeader(
+          systemImage: "cable.connector",
+          title: "Connect to \(target.title)",
+          subtitle: target.source == .crabfleet
+            ? "Use the loopback endpoint from the Crabbox tunnel."
+            : "Open a direct VNC connection with the native viewer."
+        )
 
-      Form {
-        TextField("VNC address", text: $address, prompt: Text("host:5900 or vnc://host:5900"))
-        TextField("Username (optional)", text: $username)
-        SecureField("Password", text: $password)
-        Toggle("Crabfleet Share (prefer ARD)", isOn: $prefersPasswordOnlyARD)
-        Toggle("Remember password in Keychain", isOn: $rememberAccessCode)
-        Toggle("Synchronize text clipboard", isOn: $clipboardEnabled)
-        if target.profileID != nil {
-          Section("Wake-on-LAN") {
-            TextField(
-              "MAC address (optional)", text: $macAddress,
-              prompt: Text("aa:bb:cc:dd:ee:ff"))
-            TextField(
-              "Broadcast address", text: $wakeOnLanBroadcast,
-              prompt: Text(WakeOnLan.defaultBroadcastAddress)
-            )
-            .disabled(macAddress.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-            Toggle("Wake after the initial TCP connection fails", isOn: $wakeOnLanAutomatically)
-              .disabled(macAddress.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-            Text("Wake-on-LAN normally reaches only devices on the same local network.")
-              .font(.caption)
-              .foregroundStyle(.secondary)
+        VStack(alignment: .leading, spacing: 8) {
+          ShareSectionHeader(title: "Connection")
+          ShareCard {
+            VStack(spacing: 0) {
+              ShareFieldRow(title: "VNC address") {
+                TextField("", text: $address, prompt: Text("host:5900 or vnc://host:5900"))
+                  .font(.system(size: 12, design: .monospaced))
+              }
+              ShareCardDivider(leadingInset: 14)
+              ShareFieldRow(title: "Username (optional)") {
+                TextField("", text: $username)
+              }
+              ShareCardDivider(leadingInset: 14)
+              ShareFieldRow(title: "Password") {
+                SecureField("", text: $password)
+              }
+            }
           }
         }
-      }
-      .formStyle(.grouped)
 
-      ClipboardConnectionWarning(isEnabled: clipboardEnabled)
+        VStack(alignment: .leading, spacing: 8) {
+          ShareSectionHeader(title: "Options")
+          ShareCard {
+            VStack(spacing: 0) {
+              Toggle(isOn: $prefersPasswordOnlyARD) {
+                ShareToggleLabel(
+                  systemName: "person.badge.key",
+                  title: "Crabfleet Share (prefer ARD)",
+                  caption: "Authenticates with the share password only.",
+                  isActive: prefersPasswordOnlyARD)
+              }
+              ShareCardDivider()
+              Toggle(isOn: $rememberAccessCode) {
+                ShareToggleLabel(
+                  systemName: "key.fill",
+                  title: "Remember password in Keychain",
+                  caption: "Stored per host and port on this Mac.",
+                  isActive: rememberAccessCode)
+              }
+              ShareCardDivider()
+              Toggle(isOn: $clipboardEnabled) {
+                ShareToggleLabel(
+                  systemName: "arrow.triangle.2.circlepath.doc.on.clipboard",
+                  fallbackSystemName: "doc.on.clipboard",
+                  title: "Synchronize text clipboard",
+                  caption: "Stable text changes flow to the focused desktop.",
+                  isActive: clipboardEnabled)
+              }
+            }
+          }
+        }
 
-      if let validationMessage {
-        Text(validationMessage)
-          .font(.caption)
-          .foregroundStyle(.red)
-      } else {
-        Label(
-          "Direct VNC is usually unencrypted. Prefer localhost through SSH or a trusted private network.",
-          systemImage: "lock.trianglebadge.exclamationmark"
-        )
-        .font(.caption)
-        .foregroundStyle(.secondary)
-      }
+        if target.profileID != nil {
+          VStack(alignment: .leading, spacing: 8) {
+            ShareSectionHeader(title: "Wake-on-LAN")
+            ShareCard {
+              VStack(spacing: 0) {
+                ShareFieldRow(title: "MAC address (optional)") {
+                  TextField("", text: $macAddress, prompt: Text("aa:bb:cc:dd:ee:ff"))
+                    .font(.system(size: 12, design: .monospaced))
+                }
+                ShareCardDivider(leadingInset: 14)
+                ShareFieldRow(title: "Broadcast address") {
+                  TextField(
+                    "", text: $wakeOnLanBroadcast,
+                    prompt: Text(WakeOnLan.defaultBroadcastAddress)
+                  )
+                  .font(.system(size: 12, design: .monospaced))
+                  .disabled(macAddress.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                }
+                ShareCardDivider(leadingInset: 14)
+                Toggle(isOn: $wakeOnLanAutomatically) {
+                  ShareToggleLabel(
+                    systemName: "power",
+                    title: "Wake after the initial TCP connection fails",
+                    isActive: wakeOnLanAutomatically)
+                }
+                .disabled(macAddress.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                Text("Wake-on-LAN normally reaches only devices on the same local network.")
+                  .font(.system(size: 10.5, design: .rounded))
+                  .foregroundStyle(.secondary)
+                  .frame(maxWidth: .infinity, alignment: .leading)
+                  .padding(.horizontal, 14)
+                  .padding(.bottom, 12)
+              }
+            }
+          }
+        }
 
-      HStack {
-        Text(
-          rememberAccessCode
-            ? "The password is stored in this Mac’s Keychain for this host and port."
-            : "The password stays in memory for this connection only."
-        )
-          .font(.caption)
-          .foregroundStyle(.tertiary)
-        Spacer()
-        Button("Cancel") { dismiss() }
-          .keyboardShortcut(.cancelAction)
-        Button("Connect", action: submit)
-          .buttonStyle(.borderedProminent)
-          .keyboardShortcut(.defaultAction)
+        ClipboardConnectionWarning(isEnabled: clipboardEnabled)
+
+        if let validationMessage {
+          Text(validationMessage)
+            .font(.system(.caption, design: .rounded))
+            .foregroundStyle(.red)
+        } else {
+          Label(
+            "Direct VNC is usually unencrypted. Prefer localhost through SSH or a trusted private network.",
+            systemImage: "lock.trianglebadge.exclamationmark"
+          )
+          .font(.system(.caption, design: .rounded))
+          .foregroundStyle(.secondary)
+        }
+
+        HStack {
+          Text(
+            rememberAccessCode
+              ? "The password is stored in this Mac’s Keychain for this host and port."
+              : "The password stays in memory for this connection only."
+          )
+            .font(.caption)
+            .foregroundStyle(.tertiary)
+          Spacer()
+          Button("Cancel") { dismiss() }
+            .keyboardShortcut(.cancelAction)
+          Button("Connect", action: submit)
+            .buttonStyle(.borderedProminent)
+            .keyboardShortcut(.defaultAction)
+        }
       }
     }
-    .padding(24)
-    .frame(width: 540)
     .onChange(of: address) { _, _ in refreshPasswordForCredentialIdentity() }
     .onChange(of: username) { _, _ in refreshPasswordForCredentialIdentity() }
   }
@@ -682,66 +745,132 @@ struct QuickConnectSheet: View {
   @State private var credentialIdentity: VNCAddress?
 
   var body: some View {
-    VStack(alignment: .leading, spacing: 20) {
-      ConnectionSheetHeader(
-        title: "Quick Connect",
-        subtitle: "Add any standard VNC server to your desktop deck."
-      )
+    ShareSheetContainer(width: 560) {
+      VStack(alignment: .leading, spacing: 16) {
+        ShareSheetHeader(
+          systemImage: "cable.connector",
+          title: "Quick Connect",
+          subtitle: "Add any standard VNC server to your desktop deck."
+        )
 
-      Form {
-        TextField("VNC address", text: $address, prompt: Text("host:5900 or vnc://host:5900"))
-          .focused($addressFocused)
-        TextField("Name", text: $name, prompt: Text("Design workstation"))
-        TextField("Username (optional)", text: $username)
-        SecureField("Password", text: $password)
-        Toggle("Crabfleet Share (prefer ARD)", isOn: $prefersPasswordOnlyARD)
-        Toggle("Remember password in Keychain", isOn: $rememberAccessCode)
-        Toggle("Synchronize text clipboard", isOn: $clipboardEnabled)
-        Section("Wake-on-LAN") {
-          TextField(
-            "MAC address (optional)", text: $macAddress,
-            prompt: Text("aa:bb:cc:dd:ee:ff"))
-          TextField(
-            "Broadcast address", text: $wakeOnLanBroadcast,
-            prompt: Text(WakeOnLan.defaultBroadcastAddress)
+        VStack(alignment: .leading, spacing: 8) {
+          ShareSectionHeader(title: "Connection")
+          ShareCard {
+            VStack(spacing: 0) {
+              ShareFieldRow(title: "VNC address") {
+                TextField("", text: $address, prompt: Text("host:5900 or vnc://host:5900"))
+                  .font(.system(size: 12, design: .monospaced))
+                  .focused($addressFocused)
+              }
+              ShareCardDivider(leadingInset: 14)
+              ShareFieldRow(title: "Name") {
+                TextField("", text: $name, prompt: Text("Design workstation"))
+              }
+              ShareCardDivider(leadingInset: 14)
+              ShareFieldRow(title: "Username (optional)") {
+                TextField("", text: $username)
+              }
+              ShareCardDivider(leadingInset: 14)
+              ShareFieldRow(title: "Password") {
+                SecureField("", text: $password)
+              }
+            }
+          }
+        }
+
+        VStack(alignment: .leading, spacing: 8) {
+          ShareSectionHeader(title: "Options")
+          ShareCard {
+            VStack(spacing: 0) {
+              Toggle(isOn: $prefersPasswordOnlyARD) {
+                ShareToggleLabel(
+                  systemName: "person.badge.key",
+                  title: "Crabfleet Share (prefer ARD)",
+                  caption: "Authenticates with the share password only.",
+                  isActive: prefersPasswordOnlyARD)
+              }
+              ShareCardDivider()
+              Toggle(isOn: $rememberAccessCode) {
+                ShareToggleLabel(
+                  systemName: "key.fill",
+                  title: "Remember password in Keychain",
+                  caption: "Stored per host and port on this Mac.",
+                  isActive: rememberAccessCode)
+              }
+              ShareCardDivider()
+              Toggle(isOn: $clipboardEnabled) {
+                ShareToggleLabel(
+                  systemName: "arrow.triangle.2.circlepath.doc.on.clipboard",
+                  fallbackSystemName: "doc.on.clipboard",
+                  title: "Synchronize text clipboard",
+                  caption: "Stable text changes flow to the focused desktop.",
+                  isActive: clipboardEnabled)
+              }
+            }
+          }
+        }
+
+        VStack(alignment: .leading, spacing: 8) {
+          ShareSectionHeader(title: "Wake-on-LAN")
+          ShareCard {
+            VStack(spacing: 0) {
+              ShareFieldRow(title: "MAC address (optional)") {
+                TextField("", text: $macAddress, prompt: Text("aa:bb:cc:dd:ee:ff"))
+                  .font(.system(size: 12, design: .monospaced))
+              }
+              ShareCardDivider(leadingInset: 14)
+              ShareFieldRow(title: "Broadcast address") {
+                TextField(
+                  "", text: $wakeOnLanBroadcast,
+                  prompt: Text(WakeOnLan.defaultBroadcastAddress)
+                )
+                .font(.system(size: 12, design: .monospaced))
+                .disabled(macAddress.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+              }
+              ShareCardDivider(leadingInset: 14)
+              Toggle(isOn: $wakeOnLanAutomatically) {
+                ShareToggleLabel(
+                  systemName: "power",
+                  title: "Wake after the initial TCP connection fails",
+                  isActive: wakeOnLanAutomatically)
+              }
+              .disabled(macAddress.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+              Text("Wake-on-LAN normally reaches only devices on the same local network.")
+                .font(.system(size: 10.5, design: .rounded))
+                .foregroundStyle(.secondary)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.horizontal, 14)
+                .padding(.bottom, 12)
+            }
+          }
+        }
+
+        ClipboardConnectionWarning(isEnabled: clipboardEnabled)
+
+        if let validationMessage {
+          Text(validationMessage)
+            .font(.system(.caption, design: .rounded))
+            .foregroundStyle(.red)
+        } else {
+          Text(
+            rememberAccessCode
+              ? "The connection is saved; the password is stored in this Mac’s Keychain."
+              : "The connection is saved; the password is not."
           )
-          .disabled(macAddress.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-          Toggle("Wake after the initial TCP connection fails", isOn: $wakeOnLanAutomatically)
-            .disabled(macAddress.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-          Text("Wake-on-LAN normally reaches only devices on the same local network.")
-            .font(.caption)
+            .font(.system(.caption, design: .rounded))
             .foregroundStyle(.secondary)
         }
-      }
-      .formStyle(.grouped)
 
-      ClipboardConnectionWarning(isEnabled: clipboardEnabled)
-
-      if let validationMessage {
-        Text(validationMessage)
-          .font(.caption)
-          .foregroundStyle(.red)
-      } else {
-        Text(
-          rememberAccessCode
-            ? "The connection is saved; the password is stored in this Mac’s Keychain."
-            : "The connection is saved; the password is not."
-        )
-          .font(.caption)
-          .foregroundStyle(.secondary)
-      }
-
-      HStack {
-        Spacer()
-        Button("Cancel") { dismiss() }
-          .keyboardShortcut(.cancelAction)
-        Button("Add & Connect", action: submit)
-          .buttonStyle(.borderedProminent)
-          .keyboardShortcut(.defaultAction)
+        HStack {
+          Spacer()
+          Button("Cancel") { dismiss() }
+            .keyboardShortcut(.cancelAction)
+          Button("Add & Connect", action: submit)
+            .buttonStyle(.borderedProminent)
+            .keyboardShortcut(.defaultAction)
+        }
       }
     }
-    .padding(24)
-    .frame(width: 540)
     .onAppear { addressFocused = true }
     .onChange(of: address) { _, _ in refreshRememberedState() }
     .onChange(of: username) { _, _ in refreshRememberedState() }
@@ -813,29 +942,6 @@ private struct ClipboardConnectionWarning: View {
       )
       .font(.caption)
       .foregroundStyle(.orange)
-    }
-  }
-}
-
-private struct ConnectionSheetHeader: View {
-  let title: String
-  let subtitle: String
-
-  var body: some View {
-    HStack(spacing: 12) {
-      ZStack {
-        RoundedRectangle(cornerRadius: 10, style: .continuous)
-          .fill(.mint.opacity(0.1))
-        Image(systemName: "cable.connector")
-          .font(.system(size: 20, weight: .light))
-          .foregroundStyle(.mint)
-      }
-      .frame(width: 42, height: 42)
-
-      VStack(alignment: .leading, spacing: 2) {
-        Text(title).font(.title3.weight(.semibold))
-        Text(subtitle).foregroundStyle(.secondary)
-      }
     }
   }
 }

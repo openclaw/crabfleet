@@ -6,12 +6,16 @@ struct PrivateMacShareSheet: View {
   @Environment(\.dismiss) private var dismiss
   @Environment(\.scenePhase) private var scenePhase
 
-  @State private var contentHeight: CGFloat = 0
-
   var body: some View {
-    ScrollView {
+    ShareSheetContainer(width: 600) {
       VStack(alignment: .leading, spacing: 16) {
-        header
+        ShareSheetHeader(
+          systemImage: "display.and.arrow.down",
+          title: "Share This Mac",
+          subtitle: "App-owned remote desktop, restricted to your current Tailscale identity."
+        ) {
+          SharePhaseBadge(phase: controller.phase)
+        }
         readinessSection
 
         if let warning = controller.tailnetWarning {
@@ -31,29 +35,7 @@ struct PrivateMacShareSheet: View {
         assurance
         footer
       }
-      .padding(24)
-      .background {
-        GeometryReader { proxy in
-          Color.clear.preference(key: SheetContentHeightKey.self, value: proxy.size.height)
-        }
-      }
     }
-    .scrollBounceBehavior(.basedOnSize)
-    .onPreferenceChange(SheetContentHeightKey.self) { contentHeight = $0 }
-    .frame(width: 600)
-    .frame(height: contentHeight > 0 ? min(contentHeight, Self.maxSheetHeight) : nil)
-    .background {
-      LinearGradient(
-        colors: [
-          Color(red: 0.035, green: 0.041, blue: 0.045),
-          Color(red: 0.018, green: 0.023, blue: 0.026),
-        ],
-        startPoint: .topLeading,
-        endPoint: .bottomTrailing)
-    }
-    .preferredColorScheme(.dark)
-    .tint(.mint)
-    .toggleStyle(ShareToggleStyle())
     .task { await controller.refresh() }
     .onAppear { controller.startPermissionMonitoring() }
     .onDisappear { controller.stopPermissionMonitoring() }
@@ -61,36 +43,6 @@ struct PrivateMacShareSheet: View {
       if phase == .active {
         controller.refreshPermissions()
       }
-    }
-  }
-
-  private var header: some View {
-    HStack(spacing: 12) {
-      ZStack {
-        RoundedRectangle(cornerRadius: 12, style: .continuous)
-          .fill(
-            LinearGradient(
-              colors: [.mint.opacity(0.28), .mint.opacity(0.08)],
-              startPoint: .topLeading,
-              endPoint: .bottomTrailing))
-        RoundedRectangle(cornerRadius: 12, style: .continuous)
-          .strokeBorder(.mint.opacity(0.35), lineWidth: 1)
-        Image(systemName: "display.and.arrow.down")
-          .font(.system(size: 19, weight: .medium))
-          .foregroundStyle(.mint)
-      }
-      .frame(width: 44, height: 44)
-
-      VStack(alignment: .leading, spacing: 2) {
-        Text("Share This Mac")
-          .font(.title3.weight(.semibold))
-        Text("App-owned remote desktop, restricted to your current Tailscale identity.")
-          .font(.system(size: 11.5, design: .rounded))
-          .foregroundStyle(.secondary)
-      }
-
-      Spacer()
-      SharePhaseBadge(phase: controller.phase)
     }
   }
 
@@ -492,12 +444,6 @@ struct PrivateMacShareSheet: View {
     }
   }
 
-  // Sheets cannot be moved on screen, so cap height below common laptop displays
-  // and let the content scroll instead of clipping the footer controls.
-  private static var maxSheetHeight: CGFloat {
-    max(480, (NSScreen.main?.visibleFrame.height ?? 900) - 120)
-  }
-
   private var phaseDetail: String {
     let viewers =
       controller.connectedViewerCount == 1
@@ -519,13 +465,6 @@ struct PrivateMacShareSheet: View {
       return "\(controller.phase.title) · \(peer)"
     }
     return controller.phase.title
-  }
-}
-
-private struct SheetContentHeightKey: PreferenceKey {
-  static var defaultValue: CGFloat = 0
-  static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
-    value = max(value, nextValue())
   }
 }
 
@@ -609,34 +548,5 @@ private struct ShareStatusRow: View {
     }
     .padding(.horizontal, 14)
     .padding(.vertical, 10)
-  }
-}
-
-private struct ShareToggleLabel: View {
-  let systemName: String
-  var fallbackSystemName: String?
-  let title: String
-  var caption: String?
-  let isActive: Bool
-
-  var body: some View {
-    HStack(spacing: 10) {
-      ShareIconTile(
-        systemName: systemName,
-        fallbackSystemName: fallbackSystemName,
-        isActive: isActive)
-      VStack(alignment: .leading, spacing: 2) {
-        Text(title)
-          .font(.system(size: 12.5, weight: .medium, design: .rounded))
-          .foregroundStyle(.primary)
-          .lineLimit(1)
-        if let caption {
-          Text(caption)
-            .font(.system(size: 10.5, design: .rounded))
-            .foregroundStyle(.secondary)
-            .lineLimit(1)
-        }
-      }
-    }
   }
 }
