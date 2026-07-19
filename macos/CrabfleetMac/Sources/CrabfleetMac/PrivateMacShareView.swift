@@ -6,255 +6,435 @@ struct PrivateMacShareSheet: View {
   @Environment(\.dismiss) private var dismiss
   @Environment(\.scenePhase) private var scenePhase
 
+  @State private var contentHeight: CGFloat = 0
+
   var body: some View {
-    VStack(alignment: .leading, spacing: 20) {
-      HStack(spacing: 12) {
-        ZStack {
-          RoundedRectangle(cornerRadius: 10, style: .continuous)
-            .fill(.mint.opacity(0.1))
-          Image(systemName: "display.and.arrow.down")
-            .font(.system(size: 20, weight: .light))
-            .foregroundStyle(.mint)
-        }
-        .frame(width: 42, height: 42)
+    ScrollView {
+      VStack(alignment: .leading, spacing: 16) {
+        header
+        readinessSection
 
-        VStack(alignment: .leading, spacing: 2) {
-          Text("Share This Mac")
-            .font(.title3.weight(.semibold))
-          Text("App-owned remote desktop, restricted to your current Tailscale identity.")
-            .foregroundStyle(.secondary)
+        if let warning = controller.tailnetWarning {
+          Label(warning, systemImage: "exclamationmark.triangle.fill")
+            .font(.caption)
+            .foregroundStyle(.orange)
+            .fixedSize(horizontal: false, vertical: true)
+        }
+
+        sharingSection
+        optionsSection
+
+        if controller.phase.isRunning, !controller.connectionAddresses.isEmpty {
+          connectSection
+        }
+
+        assurance
+        footer
+      }
+      .padding(24)
+      .background {
+        GeometryReader { proxy in
+          Color.clear.preference(key: SheetContentHeightKey.self, value: proxy.size.height)
         }
       }
-
-      VStack(spacing: 1) {
-        ShareStatusRow(
-          title: "Tailscale tailnet",
-          detail: controller.identity.map {
-            "\($0.tailnetName) · \($0.loginName) · \($0.ipv4Address)"
-          } ?? "Not verified",
-          isReady: controller.identity != nil
-        )
-        ShareStatusRow(
-          title: controller.capturePermissionKind.title,
-          detail: controller.capturePermissionDetail,
-          isReady: controller.capturePermissionGranted,
-          actionTitle: controller.capturePermissionGranted
-            ? nil
-            : (controller.capturePermissionKind == .remoteDesktop ? "Open Settings" : "Allow")
-        ) {
-          Task { await controller.requestCapturePermission() }
-        }
-        ShareStatusRow(
-          title: "Remote control",
-          detail: controller.accessibilityGranted
-            ? "Accessibility allowed"
-            : "Optional · view-only without it",
-          isReady: controller.accessibilityGranted,
-          actionTitle: controller.accessibilityGranted ? nil : "Allow"
-        ) {
-          controller.requestAccessibilityPermission()
-        }
-        ShareStatusRow(
-          title: "Private desktop",
-          detail: phaseDetail,
-          isReady: controller.phase.isRunning
-        )
-        ShareStatusRow(
-          title: "Crabfleet registry",
-          detail: controller.registryPhase.detail,
-          isReady: controller.registryPhase.isReady
-        )
+    }
+    .scrollBounceBehavior(.basedOnSize)
+    .onPreferenceChange(SheetContentHeightKey.self) { contentHeight = $0 }
+    .frame(width: 600)
+    .frame(height: contentHeight > 0 ? min(contentHeight, Self.maxSheetHeight) : nil)
+    .background {
+      LinearGradient(
+        colors: [
+          Color(red: 0.035, green: 0.041, blue: 0.045),
+          Color(red: 0.018, green: 0.023, blue: 0.026),
+        ],
+        startPoint: .topLeading,
+        endPoint: .bottomTrailing)
+    }
+    .preferredColorScheme(.dark)
+    .tint(.mint)
+    .toggleStyle(ShareToggleStyle())
+    .task { await controller.refresh() }
+    .onAppear { controller.startPermissionMonitoring() }
+    .onDisappear { controller.stopPermissionMonitoring() }
+    .onChange(of: scenePhase) { _, phase in
+      if phase == .active {
+        controller.refreshPermissions()
       }
-      .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+    }
+  }
 
-      if let warning = controller.tailnetWarning {
-        Label(warning, systemImage: "exclamationmark.triangle.fill")
-          .font(.caption)
-          .foregroundStyle(.orange)
-          .fixedSize(horizontal: false, vertical: true)
+  private var header: some View {
+    HStack(spacing: 12) {
+      ZStack {
+        RoundedRectangle(cornerRadius: 12, style: .continuous)
+          .fill(
+            LinearGradient(
+              colors: [.mint.opacity(0.28), .mint.opacity(0.08)],
+              startPoint: .topLeading,
+              endPoint: .bottomTrailing))
+        RoundedRectangle(cornerRadius: 12, style: .continuous)
+          .strokeBorder(.mint.opacity(0.35), lineWidth: 1)
+        Image(systemName: "display.and.arrow.down")
+          .font(.system(size: 19, weight: .medium))
+          .foregroundStyle(.mint)
+      }
+      .frame(width: 44, height: 44)
+
+      VStack(alignment: .leading, spacing: 2) {
+        Text("Share This Mac")
+          .font(.title3.weight(.semibold))
+        Text("App-owned remote desktop, restricted to your current Tailscale identity.")
+          .font(.system(size: 11.5, design: .rounded))
+          .foregroundStyle(.secondary)
       }
 
-      VStack(alignment: .leading, spacing: 10) {
-        if !controller.availableDisplays.isEmpty {
-          VStack(alignment: .leading, spacing: 6) {
-            Text("Shared displays")
-              .font(.caption.weight(.semibold))
-            ForEach(controller.availableDisplays) { display in
+      Spacer()
+      SharePhaseBadge(phase: controller.phase)
+    }
+  }
+
+  private var readinessSection: some View {
+    VStack(alignment: .leading, spacing: 8) {
+      ShareSectionHeader(title: "Readiness")
+      ShareCard {
+        VStack(spacing: 0) {
+          ShareStatusRow(
+            title: "Tailscale tailnet",
+            detail: controller.identity.map {
+              "\($0.tailnetName) · \($0.loginName) · \($0.ipv4Address)"
+            } ?? "Not verified",
+            isReady: controller.identity != nil,
+            truncationMode: .middle)
+          ShareCardDivider()
+          ShareStatusRow(
+            title: controller.capturePermissionKind.title,
+            detail: controller.capturePermissionDetail,
+            isReady: controller.capturePermissionGranted,
+            actionTitle: controller.capturePermissionGranted
+              ? nil
+              : (controller.capturePermissionKind == .remoteDesktop ? "Open Settings" : "Allow")
+          ) {
+            Task { await controller.requestCapturePermission() }
+          }
+          ShareCardDivider()
+          ShareStatusRow(
+            title: "Remote control",
+            detail: controller.accessibilityGranted
+              ? "Accessibility allowed"
+              : "Optional · view-only without it",
+            isReady: controller.accessibilityGranted,
+            actionTitle: controller.accessibilityGranted ? nil : "Allow"
+          ) {
+            controller.requestAccessibilityPermission()
+          }
+          ShareCardDivider()
+          ShareStatusRow(
+            title: "Private desktop",
+            detail: phaseDetail,
+            isReady: controller.phase.isRunning,
+            isPulsing: controller.phase == .starting)
+          ShareCardDivider()
+          ShareStatusRow(
+            title: "Crabfleet registry",
+            detail: controller.registryPhase.detail,
+            isReady: controller.registryPhase.isReady,
+            isPulsing: controller.registryPhase == .registering)
+        }
+      }
+    }
+  }
+
+  private var sharingSection: some View {
+    VStack(alignment: .leading, spacing: 8) {
+      ShareSectionHeader(title: "Sharing")
+      ShareCard {
+        VStack(spacing: 0) {
+          if !controller.availableDisplays.isEmpty {
+            ForEach(Array(controller.availableDisplays.enumerated()), id: \.element.id) {
+              index, display in
+              let isSelected = controller.selectedDisplayIDs.contains(display.id)
               Toggle(
-                display.detail,
                 isOn: Binding(
                   get: { controller.selectedDisplayIDs.contains(display.id) },
                   set: { controller.setDisplay(display.id, selected: $0) }
                 )
-              )
+              ) {
+                ShareToggleLabel(
+                  systemName: "display",
+                  title: display.detail,
+                  isActive: isSelected)
+              }
               .disabled(
                 controller.phase.isRunning
-                  || (!controller.selectedDisplayIDs.contains(display.id)
-                    && controller.selectedDisplayIDs.count >= 4)
-                  || (controller.selectedDisplayIDs.contains(display.id)
-                    && controller.selectedDisplayIDs.count == 1)
+                  || (!isSelected && controller.selectedDisplayIDs.count >= 4)
+                  || (isSelected && controller.selectedDisplayIDs.count == 1)
               )
+              .help("Share up to four displays; stop sharing to change the selection.")
+
+              if index < controller.availableDisplays.count - 1 {
+                ShareCardDivider()
+              }
             }
+            ShareCardDivider()
           }
-          .help("Share up to four displays; stop sharing to change the selection.")
-        }
 
-        Picker("Default quality", selection: $controller.qualityMode) {
-          ForEach(ShareQualityMode.allCases) { mode in
-            Text(mode.title).tag(mode)
+          VStack(alignment: .leading, spacing: 7) {
+            Text("Default quality")
+              .font(.system(size: 12.5, weight: .medium, design: .rounded))
+            ShareSegmentedControl(
+              selection: $controller.qualityMode,
+              options: ShareQualityMode.allCases,
+              title: { $0.title })
           }
-        }
-        .pickerStyle(.segmented)
-        .help("Default for older viewers; capable viewers choose their own quality.")
+          .padding(14)
+          .help("Default for older viewers; capable viewers choose their own quality.")
 
-        if !controller.viewerSessions.isEmpty {
-          VStack(alignment: .leading, spacing: 5) {
-            Text("Viewer sessions")
-              .font(.caption.weight(.semibold))
-            ForEach(controller.viewerSessions) { viewer in
+          if !controller.viewerSessions.isEmpty {
+            ShareCardDivider(leadingInset: 14)
+            Text("VIEWER SESSIONS")
+              .font(.system(size: 9, weight: .bold, design: .monospaced))
+              .tracking(0.8)
+              .foregroundStyle(.secondary)
+              .frame(maxWidth: .infinity, alignment: .leading)
+              .padding(.horizontal, 14)
+              .padding(.vertical, 9)
+
+            ForEach(Array(controller.viewerSessions.enumerated()), id: \.element.id) {
+              index, viewer in
+              if index > 0 {
+                ShareCardDivider(leadingInset: 14)
+              }
               HStack(spacing: 8) {
                 Text(viewer.transport)
                   .font(.system(size: 9, weight: .bold, design: .monospaced))
+                  .foregroundStyle(.mint)
                   .padding(.horizontal, 6)
                   .padding(.vertical, 3)
                   .background(.mint.opacity(0.12), in: Capsule())
                 Text("\(viewer.display) · \(viewer.peer)")
+                  .font(.system(size: 11.5, design: .rounded))
                   .lineLimit(1)
                 Spacer()
                 Text(viewer.qualityMode.title)
+                  .font(.system(size: 11.5, design: .rounded))
                   .foregroundStyle(.secondary)
               }
-              .font(.caption)
+              .padding(.horizontal, 14)
+              .padding(.vertical, 9)
             }
           }
         }
+      }
+    }
+  }
 
-        Toggle(
-          "Sync clipboard with the connected device",
-          isOn: $controller.clipboardSyncEnabled
-        )
-        .disabled(controller.phase.isRunning)
-        .help("Text copied on either Mac is available on the other while connected.")
+  private var optionsSection: some View {
+    VStack(alignment: .leading, spacing: 8) {
+      ShareSectionHeader(title: "Options")
+      ShareCard {
+        VStack(spacing: 0) {
+          Toggle(isOn: $controller.clipboardSyncEnabled) {
+            ShareToggleLabel(
+              systemName: "arrow.triangle.2.circlepath.doc.on.clipboard",
+              fallbackSystemName: "doc.on.clipboard",
+              title: "Sync clipboard",
+              caption: "Text copied on either Mac is available on the other.",
+              isActive: controller.clipboardSyncEnabled)
+          }
+          .disabled(controller.phase.isRunning)
+          .help("Text copied on either Mac is available on the other while connected.")
+          ShareCardDivider()
 
-        HStack(spacing: 10) {
           Toggle(
-            "Share a folder",
             isOn: Binding(
               get: { controller.sharedFolderName != nil },
               set: { enabled in
                 if enabled { controller.chooseSharedFolder() } else { controller.stopSharingFolder() }
               }
             )
-          )
+          ) {
+            ShareToggleLabel(
+              systemName: "folder",
+              title: "Share a folder",
+              caption: controller.sharedFolderName.map { "Sharing \($0)" }
+                ?? "Let capable viewers browse, download, and upload one folder.",
+              isActive: controller.sharedFolderName != nil)
+          }
           .disabled(controller.phase.isRunning)
-          Spacer()
+          .help("Lets capable viewers browse, download, and upload only inside this folder.")
+
           if let name = controller.sharedFolderName {
-            Label(name, systemImage: "folder.fill")
-              .foregroundStyle(.secondary)
-              .lineLimit(1)
-            Button("Change") { controller.chooseSharedFolder() }
+            HStack(spacing: 10) {
+              Label(name, systemImage: "folder.fill")
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+              Spacer()
+              Button("Change") { controller.chooseSharedFolder() }
+                .disabled(controller.phase.isRunning)
+              Button("Stop sharing folder", role: .destructive) {
+                controller.stopSharingFolder()
+              }
               .disabled(controller.phase.isRunning)
-            Button("Stop sharing folder", role: .destructive) {
-              controller.stopSharingFolder()
+            }
+            .padding(.horizontal, 14)
+            .padding(.bottom, 10)
+
+            ShareCardDivider(leadingInset: 14)
+            Toggle(isOn: $controller.allowRemoteFolderWrites) {
+              ShareToggleLabel(
+                systemName: "square.and.arrow.down",
+                title: "Allow remote uploads",
+                caption: "Allow new folders; completed uploads become visible atomically.",
+                isActive: controller.allowRemoteFolderWrites)
             }
             .disabled(controller.phase.isRunning)
-          }
-        }
-        .help("Lets capable viewers browse, download, and upload only inside this folder.")
-
-        if controller.sharedFolderName != nil {
-          Toggle("Allow remote uploads and new folders", isOn: $controller.allowRemoteFolderWrites)
-            .disabled(controller.phase.isRunning)
             .help("Uploads use a temporary file and become visible only after an atomic finish.")
-        }
+          }
+          ShareCardDivider()
 
-        Toggle(
-          "Allow browser access via Crabfleet",
-          isOn: $controller.browserAccessEnabled
-        )
-        .disabled(controller.registryPhase == .notConfigured)
-        .help("Publishes an authenticated browser relay while this private share is running.")
+          Toggle(isOn: $controller.browserAccessEnabled) {
+            ShareToggleLabel(
+              systemName: "globe",
+              title: "Browser access",
+              caption: "Authenticated web relay via your Crabfleet registry.",
+              isActive: controller.browserAccessEnabled)
+          }
+          .disabled(controller.registryPhase == .notConfigured)
+          .help("Publishes an authenticated browser relay while this private share is running.")
+          ShareCardDivider()
 
-        Toggle(
-          "View only (ignore remote input)",
-          isOn: $controller.viewOnlyEnabled
-        )
-        .help("Applies immediately and keeps remote keyboard and pointer events from reaching this Mac.")
-
-        Toggle("Stream audio", isOn: $controller.streamAudioEnabled)
-          .help("Streams system audio as AAC when the connected Crabfleet viewer supports it.")
-
-        Toggle(
-          "Start sharing when I log in",
-          isOn: Binding(
-            get: { controller.launchAtLoginEnabled },
-            set: { controller.setLaunchAtLogin($0) }
+          Toggle(isOn: $controller.viewOnlyEnabled) {
+            ShareToggleLabel(
+              systemName: "eye.slash",
+              title: "View only",
+              caption: "Remote keyboard and pointer input never reaches this Mac.",
+              isActive: controller.viewOnlyEnabled)
+          }
+          .help(
+            "Applies immediately and keeps remote keyboard and pointer events from reaching this Mac."
           )
-        )
-        .help("Adds Crabfleet as a login item and starts this private share automatically.")
-      }
-      .toggleStyle(.switch)
-      .controlSize(.small)
+          ShareCardDivider()
 
-      if controller.phase.isRunning, !controller.connectionAddresses.isEmpty {
-        VStack(alignment: .leading, spacing: 10) {
-          Text("CONNECT FROM YOUR OTHER MAC")
-            .font(.system(size: 9, weight: .bold, design: .monospaced))
-            .tracking(0.8)
-            .foregroundStyle(.secondary)
+          Toggle(isOn: $controller.streamAudioEnabled) {
+            ShareToggleLabel(
+              systemName: "speaker.wave.2",
+              title: "Stream audio",
+              caption: "System audio as AAC when the viewer supports it.",
+              isActive: controller.streamAudioEnabled)
+          }
+          .help("Streams system audio as AAC when the connected Crabfleet viewer supports it.")
+          ShareCardDivider()
+
+          Toggle(
+            isOn: Binding(
+              get: { controller.launchAtLoginEnabled },
+              set: { controller.setLaunchAtLogin($0) }
+            )
+          ) {
+            ShareToggleLabel(
+              systemName: "power",
+              title: "Start sharing at login",
+              caption: "Adds a login item and starts this share automatically.",
+              isActive: controller.launchAtLoginEnabled)
+          }
+          .help("Adds Crabfleet as a login item and starts this private share automatically.")
+        }
+      }
+    }
+  }
+
+  private var connectSection: some View {
+    VStack(alignment: .leading, spacing: 8) {
+      ShareSectionHeader(title: "Connect from your other Mac")
+      ShareCard(tone: .connect) {
+        VStack(spacing: 0) {
           ForEach(Array(controller.connectionAddresses.enumerated()), id: \.offset) {
             index, address in
             HStack(spacing: 10) {
               Text("Display \(index + 1) · \(address)")
-                .font(.system(.body, design: .monospaced))
+                .font(.system(size: 12, design: .monospaced))
                 .textSelection(.enabled)
               Spacer()
-              Button("Copy", systemImage: "doc.on.doc") {
+              Button {
                 NSPasteboard.general.clearContents()
                 NSPasteboard.general.setString(address, forType: .string)
+              } label: {
+                Image(systemName: "doc.on.doc")
+                  .font(.system(size: 11, weight: .medium))
               }
+              .buttonStyle(ShareCapsuleActionButtonStyle(appearance: .icon))
+              .accessibilityLabel("Copy address")
             }
+            .padding(.horizontal, 14)
+            .padding(.vertical, 9)
+
+            ShareCardDivider(leadingInset: 14)
           }
+
           HStack(spacing: 10) {
             Text("Password · \(controller.accessCode)")
-              .font(.system(.body, design: .monospaced))
+              .font(.system(size: 12, design: .monospaced))
               .textSelection(.enabled)
             Spacer()
-            Button("Copy password", systemImage: "doc.on.doc") {
+            Button {
               NSPasteboard.general.clearContents()
               NSPasteboard.general.setString(controller.accessCode, forType: .string)
+            } label: {
+              Image(systemName: "doc.on.doc")
+                .font(.system(size: 11, weight: .medium))
             }
-            Button("Regenerate", systemImage: "arrow.clockwise") {
+            .buttonStyle(ShareCapsuleActionButtonStyle(appearance: .icon))
+            .accessibilityLabel("Copy password")
+
+            Button {
               controller.regenerateAccessCode()
+            } label: {
+              Image(systemName: "arrow.clockwise")
+                .font(.system(size: 11, weight: .medium))
             }
+            .buttonStyle(ShareCapsuleActionButtonStyle(appearance: .icon))
+            .accessibilityLabel("Regenerate password")
+            .help("Regenerate password")
           }
+          .padding(.horizontal, 14)
+          .padding(.vertical, 9)
+
           Text(
             "Open Crabfleet, choose Quick Connect, paste an address, and enter this password. Existing authenticated viewers stay connected after regeneration."
           )
-          .font(.caption)
+          .font(.system(size: 10.5, design: .rounded))
           .foregroundStyle(.secondary)
+          .frame(maxWidth: .infinity, alignment: .leading)
+          .padding(.horizontal, 14)
+          .padding(.bottom, 12)
         }
-        .padding(14)
-        .background(.mint.opacity(0.07), in: RoundedRectangle(cornerRadius: 10))
       }
+    }
+  }
 
-      if let notice = controller.notice {
-        Label(notice, systemImage: "exclamationmark.triangle")
-          .font(.caption)
-          .foregroundStyle(.orange)
-          .fixedSize(horizontal: false, vertical: true)
-      } else {
-        Label(
-          "No Apple Screen Sharing service is used. The listener binds only to this Mac’s Tailscale address and accepts only another device owned by the same Tailscale user.",
-          systemImage: "lock.shield"
-        )
+  @ViewBuilder
+  private var assurance: some View {
+    if let notice = controller.notice {
+      Label(notice, systemImage: "exclamationmark.triangle")
         .font(.caption)
-        .foregroundStyle(.secondary)
+        .foregroundStyle(.orange)
         .fixedSize(horizontal: false, vertical: true)
-      }
+    } else {
+      Label(
+        "No Apple Screen Sharing service is used. The listener binds only to this Mac’s Tailscale address and accepts only another device owned by the same Tailscale user.",
+        systemImage: "lock.shield"
+      )
+      .font(.caption)
+      .foregroundStyle(.secondary)
+      .fixedSize(horizontal: false, vertical: true)
+    }
+  }
 
+  private var footer: some View {
+    VStack(alignment: .leading, spacing: 8) {
       HStack {
-        Menu("Privacy Settings") {
+        Menu {
           Button("Screen Recording") {
             controller.openPrivacySettings(.screenRecording)
           }
@@ -270,7 +450,16 @@ struct PrivateMacShareSheet: View {
             isOn: $controller.experimentalRemoteDesktopCaptureEnabled
           )
           .disabled(controller.phase.isRunning)
+        } label: {
+          HStack(spacing: 4) {
+            Text("Privacy Settings")
+            Image(systemName: "chevron.down")
+              .font(.system(size: 8, weight: .semibold))
+          }
         }
+        .menuStyle(.button)
+        .buttonStyle(ShareCapsuleActionButtonStyle())
+        .fixedSize()
 
         Button("Refresh") {
           Task { await controller.refresh() }
@@ -301,20 +490,17 @@ struct PrivateMacShareSheet: View {
         .font(.caption2)
         .foregroundStyle(.tertiary)
     }
-    .padding(24)
-    .frame(width: 590)
-    .task { await controller.refresh() }
-    .onAppear { controller.startPermissionMonitoring() }
-    .onDisappear { controller.stopPermissionMonitoring() }
-    .onChange(of: scenePhase) { _, phase in
-      if phase == .active {
-        controller.refreshPermissions()
-      }
-    }
+  }
+
+  // Sheets cannot be moved on screen, so cap height below common laptop displays
+  // and let the content scroll instead of clipping the footer controls.
+  private static var maxSheetHeight: CGFloat {
+    max(480, (NSScreen.main?.visibleFrame.height ?? 900) - 120)
   }
 
   private var phaseDetail: String {
-    let viewers = controller.connectedViewerCount == 1
+    let viewers =
+      controller.connectedViewerCount == 1
       ? "1 viewer"
       : "\(controller.connectedViewerCount) viewers"
     if let stats = controller.streamStats, controller.phase == .connected {
@@ -336,32 +522,121 @@ struct PrivateMacShareSheet: View {
   }
 }
 
+private struct SheetContentHeightKey: PreferenceKey {
+  static var defaultValue: CGFloat = 0
+  static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
+    value = max(value, nextValue())
+  }
+}
+
+private struct SharePhaseBadge: View {
+  let phase: PrivateMacShareController.Phase
+
+  @State private var pulse = false
+
+  private var color: Color {
+    switch phase {
+    case .starting, .stopping: .orange
+    case .sharing, .authorizing, .connected: .mint
+    case .failed: .red
+    case .idle: .secondary
+    }
+  }
+
+  private var isPulsing: Bool {
+    phase == .starting || phase == .stopping
+  }
+
+  var body: some View {
+    HStack(spacing: 5) {
+      Circle()
+        .fill(color)
+        .frame(width: 5, height: 5)
+        .opacity(isPulsing && pulse ? 0.28 : 1)
+      Text(phase.title.uppercased())
+        .font(.system(size: 9, weight: .semibold, design: .rounded))
+        .tracking(0.5)
+    }
+    .foregroundStyle(color)
+    .padding(.horizontal, 8)
+    .padding(.vertical, 5)
+    .background(.white.opacity(0.06), in: Capsule())
+    .onAppear { updatePulse(isPulsing) }
+    .onChange(of: isPulsing) { _, active in updatePulse(active) }
+  }
+
+  private func updatePulse(_ active: Bool) {
+    if active {
+      pulse = false
+      withAnimation(.easeInOut(duration: 0.8).repeatForever(autoreverses: true)) {
+        pulse = true
+      }
+    } else {
+      withAnimation(.easeOut(duration: 0.15)) { pulse = false }
+    }
+  }
+}
+
 private struct ShareStatusRow: View {
   let title: String
   let detail: String
   let isReady: Bool
+  var isPulsing = false
+  var truncationMode: Text.TruncationMode = .tail
   var actionTitle: String?
   var action: () -> Void = {}
 
   var body: some View {
     HStack(spacing: 10) {
-      Image(systemName: isReady ? "checkmark.circle.fill" : "circle.dashed")
-        .foregroundStyle(isReady ? .mint : .orange)
-        .frame(width: 18)
-      Text(title)
-        .font(.system(size: 12, weight: .semibold, design: .rounded))
-      Spacer()
-      Text(detail)
-        .font(.system(size: 11, design: .rounded))
-        .foregroundStyle(.secondary)
-        .lineLimit(1)
+      ShareStatusBeacon(isReady: isReady, isPulsing: isPulsing)
+
+      VStack(alignment: .leading, spacing: 2) {
+        Text(title)
+          .font(.system(size: 13, weight: .semibold, design: .rounded))
+        Text(detail)
+          .font(.system(size: 11, design: .rounded))
+          .foregroundStyle(.secondary)
+          .lineLimit(2)
+          .truncationMode(truncationMode)
+      }
+
+      Spacer(minLength: 10)
+
       if let actionTitle {
         Button(actionTitle, action: action)
-          .controlSize(.small)
+          .buttonStyle(ShareCapsuleActionButtonStyle())
       }
     }
-    .padding(.horizontal, 12)
-    .frame(height: 42)
-    .background(.white.opacity(0.045))
+    .padding(.horizontal, 14)
+    .padding(.vertical, 10)
+  }
+}
+
+private struct ShareToggleLabel: View {
+  let systemName: String
+  var fallbackSystemName: String?
+  let title: String
+  var caption: String?
+  let isActive: Bool
+
+  var body: some View {
+    HStack(spacing: 10) {
+      ShareIconTile(
+        systemName: systemName,
+        fallbackSystemName: fallbackSystemName,
+        isActive: isActive)
+      VStack(alignment: .leading, spacing: 2) {
+        Text(title)
+          .font(.system(size: 12.5, weight: .medium, design: .rounded))
+          .foregroundStyle(.primary)
+          .lineLimit(1)
+        if let caption {
+          Text(caption)
+            .font(.system(size: 10.5, design: .rounded))
+            .foregroundStyle(.secondary)
+            .lineLimit(1)
+        }
+      }
+    }
   }
 }
