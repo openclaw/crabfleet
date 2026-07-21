@@ -56,6 +56,49 @@ struct QUICTransportTests {
     #expect(X509SerialNumber.canonicalDERContent(Data([1])) == Data([1]))
   }
 
+  @Test
+  func loadOrCreateReusesTheStoredCertificateWithoutAddingKeychainItems() throws {
+    let scope = QUICKeychainScope()
+    defer { scope.remove() }
+
+    let first = try scope.loadOrCreate()
+    let firstCertificate = try #require(certificate(of: first.identity))
+    let publicKeyData = try #require(publicKeyExternalRepresentation(of: firstCertificate))
+    #expect(storedCertificates(publicKeyData: publicKeyData).count == 1)
+
+    let second = try scope.loadOrCreate()
+    let secondCertificate = try #require(certificate(of: second.identity))
+
+    // Reuse (not a fresh mint) means an identical certificate: same pinned
+    // SPKI hash and byte-identical DER (a re-mint would have a random serial).
+    #expect(first.certHash == second.certHash)
+    #expect(SecCertificateCopyData(firstCertificate) == SecCertificateCopyData(secondCertificate))
+    #expect(storedCertificates(publicKeyData: publicKeyData).count == 1)
+  }
+
+  @Test
+  func loadOrCreateCollapsesLeakedDuplicateHostCertificates() throws {
+    let scope = QUICKeychainScope()
+    defer { scope.remove() }
+
+    let created = try scope.loadOrCreate()
+    let certificate = try #require(certificate(of: created.identity))
+    let publicKeyData = try #require(publicKeyExternalRepresentation(of: certificate))
+    let privateKey = try #require(storedPrivateKey(applicationTag: scope.applicationTag))
+
+    // Reproduce the pre-fix leak: extra distinct certificates (random serials)
+    // for the same host key, exactly what per-launch minting used to pile up.
+    _ = try QUICIdentityStore.createAndStoreCertificate(
+      privateKey: privateKey, certificateLabel: scope.certificateLabel)
+    _ = try QUICIdentityStore.createAndStoreCertificate(
+      privateKey: privateKey, certificateLabel: scope.certificateLabel)
+    #expect(storedCertificates(publicKeyData: publicKeyData).count == 3)
+
+    // Next launch must self-heal back to a single certificate.
+    _ = try scope.loadOrCreate()
+    #expect(storedCertificates(publicKeyData: publicKeyData).count == 1)
+  }
+
   @Test(
     .enabled(if: udpLoopbackAvailable, "UDP loopback is unavailable in this sandbox"),
     .timeLimit(.minutes(1)))
@@ -641,6 +684,71 @@ private final class QUICConnectionGroupStore: @unchecked Sendable {
     }
     for group in values { group.cancel() }
   }
+}
+
+/// A unique-per-test keychain identity scope. Keying every item off a random
+/// application tag isolates the test from the real host identity
+/// (`org.openclaw.crabfleet.quic.host-key-v1`) and from concurrent tests: the
+/// public-key match in `QUICIdentityStore` only ever sees this scope's certs.
+private struct QUICKeychainScope {
+  let applicationTag: Data
+  let certificateLabel: String
+  let keyLabel: String
+
+  init() {
+    let id = UUID().uuidString
+    applicationTag = Data("org.openclaw.crabfleet.tests.quic.\(id)".utf8)
+    certificateLabel = "Crabfleet QUIC Test Certificate \(id)"
+    keyLabel = "Crabfleet QUIC Test Key \(id)"
+  }
+
+  func loadOrCreate() throws -> QUICHostIdentity {
+    try QUICIdentityStore.loadOrCreate(
+      applicationTag: applicationTag,
+      certificateLabel: certificateLabel,
+      keyLabel: keyLabel)
+  }
+
+  func remove() {
+    QUICIdentityStore.remove(applicationTag: applicationTag, certificateLabel: certificateLabel)
+  }
+}
+
+private func certificate(of identity: SecIdentity) -> SecCertificate? {
+  var certificate: SecCertificate?
+  guard SecIdentityCopyCertificate(identity, &certificate) == errSecSuccess else { return nil }
+  return certificate
+}
+
+private func publicKeyExternalRepresentation(of certificate: SecCertificate) -> Data? {
+  guard let key = SecCertificateCopyKey(certificate) else { return nil }
+  var error: Unmanaged<CFError>?
+  return SecKeyCopyExternalRepresentation(key, &error) as Data?
+}
+
+private func storedPrivateKey(applicationTag: Data) -> SecKey? {
+  let query: [CFString: Any] = [
+    kSecClass: kSecClassKey,
+    kSecAttrApplicationTag: applicationTag,
+    kSecAttrKeyClass: kSecAttrKeyClassPrivate,
+    kSecReturnRef: true,
+    kSecMatchLimit: kSecMatchLimitOne,
+  ]
+  var result: CFTypeRef?
+  guard SecItemCopyMatching(query as CFDictionary, &result) == errSecSuccess else { return nil }
+  return result as! SecKey?
+}
+
+private func storedCertificates(publicKeyData: Data) -> [SecCertificate] {
+  let query: [CFString: Any] = [
+    kSecClass: kSecClassCertificate,
+    kSecReturnRef: true,
+    kSecMatchLimit: kSecMatchLimitAll,
+  ]
+  var result: CFTypeRef?
+  let status = SecItemCopyMatching(query as CFDictionary, &result)
+  guard status == errSecSuccess, let certificates = result as? [SecCertificate] else { return [] }
+  return certificates.filter { publicKeyExternalRepresentation(of: $0) == publicKeyData }
 }
 
 private struct QUICIdentityFixture {

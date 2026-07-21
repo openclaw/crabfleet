@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Fix the QUIC host identity leaking a new self-signed "Crabfleet QUIC" certificate into the login keychain on every launch: reuse the stored certificate by matching the stable host public key instead of a label macOS never persists, and collapse any already-accumulated duplicates back to one, restoring fast system-CA trust evaluation.
 - Extend the deck design language to the Quick Connect and desktop connection sheets: card-based fields and switches, gradient headers, pinned dark scheme, and a shared height-capped scrolling sheet container.
 - Redesign the Share This Mac sheet in the app's dark deck design language: pulsing readiness beacons with two-line status rows, custom capsule switches with icon tiles and captions, an animated segmented quality control, a live phase badge, and a restyled connect card — no behavior changes.
 - Fix the Crabfleet Connect Linux X11 backend disabling capture entirely on keyboards with multiple XKB groups: bind only the primary group's base/shift levels so real screen capture and input injection work instead of silently falling back to the synthetic test pattern (validated on a headless Xvfb X server: real 1920x1080 Tight framebuffer + XTest pointer injection).
