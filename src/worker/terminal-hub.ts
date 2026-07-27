@@ -586,9 +586,15 @@ export class TerminalHub {
       const revokeView = () => {
         if (!viewGranted) return;
         viewGranted = false;
-        if (subscriptions.delete(id)) this.dependencies.releaseInputState(id);
         if (viewCheck !== null) clearInterval(viewCheck);
         if (upstream.readyState === WebSocket.OPEN) upstream.close(1008, "share revoked");
+        // A canView() from a prior interval tick can still be in flight and resolve here after this
+        // subscription was replaced (unsubscribe -> resubscribe); clearInterval does not cancel that
+        // pending promise. Don't let the stale closure evict the live resubscription or tell its
+        // client the share was revoked — the same identity re-check the close/error handlers use.
+        if (subscriptions.get(id) !== activeSubscription) return;
+        subscriptions.delete(id);
+        this.dependencies.releaseInputState(id);
         sendTerminalJson(client, TerminalMessageType.Error, id, {
           error: "terminal share revoked",
         });
@@ -771,8 +777,14 @@ export class TerminalHub {
               [session.attachUrl],
             )
           : "";
-        if (subscriptions.delete(id)) this.dependencies.releaseInputState(id);
         if (viewCheck !== null) clearInterval(viewCheck);
+        // A newer subscription may already own this id (unsubscribe -> immediate resubscribe); this
+        // stale upstream's close must not evict the live subscription, release its input state, mark
+        // the session detached, or tell the client it closed — the same identity re-check the input
+        // loop uses (subscriptions.get(id) !== subscription).
+        if (subscriptions.get(id) !== activeSubscription) return;
+        subscriptions.delete(id);
+        this.dependencies.releaseInputState(id);
         if (!isPassiveTerminalClose(closeReason)) {
           const message = terminalCloseMessage(event.code, safeUpstreamReason);
           void this.dependencies.markDetached(user, id, message);
@@ -792,8 +804,13 @@ export class TerminalHub {
           error: "terminal input delivery outcome is unknown; the runner may still complete it",
         });
         const closeReason = closingReason;
-        if (subscriptions.delete(id)) this.dependencies.releaseInputState(id);
         if (viewCheck !== null) clearInterval(viewCheck);
+        // A newer subscription may already own this id (unsubscribe -> immediate resubscribe); this
+        // stale upstream's error must not evict the live subscription, release its input state, or
+        // surface a failure for it — the same identity re-check the input loop uses.
+        if (subscriptions.get(id) !== activeSubscription) return;
+        subscriptions.delete(id);
+        this.dependencies.releaseInputState(id);
         const message = "terminal unavailable: upstream terminal error";
         if (!isPassiveTerminalClose(closeReason)) {
           void this.dependencies.markConnectionFailure(user, session, message);

@@ -2036,3 +2036,213 @@ test("terminal hub immediately acknowledges upstream output when the client opts
   assert.deepEqual(upstream.sent, ['{"type":"ack","bytes":3}']);
   server.emit("close");
 });
+
+test("terminal hub: a stale upstream close does not evict a live resubscription of the same id", async () => {
+  const client = socket();
+  const server = socket();
+  const upstreamA = socket();
+  const upstreamB = socket();
+  const upstreams = [upstreamA, upstreamB]; // first subscribe gets A, the resubscribe gets B
+  const releasedInputStates: string[] = [];
+  const detached: string[] = [];
+  const hub = new TerminalHub(
+    dependencies(client, server, upstreamA, {
+      async openUpstream() {
+        return {
+          socket: upstreams.shift()!,
+          outputAcknowledgements: true,
+          async markConnected() {},
+        };
+      },
+      releaseInputState(sessionId) {
+        releasedInputStates.push(sessionId);
+      },
+      async markDetached(_user, sessionId) {
+        detached.push(sessionId);
+      },
+    }),
+  );
+
+  await hub.open(
+    new Request("https://fleet.example/api/terminal/ws", { headers: { upgrade: "websocket" } }),
+    user,
+  );
+
+  const subscribe = () =>
+    server.emit("message", {
+      data: encodeTerminalFrame({
+        type: TerminalMessageType.Subscribe,
+        sessionId: session.id,
+        payload: encodeSubscribePayload({ flags: 0, columns: 120, rows: 34 }),
+      }),
+    });
+  const closedEvents = () =>
+    server.sent.filter((value) => {
+      const decoded = decodeTerminalFrame(value as Uint8Array);
+      if (!decoded || decoded.type !== TerminalMessageType.Event) return false;
+      return (decodeJsonPayload(decoded.payload) as { type?: string }).type === "closed";
+    }).length;
+
+  // 1) subscribe -> upstreamA
+  subscribe();
+  await flushQueues();
+  await flushQueues();
+  // 2) unsubscribe -> closeSubscription releases input state once and closes upstreamA
+  server.emit("message", {
+    data: encodeTerminalFrame({ type: TerminalMessageType.Unsubscribe, sessionId: session.id }),
+  });
+  await flushQueues();
+  // 3) immediately resubscribe -> upstreamB is the new, live subscription for the same id
+  subscribe();
+  await flushQueues();
+  await flushQueues();
+
+  const closedBefore = closedEvents();
+  // 4) the OLD upstream (A)'s deferred close event finally fires
+  upstreamA.emit("close", { code: 1000, reason: "" });
+  await flushQueues();
+
+  assert.deepEqual(
+    releasedInputStates,
+    [session.id],
+    "only the unsubscribe releases input state; the stale close must not release the live resubscription",
+  );
+  assert.equal(detached.length, 0, "the stale close must not mark the live session detached");
+  assert.equal(
+    closedEvents(),
+    closedBefore,
+    "the stale close must not tell the client its live session closed",
+  );
+
+  server.emit("close"); // drain the resubscription's view-check interval
+});
+
+function countClosed(server: WebSocket & TestSocket): number {
+  return server.sent.filter((value) => {
+    const decoded = decodeTerminalFrame(value as Uint8Array);
+    if (!decoded || decoded.type !== TerminalMessageType.Event) return false;
+    return (decodeJsonPayload(decoded.payload) as { type?: string }).type === "closed";
+  }).length;
+}
+function subscribeFrame(server: WebSocket & TestSocket): void {
+  server.emit("message", {
+    data: encodeTerminalFrame({
+      type: TerminalMessageType.Subscribe,
+      sessionId: session.id,
+      payload: encodeSubscribePayload({ flags: 0, columns: 120, rows: 34 }),
+    }),
+  });
+}
+
+test("terminal hub: a normal upstream close tears down the current subscription and notifies the client", async () => {
+  const client = socket();
+  const server = socket();
+  const upstream = socket();
+  const released: string[] = [];
+  const detached: string[] = [];
+  const hub = new TerminalHub(
+    dependencies(client, server, upstream, {
+      releaseInputState(id) {
+        released.push(id);
+      },
+      async markDetached(_user, id) {
+        detached.push(id);
+      },
+    }),
+  );
+  await hub.open(
+    new Request("https://fleet.example/api/terminal/ws", { headers: { upgrade: "websocket" } }),
+    user,
+  );
+  subscribeFrame(server);
+  await flushQueues();
+  await flushQueues();
+  upstream.emit("close", { code: 1006, reason: "runner gone" });
+  await flushQueues();
+  assert.deepEqual(released, [session.id], "the current subscription's input state is released");
+  assert.equal(detached.length, 1, "a non-passive close marks the session detached");
+  assert.equal(countClosed(server), 1, "the client is told its session closed");
+});
+
+test("terminal hub: a normal upstream error tears down the current subscription and surfaces a failure", async () => {
+  const client = socket();
+  const server = socket();
+  const upstream = socket();
+  const released: string[] = [];
+  let connectionFailures = 0;
+  const hub = new TerminalHub(
+    dependencies(client, server, upstream, {
+      releaseInputState(id) {
+        released.push(id);
+      },
+      async markConnectionFailure() {
+        connectionFailures += 1;
+      },
+    }),
+  );
+  await hub.open(
+    new Request("https://fleet.example/api/terminal/ws", { headers: { upgrade: "websocket" } }),
+    user,
+  );
+  subscribeFrame(server);
+  await flushQueues();
+  await flushQueues();
+  upstream.emit("error");
+  await flushQueues();
+  assert.deepEqual(released, [session.id], "the current subscription's input state is released");
+  assert.equal(connectionFailures, 1, "an upstream error surfaces a connection failure");
+});
+
+test("terminal hub: a stale upstream error does not evict a live resubscription of the same id", async () => {
+  const client = socket();
+  const server = socket();
+  const upstreamA = socket();
+  const upstreamB = socket();
+  const upstreams = [upstreamA, upstreamB];
+  const released: string[] = [];
+  let connectionFailures = 0;
+  const hub = new TerminalHub(
+    dependencies(client, server, upstreamA, {
+      async openUpstream() {
+        return {
+          socket: upstreams.shift()!,
+          outputAcknowledgements: true,
+          async markConnected() {},
+        };
+      },
+      releaseInputState(id) {
+        released.push(id);
+      },
+      async markConnectionFailure() {
+        connectionFailures += 1;
+      },
+    }),
+  );
+  await hub.open(
+    new Request("https://fleet.example/api/terminal/ws", { headers: { upgrade: "websocket" } }),
+    user,
+  );
+  subscribeFrame(server);
+  await flushQueues();
+  await flushQueues();
+  server.emit("message", {
+    data: encodeTerminalFrame({ type: TerminalMessageType.Unsubscribe, sessionId: session.id }),
+  });
+  await flushQueues();
+  subscribeFrame(server);
+  await flushQueues();
+  await flushQueues();
+  upstreamA.emit("error");
+  await flushQueues();
+  assert.deepEqual(
+    released,
+    [session.id],
+    "the stale error must not release the live resubscription",
+  );
+  assert.equal(
+    connectionFailures,
+    0,
+    "the stale error must not surface a failure for the live session",
+  );
+  server.emit("close");
+});
