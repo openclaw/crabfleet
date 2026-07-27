@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Keep slow terminal resize authorization off the shared multiplexed connection queue so other sessions and pings remain responsive, thanks @anagnorisis2peripeteia.
 - Preserve live terminal resubscriptions when stale upstream close, error, or revocation callbacks arrive for a replaced subscription, thanks @anagnorisis2peripeteia.
 - Preserve stalled card-run provenance by fencing lane completion and its audit event in one guarded D1 batch, preventing concurrent completion from overwriting terminal state, thanks @anagnorisis2peripeteia.
 - Reject native-VNC grant issuance unless the session remains live and controllable before and after minting, preventing teardown races from returning stale workspace credentials, thanks @anagnorisis2peripeteia.
