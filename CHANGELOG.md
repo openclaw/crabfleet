@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Preserve live terminal resubscriptions when stale upstream close, error, or revocation callbacks arrive for a replaced subscription, thanks @anagnorisis2peripeteia.
 - Preserve stalled card-run provenance by fencing lane completion and its audit event in one guarded D1 batch, preventing concurrent completion from overwriting terminal state, thanks @anagnorisis2peripeteia.
 - Reject native-VNC grant issuance unless the session remains live and controllable before and after minting, preventing teardown races from returning stale workspace credentials, thanks @anagnorisis2peripeteia.
 - Fix the QUIC host identity leaking a new self-signed "Crabfleet QUIC" certificate into the login keychain on every launch: reuse the stored certificate by matching the stable host public key instead of a label macOS never persists, and collapse any already-accumulated duplicates back to one, restoring fast system-CA trust evaluation.
