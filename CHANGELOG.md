@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Reject native-VNC grant issuance unless the session remains live and controllable before and after minting, preventing teardown races from returning stale workspace credentials, thanks @anagnorisis2peripeteia.
 - Fix the QUIC host identity leaking a new self-signed "Crabfleet QUIC" certificate into the login keychain on every launch: reuse the stored certificate by matching the stable host public key instead of a label macOS never persists, and collapse any already-accumulated duplicates back to one, restoring fast system-CA trust evaluation.
 - Extend the deck design language to the Quick Connect and desktop connection sheets: card-based fields and switches, gradient headers, pinned dark scheme, and a shared height-capped scrolling sheet container.
 - Redesign the Share This Mac sheet in the app's dark deck design language: pulsing readiness beacons with two-line status rows, custom capsule switches with icon tiles and captions, an animated segmented quality control, a live phase badge, and a restyled connect card — no behavior changes.
