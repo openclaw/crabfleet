@@ -14,7 +14,7 @@ const dependencies = {
   async audit() {},
 };
 
-test("SSH gateway accepts canonical and legacy bearer configuration", () => {
+test("SSH gateway accepts only the canonical bearer configuration", () => {
   const gateway = new SshGateway(
     { CRABFLEET_SSH_GATEWAY_TOKEN: "canonical-token" } as RuntimeEnv,
     dependencies,
@@ -46,31 +46,7 @@ test("SSH gateway accepts canonical and legacy bearer configuration", () => {
         headers: { authorization: "Bearer old-token" },
       }),
     ),
-    true,
-  );
-
-  const migratingConfig = new SshGateway(
-    {
-      CRABFLEET_SSH_GATEWAY_TOKEN: "canonical-token",
-      CRABBOX_SSH_GATEWAY_TOKEN: "old-token",
-    } as RuntimeEnv,
-    dependencies,
-  );
-  assert.equal(
-    migratingConfig.isRequest(
-      new Request("https://fleet.example/api/ssh/state", {
-        headers: { authorization: "Bearer canonical-token" },
-      }),
-    ),
-    true,
-  );
-  assert.equal(
-    migratingConfig.isRequest(
-      new Request("https://fleet.example/api/ssh/state", {
-        headers: { authorization: "Bearer old-token" },
-      }),
-    ),
-    true,
+    false,
   );
 });
 
