@@ -257,14 +257,15 @@ export class SshGateway {
   }
 
   isRequest(request: Request): boolean {
-    const token = this.env.CRABFLEET_SSH_GATEWAY_TOKEN;
-    return Boolean(token && request.headers.get("authorization") === `Bearer ${token}`);
+    const authorization = request.headers.get("authorization");
+    return sshGatewayTokens(this.env).some((token) => authorization === `Bearer ${token}`);
   }
 
   private requireGateway(request: Request): void {
-    const token = this.env.CRABFLEET_SSH_GATEWAY_TOKEN;
-    if (!token) throw serviceUnavailable("SSH gateway is not configured");
-    if (request.headers.get("authorization") !== `Bearer ${token}`) throw unauthorized();
+    const tokens = sshGatewayTokens(this.env);
+    if (tokens.length === 0) throw serviceUnavailable("SSH gateway is not configured");
+    const authorization = request.headers.get("authorization");
+    if (!tokens.some((token) => authorization === `Bearer ${token}`)) throw unauthorized();
   }
 
   private async consumeLink(
@@ -378,6 +379,12 @@ export class SshGateway {
 
 export function sshGatewayFingerprint(request: Request): string {
   return clean(request.headers.get("x-crabfleet-ssh-fingerprint"), 120);
+}
+
+function sshGatewayTokens(env: RuntimeEnv): string[] {
+  return [env.CRABFLEET_SSH_GATEWAY_TOKEN, env.CRABBOX_SSH_GATEWAY_TOKEN].filter(
+    (token): token is string => Boolean(token),
+  );
 }
 
 function sshLinkConfirmHtml(
