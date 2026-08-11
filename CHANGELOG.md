@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Restore Worker acceptance of the retired `CRABBOX_SSH_GATEWAY_TOKEN` during SSH gateway migration so stale standalone gateways can complete GitHub key linking while deployments move to `CRABFLEET_SSH_GATEWAY_TOKEN`.
 - Keep slow terminal resize authorization off the shared multiplexed connection queue so other sessions and pings remain responsive, thanks @anagnorisis2peripeteia.
 - Preserve live terminal resubscriptions when stale upstream close, error, or revocation callbacks arrive for a replaced subscription, thanks @anagnorisis2peripeteia.
 - Preserve stalled card-run provenance by fencing lane completion and its audit event in one guarded D1 batch, preventing concurrent completion from overwriting terminal state, thanks @anagnorisis2peripeteia.
