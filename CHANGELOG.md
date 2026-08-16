@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Stop cursor-reconcile retries and mailbox timeout waits when the share task is cancelled, so teardown does not stall.
+
 ## 0.3.1 - 2026-08-28
 
 ### Highlights

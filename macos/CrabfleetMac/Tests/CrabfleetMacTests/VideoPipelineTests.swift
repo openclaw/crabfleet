@@ -378,6 +378,30 @@ struct VideoPipelineTests {
   }
 
   @Test
+  func mailboxCancelledWaiterReturnsPromptlyWithoutResumingTwice() async {
+    let mailbox = VideoMailbox<Int>()
+    let startedAt = ContinuousClock().now
+    let task = Task {
+      withUnsafeCurrentTask { $0?.cancel() }
+      return await mailbox.next(timeout: .seconds(5))
+    }
+    let result = await task.value
+    #expect(result == nil)
+    #expect(ContinuousClock().now - startedAt < .milliseconds(500))
+
+    mailbox.offer(4)
+    #expect(await mailbox.next(timeout: .milliseconds(50)) == 4)
+  }
+
+  @Test
+  func cursorReconcileErrorsAreNotRetryableWhenCancelled() {
+    #expect(!MacScreenCapture.isRetryableCursorReconcileError(CancellationError()))
+    #expect(
+      MacScreenCapture.isRetryableCursorReconcileError(
+        NSError(domain: "CrabfleetMacTests", code: 1)))
+  }
+
+  @Test
   func videoNegotiationPrefersHEVCThenH264ThenTight() {
     let offered = [
       RFBWire.tightEncoding,

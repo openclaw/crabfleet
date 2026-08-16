@@ -418,7 +418,14 @@ final class MacScreenCapture: NSObject, @unchecked Sendable {
             try await self.reconcileCursorConfiguration()
             break
           } catch {
-            try? await Task.sleep(for: delay)
+            guard Self.isRetryableCursorReconcileError(error) else { break }
+            do {
+              try await Task.sleep(for: delay)
+            } catch is CancellationError {
+              break
+            } catch {
+              break
+            }
             delay = min(delay * 2, .seconds(5))
           }
         }
@@ -432,6 +439,10 @@ final class MacScreenCapture: NSObject, @unchecked Sendable {
       return task
     }
     _ = task
+  }
+
+  static func isRetryableCursorReconcileError(_ error: Error) -> Bool {
+    !(error is CancellationError)
   }
 
   private func reconcileCursorConfiguration() async throws {

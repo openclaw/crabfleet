@@ -12,6 +12,7 @@ final class VideoMailbox<Element>: @unchecked Sendable {
   private let lock = NSLock()
   private var latestElement: Element?
   private var waiter: Waiter?
+  private var timeoutTask: Task<Void, Never>?
   private var finished = false
 
   var isFinished: Bool {
@@ -30,27 +31,36 @@ final class VideoMailbox<Element>: @unchecked Sendable {
   }
 
   func offer(_ element: Element, onDrop: () -> Void = {}) {
-    let continuation = withLock { () -> CheckedContinuation<Element?, Never>? in
-      guard !finished else { return nil }
+    let (continuation, timeoutTask) = withLock {
+      () -> (CheckedContinuation<Element?, Never>?, Task<Void, Never>?) in
+      guard !finished else { return (nil, nil) }
       guard let waiter else {
         if latestElement != nil { onDrop() }
         latestElement = element
-        return nil
+        return (nil, nil)
       }
       self.waiter = nil
-      return waiter.continuation
+      let timeoutTask = self.timeoutTask
+      self.timeoutTask = nil
+      return (waiter.continuation, timeoutTask)
     }
+    timeoutTask?.cancel()
     continuation?.resume(returning: element)
   }
 
   func finish() {
-    let continuation = withLock { () -> CheckedContinuation<Element?, Never>? in
-      guard !finished else { return nil }
+    let (continuation, timeoutTask) = withLock {
+      () -> (CheckedContinuation<Element?, Never>?, Task<Void, Never>?) in
+      guard !finished else { return (nil, nil) }
       finished = true
       latestElement = nil
-      defer { waiter = nil }
-      return waiter?.continuation
+      let continuation = waiter?.continuation
+      let timeoutTask = self.timeoutTask
+      waiter = nil
+      self.timeoutTask = nil
+      return (continuation, timeoutTask)
     }
+    timeoutTask?.cancel()
     continuation?.resume(returning: nil)
   }
 
@@ -64,6 +74,7 @@ final class VideoMailbox<Element>: @unchecked Sendable {
         var immediateElement: Element?
         var shouldResume = false
         var replacedWaiter: Waiter?
+        var replacedTimeout: Task<Void, Never>?
         lock.lock()
         if let latestElement {
           immediateElement = latestElement
@@ -73,16 +84,35 @@ final class VideoMailbox<Element>: @unchecked Sendable {
           shouldResume = true
         } else {
           replacedWaiter = waiter
+          replacedTimeout = timeoutTask
+          timeoutTask = nil
           waiter = (id, continuation)
         }
         lock.unlock()
 
         replacedWaiter?.continuation.resume(returning: nil)
+        replacedTimeout?.cancel()
         if shouldResume {
           continuation.resume(returning: immediateElement)
         } else {
-          Task {
-            try? await Task.sleep(for: timeout)
+          let task = Task {
+            do {
+              try await Task.sleep(for: timeout)
+              self.expire(id: id)
+            } catch is CancellationError {
+              // Do not expire a different waiter; expire already guards by id.
+            } catch {
+              self.expire(id: id)
+            }
+          }
+          let shouldCancelTimeout = withLock { () -> Bool in
+            guard waiter?.id == id else { return true }
+            timeoutTask = task
+            return false
+          }
+          if shouldCancelTimeout {
+            task.cancel()
+          } else if Task.isCancelled {
             self.expire(id: id)
           }
         }
@@ -93,11 +123,16 @@ final class VideoMailbox<Element>: @unchecked Sendable {
   }
 
   private func expire(id: UUID) {
-    let continuation = withLock { () -> CheckedContinuation<Element?, Never>? in
-      guard waiter?.id == id else { return nil }
-      defer { waiter = nil }
-      return waiter?.continuation
+    let (continuation, timeoutTask) = withLock {
+      () -> (CheckedContinuation<Element?, Never>?, Task<Void, Never>?) in
+      guard waiter?.id == id else { return (nil, nil) }
+      let continuation = waiter?.continuation
+      let timeoutTask = self.timeoutTask
+      waiter = nil
+      self.timeoutTask = nil
+      return (continuation, timeoutTask)
     }
+    timeoutTask?.cancel()
     continuation?.resume(returning: nil)
   }
 
