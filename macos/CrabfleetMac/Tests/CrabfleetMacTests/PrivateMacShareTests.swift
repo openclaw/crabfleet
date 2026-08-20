@@ -202,7 +202,7 @@ struct PrivateMacShareTests {
       try await runner.run(arguments: ["status"])
     }
     #expect(await waitUntilAsync {
-      FileManager.default.fileExists(atPath: descendantPIDFile.path)
+      (try? Int32(String(contentsOf: descendantPIDFile, encoding: .utf8))) != nil
     })
     let descendantPID = try #require(
       Int32(String(contentsOf: descendantPIDFile, encoding: .utf8))
@@ -1037,6 +1037,11 @@ struct PrivateMacShareTests {
       Notification(name: NSApplication.didFinishLaunchingNotification)
     )
     #expect(await waitUntilAsync { await runner.callCount == 1 })
+    let refreshFinished = Task { @MainActor in
+      for await isRefreshing in controller.$isRefreshing.values where !isRefreshing {
+        return
+      }
+    }
     #expect(delegate.applicationShouldTerminate(application) == .terminateLater)
     #expect(await waitUntilAsync { replies == [true] })
 
@@ -1051,6 +1056,7 @@ struct PrivateMacShareTests {
     }
 
     #expect(!continuedPreflight)
+    await refreshFinished.value
     #expect(!controller.isRefreshing)
     #expect(controller.phase == .idle)
   }
@@ -2338,6 +2344,7 @@ struct PrivateMacShareTests {
 
   @Test @MainActor
   func expiresIncompleteRFBHandshakeAndReleasesInput() async throws {
+    try await RFBARDPrewarmer.shared.prepare()
     let identity = TailnetIdentity(
       tailnetName: "example.com",
       loginName: "tester@example.com",
@@ -2349,7 +2356,7 @@ struct PrivateMacShareTests {
     let capture = MacScreenCapture()
     let input = RemoteInputRecorder()
     let events = RFBEventRecorder()
-    let port: UInt16 = 5_923
+    let port = try availableLoopbackPort(socketType: SOCK_STREAM)
     let server = TailnetRFBServer(
       identity: identity,
       runner: StaticTailscaleRunner(output: ""),
@@ -2646,6 +2653,7 @@ struct PrivateMacShareTests {
       return
     }
 
+    try await RFBARDPrewarmer.shared.prepare()
     let runner = try SystemTailscaleCommandRunner()
     let status = try await runner.run(arguments: ["status", "--json"])
     let document = try JSONDecoder().decode(
@@ -2709,6 +2717,7 @@ struct PrivateMacShareTests {
 
   @Test @MainActor
   func syncsUTF8ClipboardAndNegotiatesResizeOverLoopback() async throws {
+    try await RFBARDPrewarmer.shared.prepare()
     // Full-protocol end-to-end: the production server and the RoyalVNCKit
     // client exchange handshake, Tight frames, Extended Clipboard, and
     // ExtendedDesktopSize over a real TCP connection on loopback. The
@@ -2731,7 +2740,7 @@ struct PrivateMacShareTests {
     hostPasteboard.clearContents()
     let hostClipboard = HostClipboardBridge(pasteboard: hostPasteboard, pollingInterval: 0.02)
 
-    let port: UInt16 = 5_921
+    let port = try availableLoopbackPort(socketType: SOCK_STREAM)
     let events = RFBEventRecorder()
     let server = TailnetRFBServer(
       identity: identity,
