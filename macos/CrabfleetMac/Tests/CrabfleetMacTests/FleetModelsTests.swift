@@ -128,18 +128,16 @@ struct FleetModelsTests {
       }
     )
 
-    let pid = try #require(
-      Int(String(contentsOf: pidFile, encoding: .utf8))
-    )
-    #expect(Darwin.kill(Int32(pid), 0) == 0)
+    let pid = try #require(readProcessID(from: pidFile))
+    #expect(Darwin.kill(pid, 0) == 0)
     bridge?.stop()
     bridge = nil
 
     let deadline = Date().addingTimeInterval(3)
-    while Darwin.kill(Int32(pid), 0) == 0 && Date() < deadline {
+    while Darwin.kill(pid, 0) == 0 && Date() < deadline {
       try await Task.sleep(for: .milliseconds(50))
     }
-    #expect(Darwin.kill(Int32(pid), 0) != 0)
+    #expect(Darwin.kill(pid, 0) != 0)
   }
 
   @Test @MainActor
@@ -169,15 +167,13 @@ struct FleetModelsTests {
       grant: { nativeVNCGrant() }
     )
     let launched = await waitUntil(timeout: .seconds(2)) {
-      FileManager.default.fileExists(atPath: pidFile.path)
+      readProcessID(from: pidFile) != nil
     }
-    let pid = try #require(
-      launched ? Int(String(contentsOf: pidFile, encoding: .utf8)) : nil
-    )
+    let pid = try #require(launched ? readProcessID(from: pidFile) : nil)
 
     pool.reconcile(validTargetIDs: ["fleet-native"], nativeSessionIDs: [:])
     let stopped = await waitUntil(timeout: .seconds(3)) {
-      Darwin.kill(Int32(pid), 0) != 0
+      Darwin.kill(pid, 0) != 0
     }
     #expect(stopped)
   }

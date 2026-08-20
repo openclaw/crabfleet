@@ -89,15 +89,15 @@ struct PrivateMacShareTests {
       try await cancellableRunner.run(arguments: ["status"])
     }
     let launched = await waitUntilAsync {
-      FileManager.default.fileExists(atPath: pidFile.path)
+      readProcessID(from: pidFile) != nil
     }
     #expect(launched)
-    let cancelledPID = try #require(Int(String(contentsOf: pidFile, encoding: .utf8)))
+    let cancelledPID = try #require(readProcessID(from: pidFile))
     task.cancel()
     await #expect(throws: CancellationError.self) {
       try await task.value
     }
-    #expect(await waitUntilAsync { Darwin.kill(Int32(cancelledPID), 0) != 0 })
+    #expect(await waitUntilAsync { Darwin.kill(cancelledPID, 0) != 0 })
   }
 
   @Test
@@ -130,9 +130,7 @@ struct PrivateMacShareTests {
     }
     let elapsed = startedAt.duration(to: clock.now)
 
-    let descendantPID = try #require(
-      Int32(String(contentsOf: descendantPIDFile, encoding: .utf8))
-    )
+    let descendantPID = try #require(readProcessID(from: descendantPIDFile))
     #expect(await waitUntilAsync { Darwin.kill(descendantPID, 0) != 0 })
     #expect(elapsed < .seconds(4))
   }
@@ -165,9 +163,7 @@ struct PrivateMacShareTests {
     let result = try await runner.run(arguments: ["status"])
     let elapsed = startedAt.duration(to: clock.now)
 
-    let descendantPID = try #require(
-      Int32(String(contentsOf: descendantPIDFile, encoding: .utf8))
-    )
+    let descendantPID = try #require(readProcessID(from: descendantPIDFile))
     defer {
       _ = Darwin.kill(descendantPID, SIGKILL)
     }
@@ -202,11 +198,9 @@ struct PrivateMacShareTests {
       try await runner.run(arguments: ["status"])
     }
     #expect(await waitUntilAsync {
-      (try? Int32(String(contentsOf: descendantPIDFile, encoding: .utf8))) != nil
+      readProcessID(from: descendantPIDFile) != nil
     })
-    let descendantPID = try #require(
-      Int32(String(contentsOf: descendantPIDFile, encoding: .utf8))
-    )
+    let descendantPID = try #require(readProcessID(from: descendantPIDFile))
     task.cancel()
     await #expect(throws: CancellationError.self) {
       try await task.value
