@@ -21,7 +21,7 @@
     "macos:build": "swift build --package-path macos/CrabfleetMac",
     "macos:bundle": "sh macos/CrabfleetMac/scripts/build-app.sh",
     "macos:run": "swift run --package-path macos/CrabfleetMac CrabfleetMac",
-    "macos:test": "pnpm macos:test:vendor && swift test --package-path macos/CrabfleetMac",
+    "macos:test": "pnpm macos:test:vendor && sh macos/CrabfleetMac/scripts/run-tests.sh",
     "macos:test:vendor": "swift test --package-path macos/CrabfleetMac/Vendor/RoyalVNCKit",
     "test": "node --test --experimental-strip-types tests/*.test.ts",
     "test:changed": "pnpm run test"
