@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Refresh Worker, browser, Go CLI, container, and CI dependencies, adopt pnpm 11 with the existing build allowlist and release-age policy, and keep the Cloudflare Sandbox image aligned with its SDK.
 - Disable the retired `openclaw/clawsweeper-home` and `openclaw/crabbox-fleet` repository targets while keeping `openclaw/test-permissions-check` enabled for permission probes.
 - Keep slow terminal resize authorization off the shared multiplexed connection queue so other sessions and pings remain responsive, thanks @anagnorisis2peripeteia.
 - Preserve live terminal resubscriptions when stale upstream close, error, or revocation callbacks arrive for a replaced subscription, thanks @anagnorisis2peripeteia.
