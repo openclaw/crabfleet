@@ -285,6 +285,10 @@ curl https://crabfleet.openclaw.ai/docs/spec
 
 ### Setup
 
+Use Node.js 24 or newer and the pnpm version pinned in `package.json` (currently
+11.24.0). The workspace keeps a two-day minimum release age and permits install
+scripts only for `workerd`.
+
 ```bash
 # Install dependencies
 pnpm install

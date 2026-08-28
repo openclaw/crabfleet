@@ -18,8 +18,6 @@ minimumReleaseAgeExclude:
   - "@typescript/native-preview@7.0.0-dev.20260609.1"
   - miniflare@4.20260609.0
   - wrangler@4.99.0
-onlyBuiltDependencies:
-  - workerd
 allowBuilds:
   esbuild: false
   sharp: false
