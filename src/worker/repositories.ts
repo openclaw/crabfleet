@@ -1,10 +1,11 @@
 export function normalizeRepo(value: unknown): string {
-  return String(value ?? "")
+  const normalized = String(value ?? "")
     .trim()
     .toLowerCase()
-    .replace(/^https:\/\/github\.com\//, "")
-    .replace(/\/+$/, "")
-    .replace(/\.git$/, "");
+    .replace(/^https:\/\/github\.com\//, "");
+  let end = normalized.length;
+  while (end > 0 && normalized[end - 1] === "/") end -= 1;
+  return normalized.slice(0, end).replace(/\.git$/, "");
 }
 
 export function githubRepoParts(repo: string): { owner: string; name: string } | null {
