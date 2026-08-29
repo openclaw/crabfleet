@@ -379,7 +379,9 @@ VeNCrypt would bring an RFB-layer TLS boundary to TCP and other transports too.
 The relay never stores the registration token or RFB bytes. The direct listener
 is not reachable on Wi-Fi, Ethernet, loopback, or a public address. The host app
 must remain running, and stopping the share cancels the listener, relay
-publisher, and capture stream.
+publisher, and capture stream. Cancelled video mailbox waits return without
+waiting for their frame timeout, and cursor configuration reconciliation stops
+on cancellation while retaining bounded backoff for transient failures.
 
 ### Browser viewer
 
