@@ -213,11 +213,8 @@ export class SessionControlDO extends DurableObject<RuntimeEnv> {
         );
         return checkpoint ? json({ checkpoint }) : json({ error: "not found" }, { status: 404 });
       }
-    } catch (error) {
-      return json(
-        { error: error instanceof Error ? error.message : String(error) },
-        { status: 500 },
-      );
+    } catch {
+      return json({ error: "internal error" }, { status: 500 });
     }
     return json({ error: "not found" }, { status: 404 });
   }
