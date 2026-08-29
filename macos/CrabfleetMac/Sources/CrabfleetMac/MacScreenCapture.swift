@@ -412,15 +412,8 @@ final class MacScreenCapture: NSObject, @unchecked Sendable {
       cursorReconcileTask?.cancel()
       let task = Task { [weak self] in
         guard let self else { return }
-        var delay = Duration.milliseconds(100)
-        while !Task.isCancelled {
-          do {
-            try await self.reconcileCursorConfiguration()
-            break
-          } catch {
-            try? await Task.sleep(for: delay)
-            delay = min(delay * 2, .seconds(5))
-          }
+        await Self.reconcileCursorConfigurationWithRetry {
+          try await self.reconcileCursorConfiguration()
         }
         self.withFrameLock {
           if self.cursorReconcileGeneration == generation {
@@ -432,6 +425,28 @@ final class MacScreenCapture: NSObject, @unchecked Sendable {
       return task
     }
     _ = task
+  }
+
+  static func reconcileCursorConfigurationWithRetry(
+    _ reconcile: () async throws -> Void
+  ) async {
+    var delay = Duration.milliseconds(100)
+    while !Task.isCancelled {
+      do {
+        try await reconcile()
+        return
+      } catch is CancellationError {
+        // The operation can be cancelled even when this retry task is not.
+        return
+      } catch {
+        do {
+          try await Task.sleep(for: delay)
+        } catch {
+          return
+        }
+        delay = min(delay * 2, .seconds(5))
+      }
+    }
   }
 
   private func reconcileCursorConfiguration() async throws {

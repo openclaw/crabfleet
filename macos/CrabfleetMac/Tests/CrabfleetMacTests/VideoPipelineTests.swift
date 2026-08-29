@@ -378,6 +378,102 @@ struct VideoPipelineTests {
   }
 
   @Test
+  func mailboxCancelledWaiterReturnsPromptlyWithoutResumingTwice() async {
+    let mailbox = VideoMailbox<Int>()
+    let startedAt = ContinuousClock().now
+    let task = Task {
+      withUnsafeCurrentTask { $0?.cancel() }
+      return await mailbox.next(timeout: .seconds(5))
+    }
+    let result = await task.value
+    #expect(result == nil)
+    #expect(ContinuousClock().now - startedAt < .milliseconds(500))
+
+    mailbox.offer(4)
+    #expect(await mailbox.next(timeout: .milliseconds(50)) == 4)
+  }
+
+  @Test
+  func mailboxCancellationRacingOfferLeavesMailboxUsable() async {
+    for value in 0..<100 {
+      let mailbox = VideoMailbox<Int>()
+      let waiter = Task { await mailbox.next(timeout: .seconds(5)) }
+      async let cancellation: Void = Task { waiter.cancel() }.value
+      async let offer: Void = Task { mailbox.offer(value) }.value
+      _ = await (cancellation, offer)
+      let received = await waiter.value
+      #expect(received == nil || received == value)
+      mailbox.offer(value + 1)
+      #expect(await mailbox.next(timeout: .milliseconds(50)) == value + 1)
+      mailbox.finish()
+    }
+  }
+
+  @Test
+  func mailboxCancelledWaitDoesNotRetainTimeout() async {
+    weak var releasedMailbox: VideoMailbox<Int>?
+    let task = Task {
+      let mailbox = VideoMailbox<Int>()
+      releasedMailbox = mailbox
+      withUnsafeCurrentTask { $0?.cancel() }
+      #expect(await mailbox.next(timeout: .seconds(5)) == nil)
+    }
+    await task.value
+    let deadline = ContinuousClock.now.advanced(by: .milliseconds(500))
+    while releasedMailbox != nil, ContinuousClock.now < deadline {
+      await Task.yield()
+    }
+    #expect(releasedMailbox == nil)
+  }
+
+  @Test
+  func cursorCancellationErrorStopsReconciliation() async {
+    var attempts = 0
+    await MacScreenCapture.reconcileCursorConfigurationWithRetry {
+      attempts += 1
+      if attempts == 1 { throw CancellationError() }
+    }
+    #expect(attempts == 1)
+  }
+
+  @Test
+  func cursorTransientFailureRetriesReconciliation() async {
+    var attempts = 0
+    await MacScreenCapture.reconcileCursorConfigurationWithRetry {
+      attempts += 1
+      if attempts == 1 { throw NSError(domain: "CrabfleetMacTests", code: 1) }
+    }
+    #expect(attempts == 2)
+  }
+
+  @Test
+  func cursorCancelledTaskDoesNotStartReconciliation() async {
+    let task = Task {
+      withUnsafeCurrentTask { $0?.cancel() }
+      var attempts = 0
+      await MacScreenCapture.reconcileCursorConfigurationWithRetry { attempts += 1 }
+      return attempts
+    }
+    #expect(await task.value == 0)
+  }
+
+  @Test
+  func cursorCancellationStopsRetryBackoff() async {
+    let startedAt = ContinuousClock.now
+    let task = Task {
+      var attempts = 0
+      await MacScreenCapture.reconcileCursorConfigurationWithRetry {
+        attempts += 1
+        withUnsafeCurrentTask { $0?.cancel() }
+        throw NSError(domain: "CrabfleetMacTests", code: 1)
+      }
+      return attempts
+    }
+    #expect(await task.value == 1)
+    #expect(startedAt.duration(to: .now) < .milliseconds(500))
+  }
+
+  @Test
   func videoNegotiationPrefersHEVCThenH264ThenTight() {
     let offered = [
       RFBWire.tightEncoding,
