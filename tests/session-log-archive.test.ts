@@ -1,7 +1,9 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
+import type { RuntimeEnv } from "../src/worker/env.ts";
 import {
+  archiveInteractiveSessionLogs,
   sessionLogArchiveBase,
   sessionLogEventsNdjson,
   sessionLogSummary,
@@ -10,6 +12,70 @@ import {
 } from "../src/worker/session-log-archive.ts";
 import { interactiveSession } from "../src/worker/session-model.ts";
 import { sessionRow } from "./helpers/session-row.ts";
+
+type D1Result = { results?: unknown[]; changes?: number };
+type D1Handler = (sql: string, parameters: unknown[], kind: "all" | "run") => D1Result;
+
+function runtimeEnv(
+  handler: D1Handler,
+  sessionLogs?: Pick<R2Bucket, "put" | "delete">,
+): RuntimeEnv {
+  return {
+    DB: {
+      prepare(sql: string) {
+        return {
+          bind(...parameters: unknown[]) {
+            return {
+              sql,
+              parameters,
+              async all() {
+                const result = handler(sql, parameters, "all");
+                return { results: result.results ?? [], meta: { changes: result.changes ?? 0 } };
+              },
+              async run() {
+                const result = handler(sql, parameters, "run");
+                return { meta: { changes: result.changes ?? 0 } };
+              },
+            };
+          },
+        };
+      },
+      async batch() {
+        return [];
+      },
+    } as unknown as D1Database,
+    ...(sessionLogs ? { SESSION_LOGS: sessionLogs as R2Bucket } : {}),
+  } as RuntimeEnv;
+}
+
+function archiveSessionRow() {
+  return sessionRow({ id: "IS-1", updated_at: 100 });
+}
+
+function archiveEventRow() {
+  return {
+    id: 1,
+    session_id: "IS-1",
+    actor: "operator",
+    event_key: null,
+    event_type: "message",
+    message: "started",
+    payload_json: null,
+    created_at: 50,
+  };
+}
+
+function archiveQueryHandler(): D1Handler {
+  const row = archiveSessionRow();
+  const event = archiveEventRow();
+  return (sql) => {
+    if (/from "interactive_sessions"/i.test(sql)) return { results: [row] };
+    if (/from "interactive_session_log_archives"/i.test(sql)) return { results: [] };
+    if (/count\(\*\)/i.test(sql)) return { results: [{ count: 1 }] };
+    if (/from "interactive_session_events"/i.test(sql)) return { results: [event] };
+    throw new Error(`unexpected query: ${sql}`);
+  };
+}
 
 const archive = {
   session_id: "IS-1",
@@ -108,6 +174,30 @@ test("transcripts accept domain sessions and summaries keep event anchors", () =
   assert.equal(summary.lastEventAt, 10);
   assert.equal(summary.lastEvent, "first");
   assert.equal(summary.updatedAt, 120);
+});
+
+test("failed session log puts delete the attempted archive objects", async () => {
+  const objects = new Map<string, string>();
+  const deleted: string[] = [];
+  const env = runtimeEnv(archiveQueryHandler(), {
+    async put(key, value) {
+      if (String(key).endsWith("/summary.json")) {
+        throw new Error("R2 put failed");
+      }
+      objects.set(String(key), String(value));
+      return undefined as unknown as R2Object;
+    },
+    async delete(key) {
+      deleted.push(String(key));
+      objects.delete(String(key));
+    },
+  });
+
+  await assert.rejects(() => archiveInteractiveSessionLogs(env, "IS-1", 200), /R2 put failed/);
+  assert.equal(objects.size, 0);
+  assert.ok(deleted.some((key) => key.endsWith("/events.ndjson")));
+  assert.ok(deleted.some((key) => key.endsWith("/transcript.md")));
+  assert.ok(deleted.some((key) => key.endsWith("/summary.json")));
 });
 
 test("event archives expose structured fields while preserving legacy messages", () => {
