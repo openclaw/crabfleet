@@ -51,7 +51,7 @@ export async function archiveInteractiveSessionLogs(
   const transcriptKey = attemptedArchive.transcript_key;
   const summaryKey = attemptedArchive.summary_key;
   if (env.SESSION_LOGS) {
-    await Promise.all([
+    const results = await Promise.allSettled([
       env.SESSION_LOGS.put(eventsKey, sessionLogEventsNdjson(events), {
         httpMetadata: { contentType: "application/x-ndjson; charset=utf-8" },
       }),
@@ -64,6 +64,13 @@ export async function archiveInteractiveSessionLogs(
         { httpMetadata: { contentType: "application/json; charset=utf-8" } },
       ),
     ]);
+    const failure = results.find(
+      (result): result is PromiseRejectedResult => result.status === "rejected",
+    );
+    if (failure) {
+      await cleanupSessionLogArchiveObjects(env, attemptedArchive).catch(() => undefined);
+      throw failure.reason;
+    }
   }
   await sql`
     INSERT INTO interactive_session_log_archives (
