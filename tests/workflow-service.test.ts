@@ -1,10 +1,14 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
+import type { RuntimeEnv } from "../src/worker/env.ts";
+import { githubHeaders } from "../src/worker/github.ts";
 import type { RepoWorkflow } from "../src/worker/workflow-model.ts";
 import type { WorkflowRepositoryStore } from "../src/worker/workflow-repository.ts";
 import {
+  createWorkflowService,
   parseWorkflowMarkdown,
+  WORKFLOW_SOURCE_FETCH_TIMEOUT_MS,
   WorkflowService,
   type WorkflowServiceDependencies,
 } from "../src/worker/workflow-service.ts";
@@ -22,6 +26,57 @@ function workflow(values: Partial<RepoWorkflow> = {}): RepoWorkflow {
     updatedAt: 100,
     ...values,
   };
+}
+
+function defaultFetchSource(env: Pick<RuntimeEnv, "GITHUB_TOKEN">) {
+  const service = createWorkflowService(env as RuntimeEnv);
+  return (service as unknown as { dependencies: WorkflowServiceDependencies }).dependencies
+    .fetchSource;
+}
+
+function hangUntilAborted(_input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
+  return new Promise((_resolve, reject) => {
+    const signal = init?.signal;
+    if (!signal) return;
+    const fail = () =>
+      reject(signal.reason ?? new DOMException("The operation was aborted.", "AbortError"));
+    if (signal.aborted) {
+      fail();
+      return;
+    }
+    signal.addEventListener("abort", fail, { once: true });
+  });
+}
+
+async function withMockedFetch<T>(
+  mock: typeof fetch,
+  timeoutMs: number | null,
+  run: () => Promise<T>,
+): Promise<{
+  result: T;
+  timeoutArgs: number[];
+  calls: Array<{ input: RequestInfo | URL; init?: RequestInit }>;
+}> {
+  const originalFetch = globalThis.fetch;
+  const originalTimeout = AbortSignal.timeout;
+  const timeoutArgs: number[] = [];
+  const calls: Array<{ input: RequestInfo | URL; init?: RequestInit }> = [];
+  globalThis.fetch = (input, init) => {
+    calls.push({ input, init });
+    return mock(input, init);
+  };
+  if (timeoutMs !== null) {
+    AbortSignal.timeout = (ms: number) => {
+      timeoutArgs.push(ms);
+      return originalTimeout(timeoutMs);
+    };
+  }
+  try {
+    return { result: await run(), timeoutArgs, calls };
+  } finally {
+    globalThis.fetch = originalFetch;
+    AbortSignal.timeout = originalTimeout;
+  }
 }
 
 function dependencies(
@@ -169,4 +224,39 @@ Investigate`;
   assert.deepEqual(result.config, { runtime: "container", policy: "open_pr" });
   assert.equal(result.prompt, "Investigate");
   assert.deepEqual(calls, ["fetch:openclaw/crabfleet", "write:ok:sha-valid:null"]);
+});
+
+test("default workflow fetchSource passes an AbortSignal and GitHub headers", async () => {
+  const env = { GITHUB_TOKEN: "github-secret" } as RuntimeEnv;
+  const { result, calls } = await withMockedFetch(
+    async () => new Response(null, { status: 404 }),
+    null,
+    () => defaultFetchSource(env)("openclaw/crabfleet"),
+  );
+
+  assert.equal(result.status, 404);
+  assert.equal(calls.length, 1);
+  assert.equal(
+    calls[0]?.input,
+    "https://api.github.com/repos/openclaw/crabfleet/contents/CRABBOX.md",
+  );
+  assert.ok(calls[0]?.init?.signal instanceof AbortSignal);
+  assert.equal(calls[0]?.init?.signal.aborted, false);
+  assert.deepEqual(calls[0]?.init?.headers, githubHeaders(env));
+});
+
+test("default workflow fetchSource aborts a hung GitHub lookup", async () => {
+  const { timeoutArgs } = await withMockedFetch(hangUntilAborted, 20, async () => {
+    const pending = defaultFetchSource({ GITHUB_TOKEN: "github-secret" })("openclaw/crabfleet");
+    const watchdog = new Promise<never>((_resolve, reject) => {
+      setTimeout(() => reject(new Error("did not abort hung CRABBOX.md fetch")), 200);
+    });
+    await assert.rejects(Promise.race([pending, watchdog]), (error: unknown) => {
+      assert.ok(error instanceof DOMException);
+      assert.equal(error.name, "TimeoutError");
+      return true;
+    });
+  });
+
+  assert.deepEqual(timeoutArgs, [WORKFLOW_SOURCE_FETCH_TIMEOUT_MS]);
 });
