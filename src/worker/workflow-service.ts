@@ -88,6 +88,8 @@ export class WorkflowService {
   }
 }
 
+export const WORKFLOW_SOURCE_FETCH_TIMEOUT_MS = 10_000;
+
 export function createWorkflowService(env: RuntimeEnv): WorkflowService {
   return new WorkflowService({
     repository: new WorkflowRepository(env),
@@ -95,6 +97,7 @@ export function createWorkflowService(env: RuntimeEnv): WorkflowService {
     fetchSource: (repo) =>
       fetch(`https://api.github.com/repos/${repo}/contents/CRABBOX.md`, {
         headers: githubHeaders(env),
+        signal: AbortSignal.timeout(WORKFLOW_SOURCE_FETCH_TIMEOUT_MS),
       }),
   });
 }
