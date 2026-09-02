@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Abort hung Crabfleet web login, state refresh, and admin fetches after 30 seconds instead of leaving the tab pending forever, thanks @SebTardif.
 - Stop cancelled Share This Mac cursor reconciliation and release video mailbox waits and their timeout tasks promptly, including cancellation before waiter registration, thanks @SebTardif (#114).
 
 ## 0.3.1 - 2026-08-28

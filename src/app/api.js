@@ -1,8 +1,11 @@
+export const DEFAULT_FETCH_TIMEOUT_MS = 30_000;
+
 export async function api(path, options = {}) {
   const init = {
     method: options.method || "GET",
     credentials: "same-origin",
     headers: { accept: "application/json" },
+    signal: options.signal ?? AbortSignal.timeout(DEFAULT_FETCH_TIMEOUT_MS),
   };
   if (options.body !== undefined) {
     init.headers["content-type"] = "application/json";
