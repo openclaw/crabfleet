@@ -292,6 +292,92 @@ test("GitHub membership refresh builds one normalized organization identity", as
   );
 });
 
+test("OAuth token exchange and membership refresh pass an AbortSignal", async () => {
+  const env = {
+    GITHUB_CLIENT_ID: "client-id",
+    GITHUB_CLIENT_SECRET: "client-secret",
+    GITHUB_REDIRECT_URI: "https://fleet.example/auth/github/callback",
+  } as RuntimeEnv;
+
+  const seen: Array<{ href: string; hasSignal: boolean }> = [];
+  const fetcher: Fetcher = async (input, init) => {
+    const url = new URL(String(input));
+    seen.push({ href: url.href, hasSignal: init?.signal instanceof AbortSignal });
+    if (url.hostname === "github.com") {
+      return Response.json({ access_token: "github-token" });
+    }
+    if (url.pathname.endsWith("/user/emails") || url.pathname.endsWith("/user/teams")) {
+      return Response.json([]);
+    }
+    if (url.pathname.includes("/memberships/orgs/")) {
+      return Response.json({ state: "pending" });
+    }
+    return Response.json({ id: 42, login: "owner", email: null, name: "Owner" });
+  };
+
+  const callback = await githubCallback(
+    new Request("https://fleet.example/auth/github/callback?code=code&state=state", {
+      headers: { cookie: "crabbox_oauth_state=state" },
+    }),
+    env,
+    fetcher,
+  );
+  assert.equal(callback.status, 403);
+  const tokenCall = seen.find((row) => row.href.includes("/login/oauth/access_token"));
+  assert.ok(tokenCall);
+  assert.equal(tokenCall.hasSignal, true);
+  const refreshCalls = seen.filter((row) => row.href.startsWith("https://api.github.com/"));
+  assert.ok(refreshCalls.length > 0);
+  assert.ok(refreshCalls.every((row) => row.hasSignal));
+});
+
+test("OAuth token exchange aborts when GitHub never answers", async () => {
+  const env = {
+    GITHUB_CLIENT_ID: "client-id",
+    GITHUB_CLIENT_SECRET: "client-secret",
+    GITHUB_REDIRECT_URI: "https://fleet.example/auth/github/callback",
+  } as RuntimeEnv;
+  const origTimeout = AbortSignal.timeout.bind(AbortSignal);
+  const requested: number[] = [];
+  AbortSignal.timeout = (ms: number) => {
+    requested.push(ms);
+    return origTimeout(ms === 10_000 ? 20 : ms);
+  };
+  try {
+    const hung: Fetcher = (_input, init) =>
+      new Promise((_resolve, reject) => {
+        const signal = init?.signal;
+        if (!signal) {
+          return;
+        }
+        const fail = () => {
+          reject(signal.reason ?? new DOMException("Aborted", "AbortError"));
+        };
+        if (signal.aborted) {
+          fail();
+          return;
+        }
+        signal.addEventListener("abort", fail, { once: true });
+      });
+    await assert.rejects(
+      githubCallback(
+        new Request("https://fleet.example/auth/github/callback?code=code&state=state", {
+          headers: { cookie: "crabbox_oauth_state=state" },
+        }),
+        env,
+        hung,
+      ),
+      (error: unknown) => {
+        assert.equal((error as Error).name, "TimeoutError");
+        return true;
+      },
+    );
+    assert.deepEqual(requested, [10_000]);
+  } finally {
+    AbortSignal.timeout = origTimeout;
+  }
+});
+
 test("GitHub membership refresh reports incomplete email evidence without breaking callers", async () => {
   const fetcher: Fetcher = async (input) => {
     const url = new URL(String(input));

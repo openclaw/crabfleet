@@ -75,7 +75,10 @@ export async function githubCallback(
     return text("Invalid OAuth state.\n", "text/plain; charset=utf-8", {}, 400);
   }
 
-  const tokenResponse = await fetcher("https://github.com/login/oauth/access_token", {
+  const oauthSignal = AbortSignal.timeout(10_000);
+  const timedFetcher: Fetcher = (input, init) =>
+    fetcher(input, { ...init, signal: init?.signal ?? oauthSignal });
+  const tokenResponse = await timedFetcher("https://github.com/login/oauth/access_token", {
     method: "POST",
     headers: {
       accept: "application/json",
@@ -100,7 +103,7 @@ export async function githubCallback(
     );
   }
 
-  const freshUser = await refreshGitHubUser(env, tokenBody.access_token, fetcher).catch(() => {
+  const freshUser = await refreshGitHubUser(env, tokenBody.access_token, timedFetcher).catch(() => {
     throw serviceUnavailable("GitHub membership refresh failed; retry later");
   });
   if (!freshUser) {
