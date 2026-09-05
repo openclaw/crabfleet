@@ -478,22 +478,31 @@ async function uploadTerminalClipboardBlob(id, blob, name, mediaType = blob?.typ
     return;
   }
   setTerminalStatus(id, `Uploading ${name || "clipboard"}`);
-  const response = await fetch(`/api/interactive-sessions/${encodeURIComponent(id)}/clipboard`, {
-    method: "POST",
-    headers: {
-      "content-type": mediaType || blob.type || "application/octet-stream",
-      "x-clipboard-name": encodeURIComponent(name || clipboardName(mediaType)),
-    },
-    body: blob,
-  });
-  if (!response.ok) {
-    setTerminalStatus(id, `Paste failed (${response.status})`);
-    return;
+  try {
+    const response = await fetch(`/api/interactive-sessions/${encodeURIComponent(id)}/clipboard`, {
+      method: "POST",
+      headers: {
+        "content-type": mediaType || blob.type || "application/octet-stream",
+        "x-clipboard-name": encodeURIComponent(name || clipboardName(mediaType)),
+      },
+      body: blob,
+      signal: AbortSignal.timeout(30_000),
+    });
+    if (!response.ok) {
+      setTerminalStatus(id, `Paste failed (${response.status})`);
+      return;
+    }
+    const result = await response.json();
+    const path = String(result.path || "");
+    setTerminalStatus(id, path ? `Pasted ${result.name || "file"}` : "Paste done");
+    if (path) pasteTerminalText(host, path);
+  } catch (error) {
+    if (error?.name === "TimeoutError" || error?.name === "AbortError") {
+      setTerminalStatus(id, "Paste timed out");
+      return;
+    }
+    throw error;
   }
-  const result = await response.json();
-  const path = String(result.path || "");
-  setTerminalStatus(id, path ? `Pasted ${result.name || "file"}` : "Paste done");
-  if (path) pasteTerminalText(host, path);
 }
 
 function canUploadTerminalClipboardFile(id) {
