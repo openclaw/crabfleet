@@ -26,6 +26,24 @@ function status(error: unknown): number | undefined {
     : undefined;
 }
 
+function hungGitHubFetcher(_input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
+  return new Promise((_resolve, reject) => {
+    const signal = init?.signal;
+    if (!signal) {
+      reject(new Error("missing AbortSignal"));
+      return;
+    }
+    const fail = () => {
+      reject(signal.reason ?? new DOMException("Aborted", "AbortError"));
+    };
+    if (signal.aborted) {
+      fail();
+      return;
+    }
+    signal.addEventListener("abort", fail, { once: true });
+  });
+}
+
 test("GitHub reference search rejects invalid numbers before reading repositories", async () => {
   let read = false;
   const service = new GitHubReferenceService(
@@ -129,6 +147,69 @@ test("authenticated GitHub reference search batches and maps enabled repositorie
   assert.equal(requestBody.variables?.number, 7);
   assert.match(requestBody.query ?? "", /r0: repository\(owner: "openclaw", name: "crabfleet"\)/);
   assert.match(requestBody.query ?? "", /r1: repository\(owner: "other", name: "repo"\)/);
+});
+
+test("public and authenticated GitHub reference fetches pass an AbortSignal", async () => {
+  const publicCalls: Array<{ href: string; hasSignal: boolean }> = [];
+  const publicService = new GitHubReferenceService(
+    dependencies(async (input, init) => {
+      publicCalls.push({ href: String(input), hasSignal: init?.signal instanceof AbortSignal });
+      return Response.json({
+        number: 42,
+        title: "Public issue",
+        state: "open",
+        html_url: "https://github.com/openclaw/crabfleet/issues/42",
+        body: null,
+        user: { login: "octocat" },
+        updated_at: "2026-06-15T10:00:00Z",
+      });
+    }),
+  );
+  await publicService.search("42");
+  assert.equal(publicCalls.length, 1);
+  assert.equal(publicCalls[0]?.href, "https://api.github.com/repos/openclaw/crabfleet/issues/42");
+  assert.equal(publicCalls[0]?.hasSignal, true);
+
+  const authCalls: Array<{ href: string; hasSignal: boolean }> = [];
+  const authService = new GitHubReferenceService(
+    dependencies(
+      async (input, init) => {
+        authCalls.push({ href: String(input), hasSignal: init?.signal instanceof AbortSignal });
+        return Response.json({ data: {} });
+      },
+      { authenticated: true },
+    ),
+  );
+  await authService.search(7);
+  assert.equal(authCalls.length, 1);
+  assert.equal(authCalls[0]?.href, "https://api.github.com/graphql");
+  assert.equal(authCalls[0]?.hasSignal, true);
+});
+
+test("GitHub reference search aborts a hung GitHub fetch", async () => {
+  const origTimeout = AbortSignal.timeout.bind(AbortSignal);
+  const requested: number[] = [];
+  AbortSignal.timeout = (ms: number) => {
+    requested.push(ms);
+    return origTimeout(ms === 10_000 ? 20 : ms);
+  };
+  try {
+    const publicService = new GitHubReferenceService(dependencies(hungGitHubFetcher));
+    await assert.rejects(publicService.search(1), (error: unknown) => {
+      assert.equal((error as Error).name, "TimeoutError");
+      return true;
+    });
+    const authService = new GitHubReferenceService(
+      dependencies(hungGitHubFetcher, { authenticated: true }),
+    );
+    await assert.rejects(authService.search(1), (error: unknown) => {
+      assert.equal((error as Error).name, "TimeoutError");
+      return true;
+    });
+    assert.deepEqual(requested, [10_000, 10_000]);
+  } finally {
+    AbortSignal.timeout = origTimeout;
+  }
 });
 
 test("GitHub reference search reports transport and GraphQL rate limits", async () => {
