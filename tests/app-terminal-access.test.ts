@@ -37,6 +37,23 @@ test("browser terminals consume live control grants and revocations", async () =
   assert.doesNotMatch(source, /encodeResizePayload\(host\.term\.cols,\s*host\.term\.rows\)/);
 });
 
+test("clipboard upload fetch aborts after 30s instead of hanging on Uploading", async () => {
+  const source = await readFile(new URL("../src/app/terminal.js", import.meta.url), "utf8");
+  const start = source.indexOf("async function uploadTerminalClipboardBlob");
+  const end = source.indexOf("function canUploadTerminalClipboardFile");
+  assert.ok(
+    start >= 0 && end > start,
+    "uploadTerminalClipboardBlob must precede canUploadTerminalClipboardFile",
+  );
+  const upload = source.slice(start, end);
+  assert.match(
+    upload,
+    /fetch\(`\/api\/interactive-sessions\/\$\{encodeURIComponent\(id\)\}\/clipboard`, \{[\s\S]*?signal:\s*AbortSignal\.timeout\(30_000\)/,
+  );
+  assert.match(upload, /error\?\.name === "TimeoutError" \|\| error\?\.name === "AbortError"/);
+  assert.match(upload, /setTerminalStatus\(id, "Paste timed out"\)/);
+});
+
 test("server subscription capability authoritatively updates terminal input", () => {
   const readOnly: boolean[] = [];
   const host = {
