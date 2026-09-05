@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Fail closed GitHub issue and PR ref lookups after 10 seconds when GitHub never answers, so card issue preview does not wait for the isolate wall clock, thanks @SebTardif.
 - Stop cancelled Share This Mac cursor reconciliation and release video mailbox waits and their timeout tasks promptly, including cancellation before waiter registration, thanks @SebTardif (#114).
 
 ## 0.3.1 - 2026-08-28

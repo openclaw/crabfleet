@@ -96,6 +96,7 @@ export class GitHubReferenceService {
         query: `query CrabfleetRefs($number: Int!) { ${selections} }`,
         variables: { number },
       }),
+      signal: AbortSignal.timeout(10_000),
     });
     if (response.status === 403 || response.status === 429) {
       throw serviceUnavailable("GitHub lookup rate limited; retry later");
@@ -128,7 +129,7 @@ export class GitHubReferenceService {
     if (!repo) return [];
     const response = await this.dependencies.fetcher(
       `https://api.github.com/repos/${repo}/issues/${number}`,
-      { headers: this.dependencies.headers },
+      { headers: this.dependencies.headers, signal: AbortSignal.timeout(10_000) },
     );
     if (response.status === 404 || response.status === 410) return [];
     if (response.status === 403 || response.status === 429) {
