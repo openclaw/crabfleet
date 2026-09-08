@@ -69,7 +69,7 @@ export async function interactiveTerminalFetch(
     session.adapter === runtimeAdapterName
       ? runtimeAdapterFetcher(env, target, fallbackFetcher)
       : fallbackFetcher;
-  return fetcher.fetch(fetchTarget, { headers });
+  return fetcher.fetch(fetchTarget, { headers, signal: AbortSignal.timeout(10_000) });
 }
 
 export async function readRuntimeAdapterResponseBody(response: Response): Promise<unknown> {

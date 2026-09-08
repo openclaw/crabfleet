@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Fix interactive terminal sessions hanging when the upstream never completes the WebSocket handshake: bound the upgrade fetch with the same 10s timeout the runtime adapter fetch in that file already uses.
 - Stop cancelled Share This Mac cursor reconciliation and release video mailbox waits and their timeout tasks promptly, including cancellation before waiter registration, thanks @SebTardif (#114).
 
 ## 0.3.1 - 2026-08-28

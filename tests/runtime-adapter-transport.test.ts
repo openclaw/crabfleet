@@ -158,3 +158,31 @@ test("runtime adapter response parsing is bounded and preserves non-JSON error t
     ResponseBodyLimitError,
   );
 });
+
+test("terminal upgrades bound the upstream handshake with a timeout", async () => {
+  const coordinator = recordingFetcher(new Response(null, { status: 200 }));
+  const fallback = recordingFetcher(new Response(null, { status: 200 }));
+  const env = {
+    CRABBOX_COORDINATOR: coordinator.fetcher,
+    CRABBOX_COORDINATOR_ORIGIN: "https://adapter.example",
+  } as RuntimeEnv;
+  const headers = new Headers({ upgrade: "websocket" });
+
+  await interactiveTerminalFetch(
+    env,
+    { adapter: "runtime-v1" },
+    "wss://adapter.example/v1/terminal",
+    headers,
+    fallback.fetcher,
+  );
+  assert.ok(coordinator.calls[0]?.init?.signal instanceof AbortSignal);
+
+  await interactiveTerminalFetch(
+    env,
+    { adapter: null },
+    "wss://elsewhere.example/v1/terminal",
+    headers,
+    fallback.fetcher,
+  );
+  assert.ok(fallback.calls[0]?.init?.signal instanceof AbortSignal);
+});
