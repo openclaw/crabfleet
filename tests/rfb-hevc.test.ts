@@ -299,6 +299,8 @@ function makeSps(
   bitDepthChromaMinus8: number,
   subLayerProfile = false,
   spsId = 0,
+  width = 1_920,
+  height = 1_080,
 ): Uint8Array {
   const bits = new BitWriter();
   bits.write(0, 4);
@@ -317,8 +319,8 @@ function makeSps(
   bits.expGolomb(spsId);
   bits.expGolomb(chromaFormat);
   if (chromaFormat === 3) bits.write(0, 1);
-  bits.expGolomb(1_920);
-  bits.expGolomb(1_080);
+  bits.expGolomb(width);
+  bits.expGolomb(height);
   bits.write(0, 1);
   bits.expGolomb(bitDepthLumaMinus8);
   bits.expGolomb(bitDepthChromaMinus8);
@@ -351,3 +353,121 @@ class BitWriter {
     return result;
   }
 }
+
+test("HEVC replaces the decoder when unflagged SPS dimensions change and fences old callbacks", async (t) => {
+  type Frame = {
+    width: number;
+    height: number;
+    displayWidth: number;
+    displayHeight: number;
+    close(): void;
+  };
+  type Callbacks = { output(frame: Frame): void; error(error: Error): void };
+  const previousDecoder = Object.getOwnPropertyDescriptor(globalThis, "VideoDecoder");
+  const previousChunk = Object.getOwnPropertyDescriptor(globalThis, "EncodedVideoChunk");
+  t.after(() => {
+    restoreGlobal("VideoDecoder", previousDecoder);
+    restoreGlobal("EncodedVideoChunk", previousChunk);
+  });
+  const instances: FakeDecoder[] = [];
+  class FakeDecoder {
+    state: "unconfigured" | "configured" | "closed" = "unconfigured";
+    decodeQueueSize = 0;
+    configuration: Record<string, unknown> | null = null;
+    submitted = 0;
+    callbacks: Callbacks;
+    constructor(callbacks: Callbacks) {
+      this.callbacks = callbacks;
+      instances.push(this);
+    }
+    configure(configuration: Record<string, unknown>): void {
+      this.configuration = configuration;
+      this.state = "configured";
+    }
+    decode(): void {
+      this.submitted += 1;
+    }
+    close(): void {
+      this.state = "closed";
+    }
+  }
+  Object.defineProperty(globalThis, "VideoDecoder", { configurable: true, value: FakeDecoder });
+  Object.defineProperty(globalThis, "EncodedVideoChunk", { configurable: true, value: class {} });
+  const errors: Error[] = [];
+  const presented: Frame[] = [];
+  const decoder = new HEVCDecoder(
+    (frame) => {
+      presented.push(frame);
+    },
+    (error) => errors.push(error),
+  );
+  t.after(() => decoder.close());
+  const vps = hevcVps(0),
+    pps = hevcPps(0, 0);
+  const initialSps = makeSps(
+    1,
+    [0x60, 0, 0, 0],
+    [0x90, 0, 0, 0, 0, 0],
+    120,
+    1,
+    0,
+    0,
+    false,
+    0,
+    960,
+    600,
+  );
+  const resizedSps = makeSps(
+    1,
+    [0x60, 0, 0, 0],
+    [0x90, 0, 0, 0, 0, 0],
+    120,
+    1,
+    0,
+    0,
+    false,
+    0,
+    1024,
+    640,
+  );
+  const initial = annexBPayload(vps, initialSps, pps, hevcNal(19));
+  decoder.decode(initial, 0);
+  decoder.decode(initial, 0);
+  assert.equal(instances.length, 1, "identical parameter sets must not restart decoding");
+  assert.equal(instances[0]!.submitted, 2);
+  let discarded = 0;
+  const oldFrame = {
+    width: 960,
+    height: 600,
+    displayWidth: 960,
+    displayHeight: 600,
+    close: () => {
+      discarded += 1;
+    },
+  };
+  instances[0]!.callbacks.output(oldFrame);
+  decoder.decode(annexBPayload(vps, resizedSps, pps), 0);
+  decoder.decode(annexBPayload(hevcNal(1)), 0);
+  assert.equal(instances[0]!.submitted, 2, "changed configuration must wait for IRAP");
+  decoder.decode(annexBPayload(hevcNal(19)), 0);
+  assert.equal(instances.length, 2);
+  assert.equal(instances[0]!.state, "closed");
+  assert.deepEqual(
+    instances[1]!.configuration?.description,
+    hevcDescription([escapeNal(vps)], [escapeNal(resizedSps)], [escapeNal(pps)]),
+  );
+  instances[0]!.callbacks.output(oldFrame);
+  instances[0]!.callbacks.error(new Error("stale decoder error"));
+  await Promise.resolve();
+  assert.equal(discarded, 2, "late and queued old output must be discarded");
+  assert.equal(presented.length, 0);
+  assert.deepEqual(errors, []);
+  decoder.decode(initial, 0);
+  assert.equal(instances.length, 3, "shrinking must rebuild the original configuration too");
+  assert.deepEqual(
+    instances[2]!.configuration?.description,
+    hevcDescription([escapeNal(vps)], [escapeNal(initialSps)], [escapeNal(pps)]),
+  );
+  assert.doesNotThrow(() => decoder.decode(initial, 2));
+  assert.equal(instances.length, 4, "explicit host context resets remain supported");
+});

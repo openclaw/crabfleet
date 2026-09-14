@@ -2,6 +2,7 @@ package rfb
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/binary"
 	"errors"
 
@@ -30,6 +31,7 @@ func encodeVideoRectangle(ctx context.Context, config SessionConfig, e Encodings
 				return nil, err
 			}
 			p = binary.BigEndian.AppendUint32(p, uint32(len(payload)))
+			// Decoder reset flags are applied by the per-viewer delivery state.
 			p = binary.BigEndian.AppendUint32(p, 0)
 			return append(p, payload...), nil
 		}
@@ -55,4 +57,86 @@ func encodeVideoRectangle(ctx context.Context, config SessionConfig, e Encodings
 		}
 	}
 	return p, nil
+}
+
+// Decoder context belongs to a viewer, even when its encoder is shared. Only
+// commit a prepared context after its complete framebuffer update was sent.
+type videoContext struct {
+	encoding      int32
+	width, height uint16
+	parameters    [sha256.Size]byte
+}
+
+type videoSession struct {
+	delivered    videoContext
+	resetPending bool
+}
+
+func (session *videoSession) prepare(rectangle []byte) videoContext {
+	next := videoContext{encoding: int32(binary.BigEndian.Uint32(rectangle[8:])), width: binary.BigEndian.Uint16(rectangle[4:]), height: binary.BigEndian.Uint16(rectangle[6:])}
+	if next.encoding == EncodingH264 || next.encoding == EncodingHEVC {
+		next.parameters = videoParameterFingerprint(rectangle[20:], next.encoding)
+		if session.resetPending || next != session.delivered {
+			binary.BigEndian.PutUint32(rectangle[16:], binary.BigEndian.Uint32(rectangle[16:])|0x2)
+		}
+	}
+	return next
+}
+
+func (session *videoSession) sent(next videoContext) {
+	session.delivered = next
+	session.resetPending = false
+}
+
+// Independent encoder frames repeat their parameter sets. Fingerprint only
+// those NAL units so pixel content and access-unit delimiters do not reset a
+// decoder, while a same-size encoder/backend change reaches every viewer.
+func videoParameterFingerprint(payload []byte, encoding int32) [sha256.Size]byte {
+	fingerprint := sha256.New()
+	start := -1
+	appendParameters := func(end int) {
+		if start < 0 || start >= end {
+			return
+		}
+		for end > start && payload[end-1] == 0 {
+			end--
+		}
+		if start >= end {
+			return
+		}
+		nalType := payload[start] & 0x1f
+		parameter := nalType == 7 || nalType == 8
+		if encoding == EncodingHEVC {
+			nalType = (payload[start] >> 1) & 0x3f
+			parameter = nalType == 32 || nalType == 33 || nalType == 34
+		}
+		if !parameter {
+			return
+		}
+		var length [4]byte
+		binary.BigEndian.PutUint32(length[:], uint32(end-start))
+		_, _ = fingerprint.Write(length[:])
+		_, _ = fingerprint.Write(payload[start:end])
+	}
+	for i := 0; i+2 < len(payload); i++ {
+		if payload[i] != 0 || payload[i+1] != 0 {
+			continue
+		}
+		prefix := 0
+		if payload[i+2] == 1 {
+			prefix = 3
+		} else if i+3 < len(payload) && payload[i+2] == 0 && payload[i+3] == 1 {
+			prefix = 4
+		}
+		if prefix == 0 {
+			continue
+		}
+		appendParameters(i)
+		start = i + prefix
+		i = start - 1
+	}
+	appendParameters(len(payload))
+	var result [sha256.Size]byte
+	copy(result[:], fingerprint.Sum(nil))
+	return result
 }

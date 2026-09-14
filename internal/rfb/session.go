@@ -266,6 +266,7 @@ func messageLoop(ctx context.Context, connection net.Conn, config SessionConfig,
 	var encodings Encodings
 	var negotiated bool
 	var lastCursorShape *connect.Cursor
+	var videoState videoSession
 	pressedKeys := make(map[uint32]struct{})
 	var lastPointer connect.PointerEvent
 	defer func() { releaseInput(config.Backend, pressedKeys, lastPointer) }()
@@ -403,6 +404,7 @@ func messageLoop(ctx context.Context, connection net.Conn, config SessionConfig,
 					return err
 				}
 				layoutSent = true
+				videoState.resetPending = true
 			}
 			layout = nextLayout
 			lastDesktopRevision = frame.DesktopRevision
@@ -411,6 +413,7 @@ func messageLoop(ctx context.Context, connection net.Conn, config SessionConfig,
 			if err != nil {
 				return err
 			}
+			nextVideoContext := videoState.prepare(video)
 			rectangles := [][]byte{video}
 			var nextCursorShape *connect.Cursor
 			if source, ok := config.Backend.(connect.CursorCapturer); ok && encodings.cursorEncoding() != 0 {
@@ -454,6 +457,7 @@ func messageLoop(ctx context.Context, connection net.Conn, config SessionConfig,
 				}
 				continue
 			}
+			videoState.sent(nextVideoContext)
 			if nextCursorShape != nil {
 				lastCursorShape = nextCursorShape
 			}
@@ -552,6 +556,9 @@ func messageLoop(ctx context.Context, connection net.Conn, config SessionConfig,
 				return err
 			}
 			layoutSent = true
+			if status == 0 {
+				videoState.resetPending = true
+			}
 			lastCursorShape = nil
 		case 202:
 			if !encodings.FileSharing || config.SharedFolder == nil {
