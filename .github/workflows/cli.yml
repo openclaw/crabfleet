@@ -93,13 +93,18 @@ jobs:
     timeout-minutes: 15
     steps:
       - name: Install desktop test dependencies
-        run: pacman -Syu --noconfirm --needed git go gcc sway wayvnc wev wl-clipboard ffmpeg dbus pulseaudio
+        run: pacman -Syu --noconfirm --needed git go gcc libcap sway wayvnc wev wl-clipboard ffmpeg dbus pulseaudio
 
       - name: Check out
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - name: Prepare unprivileged desktop user
+      - name: Prepare unprivileged headless desktop
         run: |
+          # Arch grants Sway a realtime capability excluded by Docker's bounding set.
+          # Headless capture needs no capability; leaving it set prevents exec.
+          if [ -n "$(getcap /usr/bin/sway)" ]; then
+            setcap -r /usr/bin/sway
+          fi
           useradd --create-home proof
           chown -R proof:proof "$GITHUB_WORKSPACE"
 
