@@ -9,7 +9,8 @@ const workflow = await readFile(
 
 test("CodeQL covers every first-party language with its required build mode", () => {
   assert.match(workflow, /- actions\s+- javascript-typescript/);
-  assert.match(workflow, /languages: go\s+build-mode: autobuild/);
+  assert.match(workflow, /languages: go\s+build-mode: manual/);
+  assert.match(workflow, /run: go build \.\/\.\.\./);
   assert.doesNotMatch(workflow, /github\/codeql-action\/autobuild@/);
   assert.match(workflow, /languages: swift\s+build-mode: manual/);
   assert.match(

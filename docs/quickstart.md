@@ -16,11 +16,10 @@ If you already have Crabfleet installed, continue to the next section. Source bu
 ```sh
 pnpm install --frozen-lockfile
 CODE_SIGN_IDENTITY="Developer ID Application: OpenClaw Foundation (FWJYW4S8P8)" pnpm macos:bundle
-ditto macos/CrabfleetMac/.build/Crabfleet.app /Applications/Crabfleet.app
-open /Applications/Crabfleet.app
+open -R macos/CrabfleetMac/.build/Crabfleet.app
 ```
 
-The example uses the maintainer's signing identity. Substitute your own real Developer ID for local builds. Quit an existing copy before installing and keep the same signing identity and `/Applications/Crabfleet.app` path across updates so screen-capture, input, and Keychain access retain a stable app identity.
+The example uses the maintainer's signing identity. Substitute your own real Developer ID for local builds. Quit any running copy, drag the revealed app into **Applications** in Finder, and choose **Replace** if prompted. Open `/Applications/Crabfleet.app` after installation. Replace the entire bundle on updates so removed files do not linger; keep the same signing identity and installation path so screen-capture, input, and Keychain access retain a stable app identity.
 
 ## Connect from a Mac
 
