@@ -60,7 +60,6 @@ jobs:
           pnpm install --frozen-lockfile
           node --version
           pnpm --version
-          pnpm --version
 
       - name: Mark Crabbox ready
         shell: bash

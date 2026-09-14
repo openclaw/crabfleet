@@ -41,6 +41,8 @@ A trusted proxy must strip caller-supplied identity assertions. Pass the exact n
 
 ## Deploy
 
+Build from a checkout path without a literal `#`; Vite cannot reliably package the browser audio worklet from that path.
+
 ```sh
 pnpm install --frozen-lockfile
 pnpm check
@@ -49,6 +51,8 @@ pnpm deploy
 ```
 
 `CLOUDFLARE_API_TOKEN` supplies deployment and D1 migration access. `CLOUDFLARE_DNS_API_TOKEN` is required when converging the configured app, product, and docs domains. Domain setup no longer manages an SSH gateway.
+
+Each Cloudflare domain-management request has a 30-second deadline, including its response body. If a request times out, rerun domain setup to reconcile any partial changes.
 
 Pushes to main run the desktop deployment workflow. `pnpm deploy:product` deploys only the docs router. These commands publish live infrastructure.
 

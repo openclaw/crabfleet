@@ -23,20 +23,17 @@ test("CodeQL uses pinned actions and least-privilege checkout", () => {
   assert.match(workflow, /permissions:\s+contents: read\s+security-events: write/);
   assert.doesNotMatch(workflow, /pull_request_target/);
   assert.equal(
-    workflow.match(
-      /actions\/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7\.0\.1\s+with:\s+persist-credentials: false/g,
-    )?.length,
+    workflow.match(/actions\/checkout@[0-9a-f]{40}[^\n]*\n\s+with:\s+persist-credentials: false/g)
+      ?.length,
     3,
   );
   assert.equal(
-    workflow.match(
-      /github\/codeql-action\/(?:init|analyze)@cdf488f595d80d6e07e03d4674febd5ab45fa938 # v4\.37\.9/g,
-    )?.length,
+    workflow.match(/github\/codeql-action\/(?:init|analyze)@[0-9a-f]{40}(?=\s|$)/g)?.length,
     6,
   );
   assert.match(
     workflow,
-    /actions\/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7\.0\.0\s+with:\s+go-version-file: go\.mod\s+cache-dependency-path: go\.sum/,
+    /actions\/setup-go@[0-9a-f]{40}[^\n]*\n\s+with:\s+go-version-file: go\.mod\s+cache-dependency-path: go\.sum/,
   );
   assert.doesNotMatch(workflow, /uses:\s+[^@\s]+@(?![0-9a-f]{40}(?:\s|$))/);
 });

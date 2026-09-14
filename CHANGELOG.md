@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Reject checkout paths containing `#` before generating an incomplete browser audio bundle, and bound Cloudflare domain-management requests to 30 seconds.
 - Fix browser asset generation on Windows and in checkout paths containing spaces, thanks @MohammedAlkindi (#130).
 - Update desktop documentation with platform-specific setup, direct-versus-relay connection guidance, Windows connector limits, and the current discovery API; remove workspace-era navigation and installation hints, and emit the docs 404 page at the correct path.
 - Redesign the public website, documentation, sign-in, and desktop companion with responsive layouts and a shared visual system; put mobile authentication first, retain failed token input, and make connector authorization, completion, and recovery pages work on phone screens.
