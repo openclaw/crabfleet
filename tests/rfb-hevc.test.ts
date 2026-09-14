@@ -7,7 +7,6 @@ import {
   hevcCodecString,
   hevcDescription,
   hevcSampleUnits,
-  hevcUnits,
 } from "../src/app/rfb/hevc.ts";
 
 test("HEVC decoder resets and requests an IRAP after queue saturation", async (t) => {
@@ -245,6 +244,10 @@ function hvcCArrayCounts(description: Uint8Array): number[] {
 
 function hevcNal(type: number, payload: number[] = [0x80]): Uint8Array {
   return new Uint8Array([type << 1, 1, ...payload]);
+}
+
+function hevcUnits(data: readonly Uint8Array[]) {
+  return data.map((unit) => ({ type: (unit[0]! >> 1) & 0x3f, data: unit }));
 }
 
 function annexBPayload(...units: Uint8Array[]): Uint8Array {

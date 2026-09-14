@@ -321,8 +321,7 @@ export class RemoteAudioPlayer {
     this.#closed = true;
     this.#queue.setMuted(true);
     this.#queue.close();
-    this.#decoder?.close();
-    this.#decoder = null;
+    this.#stop();
     this.#worklet?.disconnect();
     this.#worklet = null;
     this.#gain?.disconnect();
@@ -412,7 +411,13 @@ export class RemoteAudioPlayer {
     const Decoder = audioDecoderAPI();
     if (!Decoder) throw new Error("WebCodecs AudioDecoder is unavailable");
     this.#decoder = new Decoder({
-      output: (data) => this.#output(data),
+      output: (data) => {
+        if (generation !== this.#decoderGeneration) {
+          data.close();
+          return;
+        }
+        this.#output(data);
+      },
       error: (error) => {
         if (generation === this.#decoderGeneration) this.#disable(error);
       },

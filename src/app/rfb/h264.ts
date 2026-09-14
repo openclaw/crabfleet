@@ -1,65 +1,20 @@
+import { annexBToLengthPrefixed, parseAnnexB } from "./annex-b.ts";
 import {
-  annexBToLengthPrefixed,
-  parseAnnexB as parseSharedAnnexB,
-  type AnnexBNalUnit,
-} from "./annex-b.ts";
-
-export type { AnnexBNalUnit } from "./annex-b.ts";
-
-export interface BrowserVideoFrame {
-  width: number;
-  height: number;
-  displayWidth: number;
-  displayHeight: number;
-  close(): void;
-}
-
-interface BrowserVideoDecoder {
-  readonly state: "unconfigured" | "configured" | "closed";
-  configure(config: Record<string, unknown>): void;
-  decode(chunk: unknown): void;
-  reset(): void;
-  close(): void;
-}
-
-interface VideoDecoderAPI {
-  new (callbacks: {
-    output(frame: BrowserVideoFrame): void;
-    error(error: Error): void;
-  }): BrowserVideoDecoder;
-  isConfigSupported(config: Record<string, unknown>): Promise<{ supported?: boolean }>;
-}
-
-interface EncodedVideoChunkAPI {
-  new (init: {
-    type: "key" | "delta";
-    timestamp: number;
-    duration: number;
-    data: Uint8Array;
-  }): unknown;
-}
-
-function videoDecoderAPI(): VideoDecoderAPI | undefined {
-  return (globalThis as unknown as { VideoDecoder?: VideoDecoderAPI }).VideoDecoder;
-}
-
-function encodedVideoChunkAPI(): EncodedVideoChunkAPI {
-  const api = (globalThis as unknown as { EncodedVideoChunk?: EncodedVideoChunkAPI })
-    .EncodedVideoChunk;
-  if (!api) throw new Error("WebCodecs EncodedVideoChunk is unavailable");
-  return api;
-}
-
-export function parseAnnexB(data: Uint8Array): AnnexBNalUnit[] {
-  return parseSharedAnnexB(data, "h264");
-}
-
-export function annexBToAvcc(units: AnnexBNalUnit[]): Uint8Array {
-  return annexBToLengthPrefixed(units);
-}
+  encodedVideoChunkAPI,
+  supportsVideoCodec,
+  videoDecoderAPI,
+  type BrowserVideoDecoder,
+  type BrowserVideoFrame,
+} from "./video.ts";
 
 export function avcDescription(sps: Uint8Array, pps: Uint8Array): Uint8Array {
-  if (sps.byteLength < 4 || pps.byteLength < 1) throw new Error("invalid H.264 parameter sets");
+  if (
+    sps.byteLength < 4 ||
+    sps.byteLength > 0xffff ||
+    pps.byteLength < 1 ||
+    pps.byteLength > 0xffff
+  )
+    throw new Error("invalid H.264 parameter sets");
   const result = new Uint8Array(11 + sps.byteLength + pps.byteLength);
   const view = new DataView(result.buffer);
   result.set([1, sps[1]!, sps[2]!, sps[3]!, 0xff, 0xe1], 0);
@@ -71,18 +26,8 @@ export function avcDescription(sps: Uint8Array, pps: Uint8Array): Uint8Array {
   return result;
 }
 
-export async function supportsWebCodecsH264(): Promise<boolean> {
-  const api = videoDecoderAPI();
-  if (!api) return false;
-  try {
-    const result = await api.isConfigSupported({
-      codec: "avc1.42E01F",
-      optimizeForLatency: true,
-    });
-    return result.supported === true;
-  } catch {
-    return false;
-  }
+export function supportsWebCodecsH264(): Promise<boolean> {
+  return supportsVideoCodec("avc1.42E01F");
 }
 
 export class H264Decoder {
@@ -102,13 +47,13 @@ export class H264Decoder {
   ) {
     this.#output = output;
     this.#error = error;
-    this.#createDecoder(error);
+    this.#createDecoder();
   }
 
   decode(payload: Uint8Array, flags: number): Promise<void> {
     // The Crabfleet host marks decoder-context resets with bit 0x2.
     if (flags & 0x2) this.reset();
-    const units = parseAnnexB(payload);
+    const units = parseAnnexB(payload, "h264");
     for (const unit of units) {
       if (unit.type === 7) {
         this.#configurationDirty ||= !sameParameterSet(this.#sps, unit.data);
@@ -126,7 +71,7 @@ export class H264Decoder {
       this.#decoderGeneration += 1;
       this.#decoder.close();
       this.#rejectPending(new Error("H.264 decoder configuration changed"));
-      this.#createDecoder(this.#error);
+      this.#createDecoder();
     }
     if (this.#decoder!.state === "unconfigured") this.#configure();
     this.#decoder!.decode(
@@ -134,7 +79,7 @@ export class H264Decoder {
         type: key ? "key" : "delta",
         timestamp: this.#timestamp,
         duration: 16_667,
-        data: annexBToAvcc(units),
+        data: annexBToLengthPrefixed(units),
       }),
     );
     this.#timestamp += 16_667;
@@ -148,7 +93,7 @@ export class H264Decoder {
     this.#rejectPending(new Error("H.264 decoder context reset"));
     this.#sps = null;
     this.#pps = null;
-    this.#createDecoder(this.#error);
+    this.#createDecoder();
   }
 
   close(): void {
@@ -157,7 +102,7 @@ export class H264Decoder {
     this.#rejectPending(new Error("H.264 decoder closed"));
   }
 
-  #createDecoder(error: (error: Error) => void): void {
+  #createDecoder(): void {
     const Decoder = videoDecoderAPI();
     if (!Decoder) throw new Error("WebCodecs VideoDecoder is unavailable");
     const generation = ++this.#decoderGeneration;
@@ -187,7 +132,7 @@ export class H264Decoder {
       },
       error: (decodeError) => {
         if (generation !== this.#decoderGeneration) return;
-        error(decodeError);
+        this.#error(decodeError);
         this.#rejectPending(decodeError);
       },
     });

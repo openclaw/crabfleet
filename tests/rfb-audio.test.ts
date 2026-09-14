@@ -85,6 +85,104 @@ test("closing during AudioWorklet initialization cancels the orphan graph", asyn
   assert.equal(nodeCreations, 0);
 });
 
+test("retired audio decoders cannot publish PCM or errors after reconfiguration, stop, or close", async (t) => {
+  const descriptors = saveGlobals("AudioDecoder", "AudioContext", "AudioWorkletNode");
+  t.after(() => restoreGlobals(descriptors));
+  const messages: unknown[] = [];
+  const errors: Error[] = [];
+  const instances: FakeAudioDecoder[] = [];
+  const data = {
+    numberOfFrames: 1,
+    numberOfChannels: 1,
+    copies: 0,
+    closes: 0,
+    copyTo(plane: Float32Array) {
+      this.copies += 1;
+      plane[0] = 0.5;
+    },
+    close() {
+      this.closes += 1;
+    },
+  };
+  class FakeAudioDecoder {
+    state = "unconfigured";
+    readonly callbacks: { output(value: typeof data): void; error(error: Error): void };
+    constructor(callbacks: { output(value: typeof data): void; error(error: Error): void }) {
+      this.callbacks = callbacks;
+      instances.push(this);
+    }
+    configure() {
+      this.state = "configured";
+    }
+    close() {
+      this.state = "closed";
+    }
+  }
+  class FakeAudioContext {
+    state = "running";
+    destination = {};
+    audioWorklet = { addModule: async () => {} };
+    createGain() {
+      return { gain: { value: 0 }, connect() {}, disconnect() {} };
+    }
+    async close() {}
+  }
+  class FakeAudioWorkletNode {
+    port = { onmessage: null, postMessage: (message: unknown) => messages.push(message) };
+    connect() {}
+    disconnect() {}
+  }
+  for (const [name, value] of [
+    ["AudioDecoder", FakeAudioDecoder],
+    ["AudioContext", FakeAudioContext],
+    ["AudioWorkletNode", FakeAudioWorkletNode],
+  ] as const)
+    Object.defineProperty(globalThis, name, { value, configurable: true });
+  const player = new RemoteAudioPlayer(
+    () => {},
+    (error) => errors.push(error),
+  );
+  t.after(() => player.close());
+  await player.enableFromGesture();
+  const configure = async () => {
+    player.receive({
+      kind: "config",
+      channels: 1,
+      sampleRate: 48_000,
+      cookie: new Uint8Array([0x11, 0x90]),
+    });
+    await new Promise<void>((resolve) => queueMicrotask(resolve));
+    return instances.at(-1)!;
+  };
+  let current = await configure();
+  current.callbacks.output(data);
+  assert.equal(data.copies, 1);
+  assert.equal(data.closes, 1);
+  assert.deepEqual(messages.at(-1), {
+    kind: "pcm",
+    channels: 1,
+    samples: new Float32Array([0.5]).buffer,
+  });
+
+  for (const transition of ["reconfigure", "stop", "close"]) {
+    const retired = current;
+    if (transition === "reconfigure") current = await configure();
+    else if (transition === "stop") {
+      player.receive({ kind: "stop" });
+      await new Promise<void>((resolve) => queueMicrotask(resolve));
+    } else await player.close();
+    const count = messages.length;
+    const closed = data.closes;
+    retired.callbacks.output(data);
+    retired.callbacks.error(new Error(`late error after ${transition}`));
+    assert.equal(data.copies, 1, transition);
+    assert.equal(data.closes, closed + 1, transition);
+    assert.equal(messages.length, count, transition);
+    assert.deepEqual(errors, [], transition);
+    if (transition === "stop") current = await configure();
+  }
+});
+
 test("CAF1 parser matches host config, packet, and stop encoders byte-for-byte", async () => {
   const config = new Uint8Array([200, 1, 1, 2, 0, 0, 0xbb, 0x80, 0, 0, 0, 2, 0x11, 0x90]);
   const packet = new Uint8Array([200, 2, 0, 0, 0xff, 0xff, 0xff, 0xfe, 0, 0, 0, 2, 0xaa, 0xbb]);

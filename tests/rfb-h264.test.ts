@@ -1,13 +1,9 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import {
-  H264Decoder,
-  annexBToAvcc,
-  avcDescription,
-  parseAnnexB,
-  type BrowserVideoFrame,
-} from "../src/app/rfb/h264.ts";
+import { annexBToLengthPrefixed, parseAnnexB } from "../src/app/rfb/annex-b.ts";
+import { H264Decoder, avcDescription } from "../src/app/rfb/h264.ts";
+import type { BrowserVideoFrame } from "../src/app/rfb/video.ts";
 
 test("H.264 rendering exceptions reject decoding instead of stalling fallback", async () => {
   const previousDecoder = Object.getOwnPropertyDescriptor(globalThis, "VideoDecoder");
@@ -68,13 +64,13 @@ test("Annex-B parser accepts three- and four-byte start codes", () => {
   const payload = new Uint8Array([
     0, 0, 0, 1, 0x67, 0x42, 0, 0x1f, 0xaa, 0, 0, 1, 0x68, 0xbb, 0, 0, 0, 1, 0x65, 1, 2, 3,
   ]);
-  const units = parseAnnexB(payload);
+  const units = parseAnnexB(payload, "h264");
   assert.deepEqual(
     units.map((unit) => unit.type),
     [7, 8, 5],
   );
   assert.deepEqual(
-    [...annexBToAvcc(units)],
+    [...annexBToLengthPrefixed(units)],
     [0, 0, 0, 5, 0x67, 0x42, 0, 0x1f, 0xaa, 0, 0, 0, 2, 0x68, 0xbb, 0, 0, 0, 4, 0x65, 1, 2, 3],
   );
 });
@@ -88,12 +84,19 @@ test("AVC description carries SPS and PPS with four-byte NAL lengths", () => {
   );
 });
 
+test("AVC description rejects parameter sets that do not fit its 16-bit lengths", () => {
+  const sps = new Uint8Array([0x67, 0x42, 0, 0x1f]);
+  const pps = new Uint8Array([0x68]);
+  assert.throws(() => avcDescription(new Uint8Array(65_536), pps), /invalid H.264 parameter sets/);
+  assert.throws(() => avcDescription(sps, new Uint8Array(65_536)), /invalid H.264 parameter sets/);
+});
+
 test("Annex-B parser rejects pathological NAL counts", () => {
   const payload = new Uint8Array(4 * 1_026);
   for (let offset = 0; offset < payload.byteLength; offset += 4) {
     payload.set([0, 0, 1, 0x09], offset);
   }
-  assert.throws(() => parseAnnexB(payload), /too many NAL units/);
+  assert.throws(() => parseAnnexB(payload, "h264"), /too many NAL units/);
 });
 
 test("H.264 replaces changed unflagged SPS configuration and ignores retired decoder callbacks", async (t) => {

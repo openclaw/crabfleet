@@ -57,10 +57,19 @@ function formatFileSize(bytes) {
   return `${(bytes / (1024 * 1024)).toFixed(1)} MiB`;
 }
 
+function savedQuality(hostID) {
+  try {
+    return loadViewerQuality(window.sessionStorage, hostID);
+  } catch {
+    return "auto";
+  }
+}
+
 export function DesktopViewer({ host, onExit }) {
   const canvasRef = useRef(null);
   const stageRef = useRef(null);
   const sessionRef = useRef(null);
+  const sessionLifetimeRef = useRef(null);
   const readyRef = useRef(false);
   const pressedKeysRef = useRef(new Map());
   const pointerRef = useRef({ x: 0, y: 0, buttonsDown: false });
@@ -68,6 +77,7 @@ export function DesktopViewer({ host, onExit }) {
   const audioRef = useRef(null);
   const uploadInputRef = useRef(null);
   const audioEnabledRef = useRef(false);
+  const fileRequestRef = useRef(null);
   const [connectionState, setConnectionState] = useState("Preparing decoder");
   const [serverName, setServerName] = useState(host?.name || host?.id || "Desktop");
   const [codec, setCodec] = useState("Detecting");
@@ -78,9 +88,7 @@ export function DesktopViewer({ host, onExit }) {
     jitterMs: 0,
   });
   const [statsVisible, setStatsVisible] = useState(false);
-  const [qualityMode, setQualityMode] = useState(() =>
-    loadViewerQuality(sessionStorage, host?.id || "unknown"),
-  );
+  const [qualityMode, setQualityMode] = useState(() => savedQuality(host?.id || "unknown"));
   const [audioAvailable, setAudioAvailable] = useState(false);
   const [audioMuted, setAudioMuted] = useState(true);
   const [manualClipboard, setManualClipboard] = useState("");
@@ -97,6 +105,12 @@ export function DesktopViewer({ host, onExit }) {
   const [fileEntries, setFileEntries] = useState([]);
   const [fileStatus, setFileStatus] = useState("");
   const [fileProgress, setFileProgress] = useState(null);
+
+  const captureSessionLifetime = () => {
+    // Late UI work must not apply to the next host, even after a reconnect.
+    const lifetime = sessionLifetimeRef.current;
+    return () => lifetime !== null && sessionLifetimeRef.current === lifetime;
+  };
 
   const noteLocalPointer = (point, convergedRemote = true) => {
     setLocalPointer(point);
@@ -127,7 +141,7 @@ export function DesktopViewer({ host, onExit }) {
   };
 
   useEffect(() => {
-    if (host?.id) setQualityMode(loadViewerQuality(sessionStorage, host.id));
+    if (host?.id) setQualityMode(savedQuality(host.id));
   }, [host?.id]);
 
   useEffect(() => {
@@ -148,6 +162,7 @@ export function DesktopViewer({ host, onExit }) {
 
   useEffect(() => {
     if (!host || !canvasRef.current) return undefined;
+    sessionLifetimeRef.current = {};
     audioEnabledRef.current = false;
     setAudioMuted(true);
     setAudioAvailable(false);
@@ -161,12 +176,22 @@ export function DesktopViewer({ host, onExit }) {
     setFileEntries([]);
     setFileStatus("");
     setFileProgress(null);
+    setManualClipboard("");
+    setClipboardNotice("");
     let disposed = false;
     let h264Decoder = null;
     let hevcDecoder = null;
     let client = null;
     const renderer = new CanvasRenderer(canvasRef.current);
     const statsWindow = new ViewerStatsWindow(performance.now());
+    const presentFrame = async (frame) => {
+      if (disposed) {
+        frame.close();
+        return;
+      }
+      await renderer.present(frame);
+      if (!disposed) statsWindow.recordDecodedFrame(performance.now());
+    };
     const socketProtocol = location.protocol === "https:" ? "wss:" : "ws:";
     const socket = new WebSocket(
       `${socketProtocol}//${location.host}/api/desktop-hosts/${encodeURIComponent(host.id)}/relay/viewer`,
@@ -189,38 +214,37 @@ export function DesktopViewer({ host, onExit }) {
       setCodec(hevc ? "HEVC / WebCodecs" : h264 ? "H.264 / WebCodecs" : "JPEG / Tight");
       if (hevc) {
         hevcDecoder = new HEVCDecoder(
-          async (frame) => {
-            await renderer.present(frame);
-            statsWindow.recordDecodedFrame(performance.now());
-          },
+          presentFrame,
           (error) => {
+            if (disposed) return;
             if (client) client.reportDecoderFailure("hevc", error);
             else setConnectionState(`Decoder error: ${error.message}`);
           },
-          () => client?.requestCodecRefresh(),
+          () => {
+            if (!disposed) client?.requestCodecRefresh();
+          },
         );
       }
       if (h264) {
-        h264Decoder = new H264Decoder(
-          async (frame) => {
-            await renderer.present(frame);
-            statsWindow.recordDecodedFrame(performance.now());
-          },
-          (error) => {
-            if (client) client.reportDecoderFailure("h264", error);
-            else setConnectionState(`Decoder error: ${error.message}`);
-          },
-        );
+        h264Decoder = new H264Decoder(presentFrame, (error) => {
+          if (disposed) return;
+          if (client) client.reportDecoderFailure("h264", error);
+          else setConnectionState(`Decoder error: ${error.message}`);
+        });
       }
       if (audio) {
         const player = new RemoteAudioPlayer(
-          (audioStats) =>
-            setStats((current) => ({
-              ...current,
-              droppedAudio: audioStats.droppedPackets,
-              jitterMs: audioStats.jitterDepthMs,
-            })),
-          (error) => setConnectionState(`Audio disabled: ${error.message}`),
+          (audioStats) => {
+            if (!disposed)
+              setStats((current) => ({
+                ...current,
+                droppedAudio: audioStats.droppedPackets,
+                jitterMs: audioStats.jitterDepthMs,
+              }));
+          },
+          (error) => {
+            if (!disposed) setConnectionState(`Audio disabled: ${error.message}`);
+          },
         );
         audioRef.current = player;
         player.setMuted(true);
@@ -232,14 +256,18 @@ export function DesktopViewer({ host, onExit }) {
         h264,
         chroma444: hevc && rext,
         audio,
-        qualityMode: loadViewerQuality(sessionStorage, host.id),
-        onState: setConnectionState,
+        qualityMode: savedQuality(host.id),
+        onState: (state) => {
+          if (!disposed) setConnectionState(state);
+        },
         onReady: () => {
+          if (disposed) return;
           readyRef.current = true;
           const pending = pendingResizeRef.current;
           if (pending) sessionRef.current?.resize(pending.width, pending.height);
         },
         onServerInit: (info) => {
+          if (disposed) return;
           setServerName(info.name);
           setCodec(
             info.codec === "HEVC"
@@ -250,8 +278,11 @@ export function DesktopViewer({ host, onExit }) {
           );
           setFramebufferSize({ width: info.width, height: info.height });
         },
-        onResize: (width, height) => setFramebufferSize({ width, height }),
+        onResize: (width, height) => {
+          if (!disposed) setFramebufferSize({ width, height });
+        },
         onCursor: (cursor) => {
+          if (disposed) return;
           const canvas = canvasRef.current;
           if (!canvas || !cursor) {
             if (canvas) canvas.style.cursor = "none";
@@ -262,11 +293,14 @@ export function DesktopViewer({ host, onExit }) {
           const dataURL = cursorDataURL(cursor);
           setCursorImage({ ...cursor, dataURL });
         },
-        onPointerPosition: setRemotePointer,
+        onPointerPosition: (point) => {
+          if (!disposed) setRemotePointer(point);
+        },
         onTraffic: (bytes) => {
           statsWindow.recordTraffic(bytes, performance.now());
         },
         onFrame: async (frame) => {
+          if (disposed) return;
           if (frame.encoding === "hevc") {
             await hevcDecoder.decode(frame.payload, frame.flags);
           } else if (frame.encoding === "h264") {
@@ -275,9 +309,9 @@ export function DesktopViewer({ host, onExit }) {
             const bitmap = await createImageBitmap(
               new Blob([frame.payload], { type: "image/jpeg" }),
             );
-            await renderer.present(bitmap);
-            statsWindow.recordDecodedFrame(performance.now());
+            await presentFrame(bitmap);
           }
+          if (disposed) return;
           setCodec(
             frame.encoding === "hevc"
               ? "HEVC / WebCodecs"
@@ -287,63 +321,72 @@ export function DesktopViewer({ host, onExit }) {
           );
         },
         onAudio: (message) => {
+          if (disposed) return;
           if (message.kind === "config" && audioRef.current) setAudioAvailable(true);
           audioRef.current?.receive(message);
         },
         onClipboard: async (text) => {
+          if (disposed) return;
           setManualClipboard(text);
           try {
             await navigator.clipboard.writeText(text);
-            setClipboardNotice("Remote clipboard copied");
+            if (!disposed) setClipboardNotice("Remote clipboard copied");
           } catch {
-            setClipboardNotice("Remote clipboard ready below");
+            if (!disposed) setClipboardNotice("Remote clipboard ready below");
           }
         },
-        onClipboardError: setClipboardNotice,
+        onClipboardError: (message) => {
+          if (!disposed) setClipboardNotice(message);
+        },
         fileSharing: true,
         onFileSharing: (capability) => {
+          if (disposed) return;
           setFileSharing(capability);
           if (!capability) {
+            fileRequestRef.current = null;
             setFilePanelOpen(false);
             setFileEntries([]);
             return;
           }
-          void client
-            ?.listFiles("")
-            .then(setFileEntries)
-            .catch((error) => setFileStatus(error.message));
+          void loadFiles("");
         },
-        onFileTransferProgress: setFileProgress,
+        onFileTransferProgress: (progress) => {
+          if (!disposed) setFileProgress(progress);
+        },
       });
       sessionRef.current = client;
-      try {
-        await client.start();
-      } finally {
-        if (sessionRef.current === client) {
-          readyRef.current = false;
-          sessionRef.current = null;
-          pressedKeysRef.current.clear();
-        }
-      }
+      await client.start();
     };
 
     let opened = false;
     const onOpen = () => {
       opened = true;
-      void connect().catch((error) => setConnectionState(error.message));
+      void connect()
+        .catch((error) => {
+          if (!disposed) setConnectionState(error.message);
+        })
+        .finally(dispose);
     };
     const onPreOpenError = () => {
-      if (!opened) setConnectionState("Desktop relay connection failed");
+      if (!opened) {
+        setConnectionState("Desktop relay connection failed");
+        dispose();
+      }
     };
     const onPreOpenClose = (event) => {
-      if (!opened)
+      if (!opened) {
         setConnectionState(event.reason || `Desktop relay rejected connection (${event.code})`);
+        dispose();
+      }
     };
     socket.addEventListener("open", onOpen, { once: true });
     socket.addEventListener("error", onPreOpenError);
     socket.addEventListener("close", onPreOpenClose);
-    return () => {
+    const dispose = () => {
+      if (disposed) return;
       disposed = true;
+      sessionLifetimeRef.current = null;
+      fileRequestRef.current = null;
       clearInterval(statsTimer);
       socket.removeEventListener("open", onOpen);
       socket.removeEventListener("error", onPreOpenError);
@@ -356,9 +399,14 @@ export function DesktopViewer({ host, onExit }) {
       stream.close();
       h264Decoder?.close();
       hevcDecoder?.close();
-      void audioRef.current?.close();
+      void audioRef.current?.close().catch(() => {});
       audioRef.current = null;
       audioEnabledRef.current = false;
+      setAudioAvailable(false);
+      setAudioMuted(true);
+      setFileSharing(null);
+      setFilePanelOpen(false);
+      setFileProgress(null);
       renderer.clear();
       if (canvasRef.current) canvasRef.current.style.cursor = "default";
       setCursorImage(null);
@@ -366,6 +414,7 @@ export function DesktopViewer({ host, onExit }) {
       setLocalPointer(null);
       setHasPointerFocus(false);
     };
+    return dispose;
   }, [host?.id]);
 
   useEffect(() => {
@@ -430,30 +479,35 @@ export function DesktopViewer({ host, onExit }) {
       setClipboardNotice("Connect before sending clipboard text");
       return;
     }
+    const isCurrent = captureSessionLifetime();
     try {
       await sessionRef.current.sendClipboardText(manualClipboard);
-      setClipboardNotice("Clipboard sent to desktop");
+      if (isCurrent()) setClipboardNotice("Clipboard sent to desktop");
     } catch (error) {
-      setClipboardNotice(error instanceof Error ? error.message : String(error));
+      if (isCurrent()) setClipboardNotice(error instanceof Error ? error.message : String(error));
     }
   };
 
   const pasteSystemClipboard = async () => {
+    const isCurrent = captureSessionLifetime();
     try {
       const text = await navigator.clipboard.readText();
+      if (!isCurrent()) return;
       setManualClipboard(text);
       setClipboardNotice("System clipboard loaded; press Send to share it");
     } catch {
-      setClipboardNotice("Clipboard permission unavailable; paste into the field");
+      if (isCurrent()) setClipboardNotice("Clipboard permission unavailable; paste into the field");
     }
   };
 
   const toggleAudio = async () => {
     const player = audioRef.current;
     if (!player) return;
+    const isCurrent = captureSessionLifetime();
     try {
       if (!audioEnabledRef.current) {
         await player.enableFromGesture();
+        if (!isCurrent()) return;
         audioEnabledRef.current = true;
       } else {
         audioEnabledRef.current = false;
@@ -462,36 +516,49 @@ export function DesktopViewer({ host, onExit }) {
       player.setMuted(muted);
       setAudioMuted(muted);
     } catch (error) {
-      setConnectionState(error instanceof Error ? error.message : String(error));
+      if (isCurrent()) setConnectionState(error instanceof Error ? error.message : String(error));
     }
   };
 
   const selectQualityMode = (mode) => {
     setQualityMode(mode);
-    saveViewerQuality(sessionStorage, host.id, mode);
+    try {
+      saveViewerQuality(window.sessionStorage, host.id, mode);
+    } catch {}
     sessionRef.current?.setQualityMode(mode);
   };
 
   const loadFiles = async (path) => {
     const session = sessionRef.current;
     if (!session) return;
+    const request = { path };
+    fileRequestRef.current = request;
     setFileStatus("Loading…");
     try {
-      setFileEntries(await session.listFiles(path));
+      const entries = await session.listFiles(path);
+      if (sessionRef.current !== session || fileRequestRef.current !== request) return;
+      setFileEntries(entries);
       setFilePath(path);
       setFileStatus("");
     } catch (error) {
-      setFileStatus(error instanceof Error ? error.message : String(error));
+      if (sessionRef.current === session && fileRequestRef.current === request)
+        setFileStatus(error instanceof Error ? error.message : String(error));
     }
+  };
+
+  const refreshFiles = (path, request) => {
+    if (fileRequestRef.current === request && request?.path === path) return loadFiles(path);
   };
 
   const downloadFile = async (entry) => {
     const session = sessionRef.current;
     if (!session) return;
+    const isCurrent = captureSessionLifetime();
     const path = filePath ? `${filePath}/${entry.name}` : entry.name;
     setFileStatus(`Downloading ${entry.name}…`);
     try {
       const blob = await session.downloadFile(path, entry.size);
+      if (!isCurrent()) return;
       const url = URL.createObjectURL(blob);
       const link = document.createElement("a");
       link.href = url;
@@ -500,34 +567,39 @@ export function DesktopViewer({ host, onExit }) {
       URL.revokeObjectURL(url);
       setFileStatus(`Downloaded ${entry.name}`);
     } catch (error) {
-      setFileStatus(error instanceof Error ? error.message : String(error));
+      if (isCurrent()) setFileStatus(error instanceof Error ? error.message : String(error));
     } finally {
-      setFileProgress(null);
+      if (isCurrent()) setFileProgress(null);
     }
   };
 
   const uploadFiles = async (files) => {
     const session = sessionRef.current;
     if (!session || !fileSharing?.allowWrites) return;
-    let completed = true;
+    const isCurrent = captureSessionLifetime();
+    const listing = fileRequestRef.current;
     for (const file of files) {
       const path = filePath ? `${filePath}/${file.name}` : file.name;
       setFileStatus(`Uploading ${file.name}…`);
       try {
         await session.uploadFile(path, file);
+        if (!isCurrent()) return;
         setFileStatus(`Uploaded ${file.name}`);
       } catch (error) {
-        setFileStatus(error instanceof Error ? error.message : String(error));
-        completed = false;
-        break;
+        if (isCurrent()) setFileStatus(error instanceof Error ? error.message : String(error));
+        return;
       } finally {
-        setFileProgress(null);
+        if (isCurrent()) setFileProgress(null);
       }
     }
-    if (completed) await loadFiles(filePath);
+    if (isCurrent()) await refreshFiles(filePath, listing);
   };
 
   const createDirectory = async () => {
+    const session = sessionRef.current;
+    if (!session || !fileSharing?.allowWrites) return;
+    const isCurrent = captureSessionLifetime();
+    const listing = fileRequestRef.current;
     const name = window.prompt("New folder name");
     if (!name) return;
     if (name.includes("/") || name === "." || name === "..") {
@@ -536,10 +608,10 @@ export function DesktopViewer({ host, onExit }) {
     }
     const path = filePath ? `${filePath}/${name}` : name;
     try {
-      await sessionRef.current?.createDirectory(path);
-      await loadFiles(filePath);
+      await session.createDirectory(path);
+      if (isCurrent()) await refreshFiles(filePath, listing);
     } catch (error) {
-      setFileStatus(error instanceof Error ? error.message : String(error));
+      if (isCurrent()) setFileStatus(error instanceof Error ? error.message : String(error));
     }
   };
 

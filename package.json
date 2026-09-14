@@ -23,6 +23,7 @@
     "macos:test": "pnpm macos:test:vendor && sh macos/CrabfleetMac/scripts/run-tests.sh",
     "macos:test:vendor": "swift test --package-path macos/CrabfleetMac/Vendor/RoyalVNCKit",
     "test": "node --test --experimental-strip-types tests/*.test.ts",
+    "test:browser": "node --test --experimental-strip-types tests/browser/*.test.ts",
     "test:changed": "pnpm run test",
     "test:native": "node scripts/test-native.mjs",
     "build:docs": "node scripts/build-docs-site.mjs"
@@ -36,6 +37,7 @@
     "@preact/preset-vite": "^2.10.6",
     "oxfmt": "^0.65.0",
     "oxlint": "^1.80.0",
+    "playwright": "1.63.0",
     "typescript": "^7.0.2",
     "vite": "^8.2.2",
     "wrangler": "4.116.0"

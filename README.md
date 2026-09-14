@@ -65,6 +65,15 @@ pnpm build:docs
 
 `pnpm check` builds the browser companion, type-checks the desktop backend, and runs lint and format checks. `pnpm test` covers desktop authorization, registration, relays, and browser RFB. `pnpm test:native` runs Go race tests and vet; on macOS it also runs the Swift suites. Use `pnpm format` to apply formatting.
 
+The viewer's interaction, session cleanup, and narrow-layout tests run separately in an isolated Chromium browser. Install its matching browser once, then run the suite:
+
+```sh
+pnpm exec playwright install chromium
+pnpm test:browser
+```
+
+On Linux, use `pnpm exec playwright install --with-deps chromium` if browser system libraries are missing. The Worker CI runs this suite. Fixtures use synthetic desktops and controlled transport/media responses; they do not connect to a live host or your browser profile.
+
 The source is split into `macos/CrabfleetMac` (native viewer and Mac host), `cmd/crabfleet-connect` and `internal` (Go hosts and RFB), and `src` (desktop discovery, authorization, relay, and browser VNC companion).
 
 Deployment configuration and upgrade notes are in the [administration guide](docs/admin.md); the desktop protocol is documented in the [API reference](docs/api.md).

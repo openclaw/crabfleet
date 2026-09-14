@@ -8,32 +8,13 @@ import {
   videoParameterSets,
   type AnnexBNalUnit,
 } from "./annex-b.ts";
-import type { BrowserVideoFrame } from "./h264.ts";
-
-interface BrowserVideoDecoder {
-  readonly state: "unconfigured" | "configured" | "closed";
-  readonly decodeQueueSize: number;
-  configure(config: Record<string, unknown>): void;
-  decode(chunk: unknown): void;
-  close(): void;
-}
-
-interface VideoDecoderAPI {
-  new (callbacks: {
-    output(frame: BrowserVideoFrame): void;
-    error(error: Error): void;
-  }): BrowserVideoDecoder;
-  isConfigSupported(config: Record<string, unknown>): Promise<{ supported?: boolean }>;
-}
-
-interface EncodedVideoChunkAPI {
-  new (init: {
-    type: "key" | "delta";
-    timestamp: number;
-    duration: number;
-    data: Uint8Array;
-  }): unknown;
-}
+import {
+  encodedVideoChunkAPI,
+  supportsVideoCodec,
+  videoDecoderAPI,
+  type BrowserVideoDecoder,
+  type BrowserVideoFrame,
+} from "./video.ts";
 
 interface HEVCProfileTierLevel {
   profileByte: number;
@@ -48,40 +29,12 @@ interface HEVCProfileTierLevel {
   spsId: number;
 }
 
-function videoDecoderAPI(): VideoDecoderAPI | undefined {
-  return (globalThis as unknown as { VideoDecoder?: VideoDecoderAPI }).VideoDecoder;
-}
-
-function encodedVideoChunkAPI(): EncodedVideoChunkAPI {
-  const api = (globalThis as unknown as { EncodedVideoChunk?: EncodedVideoChunkAPI })
-    .EncodedVideoChunk;
-  if (!api) throw new Error("WebCodecs EncodedVideoChunk is unavailable");
-  return api;
-}
-
-async function supports(codec: string): Promise<boolean> {
-  const api = videoDecoderAPI();
-  if (!api) return false;
-  try {
-    return (
-      (
-        await api.isConfigSupported({
-          codec,
-          optimizeForLatency: true,
-        })
-      ).supported === true
-    );
-  } catch {
-    return false;
-  }
-}
-
 export function supportsWebCodecsHEVC(): Promise<boolean> {
-  return supports("hvc1.1.6.L120.90");
+  return supportsVideoCodec("hvc1.1.6.L120.90");
 }
 
 export function supportsWebCodecsHEVCRExt(): Promise<boolean> {
-  return supports("hvc1.4.10.L120.9c");
+  return supportsVideoCodec("hvc1.4.10.L120.9c");
 }
 
 export function hevcDescription(
@@ -495,10 +448,6 @@ class BitReader {
     }
     return zeroes ? 2 ** zeroes - 1 + this.read(zeroes) : 0;
   }
-}
-
-export function hevcUnits(data: readonly Uint8Array[]): AnnexBNalUnit[] {
-  return data.map((unit) => ({ type: (unit[0]! >> 1) & 0x3f, data: unit }));
 }
 
 function sameParameterSets(

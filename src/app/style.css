@@ -692,19 +692,6 @@ footer {
     gap: 6px;
     padding-bottom: max(25px, env(safe-area-inset-bottom));
   }
-  .desktop-viewer-bar {
-    grid-template-columns: minmax(0, 1fr) auto;
-  }
-  .desktop-viewer-stats {
-    display: none;
-  }
-  .desktop-clipboard {
-    grid-template-columns: 1fr auto;
-  }
-  .desktop-clipboard label,
-  .desktop-clipboard span {
-    display: none;
-  }
 }
 @media (prefers-reduced-motion: reduce) {
   button,

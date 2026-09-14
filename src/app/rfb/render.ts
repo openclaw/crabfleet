@@ -25,45 +25,58 @@ declare const window: { devicePixelRatio?: number };
 
 export class CanvasRenderer {
   readonly canvas: CanvasElement;
-  #latest: FrameDrawable | null = null;
+  #latest: {
+    frame: FrameDrawable;
+    resolve: () => void;
+    reject: (error: unknown) => void;
+  } | null = null;
   #scheduled = false;
-  #resolveLatest: (() => void) | null = null;
-  #rejectLatest: ((error: Error) => void) | null = null;
 
   constructor(canvas: CanvasElement) {
     this.canvas = canvas;
   }
 
   present(frame: FrameDrawable): Promise<void> {
-    this.#latest?.close();
-    this.#resolveLatest?.();
-    this.#rejectLatest = null;
-    this.#latest = frame;
+    this.#discardLatest();
+    const presentation = new Promise<void>((resolve, reject) => {
+      this.#latest = { frame, resolve, reject };
+    });
     if (!this.#scheduled) {
       this.#scheduled = true;
       requestAnimationFrame(() => this.#drawLatest());
     }
-    return new Promise((resolve, reject) => {
-      this.#resolveLatest = resolve;
-      this.#rejectLatest = reject;
-    });
+    return presentation;
   }
 
   clear(): void {
-    this.#latest?.close();
-    this.#latest = null;
-    this.#resolveLatest?.();
-    this.#resolveLatest = null;
-    this.#rejectLatest = null;
+    this.#discardLatest();
     const context = this.canvas.getContext("2d");
     context?.clearRect(0, 0, this.canvas.width, this.canvas.height);
   }
 
+  #discardLatest(): void {
+    const latest = this.#latest;
+    this.#latest = null;
+    latest?.frame.close();
+    latest?.resolve();
+  }
+
   #drawLatest(): void {
     this.#scheduled = false;
-    const frame = this.#latest;
+    const latest = this.#latest;
     this.#latest = null;
-    if (!frame) return;
+    if (!latest) return;
+    try {
+      this.#draw(latest.frame);
+      latest.resolve();
+    } catch (error) {
+      latest.reject(error);
+    } finally {
+      latest.frame.close();
+    }
+  }
+
+  #draw(frame: FrameDrawable): void {
     const bounds = this.canvas.getBoundingClientRect();
     const scale = window.devicePixelRatio || 1;
     const pixelWidth = Math.max(1, Math.round(bounds.width * scale));
@@ -73,13 +86,7 @@ export class CanvasRenderer {
       this.canvas.height = pixelHeight;
     }
     const context = this.canvas.getContext("2d", { alpha: false });
-    if (!context) {
-      frame.close();
-      this.#rejectLatest?.(new Error("2D canvas rendering is unavailable"));
-      this.#resolveLatest = null;
-      this.#rejectLatest = null;
-      return;
-    }
+    if (!context) throw new Error("2D canvas rendering is unavailable");
     const sourceWidth = frame.displayWidth ?? frame.width;
     const sourceHeight = frame.displayHeight ?? frame.height;
     const fit = Math.min(pixelWidth / sourceWidth, pixelHeight / sourceHeight);
@@ -90,9 +97,5 @@ export class CanvasRenderer {
     context.fillStyle = "#020307";
     context.fillRect(0, 0, pixelWidth, pixelHeight);
     context.drawImage(frame, x, y, width, height);
-    frame.close();
-    this.#resolveLatest?.();
-    this.#resolveLatest = null;
-    this.#rejectLatest = null;
   }
 }
