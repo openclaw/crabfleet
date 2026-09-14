@@ -21,14 +21,6 @@ final class ZlibStream {
 			fatalError("ERROR (Zlib): Failed to initialize Zlib Stream (\(error))")
 		}
 	}
-
-	deinit {
-		do {
-			try self.stream.inflateEnd()
-		} catch {
-			fatalError("ERROR (Zlib): Failed to end inflate (\(error))")
-		}
-	}
 }
 
 extension ZlibStream {

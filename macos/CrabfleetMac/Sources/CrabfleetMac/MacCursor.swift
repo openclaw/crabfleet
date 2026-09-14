@@ -198,17 +198,15 @@ final class MacCursorMonitor: @unchecked Sendable {
   private var generation: UInt64 = 0
 
   func start() {
-    let shouldStart = withLock { () -> Bool in
-      guard timer == nil else { return false }
+    withLock {
+      guard timer == nil else { return }
       generation &+= 1
       let timer = DispatchSource.makeTimerSource(queue: queue)
       timer.schedule(deadline: .now(), repeating: .nanoseconds(16_666_667), leeway: .milliseconds(1))
       timer.setEventHandler { [weak self] in self?.poll() }
       self.timer = timer
       timer.resume()
-      return true
     }
-    if !shouldStart { return }
   }
 
   func stop() {

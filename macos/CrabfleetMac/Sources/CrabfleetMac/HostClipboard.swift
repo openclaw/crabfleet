@@ -23,7 +23,6 @@ final class HostClipboardBridge: HostClipboardSyncing, @unchecked Sendable {
   private let pasteboard: NSPasteboard
   private let pollingInterval: TimeInterval
   private let lock = NSLock()
-  private let legacyPusherID = UUID()
   private var pushers: [UUID: @Sendable (String) -> Void] = [:]
   private var timer: Timer?
   private var lastObservedChangeCount: Int?
@@ -68,10 +67,6 @@ final class HostClipboardBridge: HostClipboardSyncing, @unchecked Sendable {
     }
   }
 
-  func attach(pusher: @escaping @Sendable (String) -> Void) {
-    attach(id: legacyPusherID, pusher: pusher)
-  }
-
   func detach(id: UUID) {
     let shouldStop = withLock { () -> Bool in
       pushers.removeValue(forKey: id)
@@ -95,10 +90,6 @@ final class HostClipboardBridge: HostClipboardSyncing, @unchecked Sendable {
       self.timer?.invalidate()
       self.timer = nil
     }
-  }
-
-  func detach() {
-    detachAll()
   }
 
   func receiveClientText(id: UUID, text: String) {
@@ -125,10 +116,6 @@ final class HostClipboardBridge: HostClipboardSyncing, @unchecked Sendable {
       }
       for pusher in otherPushers { pusher(text) }
     }
-  }
-
-  func receiveClientText(_ text: String) {
-    receiveClientText(id: legacyPusherID, text: text)
   }
 
   func currentText() -> String? {

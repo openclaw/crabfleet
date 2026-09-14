@@ -136,68 +136,6 @@ struct NativeConnectionTests {
   }
 
   @Test
-  func nativeAPIRequestsShortLivedVNCGrantWithoutLeakingItIntoURL() async throws {
-    let origin = try DeploymentOrigin("https://fleet.example.test")
-    let expiresAt = Date().addingTimeInterval(60)
-    let expiryFormatter = ISO8601DateFormatter()
-    expiryFormatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-    let transport = RecordingHTTPTransport { request in
-      #expect(request.httpMethod == "POST")
-      #expect(request.url?.path == "/api/native/v1/native-vnc")
-      #expect(request.url?.query == nil)
-      #expect(request.value(forHTTPHeaderField: "Authorization") == "Bearer access-token")
-      let requestBody = try #require(request.httpBody)
-      let requestJSON = try #require(
-        JSONSerialization.jsonObject(with: requestBody) as? [String: String]
-      )
-      #expect(requestJSON == ["sessionId": "IS-257"])
-      let body = Data(
-        """
-        {
-          "grant": {
-            "brokerUrl": "https://crabbox.example.test",
-            "leaseId": "cbx_native123",
-            "ticket": "native_vnc_0123456789abcdef0123456789abcdef",
-            "expiresAt": "\(expiryFormatter.string(from: expiresAt))"
-          }
-        }
-        """.utf8
-      )
-      return (body, httpResponse(url: request.url!, status: 200))
-    }
-    let grant = try await NativeAPIClient(origin: origin, transport: transport)
-      .nativeVNCGrant(sessionID: "IS-257", accessToken: "access-token")
-    #expect(grant.brokerURL.absoluteString == "https://crabbox.example.test")
-    #expect(grant.leaseID == "cbx_native123")
-    #expect(grant.ticket == "native_vnc_0123456789abcdef0123456789abcdef")
-
-    let missingHostTransport = RecordingHTTPTransport { request in
-      let body = Data(
-        """
-        {
-          "grant": {
-            "brokerUrl": "https:///native-vnc",
-            "leaseId": "cbx_native123",
-            "ticket": "native_vnc_0123456789abcdef0123456789abcdef",
-            "expiresAt": "\(expiryFormatter.string(from: expiresAt))"
-          }
-        }
-        """.utf8
-      )
-      return (body, httpResponse(url: request.url!, status: 200))
-    }
-    await #expect(throws: NativeAPIError.invalidResponse) {
-      try await NativeAPIClient(origin: origin, transport: missingHostTransport)
-        .nativeVNCGrant(sessionID: "IS-257", accessToken: "access-token")
-    }
-
-    await #expect(throws: NativeAPIError.invalidResponse) {
-      try await NativeAPIClient(origin: origin, transport: transport)
-        .nativeVNCGrant(sessionID: "IS-0", accessToken: "access-token")
-    }
-  }
-
-  @Test
   func nativeAPIFallsBackToOAuthGatewayAndUsesItsReadIngress() async throws {
     let origin = try DeploymentOrigin("https://fleet.example.test")
     var requests: [URLRequest] = []
@@ -361,7 +299,6 @@ struct NativeConnectionTests {
       switch url.path {
       case "/mcp/crabfleet/native/v1/session": scope = firstScope
       case "/mcp/crabfleet/native/v1/fleet": scope = secondScope
-      case "/mcp/crabfleet/native/v1/native-vnc": scope = secondScope
       case metadataURL.path:
         return (
           Data(
@@ -406,8 +343,6 @@ struct NativeConnectionTests {
       metadataURL.path,
       "/mcp/crabfleet/native/v1/fleet",
       metadataURL.path,
-      "/mcp/crabfleet/native/v1/native-vnc",
-      metadataURL.path,
     ])
     #expect(trust.endpoints.isEmpty)
   }
@@ -417,19 +352,17 @@ struct NativeConnectionTests {
     let origin = try DeploymentOrigin("https://fleet.example.test")
     let sessionURL = try origin.endpoint("/mcp/crabfleet/native/v1/session")
     let fleetURL = try origin.endpoint("/mcp/crabfleet/native/v1/fleet")
-    let nativeVNCURL = try origin.endpoint("/mcp/crabfleet/native/v1/native-vnc")
     let sessionMetadataURL = try origin.endpoint("/oauth/session-metadata")
     let fleetMetadataURL = try origin.endpoint("/oauth/fleet-metadata")
-    let nativeVNCMetadataURL = try origin.endpoint("/oauth/native-vnc-metadata")
     var requests: [URL] = []
     let transport = RecordingHTTPTransport { request in
       let url = try #require(request.url)
       requests.append(url)
-      if url == sessionURL || url == fleetURL || url == nativeVNCURL {
-        #expect(request.httpMethod == (url == nativeVNCURL ? "POST" : "GET"))
+      if url == sessionURL || url == fleetURL {
+        #expect(request.httpMethod == "GET")
         let metadataURL =
           url == sessionURL
-          ? sessionMetadataURL : (url == fleetURL ? fleetMetadataURL : nativeVNCMetadataURL)
+          ? sessionMetadataURL : fleetMetadataURL
         return (
           Data(),
           httpResponse(
@@ -442,10 +375,10 @@ struct NativeConnectionTests {
           )
         )
       }
-      if url == sessionMetadataURL || url == fleetMetadataURL || url == nativeVNCMetadataURL {
+      if url == sessionMetadataURL || url == fleetMetadataURL {
         let resource =
           url == sessionMetadataURL
-          ? sessionURL : (url == fleetMetadataURL ? fleetURL : nativeVNCURL)
+          ? sessionURL : fleetURL
         return (
           Data(
             """
@@ -489,7 +422,6 @@ struct NativeConnectionTests {
     #expect(requests.last?.path == "/register")
     #expect(requests.contains(sessionMetadataURL))
     #expect(requests.contains(fleetMetadataURL))
-    #expect(requests.contains(nativeVNCMetadataURL))
   }
 
   @Test
@@ -603,8 +535,6 @@ struct NativeConnectionTests {
       metadataURL.path,
       "/mcp/crabfleet/native/v1/fleet",
       metadataURL.path,
-      "/mcp/crabfleet/native/v1/native-vnc",
-      metadataURL.path,
     ])
   }
 
@@ -626,6 +556,47 @@ struct NativeConnectionTests {
     }
     try await NativeAPIClient(origin: origin, transport: alreadyInvalid)
       .revoke(accessToken: "expired-token")
+  }
+
+  @Test(arguments: [
+    "",
+    #", "generatedAt": null, "registryAvailable": false, "totals": {}, "sessions": [{"status":"retired-unknown-state"}]"#,
+  ])
+  func desktopDiscoveryIgnoresRetiredWorkspaceFields(_ legacyFields: String) async throws {
+    let origin = try DeploymentOrigin("https://fleet.example.test")
+    let transport = RecordingHTTPTransport { request in
+      #expect(request.httpMethod == "GET")
+      #expect(request.url?.path == "/api/native/v1/fleet")
+      let body = Data(
+        """
+        {"fleet": {"desktopHosts": [{
+          "id": "desktop", "owner": "operator", "name": "My Mac",
+          "address": "100.64.0.8", "port": 5901,
+          "createdAt": 1730000000000, "updatedAt": 1730000000000
+        }]\(legacyFields)}}
+        """.utf8
+      )
+      return (body, httpResponse(url: request.url!, status: 200))
+    }
+
+    let fleet = try await NativeAPIClient(origin: origin, transport: transport)
+      .fleet(accessToken: "saved-token")
+    #expect(fleet.desktopHosts.map(\.id) == ["desktop"])
+    let target = DesktopTarget(host: try #require(fleet.desktopHosts.first))
+    #expect(target.endpoint?.host == "100.64.0.8")
+    #expect(target.prefersPasswordOnlyARD)
+  }
+
+  @Test
+  func desktopDiscoveryAcceptsLegacyEnvelopeWithoutRegisteredHosts() async throws {
+    let origin = try DeploymentOrigin("https://fleet.example.test")
+    let transport = RecordingHTTPTransport { request in
+      let body = Data(#"{"fleet":{"sessions":[{"id":"retired-workspace"}],"totals":{}}}"#.utf8)
+      return (body, httpResponse(url: request.url!, status: 200))
+    }
+    let fleet = try await NativeAPIClient(origin: origin, transport: transport)
+      .fleet(accessToken: "saved-token")
+    #expect(fleet.desktopHosts.isEmpty)
   }
 
   @Test
@@ -660,7 +631,7 @@ struct NativeConnectionTests {
     let fleet = try await NativeAPIClient(origin: origin, transport: transport)
       .fleet(accessToken: "access-token")
 
-    #expect(fleet.leases.isEmpty)
+    #expect(fleet.desktopHosts.count == 1)
     #expect(fleet.desktopHosts.map(\.id) == ["studio"])
     #expect(fleet.desktopHosts.first?.address == "100.64.0.8")
     #expect(fleet.desktopHosts.first?.relayOnly == false)
@@ -772,47 +743,9 @@ struct NativeConnectionTests {
 
     #expect(store.connectionPhase == .connected)
     #expect(store.currentUser == "operator")
-    #expect(store.leases.map(\.id) == ["IS-live"])
+    #expect(store.desktopHosts.map(\.id) == ["IS-live"])
     #expect(api.sessionTokens == ["saved-token"])
     #expect(api.fleetTokens == ["saved-token"])
-  }
-
-  @Test
-  func disconnectDiscardsAnInFlightNativeVNCGrant() async throws {
-    let origin = try DeploymentOrigin("https://fleet.example.test")
-    let origins = MemoryOriginStore(value: origin.displayValue)
-    let tokens = MemoryTokenStore(values: [origin.displayValue: "saved-token"])
-    let api = StubNativeAPIClient(origin: origin)
-    api.sessionResult = .success(testSession())
-    api.fleetResult = .success(testFleet())
-    var grantStarted = false
-    var grantContinuation: CheckedContinuation<NativeVNCGrant, Error>?
-    api.nativeVNCGrantHandler = { _, _ in
-      grantStarted = true
-      return try await withCheckedThrowingContinuation { continuation in
-        grantContinuation = continuation
-      }
-    }
-    let store = FleetStore(
-      environment: [:],
-      originStore: origins,
-      tokenStore: tokens,
-      clientFactory: { _ in api },
-      openURL: { _ in false }
-    )
-    await store.restore()
-
-    let grantTask = Task {
-      try await store.nativeVNCGrant(sessionID: "IS-257")
-    }
-    try await waitUntil { grantStarted }
-    store.disconnect()
-    let continuation = try #require(grantContinuation)
-    continuation.resume(returning: testNativeVNCGrant())
-
-    await #expect(throws: CancellationError.self) {
-      try await grantTask.value
-    }
   }
 
   @Test
@@ -891,7 +824,7 @@ struct NativeConnectionTests {
     await store.restore()
     #expect(store.connectionPhase == .connected)
     #expect(store.canRetrySavedSession)
-    #expect(store.leases.map(\.id) == ["IS-old"])
+    #expect(store.desktopHosts.map(\.id) == ["IS-old"])
 
     origins.value = newOrigin.displayValue
     await store.restore()
@@ -900,7 +833,7 @@ struct NativeConnectionTests {
     #expect(store.connectedOrigin == newOrigin)
     #expect(!store.canRetrySavedSession)
     #expect(!store.isConnected)
-    #expect(store.leases.isEmpty)
+    #expect(store.desktopHosts.isEmpty)
 
     store.retrySavedSession()
     try await waitUntil { newAPI.deviceAuthorizationRequests == 1 }
@@ -923,7 +856,7 @@ struct NativeConnectionTests {
     await store.restore()
 
     #expect(store.connectionPhase == .disconnected)
-    #expect(store.leases.isEmpty)
+    #expect(store.desktopHosts.isEmpty)
     #expect(store.notice == nil)
   }
 
@@ -946,7 +879,7 @@ struct NativeConnectionTests {
 
     #expect(store.connectionPhase == .failed)
     #expect(tokens.values[origin.displayValue] == nil)
-    #expect(store.leases.isEmpty)
+    #expect(store.desktopHosts.isEmpty)
   }
 
   @Test
@@ -1008,7 +941,7 @@ struct NativeConnectionTests {
     #expect(api.revokeWasCancelled == [false])
     #expect(api.lifecycleEvents == ["revoke-start", "revoke-finish", "close"])
     #expect(tokens.values[origin.displayValue] == nil)
-    #expect(store.leases.isEmpty)
+    #expect(store.desktopHosts.isEmpty)
   }
 
   @Test
@@ -1052,7 +985,7 @@ struct NativeConnectionTests {
       "crabfleet-oauth-v1:gateway-token",
     ])
     #expect(store.currentUser == "operator")
-    #expect(store.leases.map(\.id) == ["IS-live"])
+    #expect(store.desktopHosts.map(\.id) == ["IS-live"])
   }
 
   @Test
@@ -1605,7 +1538,7 @@ struct NativeConnectionTests {
     #expect(store.connectionPhase == .connected)
     #expect(store.isConnected)
     #expect(store.connectedOrigin == oldOrigin)
-    #expect(store.leases.map(\.id) == ["IS-old"])
+    #expect(store.desktopHosts.map(\.id) == ["IS-old"])
     #expect(origins.value == oldOrigin.displayValue)
     #expect(tokens.values[oldOrigin.displayValue] == "old-token")
     #expect(newAPI.deviceAuthorizationRequests == 0)
@@ -1655,7 +1588,7 @@ struct NativeConnectionTests {
     #expect(store.connectionPhase == .disconnected)
     #expect(!store.isConnected)
     #expect(tokens.values[origin.displayValue] == nil)
-    #expect(store.leases.isEmpty)
+    #expect(store.desktopHosts.isEmpty)
     try await waitUntil { revokeStarted }
     #expect(store.connectionPhase == .disconnected)
     #expect(tokens.values[origin.displayValue] == nil)
@@ -1731,7 +1664,7 @@ struct NativeConnectionTests {
 
     store.connect(to: newOrigin.displayValue)
     try await waitUntil {
-      store.connectionPhase == .connected && store.leases.map(\.id) == ["IS-new"]
+      store.connectionPhase == .connected && store.desktopHosts.map(\.id) == ["IS-new"]
     }
 
     let continuation = try #require(oldRefreshContinuation)
@@ -1743,7 +1676,7 @@ struct NativeConnectionTests {
 
     #expect(store.connectionPhase == .connected)
     #expect(store.connectedOrigin == newOrigin)
-    #expect(store.leases.map(\.id) == ["IS-new"])
+    #expect(store.desktopHosts.map(\.id) == ["IS-new"])
     #expect(tokens.values[newOrigin.displayValue] == "new-token")
   }
 
@@ -1845,9 +1778,6 @@ private final class StubNativeAPIClient: NativeAPIClientProtocol {
   var sessionResults: [Result<NativeAPISession, Error>] = []
   var sessionHandler: ((String) async throws -> NativeAPISession)?
   var fleetResult: Result<NativeAPIFleet, Error> = .failure(NativeAPIError.invalidResponse)
-  var nativeVNCGrantResult: Result<NativeVNCGrant, Error> = .failure(
-    NativeAPIError.invalidResponse)
-  var nativeVNCGrantHandler: ((String, String) async throws -> NativeVNCGrant)?
   var fleetHandler: (() async throws -> NativeAPIFleet)?
   var sessionTokens: [String] = []
   var fleetTokens: [String] = []
@@ -1893,13 +1823,6 @@ private final class StubNativeAPIClient: NativeAPIClientProtocol {
     fleetTokens.append(accessToken)
     if let fleetHandler { return try await fleetHandler() }
     return try fleetResult.get()
-  }
-
-  func nativeVNCGrant(sessionID: String, accessToken: String) async throws -> NativeVNCGrant {
-    if let nativeVNCGrantHandler {
-      return try await nativeVNCGrantHandler(sessionID, accessToken)
-    }
-    return try nativeVNCGrantResult.get()
   }
 
   func refreshCredential(accessToken: String) async throws -> String? {
@@ -2016,34 +1939,17 @@ private func testSession() -> NativeAPISession {
   )
 }
 
-private func testNativeVNCGrant() -> NativeVNCGrant {
-  .init(
-    brokerURL: URL(string: "https://crabbox.example.test")!,
-    leaseID: "cbx_native123",
-    ticket: "native_vnc_0123456789abcdef0123456789abcdef",
-    expiresAt: Date().addingTimeInterval(60)
-  )
-}
-
-private func testLease(id: String = "IS-live") -> CrabboxLease {
-  .init(
-    id: id,
-    leaseID: "live-crab",
-    nativeVncSessionID: nil,
-    owner: "operator",
-    repository: "openclaw/crabfleet",
-    branch: "main",
-    runtime: "crabbox",
-    status: .ready,
-    purpose: "Live test",
-    summary: "Real deployment data",
-    lastEvent: "ready",
-    updatedAt: .now,
-    desktopAvailable: true,
-    terminalAvailable: true
-  )
-}
-
 private func testFleet(id: String = "IS-live") -> NativeAPIFleet {
-  .init(leases: [testLease(id: id)], desktopHosts: [])
+  .init(desktopHosts: [.init(
+    id: id,
+    owner: "operator",
+    name: "Test desktop",
+    address: "100.64.0.2",
+    port: 5901,
+    quicPort: nil,
+    quicCertHash: nil,
+    webtransport: false,
+    createdAt: .now,
+    updatedAt: .now
+  )])
 }

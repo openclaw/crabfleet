@@ -197,7 +197,6 @@ final class RemoteAudioPlayer: @unchecked Sendable {
       stopNow()
       return
     }
-    applyMuteState()
     jitterBuffer = RemoteAudioJitterBuffer(sampleRate: configuration.sampleRate)
   }
 
@@ -300,7 +299,6 @@ final class RemoteAudioPlayer: @unchecked Sendable {
   private func stopNow() {
     resetPlaybackQueue()
     engine.stop()
-    jitterBuffer?.reset()
     jitterBuffer = nil
     converter = nil
     compressedFormat = nil

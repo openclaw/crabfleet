@@ -93,20 +93,6 @@ struct OpenH264AnnexB {
 		}
 	}
 
-	static func parameterSets(in nalUnits: [Data]) -> (sps: Data?, pps: Data?) {
-		var sps: Data?
-		var pps: Data?
-		for unit in nalUnits {
-			guard let first = unit.first else { continue }
-			switch first & 0x1f {
-				case 7: sps = unit
-				case 8: pps = unit
-				default: break
-			}
-		}
-		return (sps, pps)
-	}
-
 	static func videoParameterSets(
 		in nalUnits: [Data],
 		codec: VideoAnnexBCodec
@@ -123,14 +109,6 @@ struct OpenH264AnnexB {
 			}
 		}
 		return (vps, sps, pps)
-	}
-
-	static func parameterSetsFitLimit(sps: Data?, pps: Data?) -> Bool {
-		let spsCount = sps?.count ?? 0
-		let ppsCount = pps?.count ?? 0
-		guard spsCount <= maximumParameterSetBytes,
-			  ppsCount <= maximumParameterSetBytes else { return false }
-		return spsCount <= maximumParameterSetBytes - ppsCount
 	}
 
 	static func parameterSetsFitLimit(vps: Data?, sps: Data?, pps: Data?) -> Bool {

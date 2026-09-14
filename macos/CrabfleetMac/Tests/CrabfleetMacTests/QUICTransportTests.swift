@@ -58,13 +58,13 @@ struct QUICTransportTests {
 
   @Test
   func loadOrCreateReusesTheStoredCertificateWithoutAddingKeychainItems() throws {
-    let scope = QUICKeychainScope()
+    let scope = try QUICKeychainScope()
     defer { scope.remove() }
 
     let first = try scope.loadOrCreate()
     let firstCertificate = try #require(certificate(of: first.identity))
     let publicKeyData = try #require(publicKeyExternalRepresentation(of: firstCertificate))
-    #expect(storedCertificates(publicKeyData: publicKeyData).count == 1)
+    #expect(storedCertificates(publicKeyData: publicKeyData, keychain: scope.keychain).count == 1)
 
     let second = try scope.loadOrCreate()
     let secondCertificate = try #require(certificate(of: second.identity))
@@ -73,30 +73,77 @@ struct QUICTransportTests {
     // SPKI hash and byte-identical DER (a re-mint would have a random serial).
     #expect(first.certHash == second.certHash)
     #expect(SecCertificateCopyData(firstCertificate) == SecCertificateCopyData(secondCertificate))
-    #expect(storedCertificates(publicKeyData: publicKeyData).count == 1)
+    #expect(storedCertificates(publicKeyData: publicKeyData, keychain: scope.keychain).count == 1)
   }
 
   @Test
   func loadOrCreateCollapsesLeakedDuplicateHostCertificates() throws {
-    let scope = QUICKeychainScope()
+    let scope = try QUICKeychainScope()
     defer { scope.remove() }
 
     let created = try scope.loadOrCreate()
     let hostCertificate = try #require(certificate(of: created.identity))
     let publicKeyData = try #require(publicKeyExternalRepresentation(of: hostCertificate))
-    let privateKey = try #require(storedPrivateKey(applicationTag: scope.applicationTag))
+    let privateKey = try #require(storedPrivateKey(applicationTag: scope.applicationTag, keychain: scope.keychain))
 
     // Reproduce the pre-fix leak: extra distinct certificates (random serials)
     // for the same host key, exactly what per-launch minting used to pile up.
     _ = try QUICIdentityStore.createAndStoreCertificate(
-      privateKey: privateKey, certificateLabel: scope.certificateLabel)
+      privateKey: privateKey, certificateLabel: scope.certificateLabel, keychain: scope.keychain)
     _ = try QUICIdentityStore.createAndStoreCertificate(
-      privateKey: privateKey, certificateLabel: scope.certificateLabel)
-    #expect(storedCertificates(publicKeyData: publicKeyData).count == 3)
+      privateKey: privateKey, certificateLabel: scope.certificateLabel, keychain: scope.keychain)
+    #expect(storedCertificates(publicKeyData: publicKeyData, keychain: scope.keychain).count == 3)
 
     // Next launch must self-heal back to a single certificate.
     _ = try scope.loadOrCreate()
-    #expect(storedCertificates(publicKeyData: publicKeyData).count == 1)
+    #expect(storedCertificates(publicKeyData: publicKeyData, keychain: scope.keychain).count == 1)
+  }
+
+  @Test
+  func explicitKeychainIsolatesIdentityLookupAndRemoval() throws {
+    var originalSearchList: CFArray?
+    #expect(SecKeychainCopySearchList(&originalSearchList) == errSecSuccess)
+    let searchList = try #require(originalSearchList)
+    var originalDefault: SecKeychain?
+    let defaultStatus = SecKeychainCopyDefault(&originalDefault)
+    let scope = try QUICKeychainScope()
+    defer { scope.remove() }
+    let other = try QUICKeychainScope(applicationTag: scope.applicationTag)
+    defer { other.remove() }
+
+    let first = try scope.loadOrCreate()
+    let second = try other.loadOrCreate()
+    #expect(first.certHash != second.certHash)
+    let firstCertificate = try #require(certificate(of: first.identity))
+    let firstPublicKey = try #require(publicKeyExternalRepresentation(of: firstCertificate))
+    let privateKey = try #require(
+      storedPrivateKey(applicationTag: scope.applicationTag, keychain: scope.keychain))
+    for _ in 0..<2 {
+      _ = try QUICIdentityStore.createAndStoreCertificate(
+        privateKey: privateKey, certificateLabel: other.certificateLabel, keychain: other.keychain)
+    }
+    _ = try scope.loadOrCreate()
+    #expect(storedCertificates(publicKeyData: firstPublicKey, keychain: other.keychain).count == 2)
+
+    QUICIdentityStore.remove(
+      applicationTag: scope.applicationTag, certificateLabel: scope.certificateLabel,
+      keychain: scope.keychain)
+    #expect(storedPrivateKey(applicationTag: scope.applicationTag, keychain: scope.keychain) == nil)
+    #expect(storedCertificates(publicKeyData: firstPublicKey, keychain: scope.keychain).isEmpty)
+    #expect(storedPrivateKey(applicationTag: other.applicationTag, keychain: other.keychain) != nil)
+    #expect(storedCertificates(publicKeyData: firstPublicKey, keychain: other.keychain).count == 2)
+    #expect(try other.loadOrCreate().certHash == second.certHash)
+
+    scope.remove()
+    other.remove()
+    #expect(!FileManager.default.fileExists(atPath: scope.directory.path))
+    #expect(!FileManager.default.fileExists(atPath: other.directory.path))
+    var finalSearchList: CFArray?
+    #expect(SecKeychainCopySearchList(&finalSearchList) == errSecSuccess)
+    #expect(CFEqual(searchList, try #require(finalSearchList)))
+    var finalDefault: SecKeychain?
+    #expect(SecKeychainCopyDefault(&finalDefault) == defaultStatus)
+    #expect(originalDefault == finalDefault)
   }
 
   @Test(
@@ -665,31 +712,58 @@ private final class QUICConnectionGroupStore: @unchecked Sendable {
   }
 }
 
-/// A unique-per-test keychain identity scope. Keying every item off a random
-/// application tag isolates the test from the real host identity
-/// (`org.openclaw.crabfleet.quic.host-key-v1`) and from concurrent tests: the
-/// public-key match in `QUICIdentityStore` only ever sees this scope's certs.
-private struct QUICKeychainScope {
+/// Owns an explicit disposable Keychain without changing the user's search list
+/// or default Keychain. Persistence tests exercise real stored keys/certificates.
+private final class QUICKeychainScope {
   let applicationTag: Data
   let certificateLabel: String
   let keyLabel: String
+  let keychain: SecKeychain
+  let directory: URL
+  private var removed = false
 
-  init() {
+  init(applicationTag: Data? = nil) throws {
     let id = UUID().uuidString
-    applicationTag = Data("org.openclaw.crabfleet.tests.quic.\(id)".utf8)
+    self.applicationTag = applicationTag ?? Data("org.openclaw.crabfleet.tests.quic.\(id)".utf8)
     certificateLabel = "Crabfleet QUIC Test Certificate \(id)"
     keyLabel = "Crabfleet QUIC Test Key \(id)"
+    directory = FileManager.default.temporaryDirectory
+      .appendingPathComponent("CrabfleetQUICTests.\(id)", isDirectory: true)
+    try FileManager.default.createDirectory(
+      at: directory, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
+    let path = directory.appendingPathComponent("fixture.keychain").path
+    let password = UUID().uuidString
+    var created: SecKeychain?
+    let status = password.withCString {
+      SecKeychainCreate(path, UInt32(password.utf8.count), $0, false, nil, &created)
+    }
+    guard status == errSecSuccess, let created else {
+      if let created { SecKeychainDelete(created) }
+      try? FileManager.default.removeItem(at: directory)
+      throw QUICTransportError.keychain(status)
+    }
+    keychain = created
   }
+
+  deinit { remove() }
 
   func loadOrCreate() throws -> QUICHostIdentity {
     try QUICIdentityStore.loadOrCreate(
       applicationTag: applicationTag,
       certificateLabel: certificateLabel,
-      keyLabel: keyLabel)
+      keyLabel: keyLabel,
+      keychain: keychain)
   }
 
   func remove() {
-    QUICIdentityStore.remove(applicationTag: applicationTag, certificateLabel: certificateLabel)
+    guard !removed else { return }
+    removed = true
+    #expect(SecKeychainDelete(keychain) == errSecSuccess)
+    do {
+      try FileManager.default.removeItem(at: directory)
+    } catch {
+      Issue.record("Could not remove disposable QUIC Keychain directory: \(error)")
+    }
   }
 }
 
@@ -705,8 +779,9 @@ private func publicKeyExternalRepresentation(of certificate: SecCertificate) -> 
   return SecKeyCopyExternalRepresentation(key, &error) as Data?
 }
 
-private func storedPrivateKey(applicationTag: Data) -> SecKey? {
+private func storedPrivateKey(applicationTag: Data, keychain: SecKeychain) -> SecKey? {
   let query: [CFString: Any] = [
+    kSecMatchSearchList: [keychain],
     kSecClass: kSecClassKey,
     kSecAttrApplicationTag: applicationTag,
     kSecAttrKeyClass: kSecAttrKeyClassPrivate,
@@ -718,8 +793,11 @@ private func storedPrivateKey(applicationTag: Data) -> SecKey? {
   return result as! SecKey?
 }
 
-private func storedCertificates(publicKeyData: Data) -> [SecCertificate] {
+private func storedCertificates(
+  publicKeyData: Data, keychain: SecKeychain
+) -> [SecCertificate] {
   let query: [CFString: Any] = [
+    kSecMatchSearchList: [keychain],
     kSecClass: kSecClassCertificate,
     kSecReturnRef: true,
     kSecMatchLimit: kSecMatchLimitAll,
@@ -731,23 +809,16 @@ private func storedCertificates(publicKeyData: Data) -> [SecCertificate] {
 }
 
 private struct QUICIdentityFixture {
-  let applicationTag: Data
-  let certificateLabel: String
+  private let scope: QUICKeychainScope
   let hostIdentity: QUICHostIdentity
 
   init() throws {
-    let id = UUID().uuidString
-    applicationTag = Data("org.openclaw.crabfleet.tests.quic.\(id)".utf8)
-    certificateLabel = "Crabfleet QUIC Test Certificate \(id)"
-    hostIdentity = try QUICIdentityStore.loadOrCreate(
-      applicationTag: applicationTag,
-      certificateLabel: certificateLabel,
-      keyLabel: "Crabfleet QUIC Test Key \(id)")
+    let scope = try QUICKeychainScope()
+    hostIdentity = try scope.loadOrCreate()
+    self.scope = scope
   }
 
-  func remove() {
-    QUICIdentityStore.remove(applicationTag: applicationTag, certificateLabel: certificateLabel)
-  }
+  func remove() { scope.remove() }
 }
 
 private func start(_ listener: NWListener) async throws {

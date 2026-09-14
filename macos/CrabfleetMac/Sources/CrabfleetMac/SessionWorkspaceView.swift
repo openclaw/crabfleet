@@ -547,9 +547,7 @@ struct DesktopConnectionSheet: View {
         ShareSheetHeader(
           systemImage: "cable.connector",
           title: "Connect to \(target.title)",
-          subtitle: target.source == .crabfleet
-            ? "Use the loopback endpoint from the Crabbox tunnel."
-            : "Open a direct VNC connection with the native viewer."
+          subtitle: "Open a direct VNC connection with the native viewer."
         )
 
         VStack(alignment: .leading, spacing: 8) {

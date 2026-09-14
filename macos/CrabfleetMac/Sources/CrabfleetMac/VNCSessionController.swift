@@ -451,23 +451,6 @@ final class VNCSessionController: NSObject, ObservableObject {
     wakeOnInitialTCPFailure = nil
   }
 
-  func beginConnecting(endpoint: String) {
-    tearDownConnection()
-    endpointDescription = endpoint
-    errorMessage = nil
-    framebuffer = nil
-    framebufferUpdateCount = 0
-    phase = .connecting
-    clipboardCoordinator?.sessionStateDidChange(self, targetID: targetID)
-  }
-
-  func failConnection(_ message: String) {
-    tearDownConnection()
-    phase = .failed
-    errorMessage = message
-    clipboardCoordinator?.sessionStateDidChange(self, targetID: targetID)
-  }
-
   func disconnect() {
     clearTCPFallbackRetry()
     clearWakeRetry()

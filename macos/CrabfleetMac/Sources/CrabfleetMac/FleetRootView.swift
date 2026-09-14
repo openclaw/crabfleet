@@ -27,9 +27,8 @@ struct FleetRootView: View {
 
   private var allTargets: [DesktopTarget] {
     let saved = connections.profiles.map(DesktopTarget.init(profile:))
-    let fleet = store.leases.map(DesktopTarget.init(lease:))
     let hosts = store.desktopHosts.map(DesktopTarget.init(host:))
-    return (saved + hosts + fleet).sorted(by: targetSort)
+    return (saved + hosts).sorted(by: targetSort)
   }
 
   private var visibleTargets: [DesktopTarget] {
@@ -53,12 +52,6 @@ struct FleetRootView: View {
   private var focusedTarget: DesktopTarget? {
     guard let focusedTargetID else { return nil }
     return allTargets.first { $0.id == focusedTargetID }
-  }
-
-  private var targetConnectionStates: [DesktopTargetConnectionState] {
-    allTargets.map {
-      DesktopTargetConnectionState(id: $0.id, nativeVncSessionID: $0.nativeVncSessionID)
-    }
   }
 
   var body: some View {
@@ -198,14 +191,9 @@ struct FleetRootView: View {
     }
     .onAppear(perform: connectLaunchConnectionIfNeeded)
     .onExitCommand(perform: closeFocus)
-    .onChange(of: targetConnectionStates) { _, targetStates in
-      let targetIDs = Set(targetStates.map(\.id))
-      let nativeSessionIDs = Dictionary(
-        uniqueKeysWithValues: targetStates.compactMap { state in
-          state.nativeVncSessionID.map { (state.id, $0) }
-        }
-      )
-      sessions.reconcile(validTargetIDs: targetIDs, nativeSessionIDs: nativeSessionIDs)
+    .onChange(of: allTargets.map(\.id)) { _, ids in
+      let targetIDs = Set(ids)
+      sessions.reconcile(validTargetIDs: targetIDs)
       if let focusedTargetID, !targetIDs.contains(focusedTargetID) {
         self.focusedTargetID = nil
         sessions.focus(targetID: nil)
@@ -218,9 +206,6 @@ struct FleetRootView: View {
 
   private func targetSort(_ lhs: DesktopTarget, _ rhs: DesktopTarget) -> Bool {
     if lhs.source != rhs.source { return lhs.source == .saved }
-    let lhsActive = lhs.status?.isActive ?? false
-    let rhsActive = rhs.status?.isActive ?? false
-    if lhsActive != rhsActive { return lhsActive && !rhsActive }
     return lhs.updatedAt > rhs.updatedAt
   }
 
@@ -228,7 +213,7 @@ struct FleetRootView: View {
     sessions.focus(targetID: targetID)
     if let target = allTargets.first(where: { $0.id == targetID }),
       target.source == .crabfleet,
-      (target.endpoint != nil || target.nativeVncSessionID != nil),
+      target.endpoint != nil,
       !sessions.session(for: targetID).phase.isConnectedOrConnecting
     {
       connect(target)
@@ -243,15 +228,7 @@ struct FleetRootView: View {
   }
 
   private func connect(_ target: DesktopTarget) {
-    if target.source == .crabfleet, let sessionID = target.nativeVncSessionID {
-      sessions.connectCrabbox(targetID: target.id, sessionID: sessionID) {
-        try await store.nativeVNCGrant(sessionID: sessionID)
-      }
-    } else if target.endpoint != nil {
-      connectionTarget = target
-    } else {
-      connectionTarget = target
-    }
+    connectionTarget = target
   }
 
   private func connectLaunchConnectionIfNeeded() {
@@ -363,11 +340,6 @@ struct FleetRootView: View {
       focusedTargetID = nil
     }
   }
-}
-
-private struct DesktopTargetConnectionState: Equatable {
-  let id: String
-  let nativeVncSessionID: String?
 }
 
 private struct WakeNotice: Identifiable {
@@ -736,7 +708,7 @@ private struct DesktopCard: View {
           HStack(alignment: .top) {
             SourceBadge(source: target.source, accent: accent)
             Spacer()
-            SessionPhaseBadge(phase: session.phase, fallbackStatus: target.status)
+            SessionPhaseBadge(phase: session.phase)
           }
           Spacer()
           HStack(alignment: .bottom, spacing: 12) {
@@ -748,12 +720,6 @@ private struct DesktopCard: View {
                 .font(.system(size: 11, weight: .medium, design: .rounded))
                 .foregroundStyle(.secondary)
                 .lineLimit(1)
-              if target.source == .crabfleet, let branch = target.branch {
-                Label(branch, systemImage: "arrow.triangle.branch")
-                  .font(.system(size: 9, weight: .medium, design: .monospaced))
-                  .foregroundStyle(.tertiary)
-                  .lineLimit(1)
-              }
             }
             Spacer(minLength: 0)
             Image(systemName: "arrow.up.right")
@@ -856,50 +822,17 @@ private struct SourceBadge: View {
 
 private struct SessionPhaseBadge: View {
   let phase: VNCSessionController.Phase
-  let fallbackStatus: LeaseStatus?
-
-  private var title: String {
-    phase == .idle ? (fallbackStatus?.label ?? "Saved") : phase.title
-  }
-
-  private var color: Color {
-    if phase != .idle { return phase.color }
-    guard let fallbackStatus else { return .secondary }
-    return StatusBeacon.color(for: fallbackStatus)
-  }
 
   var body: some View {
     HStack(spacing: 5) {
-      Circle().fill(color).frame(width: 5, height: 5)
-      Text(title)
+      Circle().fill(phase.color).frame(width: 5, height: 5)
+      Text(phase == .idle ? "Saved" : phase.title)
     }
     .font(.system(size: 9, weight: .semibold, design: .rounded))
     .foregroundStyle(.secondary)
     .padding(.horizontal, 7)
     .padding(.vertical, 5)
     .background(.black.opacity(0.42), in: Capsule())
-  }
-}
-
-struct StatusBeacon: View {
-  let status: LeaseStatus
-
-  static func color(for status: LeaseStatus) -> Color {
-    switch status {
-    case .ready, .attached, .detached: .mint
-    case .provisioning, .pendingAdapter: .orange
-    case .failed: .red
-    case .stopping, .stopped, .expired: .gray
-    }
-  }
-
-  var body: some View {
-    let color = Self.color(for: status)
-    ZStack {
-      Circle().fill(color.opacity(0.17)).frame(width: 14, height: 14)
-      Circle().fill(color).frame(width: 6, height: 6)
-    }
-    .accessibilityLabel(status.label)
   }
 }
 

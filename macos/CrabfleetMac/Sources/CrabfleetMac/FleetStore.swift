@@ -18,7 +18,6 @@ final class FleetStore: ObservableObject {
     case failed
   }
 
-  @Published private(set) var leases: [CrabboxLease] = []
   @Published private(set) var desktopHosts: [RegisteredDesktopHost] = []
   @Published private(set) var isRefreshing = false
   @Published private(set) var lastUpdated: Date?
@@ -96,9 +95,9 @@ final class FleetStore: ObservableObject {
       retireClient(previousClient, after: previousOperation)
     }
     let generation = beginConnectionTransition()
-    clearInMemoryConnectionState(clearOrigin: true)
+    clearConnection()
+    connectedOrigin = nil
     connectionError = nil
-    notice = nil
 
     guard let storedValue = originStore.load(), !storedValue.isEmpty else {
       connectionPhase = .disconnected
@@ -172,7 +171,6 @@ final class FleetStore: ObservableObject {
     let api = clientFactory(origin)
     client = api
     session = nil
-    leases = []
     desktopHosts = []
     lastUpdated = nil
 
@@ -284,34 +282,6 @@ final class FleetStore: ObservableObject {
     await refresh(expectedGeneration: connectionGeneration)
   }
 
-  func nativeVNCGrant(sessionID: String) async throws -> NativeVNCGrant {
-    let generation = connectionGeneration
-    guard let client, let connectedOrigin, let credential,
-      credential.origin == connectedOrigin,
-      client.origin == connectedOrigin,
-      connectionPhase == .connected
-    else {
-      throw NativeAPIError.unauthorized
-    }
-    do {
-      return try await authenticatedRead(
-        api: client,
-        token: credential.token,
-        origin: connectedOrigin,
-        generation: generation,
-        operation: { token in
-          try await client.nativeVNCGrant(sessionID: sessionID, accessToken: token)
-        }
-      ).value
-    } catch NativeAPIError.unauthorized {
-      await expireCredential(
-        message: NativeAPIError.unauthorized.localizedDescription,
-        expectedGeneration: generation
-      )
-      throw NativeAPIError.unauthorized
-    }
-  }
-
   private func refresh(expectedGeneration: UInt64) async {
     guard isCurrent(expectedGeneration), !isRefreshing, let client, let connectedOrigin,
       let credential, credential.origin == connectedOrigin, client.origin == connectedOrigin,
@@ -339,7 +309,6 @@ final class FleetStore: ObservableObject {
         operation: client.fleet(accessToken:)
       )
       guard isCurrent(expectedGeneration), refreshOperationID == operationID else { return }
-      leases = refreshedFleet.value.leases
       desktopHosts = refreshedFleet.value.desktopHosts
       notice = nil
       lastUpdated = now()
@@ -630,7 +599,6 @@ final class FleetStore: ObservableObject {
     credential = nil
     client = nil
     session = nil
-    leases = []
     desktopHosts = []
     lastUpdated = nil
     connectionError = message
@@ -752,25 +720,11 @@ final class FleetStore: ObservableObject {
   private func clearConnection() {
     credential = nil
     session = nil
-    leases = []
     desktopHosts = []
     lastUpdated = nil
     notice = nil
     verificationURL = nil
     currentUser = NSUserName()
-  }
-
-  private func clearInMemoryConnectionState(clearOrigin: Bool) {
-    credential = nil
-    session = nil
-    leases = []
-    desktopHosts = []
-    lastUpdated = nil
-    verificationURL = nil
-    currentUser = NSUserName()
-    if clearOrigin {
-      connectedOrigin = nil
-    }
   }
 }
 

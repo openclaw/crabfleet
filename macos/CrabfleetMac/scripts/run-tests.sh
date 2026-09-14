@@ -2,10 +2,9 @@
 set -eu
 
 package_path=macos/CrabfleetMac
-integration_tests='tailnetQUICListenerAuthenticatesWithARD|keepsTCPListenerReadyWhenQUICPortIsOccupied|connectionGroupsWithoutStreamsDoNotReserveViewerSlots|expiresIncompleteRFBHandshakeAndReleasesInput|servesRoyalVNCKitOverTheCurrentTailnet|syncsUTF8ClipboardAndNegotiatesResizeOverLoopback|revokingNativeAccessStopsPendingCrabboxBridge'
+integration_tests='tailnetQUICListenerAuthenticatesWithARD|keepsTCPListenerReadyWhenQUICPortIsOccupied|connectionGroupsWithoutStreamsDoNotReserveViewerSlots|expiresIncompleteRFBHandshakeAndReleasesInput|servesRoyalVNCKitOverTheCurrentTailnet|syncsUTF8ClipboardAndNegotiatesResizeOverLoopback'
 
 # TailnetRFBServer waits for the shared ARD crypto prewarm before binding.
-# The Crabbox bridge test likewise depends on prompt subprocess scheduling.
 # Bound unit-test fan-out, then run these integration tests alone so their
 # existing listener and lifecycle deadlines remain meaningful.
 swift test \

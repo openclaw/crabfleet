@@ -35,9 +35,7 @@ final class ZlibInflateStream {
 	init() throws {
 		let streamPtr = UnsafeMutablePointer<z_stream>.allocate(capacity: 1)
 
-		streamPtr.pointee.total_out = 0
-		streamPtr.pointee.zalloc = nil
-		streamPtr.pointee.zfree = nil
+		streamPtr.initialize(to: z_stream())
 
 		var version = ZLIB_VERSION
         var status = Z_VERSION_ERROR
@@ -47,16 +45,19 @@ final class ZlibInflateStream {
         }
 
 		guard ZlibError.isSuccess(status) else {
-			throw Self.error(streamPtr: streamPtr,
-							 status: status)
+			let error = Self.error(streamPtr: streamPtr, status: status)
+			streamPtr.deinitialize(count: 1)
+			streamPtr.deallocate()
+			throw error
 		}
 
 		self.streamPtr = streamPtr
 	}
 
 	deinit {
-		let streamPtr = self.streamPtr
-
+		// The allocation and zlib state share one owner, including during teardown.
+		_ = Z.inflateEnd(streamPtr)
+		streamPtr.deinitialize(count: 1)
 		streamPtr.deallocate()
 	}
 }
@@ -149,20 +150,6 @@ extension ZlibInflateStream {
 }
 
 extension ZlibInflateStream {
-	/// All dynamically allocated data structures for this stream are freed.
-	/// This function discards any unprocessed input and does not flush any pending output.
-	/// inflateEnd returns Z_OK if success, or Z_STREAM_ERROR if the stream state was inconsistent.
-	func inflateEnd() throws {
-		let streamPtr = self.streamPtr
-
-		let status = Z.inflateEnd(streamPtr)
-
-		guard ZlibError.isSuccess(status) else {
-			throw Self.error(streamPtr: streamPtr,
-							 status: status)
-		}
-	}
-
 	/// Resets the inflate state without freeing or reallocating internal buffers.
 	/// Any unprocessed input and pending output are discarded.
 	func inflateReset() throws {

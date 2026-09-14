@@ -1,0 +1,43 @@
+name: macos-tests
+
+on:
+  pull_request:
+    branches:
+      - main
+    paths:
+      - "macos/CrabfleetMac/**"
+      - ".github/workflows/macos-tests.yml"
+  push:
+    branches:
+      - main
+    paths:
+      - "macos/CrabfleetMac/**"
+      - ".github/workflows/macos-tests.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: macos-tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  swift:
+    name: Native macOS tests
+    runs-on: macos-26
+    timeout-minutes: 20
+    steps:
+      - name: Check out
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Test RoyalVNCKit
+        run: swift test --jobs 8 --package-path macos/CrabfleetMac/Vendor/RoyalVNCKit
+
+      - name: Build app tests
+        run: swift build --build-tests --jobs 8 --package-path macos/CrabfleetMac
+
+      - name: Test app
+        run: sh macos/CrabfleetMac/scripts/run-tests.sh

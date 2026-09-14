@@ -340,21 +340,18 @@ final class MacScreenCapture: NSObject, @unchecked Sendable {
   }
 
   func addCursorSession(id: UUID) async throws {
-    try await updateCursorNegotiation(allowsStoppedCapture: true) { $0.join(id) }
+    try await updateCursorNegotiation { $0.join(id) }
   }
 
   func updateCursorSession(id: UUID, negotiated: Bool) async throws {
-    try await updateCursorNegotiation(allowsStoppedCapture: true) {
+    try await updateCursorNegotiation {
       $0.setNegotiated(negotiated, for: id)
     }
   }
 
   func removeCursorSession(id: UUID) async throws {
     do {
-      try await updateCursorNegotiation(
-        allowsStoppedCapture: true,
-        preservesMutationOnFailure: true
-      ) { $0.leave(id) }
+      try await updateCursorNegotiation(preservesMutationOnFailure: true) { $0.leave(id) }
     } catch {
       scheduleCursorReconciliation()
       throw error
@@ -374,17 +371,13 @@ final class MacScreenCapture: NSObject, @unchecked Sendable {
   }
 
   private func updateCursorNegotiation(
-    allowsStoppedCapture: Bool = false,
     preservesMutationOnFailure: Bool = false,
     _ mutation: @escaping @Sendable (inout CursorCaptureNegotiationState) -> Void
   ) async throws {
     try await configurationGate.run { [self] in
       guard let stream, let configuration else {
-        if allowsStoppedCapture {
-          withFrameLock { mutation(&cursorNegotiationState) }
-          return
-        }
-        throw PrivateMacShareError.captureUnavailable
+        withFrameLock { mutation(&cursorNegotiationState) }
+        return
       }
       let previous = withFrameLock { cursorNegotiationState }
       var next = previous
@@ -406,11 +399,11 @@ final class MacScreenCapture: NSObject, @unchecked Sendable {
   }
 
   private func scheduleCursorReconciliation() {
-    let task = withFrameLock { () -> Task<Void, Never> in
+    withFrameLock {
       cursorReconcileGeneration &+= 1
       let generation = cursorReconcileGeneration
       cursorReconcileTask?.cancel()
-      let task = Task { [weak self] in
+      cursorReconcileTask = Task { [weak self] in
         guard let self else { return }
         await Self.reconcileCursorConfigurationWithRetry {
           try await self.reconcileCursorConfiguration()
@@ -421,10 +414,7 @@ final class MacScreenCapture: NSObject, @unchecked Sendable {
           }
         }
       }
-      cursorReconcileTask = task
-      return task
     }
-    _ = task
   }
 
   static func reconcileCursorConfigurationWithRetry(

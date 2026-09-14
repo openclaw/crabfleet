@@ -1059,7 +1059,8 @@ struct HostClipboardBridgeTests {
 
     let recorder = PushRecorder()
     let bridge = HostClipboardBridge(pasteboard: pasteboard, pollingInterval: 0.01)
-    bridge.attach { recorder.append($0) }
+    let sessionID = UUID()
+    bridge.attach(id: sessionID) { recorder.append($0) }
 
     try await Task.sleep(for: .milliseconds(60))
     #expect(recorder.values.isEmpty)
@@ -1069,7 +1070,7 @@ struct HostClipboardBridgeTests {
     try await waitUntil { recorder.values == ["host copy"] }
     #expect(bridge.currentText() == "host copy")
 
-    bridge.detach()
+    bridge.detach(id: sessionID)
   }
 
   @Test
@@ -1079,10 +1080,11 @@ struct HostClipboardBridgeTests {
 
     let recorder = PushRecorder()
     let bridge = HostClipboardBridge(pasteboard: pasteboard, pollingInterval: 0.01)
-    bridge.attach { recorder.append($0) }
+    let sessionID = UUID()
+    bridge.attach(id: sessionID) { recorder.append($0) }
     try await Task.sleep(for: .milliseconds(30))
 
-    bridge.receiveClientText("from client")
+    bridge.receiveClientText(id: sessionID, text: "from client")
     try await waitUntil { pasteboard.string(forType: .string) == "from client" }
     #expect(bridge.currentText() == "from client")
 
@@ -1095,7 +1097,7 @@ struct HostClipboardBridgeTests {
     pasteboard.setString("newer host copy", forType: .string)
     try await waitUntil { recorder.values == ["newer host copy"] }
 
-    bridge.detach()
+    bridge.detach(id: sessionID)
   }
 
   @Test
@@ -1133,10 +1135,11 @@ struct HostClipboardBridgeTests {
 
     let recorder = PushRecorder()
     let bridge = HostClipboardBridge(pasteboard: pasteboard, pollingInterval: 0.01)
-    bridge.attach { recorder.append($0) }
+    let sessionID = UUID()
+    bridge.attach(id: sessionID) { recorder.append($0) }
     try await Task.sleep(for: .milliseconds(30))
 
-    bridge.receiveClientText("reused")
+    bridge.receiveClientText(id: sessionID, text: "reused")
     try await waitUntil { pasteboard.string(forType: .string) == "reused" }
     bridge.poll()
     #expect(recorder.values.isEmpty)
@@ -1154,7 +1157,7 @@ struct HostClipboardBridgeTests {
     pasteboard.setString("reused", forType: .string)
     bridge.poll()
     #expect(recorder.values == ["other", "", "reused"])
-    bridge.detach()
+    bridge.detach(id: sessionID)
   }
 
   @Test
@@ -1165,7 +1168,8 @@ struct HostClipboardBridgeTests {
 
     let recorder = PushRecorder()
     let bridge = HostClipboardBridge(pasteboard: pasteboard, pollingInterval: 0.01)
-    bridge.attach { recorder.append($0) }
+    let sessionID = UUID()
+    bridge.attach(id: sessionID) { recorder.append($0) }
     try await Task.sleep(for: .milliseconds(30))
 
     let item = NSPasteboardItem()
@@ -1176,7 +1180,7 @@ struct HostClipboardBridgeTests {
     #expect(recorder.values.isEmpty)
     #expect(bridge.currentText() == nil)
 
-    bridge.receiveClientText("initial")
+    bridge.receiveClientText(id: sessionID, text: "initial")
     try await waitUntil { pasteboard.string(forType: .string) == "initial" }
     #expect(bridge.currentText() == "initial")
 
@@ -1185,7 +1189,7 @@ struct HostClipboardBridgeTests {
     bridge.poll()
     #expect(recorder.values == [""])
     #expect(bridge.currentText() == "")
-    bridge.detach()
+    bridge.detach(id: sessionID)
   }
 
   private func waitUntil(

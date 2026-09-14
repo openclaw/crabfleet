@@ -8,8 +8,8 @@ License: MIT; see `LICENSE`.
 
 This macOS-only source fork removes demo and C SDK targets and carries narrow
 defensive limits for remote-controlled strings, clipboard payloads, compressed
-frame payloads, and framebuffer allocations. It also serializes shared queues
-and connection state; replaces bundled d3des with per-call CommonCrypto DES
+frame payloads, and framebuffer allocations. It also serializes queues and connection state, releases drained queue payloads,
+and keeps zlib allocation and teardown under one owner; replaces bundled d3des with per-call CommonCrypto DES
 using the VNC bit-reversed-key variant; drops upstream's CryptoSwift dependency
 in favor of CommonCrypto and CryptoKit plus an in-fork pure-Swift big integer
 for Apple Remote Desktop Diffie-Hellman; suppresses clipboard echoes; releases

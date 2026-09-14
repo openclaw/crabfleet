@@ -12,19 +12,7 @@ final class Queue<T>: @unchecked Sendable {
 	private var isFinished = false
 
 	func enqueue(_ element: T) {
-		lock.lock()
-		guard !isFinished else {
-			lock.unlock()
-			return
-		}
-		if let waiter {
-			self.waiter = nil
-			lock.unlock()
-			waiter.resume(returning: element)
-			return
-		}
-		list.append(element)
-		lock.unlock()
+		enqueue(element, coalescingLastWhere: { _ in false })
 	}
 
 	func enqueue(_ element: T, coalescingLastWhere shouldCoalesce: (T) -> Bool) {
@@ -91,7 +79,10 @@ final class Queue<T>: @unchecked Sendable {
 		let element = list[head]
 		head += 1
 
-		if head >= 64, head * 2 >= list.count {
+		if head == list.count {
+			list.removeAll(keepingCapacity: true)
+			head = 0
+		} else if head >= 64, head * 2 >= list.count {
 			list.removeFirst(head)
 			head = 0
 		}
