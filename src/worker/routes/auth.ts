@@ -1,3 +1,4 @@
+import { decodePathIdentifier } from "../http.ts";
 import type { TrustedProxyAuthResult } from "../../trusted-proxy-auth.ts";
 
 export type PublicAuthRouteDependencies = {
@@ -28,11 +29,7 @@ export async function handlePublicAuthRoute(
   }
   const nativeLinkMatch = url.pathname.match(/^\/native\/link\/([^/]+)$/);
   if (nativeLinkMatch && (request.method === "GET" || request.method === "POST")) {
-    return dependencies.nativeLink(
-      request,
-      decodeURIComponent(nativeLinkMatch[1] ?? ""),
-      requestAuth,
-    );
+    return dependencies.nativeLink(request, decodePathIdentifier(nativeLinkMatch[1]), requestAuth);
   }
   if (request.method === "POST" && url.pathname === "/api/login/token") {
     return dependencies.tokenLogin(request);

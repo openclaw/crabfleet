@@ -130,12 +130,25 @@ export function bearerToken(request: Request): string {
   return scheme?.toLowerCase() === "bearer" ? clean(token, 200) : "";
 }
 
+export function decodePathIdentifier(value: string | undefined): string {
+  try {
+    return decodeURIComponent(value ?? "");
+  } catch {
+    throw badRequest("invalid path identifier");
+  }
+}
+
 export function cookies(request: Request): Map<string, string> {
   const result = new Map<string, string>();
   for (const part of (request.headers.get("cookie") ?? "").split(";")) {
     const index = part.indexOf("=");
     if (index === -1) continue;
-    result.set(part.slice(0, index).trim(), decodeURIComponent(part.slice(index + 1).trim()));
+    const name = part.slice(0, index).trim();
+    try {
+      result.set(name, decodeURIComponent(part.slice(index + 1).trim()));
+    } catch {
+      continue;
+    }
   }
   return result;
 }
