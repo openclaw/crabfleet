@@ -266,6 +266,7 @@
         --command-border: rgb(255 255 255 / 0.09);
         position: relative;
         min-height: 100vh;
+        min-height: 100dvh;
         display: grid;
         place-items: center;
         padding: 24px;
@@ -288,67 +289,11 @@
         font-family: ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;
         font-size: 13px;
       }
-      .infra-field {
-        position: absolute;
-        inset: 0;
-        pointer-events: none;
-        perspective: 900px;
-      }
-      .infra-field::after {
-        content: "";
-        position: absolute;
-        inset: auto 0 0;
-        height: 42%;
-        background: linear-gradient(180deg, transparent, rgb(5 7 12 / 0.96));
-      }
-      .infra-block {
-        position: absolute;
-        left: var(--x);
-        top: var(--y);
-        width: var(--w);
-        height: var(--h);
-        opacity: var(--o);
-        border: 1px solid rgb(240 90 112 / 0.16);
-        background: linear-gradient(145deg, rgb(72 26 42 / 0.62), rgb(16 11 18 / 0.78));
-        box-shadow: 0 8px 20px rgb(0 0 0 / 0.24);
-        transform: translate(-50%, -50%) rotateX(56deg) rotateZ(-38deg);
-        animation: infraDrift 7s ease-in-out infinite;
-        animation-delay: var(--d);
-      }
-      .infra-block::before,
-      .infra-block::after {
-        content: "";
-        position: absolute;
-        background: rgb(46 17 29 / 0.72);
-        border: 1px solid rgb(240 90 112 / 0.1);
-      }
-      .infra-block::before {
-        left: -1px;
-        top: 100%;
-        width: 100%;
-        height: 26px;
-        transform: skewX(-42deg);
-        transform-origin: top;
-      }
-      .infra-block::after {
-        left: 100%;
-        top: -1px;
-        width: 30px;
-        height: 100%;
-        transform: skewY(-48deg);
-        transform-origin: left;
-      }
-      .infra-block.focus {
-        border-color: rgb(240 90 112 / 0.76);
-        background: linear-gradient(145deg, rgb(91 30 48 / 0.8), rgb(31 17 27 / 0.9));
-        box-shadow:
-          0 0 0 1px rgb(240 90 112 / 0.2),
-          0 0 24px rgb(240 90 112 / 0.16);
-      }
       .login-panel {
         position: relative;
         z-index: 1;
         width: min(420px, 100%);
+        min-width: 0;
         border: 0;
         border-radius: 0;
         background: transparent;
@@ -377,6 +322,7 @@
       .login-panel h1 {
         margin: 0;
         font-size: 26px;
+        overflow-wrap: anywhere;
         line-height: 1.1;
         letter-spacing: 0;
         font-family: ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;
@@ -468,6 +414,9 @@
         font-size: 13px;
         font-weight: 600;
         list-style: none;
+        min-height: 44px;
+        display: flex;
+        align-items: center;
       }
       .bootstrap-login summary::-webkit-details-marker {
         display: none;
@@ -479,6 +428,26 @@
         display: grid;
         gap: 14px;
         margin-top: 12px;
+      }
+      .login-panel input,
+      .login-panel select {
+        min-width: 0;
+        min-height: 48px;
+        font-size: 16px;
+      }
+      .login-panel button,
+      .login-footer a,
+      .login-back {
+        min-height: 44px;
+      }
+      .login-footer a,
+      .login-back {
+        display: inline-flex;
+        align-items: center;
+      }
+      .login-panel .banner {
+        max-width: 100%;
+        overflow-wrap: anywhere;
       }
       .dev-identity-panel {
         border: 1px solid var(--line);
@@ -2084,16 +2053,6 @@
         font-size: 13px;
       }
 
-      @keyframes infraDrift {
-        0%,
-        100% {
-          transform: translate(-50%, -50%) rotateX(56deg) rotateZ(-38deg) translateY(0);
-        }
-        50% {
-          transform: translate(-50%, -50%) rotateX(56deg) rotateZ(-38deg) translateY(-10px);
-        }
-      }
-
       @keyframes slideInRight {
         from {
           opacity: 0;
@@ -2695,7 +2654,8 @@
           padding: 18px 0 32px;
         }
         .login-screen {
-          padding: 72px 18px 28px;
+          padding: max(72px, env(safe-area-inset-top)) max(18px, env(safe-area-inset-right))
+            max(28px, env(safe-area-inset-bottom)) max(18px, env(safe-area-inset-left));
         }
         .login-back {
           left: 18px;
@@ -2704,6 +2664,14 @@
         .fleet-box-actions {
           flex-direction: column;
           align-items: stretch;
+        }
+        .login-screen .command-row .terminal-command {
+          flex: none;
+          width: 100%;
+          min-height: 48px;
+        }
+        .login-screen .command-row > span {
+          text-align: center;
         }
         .fleet-box-actions button {
           width: 100%;
@@ -2799,6 +2767,592 @@
         }
         .action-dialog-access-form .full {
           grid-column: auto;
+        }
+      }
+      /* Shared visual language: warm paper, forest ink, and the Crabfleet coral. */
+      :root {
+        --ink: #202821;
+        --muted: #687267;
+        --faint: #737d71;
+        --paper: #f5f3ec;
+        --panel: #fffef9;
+        --panel-2: #efeee7;
+        --line: #d9ddd3;
+        --line-strong: #aeb9ab;
+        --primary: #b8442b;
+        --primary-dark: #983520;
+        --primary-ink: #fffdf7;
+        --success: #287650;
+        --accent: #397e82;
+        --nav-surface: #fffef9;
+        --dashboard-surface: #fffef9;
+        --command-bg: #efeee7;
+        --command-bg-hover: #e8e9df;
+        --command-ink: #202821;
+        --command-border: #d9ddd3;
+        --radius-control: 8px;
+        --radius-surface: 12px;
+        --radius-large: 16px;
+        font-family: "Trebuchet MS", "Segoe UI", sans-serif;
+      }
+      :root[data-theme="dark"] {
+        --ink: #f3f2e9;
+        --muted: #a4b0a5;
+        --faint: #94a194;
+        --paper: #141b18;
+        --panel: #1c2520;
+        --panel-2: #242f28;
+        --line: #354238;
+        --line-strong: #5d6f60;
+        --primary: #ed7255;
+        --primary-dark: #f18b72;
+        --primary-ink: #192018;
+        --success: #76c79e;
+        --accent: #88c5c9;
+        --nav-surface: #19221d;
+        --dashboard-surface: #1c2520;
+        --command-bg: #141c17;
+        --command-bg-hover: #26342a;
+        --command-ink: #f3f2e9;
+        --command-border: #354238;
+      }
+      :is(button, a, input, select, textarea, summary):focus-visible {
+        outline: 3px solid var(--primary);
+        outline-offset: 4px;
+      }
+      button {
+        min-height: 40px;
+      }
+      button.primary {
+        font-weight: 700;
+      }
+      .app {
+        background: var(--paper);
+      }
+      .rail {
+        height: 80px;
+        padding-inline: max(28px, calc((100vw - 1240px) / 2));
+        gap: 28px;
+        backdrop-filter: none;
+      }
+      .brand-lockup {
+        font-family: "Trebuchet MS", sans-serif;
+        font-size: 21px;
+        letter-spacing: -0.04em;
+      }
+      .brand-lockup .mark,
+      .brand-lockup .mark img {
+        width: 34px;
+        height: 34px;
+      }
+      .rail button {
+        height: 42px;
+        border-color: transparent;
+        background: transparent;
+      }
+      .rail button.active {
+        color: var(--ink);
+        background: var(--panel-2);
+        box-shadow: inset 0 -2px var(--primary);
+      }
+      .shell {
+        width: min(1240px, calc(100vw - 56px));
+        padding-top: 38px;
+      }
+      .top {
+        grid-template-columns: minmax(0, 1fr) auto;
+        margin-bottom: 30px;
+      }
+      .title h1 {
+        font-family: Georgia, "Times New Roman", serif;
+        font-weight: 400;
+        font-size: 38px;
+        letter-spacing: -0.04em;
+      }
+      .title p {
+        max-width: 68ch;
+        margin-top: 7px;
+        font-size: 14px;
+      }
+      .user-chip {
+        max-width: 220px;
+        overflow-wrap: anywhere;
+      }
+      .dashboard {
+        gap: 24px;
+      }
+      .fleet-hero,
+      :root[data-theme="light"] .fleet-hero {
+        padding: 32px;
+        border-color: var(--line);
+        background: var(--panel);
+      }
+      .fleet-hero::after {
+        width: 36%;
+        opacity: 0.24;
+        background-size: 28px 28px;
+      }
+      .fleet-hero h2 {
+        font-family: Georgia, "Times New Roman", serif;
+        font-weight: 400;
+        font-size: clamp(30px, 4vw, 52px);
+        letter-spacing: -0.045em;
+        line-height: 1.1;
+      }
+      .fleet-hero h2 strong {
+        font-family: inherit;
+        font-weight: 400;
+      }
+      .fleet-hero-actions {
+        align-items: center;
+      }
+      .fleet-signal {
+        padding-top: 22px;
+      }
+      .fleet-signal strong {
+        font-size: 28px;
+        font-weight: 500;
+      }
+      .fleet-ops-grid {
+        grid-template-columns: minmax(0, 1.2fr) minmax(0, 1fr);
+        gap: 24px;
+      }
+      .readiness-panel,
+      .connection-deck {
+        padding: 24px;
+      }
+      .fleet-roster {
+        padding: 0;
+        border: 0;
+        background: transparent;
+      }
+      .fleet-roster-head {
+        padding: 10px 0 20px;
+        border-bottom: 1px solid var(--line);
+      }
+      .fleet-owner-head {
+        padding: 20px 0 12px;
+      }
+      .fleet-owner-lockup .fleet-owner-mark {
+        display: grid;
+        place-items: center;
+        color: var(--primary);
+        border-color: var(--line);
+        background: var(--panel);
+      }
+      .fleet-box {
+        background: var(--panel);
+        box-shadow: none;
+      }
+      .fleet-box:hover {
+        border-color: var(--line-strong);
+      }
+      .fleet-empty {
+        margin-top: 20px;
+        border: 1px dashed var(--line-strong);
+        border-radius: 12px;
+        padding: 28px;
+      }
+      .fleet-empty > div {
+        min-width: 0;
+      }
+      .fleet-empty .terminal-command {
+        max-width: 100%;
+      }
+      .readiness-head h2 {
+        overflow-wrap: anywhere;
+      }
+      .fleet-empty-index {
+        font-family: Georgia, serif;
+        font-size: 40px;
+        color: var(--primary);
+      }
+      .login-screen {
+        --ink: #f3f2e9;
+        --muted: #a4b0a5;
+        --faint: #a4b0a5;
+        --panel: #1c2520;
+        --panel-2: #242f28;
+        --line: #354238;
+        --line-strong: #5d6f60;
+        --primary: #ed7255;
+        --primary-dark: #f18b72;
+        --primary-ink: #192018;
+        --command-bg: #141c17;
+        --command-bg-hover: #26342a;
+        --command-ink: #f3f2e9;
+        --command-border: #354238;
+        color-scheme: dark;
+        color: var(--ink);
+        background: #141b18;
+        grid-template-columns: minmax(0, 1.15fr) minmax(0, 0.85fr);
+        align-content: center;
+        justify-items: stretch;
+        gap: 60px;
+        padding: 132px max(6vw, calc((100vw - 1180px) / 2)) 72px;
+      }
+      .login-header {
+        position: absolute;
+        inset: 0 0 auto;
+        height: 92px;
+        margin: 0 max(6vw, calc((100vw - 1180px) / 2));
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 24px;
+        border-bottom: 1px solid #354238;
+      }
+      .login-wordmark {
+        display: flex;
+        align-items: center;
+        gap: 11px;
+        color: var(--ink);
+        font-size: 23px;
+        font-weight: 700;
+        letter-spacing: -0.04em;
+        min-width: 0;
+      }
+      .login-wordmark span {
+        overflow-wrap: anywhere;
+      }
+      .login-wordmark img {
+        flex: none;
+      }
+      .login-back {
+        position: static;
+        color: var(--muted);
+        font-family: inherit;
+        font-size: 13px;
+        display: inline-flex;
+        align-items: center;
+        gap: 10px;
+        flex-shrink: 0;
+      }
+      .login-story {
+        max-width: 580px;
+        min-width: 0;
+      }
+      .login-story .section-kicker {
+        color: #c4cabc;
+        font-weight: 500;
+        font-size: 10px;
+      }
+      .login-story h2 {
+        margin: 24px 0;
+        font:
+          400 clamp(48px, 5.9vw, 82px)/1.03 Georgia,
+          "Times New Roman",
+          serif;
+        letter-spacing: -0.055em;
+      }
+      .login-story h2 em {
+        color: #ed7255;
+        font-weight: 400;
+      }
+      .login-story > p {
+        max-width: 42ch;
+        color: var(--muted);
+        font-size: 17px;
+        line-height: 1.75;
+      }
+      .login-map {
+        margin-top: 36px;
+        max-width: 430px;
+        border: 1px solid #354238;
+        border-radius: 12px;
+        background: #19221d;
+        padding: 0 22px;
+        transform: rotate(-2deg);
+      }
+      .login-map > div {
+        display: flex;
+        align-items: center;
+        gap: 16px;
+        padding: 16px 0;
+        border-bottom: 1px solid #354238;
+        font-size: 14px;
+      }
+      .login-map > div svg {
+        color: #a4b0a5;
+        width: 18px;
+        height: 18px;
+      }
+      .login-map .login-map-head,
+      .login-map .login-map-foot {
+        justify-content: space-between;
+        color: #a4b0a5;
+        font:
+          10px/1.5 ui-monospace,
+          monospace;
+        letter-spacing: 0.08em;
+      }
+      .login-map .login-map-foot {
+        border: 0;
+      }
+      .login-map i {
+        margin-left: auto;
+        width: 6px;
+        height: 6px;
+        border-radius: 50%;
+        background: #76c79e;
+      }
+      .login-story-note {
+        display: block;
+        margin-top: 30px;
+        color: var(--muted);
+        font-size: 12px;
+      }
+      .login-panel {
+        width: 100%;
+        max-width: 440px;
+        justify-self: end;
+        padding: 36px;
+        border: 1px solid #354238;
+        border-radius: 16px;
+        background: #1c2520;
+        gap: 22px;
+        box-shadow: 0 24px 70px #07100933;
+      }
+      .login-brand {
+        display: block;
+        width: 100%;
+      }
+      .login-brand .section-kicker {
+        font-size: 10px;
+        font-weight: 500;
+      }
+      .login-panel h1 {
+        margin: 18px 0 12px;
+        font:
+          400 36px/1.15 Georgia,
+          serif;
+        letter-spacing: -0.04em;
+      }
+      .login-panel p {
+        font-family: inherit;
+        font-size: 14px;
+        text-align: left;
+        line-height: 1.7;
+      }
+      .login-actions {
+        width: 100%;
+        margin: 0;
+        gap: 24px;
+      }
+      .login-actions .github-login {
+        min-height: 52px;
+      }
+      .login-screen .command-row {
+        flex-direction: column;
+        align-items: stretch;
+        gap: 12px;
+        padding-top: 22px;
+        border-top: 1px solid var(--line);
+        font-family: inherit;
+        font-size: 13px;
+      }
+      .login-screen .command-row .terminal-command {
+        flex: none;
+        width: 100%;
+        min-height: 48px;
+      }
+      .login-screen .command-row > span {
+        text-align: left;
+      }
+      .bootstrap-login {
+        border-top: 1px solid var(--line);
+      }
+      .bootstrap-login summary {
+        margin: 0;
+        min-height: 48px;
+        color: var(--muted);
+      }
+      .bootstrap-login summary::after {
+        content: "+";
+        margin-left: 12px;
+      }
+      .bootstrap-login[open] summary::after {
+        content: "−";
+      }
+      .login-footer {
+        width: 100%;
+        margin: 0;
+        color: var(--muted);
+        font-size: 11px;
+        text-align: left;
+      }
+      .login-panel .banner {
+        margin: 0;
+      }
+      @media (max-width: 1000px) {
+        .login-screen {
+          gap: 32px;
+          padding-inline: 5vw;
+        }
+        .login-panel {
+          padding: 28px;
+        }
+        .login-story h2 {
+          font-size: 62px;
+        }
+        .fleet-ops-grid {
+          grid-template-columns: 1fr;
+        }
+        .rail {
+          gap: 16px;
+        }
+      }
+      @media (max-width: 720px) {
+        button,
+        input,
+        select {
+          min-height: 44px;
+        }
+        .rail {
+          height: auto;
+          gap: 14px;
+          padding: 16px;
+        }
+        .rail button {
+          height: 44px;
+          padding: 0 6px;
+          font-size: 12px;
+        }
+        .nav-actions {
+          grid-template-columns: repeat(4, minmax(0, 1fr));
+          gap: 4px;
+        }
+        .nav-actions button {
+          flex-direction: column;
+          height: 60px;
+          gap: 6px;
+        }
+        .shell {
+          width: calc(100vw - 32px);
+          padding-top: 24px;
+        }
+        .top {
+          grid-template-columns: minmax(0, 1fr);
+          gap: 14px;
+        }
+        .user-chip {
+          justify-self: start;
+        }
+        .title h1 {
+          font-size: 34px;
+        }
+        .fleet-hero,
+        :root[data-theme="light"] .fleet-hero {
+          padding: 22px;
+        }
+        .fleet-hero-actions {
+          display: grid;
+          grid-template-columns: 1fr;
+        }
+        .fleet-signal-grid {
+          grid-template-columns: repeat(3, minmax(0, 1fr));
+          gap: 16px 0;
+          padding-top: 18px;
+        }
+        .fleet-signal,
+        .fleet-signal:first-child {
+          padding: 0 10px;
+          border-top: 0;
+          border-left: 1px solid var(--line);
+        }
+        .fleet-signal:nth-child(3n + 1) {
+          border-left: 0;
+          padding-left: 0;
+        }
+        .readiness-panel,
+        .connection-deck {
+          padding: 20px;
+        }
+        .fleet-box-grid {
+          grid-template-columns: minmax(0, 1fr);
+        }
+        .fleet-empty {
+          padding: 20px;
+          grid-template-columns: minmax(0, 1fr);
+        }
+        .fleet-empty > button {
+          grid-column: 1;
+        }
+        .login-screen {
+          grid-template-columns: minmax(0, 1fr);
+          align-content: start;
+          gap: 46px;
+          padding: 110px max(20px, env(safe-area-inset-right))
+            max(36px, env(safe-area-inset-bottom)) max(20px, env(safe-area-inset-left));
+        }
+        .login-header {
+          height: 78px;
+          margin-inline: 20px;
+          gap: 14px;
+        }
+        .login-wordmark {
+          font-size: 21px;
+          gap: 8px;
+        }
+        .login-back {
+          font-size: 12px;
+        }
+        .login-panel {
+          grid-row: 1;
+          width: min(100%, 440px);
+          justify-self: center;
+          padding: 26px;
+          gap: 22px;
+        }
+        .login-panel h1 {
+          font-size: 34px;
+        }
+        .login-story {
+          justify-self: center;
+          width: min(100%, 440px);
+          border-top: 1px solid #354238;
+          padding-top: 30px;
+        }
+        .login-story h2 {
+          font-size: 48px;
+          margin: 18px 0;
+        }
+        .login-story > p {
+          font-size: 15px;
+        }
+        .login-map,
+        .login-story-note {
+          display: none;
+        }
+      }
+      @media (max-width: 360px) {
+        .login-screen {
+          padding-inline: 14px;
+        }
+        .login-header {
+          margin-inline: 14px;
+        }
+        .login-wordmark {
+          font-size: 18px;
+        }
+        .login-wordmark img {
+          width: 26px;
+          height: 26px;
+        }
+        .login-panel {
+          padding: 22px;
+        }
+        .login-panel h1 {
+          font-size: 30px;
+        }
+      }
+      @media (prefers-reduced-motion: reduce) {
+        *,
+        *::before,
+        *::after {
+          scroll-behavior: auto !important;
+          animation: none !important;
+          transition: none !important;
         }
       }
     </style>

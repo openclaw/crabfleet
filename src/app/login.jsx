@@ -11,23 +11,6 @@ const devIdentityPresets = [
   { id: "user-2", name: "User 2", role: "viewer" },
 ];
 
-const infraBlocks = [
-  { x: "50%", y: "31%", w: "86px", h: "48px", o: "0.95", d: "0s" },
-  { x: "41%", y: "39%", w: "92px", h: "44px", o: "0.56", d: "-1.1s" },
-  { x: "59%", y: "39%", w: "86px", h: "38px", o: "0.5", d: "-2.4s" },
-  { x: "34%", y: "49%", w: "104px", h: "42px", o: "0.34", d: "-3.1s" },
-  { x: "66%", y: "49%", w: "106px", h: "46px", o: "0.33", d: "-0.8s" },
-  { x: "27%", y: "61%", w: "96px", h: "36px", o: "0.24", d: "-2.2s" },
-  { x: "73%", y: "61%", w: "96px", h: "36px", o: "0.24", d: "-1.8s" },
-  { x: "43%", y: "64%", w: "106px", h: "42px", o: "0.3", d: "-3.7s" },
-  { x: "57%", y: "65%", w: "100px", h: "40px", o: "0.28", d: "-0.5s" },
-  { x: "18%", y: "73%", w: "112px", h: "38px", o: "0.19", d: "-2.9s" },
-  { x: "82%", y: "73%", w: "108px", h: "38px", o: "0.18", d: "-4.1s" },
-  { x: "34%", y: "80%", w: "98px", h: "36px", o: "0.18", d: "-0.3s" },
-  { x: "67%", y: "81%", w: "96px", h: "36px", o: "0.16", d: "-2.7s" },
-  { x: "50%", y: "87%", w: "104px", h: "34px", o: "0.12", d: "-3.5s" },
-];
-
 export function LoginScreen({
   hidden,
   authMethods,
@@ -41,12 +24,53 @@ export function LoginScreen({
   const [submittingToken, setSubmittingToken] = useState(false);
   return (
     <section class="login-screen" hidden={hidden}>
-      <a class="login-back" href="/docs/">
-        &larr; documentation
-      </a>
-      <InfrastructureField />
+      <header class="login-header">
+        <a class="login-wordmark" href={deployment.productUrl || "/docs/"}>
+          <img src={appLogo} alt="" width="32" height="32" />
+          <span>{deployment.label}</span>
+        </a>
+        <a class="login-back" href="/docs/">
+          Documentation <span aria-hidden="true">↗</span>
+        </a>
+      </header>
+      <div class="login-story">
+        <div class="section-kicker">A HOME FOR YOUR AGENT WORK</div>
+        <h2>
+          Your fleet.
+          <br />
+          <em>Within reach.</em>
+        </h2>
+        <p>
+          One place for your workspaces, live terminals, and shared desktops. Pick up wherever your
+          work takes you.
+        </p>
+        <div class="login-map" aria-hidden="true">
+          <div class="login-map-head">
+            <span>CRABFLEET / CONNECTED WORK</span>
+            <span>↗</span>
+          </div>
+          <div>
+            <Icon name="square-terminal" />
+            <span>Repo-ready workspaces</span>
+            <i />
+          </div>
+          <div>
+            <Icon name="terminal" />
+            <span>Live terminal sessions</span>
+            <i />
+          </div>
+          <div>
+            <Icon name="layout-grid" />
+            <span>Shared desktops</span>
+            <i />
+          </div>
+          <div class="login-map-foot">SSH · BROWSER · NATIVE</div>
+        </div>
+        <span class="login-story-note">Your tools. Your work. One clear view.</span>
+      </div>
       <form
         class="login-panel"
+        aria-busy={submittingToken}
         onSubmit={async (event) => {
           event.preventDefault();
           const submittedToken = token;
@@ -59,12 +83,10 @@ export function LoginScreen({
         }}
       >
         <div class="login-brand">
-          <div class="mark">
-            <img src={appLogo} alt="" />
-          </div>
-          <h1>{deployment.label}</h1>
+          <span class="section-kicker">YOUR WORKSPACE AWAITS</span>
+          <h1>Welcome aboard.</h1>
+          <p>Sign in to {deployment.label} to connect to your fleet.</p>
         </div>
-        <p>Managed crabboxes, SSH-first.</p>
         <div class="login-actions">
           <button
             class="primary github-login"
@@ -77,7 +99,7 @@ export function LoginScreen({
             Sign in with GitHub
           </button>
           <div class="command-row">
-            <span>Or connect via</span>
+            <span>Prefer the terminal?</span>
             <CopyCommand value={`ssh link@${deployment.sshHost}`} />
           </div>
           <details
@@ -103,13 +125,17 @@ export function LoginScreen({
                   type="password"
                   name="bootstrap-token"
                   autocomplete="current-password"
+                  autocapitalize="none"
+                  autocorrect="off"
+                  spellcheck={false}
+                  enterkeyhint="go"
                   disabled={!authMethods.token || submittingToken}
                   value={token}
                   onInput={(event) => setToken(event.currentTarget.value)}
                 />
               </label>
               <button type="submit" disabled={!authMethods.token || submittingToken}>
-                Use token
+                {submittingToken ? "Signing in…" : "Use token"}
               </button>
             </div>
           </details>
@@ -119,9 +145,11 @@ export function LoginScreen({
           user={null}
           onDevIdentity={onDevIdentity}
         />
-        <div class={`banner ${message ? "show" : ""}`}>{message}</div>
+        <div class={`banner ${message ? "show" : ""}`} role="status" aria-live="polite">
+          {message}
+        </div>
         <div class="login-footer">
-          <a href="/docs/">Documentation</a>
+          <span>Access is managed by your organization.</span>
         </div>
       </form>
     </section>
@@ -199,26 +227,6 @@ export function DevIdentityPanel({ hidden, user, onDevIdentity }) {
       <button class="primary" type="button" onClick={() => void submit({ id, name, role })}>
         Apply
       </button>
-    </div>
-  );
-}
-
-function InfrastructureField() {
-  return (
-    <div class="infra-field" aria-hidden="true">
-      {infraBlocks.map((block, index) => (
-        <span
-          class={index === 0 ? "infra-block focus" : "infra-block"}
-          style={{
-            "--x": block.x,
-            "--y": block.y,
-            "--w": block.w,
-            "--h": block.h,
-            "--o": block.o,
-            "--d": block.d,
-          }}
-        />
-      ))}
     </div>
   );
 }

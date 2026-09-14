@@ -82,11 +82,11 @@ export function AppShell(props) {
       <main class="shell">
         <section class="top">
           <div class="title">
-            <h1>{props.appView === "board" ? "Board" : deployment.label}</h1>
+            <h1>{props.appView === "board" ? "Board" : "Your fleet"}</h1>
             <p>
               {props.appView === "board"
                 ? "Prompt cards and run attempts, separated from the live crabbox fleet."
-                : "All visible Codex crabboxes grouped by person, with SSH, WebVNC, and session supervision."}
+                : "Your workspaces, terminals, and shared desktops, together."}
             </p>
           </div>
           <button

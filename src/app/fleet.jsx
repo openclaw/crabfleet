@@ -48,13 +48,11 @@ export function FleetPage(props) {
     <section class="dashboard fleet-dashboard" aria-label="Crabfleet dashboard">
       <section class="fleet-hero">
         <div class="fleet-hero-copy">
-          <div class="section-kicker">{deployment.label || "Crabfleet"} / FLEET COMMAND</div>
+          <div class="section-kicker">{deployment.label || "Crabfleet"} / OVERVIEW</div>
           <h2>
-            <strong>{readyCount}</strong> crabboxes live
+            <strong>{readyCount}</strong> {readyCount === 1 ? "crabbox" : "crabboxes"} live
           </h2>
-          <p>
-            One operational view across people, repositories, terminals, WebVNC, and sandbox policy.
-          </p>
+          <p>Ready when you are. Connect to a workspace or start something new.</p>
         </div>
         <div class="fleet-hero-actions">
           <button
@@ -74,32 +72,6 @@ export function FleetPage(props) {
           <Signal label="Total" value={sessionCount} />
         </div>
       </section>
-
-      <div class="fleet-ops-grid">
-        <ReadinessPanel
-          fleet={fleet}
-          repos={props.state.repos?.length || 0}
-          sessionCount={sessionCount}
-          ready={readyCount}
-          provisioning={provisioningCount}
-          attention={attentionCount}
-          stopped={stoppedCount}
-          board={{
-            active: props.active,
-            cap: props.state.cap,
-            queue: props.queue,
-            review: props.review,
-          }}
-          cli={totals.attachable ?? props.cli}
-        />
-        <ConnectionDeck
-          signedIn={props.signedIn}
-          userLabel={props.userLabel}
-          beginLogin={props.beginLogin}
-          sshHost={sshHost}
-          preferredRepo={preferredRepo}
-        />
-      </div>
 
       <DesktopHosts hosts={fleet?.desktopHosts || []} />
 
@@ -147,8 +119,8 @@ export function FleetPage(props) {
           <div class="fleet-empty">
             <span class="fleet-empty-index">00</span>
             <div>
-              <strong>No crabboxes on the board</strong>
-              <p>Create one from SSH, the Go CLI, or the app.</p>
+              <strong>Make room for your next idea.</strong>
+              <p>Start your first crabbox here, or connect from your terminal.</p>
               <CopyCommand value={`ssh ${sshHost} new --repo ${preferredRepo}`} />
             </div>
             <button
@@ -161,6 +133,32 @@ export function FleetPage(props) {
           </div>
         )}
       </section>
+
+      <div class="fleet-ops-grid">
+        <ReadinessPanel
+          fleet={fleet}
+          repos={props.state.repos?.length || 0}
+          sessionCount={sessionCount}
+          ready={readyCount}
+          provisioning={provisioningCount}
+          attention={attentionCount}
+          stopped={stoppedCount}
+          board={{
+            active: props.active,
+            cap: props.state.cap,
+            queue: props.queue,
+            review: props.review,
+          }}
+          cli={totals.attachable ?? props.cli}
+        />
+        <ConnectionDeck
+          signedIn={props.signedIn}
+          userLabel={props.userLabel}
+          beginLogin={props.beginLogin}
+          sshHost={sshHost}
+          preferredRepo={preferredRepo}
+        />
+      </div>
     </section>
   );
 }

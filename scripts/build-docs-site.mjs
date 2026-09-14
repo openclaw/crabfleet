@@ -13,7 +13,7 @@ const cname = readCname();
 const siteBase = cname ? `https://${cname}` : "";
 
 const productName = "Crabfleet";
-const productTagline = "SSH-first Codex crabbox fleet";
+const productTagline = "Your agent work. One clear view.";
 const productDescription =
   "Crabfleet is a Cloudflare Worker control plane for OpenClaw Codex crabboxes and run attempts - repo-ready workspaces, fleet visibility grouped by person, WebVNC, prompt cards, repo gates, workflow policy, and attachable Ghostty WASM session views.";
 const installCommand = "ssh link@crabd.sh";
@@ -468,25 +468,37 @@ function isHomePage(page) {
 }
 
 function homeHero(page) {
-  const description = page.frontmatter.description || productDescription;
-  const quickstartRel = pageMap.get("quickstart.md")?.outRel
-    ? hrefToOutRel(pageMap.get("quickstart.md").outRel, page.outRel)
-    : "quickstart.html";
-  const archRel = pageMap.get("architecture.md")?.outRel
-    ? hrefToOutRel(pageMap.get("architecture.md").outRel, page.outRel)
-    : "architecture.html";
+  const quickstartRel = hrefToOutRel(pageMap.get("quickstart.md").outRel, page.outRel);
+  const archRel = hrefToOutRel(pageMap.get("architecture.md").outRel, page.outRel);
   return `<header class="home-hero">
-        <p class="eyebrow">OpenClaw · Codex Control Plane</p>
-        <h1>${escapeHtml(productTagline)}</h1>
-        <p class="lede">${escapeHtml(description)}</p>
-        <div class="home-cta">
-          <a class="btn btn-primary" href="${quickstartRel}">Quickstart</a>
-          <a class="btn btn-ghost" href="${repoBase}" rel="noopener">GitHub</a>
-        </div>
-        <div class="home-install"><span class="prompt">$</span><code>${escapeHtml(installCommand)}</code></div>
-        <div class="home-services"><span>Cloudflare Worker</span><span>GitHub OAuth</span><span>Ghostty WASM</span><span>SSH Gateway</span></div>
-        <p class="muted"><a href="${archRel}">Architecture overview →</a></p>
-      </header>`;
+    <div class="home-intro">
+      <p class="eyebrow"><span class="status-dot"></span> MISSION CONTROL FOR AGENT WORK</p>
+      <h1>Your fleet.<br><em>Within reach.</em></h1>
+      <p class="lede">A home for your agent workspaces, live terminals, and shared desktops. Keep the whole picture in view. Get back to the work that matters.</p>
+      <div class="home-cta">
+        <a class="btn btn-primary" href="https://crabfleet.openclaw.ai/app/">Open your fleet <span aria-hidden="true">↗</span></a>
+        <a class="btn btn-ghost" href="${quickstartRel}">Get started <span aria-hidden="true">→</span></a>
+      </div>
+      <div class="home-install"><span class="prompt">$</span><code>${escapeHtml(installCommand)}</code></div>
+      <p class="home-caption">Prefer the terminal? Link your SSH key and you're in.</p>
+    </div>
+    <div class="fleet-preview" aria-label="Illustration of a Crabfleet workspace">
+      <div class="preview-top"><span><img src="crabbox-logo.png" alt="" width="22" height="22"> Crabfleet</span><span>WORKSPACE PREVIEW</span></div>
+      <div class="preview-heading"><span>Your fleet</span><span class="preview-badge">3 connected</span></div>
+      <div class="preview-count"><strong>Work in motion.</strong><span>One place to see it through.</span></div>
+      <div class="preview-session"><span class="preview-avatar">01</span><div><strong>Workspace</strong><span>Repo ready · terminal attached</span></div><i></i></div>
+      <div class="preview-session"><span class="preview-avatar">02</span><div><strong>Build &amp; review</strong><span>GitHub Actions · live session</span></div><i></i></div>
+      <div class="preview-session"><span class="preview-avatar">03</span><div><strong>Shared desktop</strong><span>Native host · browser viewer</span></div><i></i></div>
+      <div class="preview-terminal"><span>~/workspace</span><code><span>$</span> crabfleet list<br><span>✓</span> Your next step is within reach.</code></div>
+      <div class="preview-bottom"><span class="status-dot"></span> SSH · BROWSER · NATIVE</div>
+    </div>
+  </header>
+  <section class="home-principles" aria-label="Ways to work">
+    <article><span class="principle-number">01 / START</span><h2>A workspace.<br>Without the busywork.</h2><p>Create a repo-ready crabbox from SSH, the CLI, or your browser. Your next task has a place to live.</p><a href="${quickstartRel}">Launch your first workspace →</a></article>
+    <article><span class="principle-number">02 / CONNECT</span><h2>Right there.<br>Wherever you are.</h2><p>Attach a live terminal or open a shared desktop. Move between your machines without losing the thread.</p><a href="${hrefToOutRel(pageMap.get("macos-native-client.md").outRel, page.outRel)}">Explore desktop sharing →</a></article>
+    <article><span class="principle-number">03 / SEE IT THROUGH</span><h2>The whole fleet.<br>A clearer picture.</h2><p>See work grouped by operator, follow session progress, and find the tasks that need your attention.</p><a href="${archRel}">See how it fits together →</a></article>
+  </section>
+  <div class="overview-heading"><p class="eyebrow">THE FIELD GUIDE</p><h2>Everything you need to get underway.</h2><p>Explore what ships today, how it works, and where to go next.</p></div>`;
 }
 
 function standardHero(page, sectionName, editUrl) {
@@ -545,13 +557,12 @@ function layout({ page, html, toc, prev, next, sectionName }) {
   <meta name="description" content="${escapeAttr(description)}">
   ${socialMeta}
   <link rel="icon" href="${rootPrefix}favicon.svg" type="image/svg+xml">
-  <link rel="preconnect" href="https://fonts.googleapis.com">
-  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
   <script>${preThemeScript()}</script>
   <style>${css()}</style>
 </head>
 <body${home ? ' class="home"' : ""}>
+  <a class="skip-link" href="#main-content">Skip to content</a>
+  ${home ? `<header class="site-header"><a class="brand" href="./"><img class="mark" src="crabbox-logo.png" alt="" width="32" height="32"><strong>Crabfleet</strong></a><nav aria-label="Main"><a href="${hrefToOutRel(pageMap.get("quickstart.md").outRel, page.outRel)}">Documentation</a><a href="${repoBase}">GitHub ↗</a>${themeToggleHtml()}<a class="site-open" href="https://crabfleet.openclaw.ai/app/">Open app <span aria-hidden="true">↗</span></a></nav></header>` : ""}
   <button class="nav-toggle" type="button" aria-label="Toggle navigation" aria-expanded="false">
     <span aria-hidden="true"></span><span aria-hidden="true"></span><span aria-hidden="true"></span>
   </button>
@@ -567,7 +578,7 @@ function layout({ page, html, toc, prev, next, sectionName }) {
       <label class="search"><span>Search</span><input id="doc-search" type="search" placeholder="cards, runs, admin"></label>
       <nav>${navHtml(page)}</nav>
     </aside>
-    <main>
+    <main id="main-content">
       ${heroBlock}
       <div class="doc-grid${home ? " doc-grid-home" : ""}">
         <article class="${articleClass}">${html}${prevNext}</article>
