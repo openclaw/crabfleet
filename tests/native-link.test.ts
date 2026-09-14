@@ -426,14 +426,14 @@ test("native authorization safely renders long device names and preserves explic
     { DB: d1(user), CRABFLEET_TRUSTED_PROXY_AUTO_ROLE: "viewer" } as RuntimeEnv,
     service(approvals, {
       ...link,
-      clientName: `${"workstation".repeat(12)}<script>alert(1)</script>`,
+      clientName: `${"workstation".repeat(12)}<ScRiPt>alert(1)</ScRiPt>`,
       scope: connectorAccessScope,
     }),
   );
   assert.equal(response.status, 200);
   const html = await response.text();
-  assert.match(html, /&lt;script&gt;alert\(1\)&lt;\/script&gt;/);
-  assert.doesNotMatch(html, /<script>/);
+  assert.match(html, /&lt;ScRiPt&gt;alert\(1\)&lt;\/ScRiPt&gt;/);
+  assert.doesNotMatch(html, /<script\b/i);
   assert.match(html, /<form method="post" action="\/native\/link\/link-code">/);
   assert.match(html, /name="csrf" value="[^"]+"/);
   assert.match(html, /Authorize this connector/);

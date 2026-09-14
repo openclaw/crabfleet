@@ -176,6 +176,26 @@ func TestGreeterPrivateDirectoryAndSocketSelection(t *testing.T) {
 	}
 }
 
+func TestGreeterOwnershipRejectsUIDTruncation(t *testing.T) {
+	info, err := os.Stat(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	uid := os.Geteuid()
+	if !greeterOwned(info, uid) {
+		t.Fatal("rejected the directory's actual owner")
+	}
+	if greeterOwned(info, -1) {
+		t.Fatal("accepted a negative UID")
+	}
+	if strconv.IntSize == 64 {
+		wrappedUID := int(int64(uid) + 1<<32)
+		if greeterOwned(info, wrappedUID) {
+			t.Fatal("accepted an oversized UID that truncates to the actual owner")
+		}
+	}
+}
+
 type greeterFixtureRecord struct {
 	PID, ChildPID int
 	Arguments     []string

@@ -8,6 +8,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"math"
 	"os"
 	"os/exec"
 	"os/user"
@@ -97,8 +98,9 @@ func validateGreeter(options greeterOptions) error {
 	if err != nil {
 		return errors.New("configured greeter account does not exist")
 	}
-	uid, err := strconv.Atoi(account.Uid)
-	if err != nil || uid == 0 || uid != os.Geteuid() || os.Getuid() != uid {
+	accountUID, err := strconv.ParseUint(account.Uid, 10, 32)
+	uid := os.Geteuid()
+	if err != nil || accountUID == 0 || accountUID != uint64(uid) || os.Getuid() != uid {
 		return errors.New("run as the configured non-root greeter account, without setuid")
 	}
 	if err := greeterPrivateDirectory(options.directory, uid); err != nil {
@@ -133,6 +135,9 @@ func validateGreeter(options greeterOptions) error {
 }
 
 func greeterOwned(info os.FileInfo, uid int) bool {
+	if uid < 0 || uint64(uid) > math.MaxUint32 {
+		return false
+	}
 	stat, ok := info.Sys().(*syscall.Stat_t)
 	return ok && stat.Uid == uint32(uid)
 }
