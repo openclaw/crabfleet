@@ -432,7 +432,7 @@ export function DesktopViewer({ host, onExit }) {
     }
     try {
       await sessionRef.current.sendClipboardText(manualClipboard);
-      setClipboardNotice("Clipboard sent to Mac");
+      setClipboardNotice("Clipboard sent to desktop");
     } catch (error) {
       setClipboardNotice(error instanceof Error ? error.message : String(error));
     }
@@ -817,7 +817,9 @@ export function DesktopViewer({ host, onExit }) {
             {fileStatus ? <p class="desktop-file-status">{fileStatus}</p> : null}
           </aside>
         ) : null}
-        <div class="desktop-viewer-hint">Click display to capture keyboard · Esc sends to Mac</div>
+        <div class="desktop-viewer-hint">
+          Click display to capture keyboard · Esc sends to desktop
+        </div>
       </section>
       <aside class="desktop-clipboard">
         <label for="desktop-clipboard-text">Clipboard</label>
@@ -827,7 +829,7 @@ export function DesktopViewer({ host, onExit }) {
           placeholder="Paste text here when browser clipboard permission is unavailable"
           onInput={(event) => setManualClipboard(event.currentTarget.value)}
         />
-        <button onClick={sendClipboard}>Send to Mac</button>
+        <button onClick={sendClipboard}>Send to desktop</button>
         <button onClick={pasteSystemClipboard}>Load system clipboard</button>
         <span>{clipboardNotice}</span>
       </aside>

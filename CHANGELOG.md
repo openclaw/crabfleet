@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Keep Linux HEVC video in the browser-compatible Main profile while preserving independently decodable frames, avoiding an unnecessary H.264 fallback; label shared-desktop keyboard and clipboard controls correctly for Linux as well as Mac hosts.
 - Run native validation for the current OS with `pnpm test:native`, including Go race tests and vet, plus Swift suites on macOS; make local Linux validation independent of Crabbox authentication or Mac runner access.
 - Add a Linux desktop connector with X11, Hyprland/wlroots and GNOME/KDE portal capture; scoped Fleet sign-in and reconnecting browser relay; negotiated H.264/HEVC, UTF-8 clipboard, opt-in system audio and confined shared folders; systemd user service/autostart; private persistent state and publication recovery; Linux amd64/arm64 archives and protocol, media and compositor tests. Direct VNC now offers only its implemented password authentication so native viewers no longer select the old ARD stub.
 - Retry disconnected desktop input cleanup during normal operation, bound retained input sessions, keep shutdown responsive during blocked input, reject interrupted browser file requests, preserve folder sharing across codec fallback, recover synchronous H.264 presentation failures, prevent detached relay peers from closing a replacement pairing, and reject quiet mode on platforms without saved-password retrieval.

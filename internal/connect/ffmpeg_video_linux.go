@@ -125,7 +125,10 @@ func (v *FFmpegVideo) start(width, height int, codec string) (*videoWorker, erro
 	if codec == "h264" {
 		args = append(args, "-c:v", "libx264", "-preset", "ultrafast", "-tune", "zerolatency", "-x264-params", "keyint=1:repeat-headers=1:threads=1")
 	} else {
-		args = append(args, "-c:v", "libx265", "-preset", "ultrafast", "-tune", "zerolatency", "-x265-params", "keyint=1:repeat-headers=1:pools=none:frame-threads=1:log-level=error")
+		// keyint=1 selects Main Intra (Range Extensions), which browser HEVC
+		// decoders may reject. Force every frame to a closed-GOP keyframe while
+		// retaining Main profile and independently decodable access units.
+		args = append(args, "-c:v", "libx265", "-preset", "ultrafast", "-tune", "zerolatency", "-profile:v", "main", "-force_key_frames", "expr:gte(t,0)", "-x265-params", "keyint=30:min-keyint=1:scenecut=0:repeat-headers=1:open-gop=0:pools=none:frame-threads=1:log-level=error")
 	}
 	// image2 atomically publishes each complete access unit. A single input is
 	// outstanding, so at most one finished file and its temporary file can exist.

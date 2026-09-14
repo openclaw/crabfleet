@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"strings"
 	"testing"
 	"time"
 )
@@ -53,6 +54,14 @@ func TestFFmpegLiveVideoCodecs(t *testing.T) {
 				payload, err := v.Encode(ctx, frame, codec)
 				if err != nil {
 					t.Fatal(err)
+				}
+				if codec == "hevc" {
+					probe := exec.CommandContext(ctx, "ffprobe", "-v", "error", "-f", codec, "-i", "pipe:0", "-show_entries", "stream=profile", "-of", "default=noprint_wrappers=1:nokey=1")
+					probe.Stdin = bytes.NewReader(payload)
+					profile, err := probe.Output()
+					if err != nil || strings.TrimSpace(string(profile)) != "Main" {
+						t.Fatalf("HEVC must use the browser-compatible Main profile, got %q: %v", profile, err)
+					}
 				}
 				cmd := exec.CommandContext(ctx, "ffmpeg", "-nostdin", "-v", "error", "-f", codec, "-i", "pipe:0", "-frames:v", "1", "-f", "rawvideo", "-pix_fmt", "rgba", "pipe:1")
 				cmd.Stdin = bytes.NewReader(payload)

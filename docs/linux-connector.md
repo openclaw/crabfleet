@@ -131,7 +131,8 @@ and dropped late packets. Select the output device before starting the connector
 
 Video defaults to negotiated HEVC, then H.264, then Tight/JPEG, with RAW available
 for basic VNC clients. FFmpeg uses persistent software encoders and independent
-frames so a new viewer can decode immediately. A missing encoder or an unsupported
+frames so a new viewer can decode immediately. HEVC uses Main profile for browser
+compatibility while keeping every frame independently decodable. A missing encoder or an unsupported
 frame size falls back to JPEG/RAW when the viewer offers them. `--video h264` or
 `hevc` restricts the preferred codec; it still permits the negotiated fallback.
 Hardware encoding and adaptive frame resizing are not implemented.
