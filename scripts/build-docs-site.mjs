@@ -28,15 +28,10 @@ const sections = [
   ["Reference", ["admin.md", "api.md", "screen-recording-indicator.md"]],
 ];
 
-// Skip these from page generation (internal notes, generated subpages we don't want as their own
-// nav-less HTML files, etc.). Generated `commands/*.md` ARE built (deep-linkable) but only the
-// commands index appears in the sidebar.
-const buildExcludes = [/^refactor\//, /^commands\.generated\.md$/];
-
 fs.rmSync(outDir, { recursive: true, force: true });
 fs.mkdirSync(outDir, { recursive: true });
 
-const allPages = allMarkdown(docsDir).map((file) => {
+const pages = allMarkdown(docsDir).map((file) => {
   const rel = path.relative(docsDir, file).replaceAll(path.sep, "/");
   const raw = fs.readFileSync(file, "utf8");
   const { frontmatter, body } = parseFrontmatter(raw);
@@ -45,7 +40,6 @@ const allPages = allMarkdown(docsDir).map((file) => {
   return { file, rel, title, outRel: outPath(rel, frontmatter), markdown: cleaned, frontmatter };
 });
 
-const pages = allPages.filter((page) => !buildExcludes.some((re) => re.test(page.rel)));
 const pageMap = new Map(pages.map((page) => [page.rel, page]));
 const permalinkMap = new Map();
 for (const page of pages) {
@@ -88,58 +82,25 @@ fs.writeFileSync(path.join(outDir, "llms.txt"), llmsTxt(), "utf8");
 console.log(`built docs site: ${path.relative(root, outDir)}`);
 
 function llmsTxt() {
-  const origin = docsOrigin();
-  const source = docsSourceUrl();
-  const name = typeof productName !== "undefined" ? productName : path.basename(root);
-  const description =
-    typeof productDescription !== "undefined" ? productDescription : `${name} documentation index.`;
-  const docPages = docsLlmsPages().map(
-    (page) => `- ${page.title}: ${pageUrl(origin, page.outRel)}`,
-  );
-  const lines = [`# ${name}`, "", description, "", "Canonical documentation:", ...docPages];
-  if (source) {
-    lines.push("", `Source: ${source}`);
-  }
-  lines.push(
+  const seen = new Set();
+  const docPages = [...orderedPages, ...pages]
+    .filter((page) => !seen.has(page.outRel) && seen.add(page.outRel))
+    .map((page) => `- ${page.title}: ${pageCanonicalUrl(page)}`);
+  return [
+    `# ${productName}`,
+    "",
+    productDescription,
+    "",
+    "Canonical documentation:",
+    ...docPages,
+    "",
+    `Source: ${repoBase}`,
     "",
     "Guidance for agents:",
     "- Prefer the canonical documentation URLs above over README excerpts or package metadata.",
     "- Fetch only the pages needed for the current task; this is an index, not a full-site corpus.",
-  );
-  return `${lines.join("\n")}\n`;
-}
-
-function docsLlmsPages() {
-  const seen = new Set();
-  const ordered = typeof orderedPages !== "undefined" ? orderedPages : [];
-  return [...ordered, ...pages].filter(
-    (page) => page.outRel && !seen.has(page.outRel) && seen.add(page.outRel),
-  );
-}
-
-function docsOrigin() {
-  const value =
-    (typeof siteBase !== "undefined" && siteBase) ||
-    (typeof siteUrl !== "undefined" && siteUrl) ||
-    (typeof customDomain !== "undefined" && customDomain ? `https://${customDomain}` : "");
-  return value.replace(/\/$/, "");
-}
-
-function docsSourceUrl() {
-  if (typeof repoBase !== "undefined") return repoBase;
-  if (typeof repoUrl !== "undefined") return repoUrl;
-  if (typeof repoEditBase !== "undefined")
-    return repoEditBase.replace(/\/edit\/main\/docs\/?$/, "");
-  return "";
-}
-
-function pageUrl(origin, outRel) {
-  const normalized =
-    outRel === "index.html"
-      ? ""
-      : outRel.replace(/(?:^|\/)index\.html$/, (match) => (match === "index.html" ? "" : "/"));
-  if (!origin) return normalized || "index.html";
-  return normalized ? `${origin}/${normalized}` : `${origin}/`;
+    "",
+  ].join("\n");
 }
 
 function readCname() {
@@ -237,7 +198,10 @@ function markdownToHtml(markdown, currentRel) {
   };
   const closeList = () => {
     if (!list) return;
-    html.push(`</${list}>`);
+    const start = list.tag === "ol" && list.start !== 1 ? ` start="${list.start}"` : "";
+    html.push(
+      `<${list.tag}${start}>${list.items.map((item) => `<li>${inline(item, currentRel)}</li>`).join("\n")}</${list.tag}>`,
+    );
     list = null;
   };
   const flushBlockquote = () => {
@@ -300,6 +264,8 @@ function markdownToHtml(markdown, currentRel) {
     flushBlockquote();
     if (!line.trim()) {
       flushParagraph();
+      const nextLine = lines.slice(i + 1).find((next) => next.trim()) || "";
+      if (list && /^(?:-\s+|\d+\.\s+)/.test(nextLine)) continue;
       closeList();
       continue;
     }
@@ -361,18 +327,22 @@ function markdownToHtml(markdown, currentRel) {
       continue;
     }
     const bullet = line.match(/^\s*-\s+(.+)$/);
-    const numbered = line.match(/^\s*\d+\.\s+(.+)$/);
+    const numbered = line.match(/^\s*(\d+)\.\s+(.+)$/);
     if (bullet || numbered) {
       flushParagraph();
       const tag = bullet ? "ul" : "ol";
-      if (list && list !== tag) closeList();
+      if (list && list.tag !== tag) closeList();
       if (!list) {
-        list = tag;
-        html.push(`<${tag}>`);
+        list = { tag, start: numbered ? Number(numbered[1]) : 1, items: [] };
       }
-      html.push(`<li>${inline((bullet || numbered)[1], currentRel)}</li>`);
+      list.items.push(bullet ? bullet[1] : numbered[2]);
       continue;
     }
+    if (list && /^\s+/.test(line)) {
+      list.items[list.items.length - 1] += ` ${line.trim()}`;
+      continue;
+    }
+    closeList();
     paragraph.push(line.trim());
   }
   flushParagraph();
@@ -428,6 +398,7 @@ function tocFromHtml(html) {
   const re = /<h([23]) id="([^"]+)">([\s\S]*?)<\/h[23]>/g;
   let m;
   while ((m = re.exec(html))) {
+    // Inline rendering has already escaped the heading's text and entities.
     const text = m[3]
       .replace(/<a class="anchor"[^>]*>.*?<\/a>/, "")
       .replace(/<[^>]+>/g, "")
@@ -436,7 +407,7 @@ function tocFromHtml(html) {
   }
   if (items.length < 2) return "";
   return `<nav class="toc" aria-label="On this page"><h2>On this page</h2>${items
-    .map((i) => `<a class="toc-l${i.level}" href="#${i.id}">${escapeHtml(i.text)}</a>`)
+    .map((i) => `<a class="toc-l${i.level}" href="#${i.id}">${i.text}</a>`)
     .join("")}</nav>`;
 }
 
@@ -610,8 +581,7 @@ function navHtml(currentPage) {
 
 function navTitle(page) {
   if (page.rel === "index.md") return "Overview";
-  if (page.rel === "commands/README.md") return "Command Index";
-  return page.title.replace(/^`gog\s*/, "").replace(/`$/, "");
+  return page.title;
 }
 
 function hrefToOutRel(targetOutRel, currentOutRel) {
@@ -728,7 +698,7 @@ function highlightShellLine(line) {
     (_, lead, flag) => `${escapeHtml(lead)}${stashAdd(flag, "hl-f")}`,
   );
   working = working.replace(
-    /\b(gog|brew|go|git|gh|make|sudo|cd|export|cat|curl|jq|ls|mv|cp|rm|mkdir|docker|tail|node|npm|pnpm|yarn)\b/g,
+    /\b(brew|go|git|gh|make|sudo|cd|export|cat|curl|jq|ls|mv|cp|rm|mkdir|docker|tail|node|npm|pnpm|yarn)\b/g,
     (m) => stashAdd(m, "hl-cmd"),
   );
   working = working.replace(/\b(\d+(?:\.\d+)?)\b/g, (m) => stashAdd(m, "hl-n"));
@@ -811,15 +781,11 @@ function highlightYamlValue(rest) {
 
 function validateLinks(outputDir) {
   const failures = [];
-  // Generated command pages embed literal placeholders like `(url)` / `(path)` from help text.
-  // These are not real links, so skip them rather than fail the build.
-  const placeholderHrefs = /^(url|path|file|dir|name)$/i;
   for (const file of allHtml(outputDir)) {
     const html = fs.readFileSync(file, "utf8");
     for (const match of html.matchAll(/href="([^"]+)"/g)) {
       const href = match[1];
-      if (/^(#|https?:|mailto:|tel:|javascript:)/.test(href)) continue;
-      if (placeholderHrefs.test(href)) continue;
+      if (/^(https?:|mailto:|tel:)/.test(href)) continue;
       const [rawPath, anchor = ""] = href.split("#");
       const targetPath = rawPath ? path.resolve(path.dirname(file), rawPath) : file;
       const target =

@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Correct wrapped documentation lists and escaped table-of-contents labels, validate local anchors, and remove obsolete site-generation paths while preserving the responsive design.
 - Update desktop documentation with platform-specific setup, direct-versus-relay connection guidance, Windows connector limits, and the current discovery API; remove workspace-era navigation and installation hints, and emit the docs 404 page at the correct path.
 - Redesign the public website, documentation, sign-in, and desktop companion with responsive layouts and a shared visual system; put mobile authentication first, retain failed token input, and make connector authorization, completion, and recovery pages work on phone screens.
 - Add Linux VAAPI/NVENC video selection with recoverable software fallback, negotiated live desktop sizing with decoder resets and opt-in supported mode changes, simultaneous X11/Wayland/portal monitor sharing, and an administrator-configured SDDM Wayland greeter wrapper with separate authenticated state and bounded helper cleanup.
