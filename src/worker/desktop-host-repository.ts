@@ -1,4 +1,5 @@
-import { database, executeBatch } from "./database.ts";
+import type { Selectable } from "kysely";
+import { database, executeBatch, type DesktopHostTable } from "./database.ts";
 import type { RuntimeEnv } from "./env.ts";
 import { conflict } from "./http.ts";
 
@@ -61,22 +62,7 @@ export class DesktopHostRepository implements DesktopHostStore, DesktopRelayRegi
       .orderBy("updated_at", "desc")
       .orderBy("id")
       .execute();
-    return rows.map((row) => ({
-      relayOnly: row.relay_only === 1,
-      quicPort: row.quic_port ?? null,
-      quicCertHash: row.quic_cert_hash ?? null,
-      webtransport: row.webtransport === 1,
-      ownerSubject: row.owner_subject,
-      id: row.id,
-      owner: row.owner,
-      name: row.name,
-      address: row.address,
-      port: row.port,
-      ownershipToken: row.ownership_token,
-      publicationID: row.publication_id,
-      createdAt: row.created_at,
-      updatedAt: row.updated_at,
-    }));
+    return rows.map(desktopHostRow);
   }
 
   async findOwnedTokenRegistration(
@@ -108,71 +94,41 @@ export class DesktopHostRepository implements DesktopHostStore, DesktopRelayRegi
   }
 
   async upsert(host: DesktopHostWrite): Promise<DesktopHostRow> {
+    const metadata = {
+      owner: host.owner,
+      name: host.name,
+      address: host.address,
+      port: host.port,
+      updated_at: host.updatedAt,
+    };
+    const publication = {
+      relay_only: host.relayOnly === true ? 1 : 0,
+      quic_port: host.quicPort ?? null,
+      quic_cert_hash: host.quicCertHash ?? null,
+      webtransport: host.webtransport === true ? 1 : 0,
+      ownership_token: host.ownershipToken,
+      publication_id: host.publicationID,
+      publication_write_token: host.ownershipToken,
+    };
     const row = await database(this.env)
       .insertInto("desktop_hosts")
       .values({
-        relay_only: host.relayOnly === true ? 1 : 0,
-        quic_port: host.quicPort ?? null,
-        quic_cert_hash: host.quicCertHash ?? null,
-        webtransport: host.webtransport === true ? 1 : 0,
+        ...metadata,
+        ...publication,
         owner_subject: host.ownerSubject,
         id: host.id,
-        owner: host.owner,
-        name: host.name,
-        address: host.address,
-        port: host.port,
-        ownership_token: host.ownershipToken,
-        publication_id: host.publicationID,
-        publication_write_token: host.ownershipToken,
         created_at: host.createdAt,
-        updated_at: host.updatedAt,
       })
       .onConflict((conflict) => {
         const update = conflict.columns(["owner_subject", "id"]);
         return host.ownershipToken
-          ? update.doUpdateSet({
-              relay_only: host.relayOnly === true ? 1 : 0,
-              quic_port: host.quicPort ?? null,
-              quic_cert_hash: host.quicCertHash ?? null,
-              webtransport: host.webtransport === true ? 1 : 0,
-              owner: host.owner,
-              name: host.name,
-              address: host.address,
-              port: host.port,
-              ownership_token: host.ownershipToken,
-              publication_id: host.publicationID,
-              publication_write_token: host.ownershipToken,
-              updated_at: host.updatedAt,
-            })
-          : update
-              .doUpdateSet({
-                owner: host.owner,
-                name: host.name,
-                address: host.address,
-                port: host.port,
-                updated_at: host.updatedAt,
-              })
-              .where("desktop_hosts.ownership_token", "=", "");
+          ? update.doUpdateSet({ ...metadata, ...publication })
+          : update.doUpdateSet(metadata).where("desktop_hosts.ownership_token", "=", "");
       })
       .returningAll()
       .executeTakeFirst();
     if (!row) throw desktopHostOwnershipConflict();
-    return {
-      relayOnly: row.relay_only === 1,
-      quicPort: row.quic_port ?? null,
-      quicCertHash: row.quic_cert_hash ?? null,
-      webtransport: row.webtransport === 1,
-      ownerSubject: row.owner_subject,
-      id: row.id,
-      owner: row.owner,
-      name: row.name,
-      address: row.address,
-      port: row.port,
-      ownershipToken: row.ownership_token,
-      publicationID: row.publication_id,
-      createdAt: row.created_at,
-      updatedAt: row.updated_at,
-    };
+    return desktopHostRow(row);
   }
 
   async ownershipTokenForPublication(
@@ -227,6 +183,25 @@ export class DesktopHostRepository implements DesktopHostStore, DesktopRelayRegi
         .where("ownership_token", "=", deleteMarker),
     ]);
   }
+}
+
+function desktopHostRow(row: Selectable<DesktopHostTable>): DesktopHostRow {
+  return {
+    relayOnly: row.relay_only === 1,
+    quicPort: row.quic_port ?? null,
+    quicCertHash: row.quic_cert_hash ?? null,
+    webtransport: row.webtransport === 1,
+    ownerSubject: row.owner_subject,
+    id: row.id,
+    owner: row.owner,
+    name: row.name,
+    address: row.address,
+    port: row.port,
+    ownershipToken: row.ownership_token,
+    publicationID: row.publication_id,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
 }
 
 function desktopHostOwnershipConflict(): ReturnType<typeof conflict> {

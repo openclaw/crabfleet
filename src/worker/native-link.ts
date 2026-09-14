@@ -11,7 +11,7 @@ import {
 import { sha256 } from "./crypto.ts";
 import { browserAppOrigin } from "./deployment.ts";
 import type { RuntimeEnv } from "./env.ts";
-import { badRequest, cookie, cookies, forbidden, redirect, text } from "./http.ts";
+import { badRequest, cookie, cookies, forbidden, readBoundedText, redirect, text } from "./http.ts";
 import { connectorAccessScope, type NativeAuthService } from "./native-auth.ts";
 
 export const nativeLinkCookie = "crabbox_native_link";
@@ -223,47 +223,11 @@ async function readNativeLinkCsrf(request: Request): Promise<string> {
   if (!/^application\/x-www-form-urlencoded(?:\s*;|$)/iu.test(contentType)) {
     throw badRequest("invalid native authorization form");
   }
-  const declaredLength = request.headers.get("content-length");
-  if (/^\d+$/u.test(declaredLength ?? "") && Number(declaredLength) > nativeLinkFormLimitBytes) {
-    await request.body?.cancel().catch(() => undefined);
-    throw requestBodyTooLarge();
-  }
-  if (!request.body) throw badRequest("invalid native authorization form");
-
-  const reader = request.body.getReader();
-  const chunks: Uint8Array[] = [];
-  let total = 0;
-  try {
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      if (!value?.byteLength) continue;
-      if (total + value.byteLength > nativeLinkFormLimitBytes) {
-        await reader.cancel().catch(() => undefined);
-        throw requestBodyTooLarge();
-      }
-      chunks.push(value);
-      total += value.byteLength;
-    }
-  } finally {
-    reader.releaseLock();
-  }
-
-  const body = new Uint8Array(total);
-  let offset = 0;
-  for (const chunk of chunks) {
-    body.set(chunk, offset);
-    offset += chunk.byteLength;
-  }
-  try {
-    return new URLSearchParams(new TextDecoder().decode(body)).get("csrf") ?? "";
-  } catch {
-    throw badRequest("invalid native authorization form");
-  }
-}
-
-function requestBodyTooLarge(): Error & { status: number } {
-  return Object.assign(new Error("request body too large"), { status: 413 });
+  const body = await readBoundedText(request, nativeLinkFormLimitBytes, {
+    emptyBodyMessage: "invalid native authorization form",
+    tooLargeMessage: "request body too large",
+  });
+  return new URLSearchParams(body).get("csrf") ?? "";
 }
 
 function nativeLinkApprovalOrigin(request: Request, env: RuntimeEnv): string {

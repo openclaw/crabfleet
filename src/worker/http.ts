@@ -8,36 +8,40 @@ export function text(
   extraHeaders: HeadersInit = {},
   status = 200,
 ): Response {
+  const headers = responseHeaders(securityHeaders(contentType), extraHeaders);
+  headers.set("content-length", String(encoder.encode(body).byteLength));
   return new Response(body, {
     status,
-    headers: {
-      ...securityHeaders(contentType),
-      ...extraHeaders,
-      "content-length": String(encoder.encode(body).byteLength),
-    },
+    headers,
   });
 }
 
 export function json(body: unknown, init: ResponseInit & { headers?: HeadersInit } = {}): Response {
   const textBody = JSON.stringify(body);
+  const headers = responseHeaders(
+    securityHeaders("application/json; charset=utf-8", false),
+    init.headers,
+  );
+  headers.set("content-length", String(encoder.encode(textBody).byteLength));
   return new Response(textBody, {
     ...init,
-    headers: {
-      ...securityHeaders("application/json; charset=utf-8", false),
-      ...init.headers,
-      "content-length": String(encoder.encode(textBody).byteLength),
-    },
+    headers,
   });
 }
 
 export function redirect(location: string, headers: HeadersInit = {}): Response {
   return new Response(null, {
     status: 302,
-    headers: {
-      location,
-      ...headers,
-    },
+    headers: responseHeaders({ location }, headers),
   });
+}
+
+function responseHeaders(defaults: HeadersInit, overrides?: HeadersInit): Headers {
+  const headers = new Headers(overrides);
+  for (const [name, value] of new Headers(defaults)) {
+    if (!headers.has(name)) headers.set(name, value);
+  }
+  return headers;
 }
 
 export function securityHeaders(contentType: string, cache = true): HeadersInit {
@@ -49,10 +53,6 @@ export function securityHeaders(contentType: string, cache = true): HeadersInit 
   };
 }
 
-export function wantsMarkdown(request: Request): boolean {
-  return (request.headers.get("accept") ?? "").includes("text/markdown");
-}
-
 export async function readJson<T>(request: Request): Promise<T> {
   let source: string;
   try {
@@ -60,27 +60,29 @@ export async function readJson<T>(request: Request): Promise<T> {
   } catch {
     throw badRequest("invalid json");
   }
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(source) as unknown;
-  } catch {
-    throw badRequest("invalid json");
-  }
-  assertRoundTrippableJsonIntegerLexemes(source);
-  assertRoundTrippableJsonIntegers(parsed);
-  return parsed as T;
+  return parseJson<T>(source);
 }
 
 export async function readBoundedJson<T>(request: Request, maximumBytes: number): Promise<T> {
+  return parseJson<T>(await readBoundedText(request, maximumBytes));
+}
+
+export async function readBoundedText(
+  request: Request,
+  maximumBytes: number,
+  errors: { emptyBodyMessage?: string; tooLargeMessage?: string } = {},
+): Promise<string> {
   if (!Number.isSafeInteger(maximumBytes) || maximumBytes < 1) {
     throw new Error("invalid JSON body limit");
   }
+  const tooLargeMessage =
+    errors.tooLargeMessage ?? `request body must be at most ${maximumBytes} bytes`;
   const declaredLength = request.headers.get("content-length");
   if (/^\d+$/u.test(declaredLength ?? "") && Number(declaredLength) > maximumBytes) {
     await request.body?.cancel().catch(() => undefined);
-    throw payloadTooLarge(`request body must be at most ${maximumBytes} bytes`);
+    throw payloadTooLarge(tooLargeMessage);
   }
-  if (!request.body) throw badRequest("invalid json");
+  if (!request.body) throw badRequest(errors.emptyBodyMessage ?? "invalid json");
 
   const reader = request.body.getReader();
   const chunks: Uint8Array[] = [];
@@ -93,7 +95,7 @@ export async function readBoundedJson<T>(request: Request, maximumBytes: number)
       total += value.byteLength;
       if (total > maximumBytes) {
         await reader.cancel().catch(() => undefined);
-        throw payloadTooLarge(`request body must be at most ${maximumBytes} bytes`);
+        throw payloadTooLarge(tooLargeMessage);
       }
       chunks.push(value);
     }
@@ -107,7 +109,10 @@ export async function readBoundedJson<T>(request: Request, maximumBytes: number)
     bytes.set(chunk, offset);
     offset += chunk.byteLength;
   }
-  const source = new TextDecoder().decode(bytes);
+  return new TextDecoder().decode(bytes);
+}
+
+function parseJson<T>(source: string): T {
   let parsed: unknown;
   try {
     parsed = JSON.parse(source) as unknown;
@@ -123,10 +128,6 @@ export function bearerToken(request: Request): string {
   const authorization = request.headers.get("authorization") ?? "";
   const [scheme, token] = authorization.split(/\s+/, 2);
   return scheme?.toLowerCase() === "bearer" ? clean(token, 200) : "";
-}
-
-export function bearer(token: string | undefined): string | null {
-  return token ? `Bearer ${token}` : null;
 }
 
 export function cookies(request: Request): Map<string, string> {

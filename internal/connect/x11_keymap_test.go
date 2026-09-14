@@ -30,8 +30,8 @@ func TestBuildX11KeymapPreservesRequiredLevels(t *testing.T) {
 	if keymap.preferredShift != 50 || keymap.preferredMode != 51 || keymap.modeMask != 1<<5 || keymap.numLockMask != 1<<4 {
 		t.Fatalf("modifier keycodes = %d/%d", keymap.preferredShift, keymap.preferredMode)
 	}
-	if _, exists := keymap.modeKeycodes[53]; !exists {
-		t.Fatal("did not include another keycode sharing the mode modifier slot")
+	if keymap.modifierMasks[53] != keymap.modeMask {
+		t.Fatal("did not preserve ownership of another keycode sharing the mode modifier slot")
 	}
 }
 

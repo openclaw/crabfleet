@@ -29,10 +29,9 @@ type captureCoordinator struct {
 }
 
 type sessionInputState struct {
-	keys        map[uint32]struct{}
-	buttonMask  byte
-	lastPointer connect.PointerEvent
-	closing     bool
+	keys       map[uint32]struct{}
+	buttonMask byte
+	closing    bool
 }
 
 type coordinatedInput struct {
@@ -137,7 +136,6 @@ func (input *coordinatedInput) Pointer(ctx context.Context, event connect.Pointe
 		return err
 	}
 	state.buttonMask = event.ButtonMask
-	state.lastPointer = event
 	coordinator.lastPointer = event
 	return nil
 }

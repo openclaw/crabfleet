@@ -45,18 +45,21 @@ enum QUICIdentityStore {
   static func loadOrCreate(
     applicationTag: Data = QUICIdentityStore.applicationTag,
     certificateLabel: String = QUICIdentityStore.certificateLabel,
-    keyLabel: String = "Crabfleet QUIC Host Key v1"
+    keyLabel: String = "Crabfleet QUIC Host Key v1",
+    keychain: SecKeychain? = nil
   ) throws -> QUICHostIdentity {
-    let privateKey = try loadOrCreatePrivateKey(applicationTag: applicationTag, keyLabel: keyLabel)
+    let privateKey = try loadOrCreatePrivateKey(
+      applicationTag: applicationTag, keyLabel: keyLabel, keychain: keychain)
     let publicKey = try publicKey(for: privateKey)
     let publicKeyData = try externalRepresentation(of: publicKey)
     let spki = try SubjectPublicKeyInfo.p256(publicKeyData: publicKeyData)
-    let certificate = try loadMatchingCertificate(publicKeyData: publicKeyData)
+    let certificate = try loadMatchingCertificate(publicKeyData: publicKeyData, keychain: keychain)
       ?? createAndStoreCertificate(
         privateKey: privateKey,
-        certificateLabel: certificateLabel)
+        certificateLabel: certificateLabel,
+        keychain: keychain)
     var identity: SecIdentity?
-    guard SecIdentityCreateWithCertificate(nil, certificate, &identity) == errSecSuccess,
+    guard SecIdentityCreateWithCertificate(keychain, certificate, &identity) == errSecSuccess,
       let identity
     else {
       throw QUICTransportError.identityUnavailable
@@ -64,31 +67,38 @@ enum QUICIdentityStore {
     return QUICHostIdentity(identity: identity, certHash: QUICCertificatePin.hash(spki: spki))
   }
 
-  static func remove(applicationTag: Data, certificateLabel: String) {
+  static func remove(
+    applicationTag: Data, certificateLabel: String, keychain: SecKeychain? = nil
+  ) {
     // Delete the host certificate(s) by matching the permanent private key's
     // public key. The certificate cannot be found by `certificateLabel`:
     // macOS ignores the label supplied to `SecItemAdd` for a `SecCertificate`
     // and stores it under the subject CN, so a label-keyed delete never hits.
-    if let privateKey = existingPrivateKey(applicationTag: applicationTag),
+    if let privateKey = existingPrivateKey(applicationTag: applicationTag, keychain: keychain),
       let publicKey = try? publicKey(for: privateKey),
       let publicKeyData = try? externalRepresentation(of: publicKey),
-      let certificates = try? matchingCertificates(publicKeyData: publicKeyData) {
-      for certificate in certificates { deleteCertificate(certificate) }
+      let certificates = try? matchingCertificates(publicKeyData: publicKeyData, keychain: keychain) {
+      for certificate in certificates { deleteCertificate(certificate, keychain: keychain) }
     }
-    SecItemDelete([
+    var query: [CFString: Any] = [
       kSecClass: kSecClassKey,
       kSecAttrApplicationTag: applicationTag,
-    ] as CFDictionary)
+    ]
+    if let keychain { query[kSecMatchSearchList] = [keychain] }
+    SecItemDelete(query as CFDictionary)
   }
 
-  private static func loadOrCreatePrivateKey(applicationTag: Data, keyLabel: String) throws -> SecKey {
-    let query: [CFString: Any] = [
+  private static func loadOrCreatePrivateKey(
+    applicationTag: Data, keyLabel: String, keychain: SecKeychain?
+  ) throws -> SecKey {
+    var query: [CFString: Any] = [
       kSecClass: kSecClassKey,
       kSecAttrApplicationTag: applicationTag,
       kSecAttrKeyClass: kSecAttrKeyClassPrivate,
       kSecReturnRef: true,
       kSecMatchLimit: kSecMatchLimitOne,
     ]
+    if let keychain { query[kSecMatchSearchList] = [keychain] }
     var result: CFTypeRef?
     let status = SecItemCopyMatching(query as CFDictionary, &result)
     if status == errSecSuccess, let key = result as! SecKey? { return key }
@@ -98,15 +108,18 @@ enum QUICIdentityStore {
     // Network.framework requires a public Security.framework SecIdentity for
     // its server identity. Security.framework does not expose Ed25519 identity
     // creation/import, so use its strongest supported compact EC identity.
-    let attributes: [CFString: Any] = [
+    var privateKeyAttributes: [CFString: Any] = [
+      kSecAttrIsPermanent: true,
+      kSecAttrApplicationTag: applicationTag,
+      kSecAttrLabel: keyLabel,
+    ]
+    if let keychain { privateKeyAttributes[kSecUseKeychain] = keychain }
+    var attributes: [CFString: Any] = [
       kSecAttrKeyType: kSecAttrKeyTypeECSECPrimeRandom,
       kSecAttrKeySizeInBits: 256,
-      kSecPrivateKeyAttrs: [
-        kSecAttrIsPermanent: true,
-        kSecAttrApplicationTag: applicationTag,
-        kSecAttrLabel: keyLabel,
-      ],
+      kSecPrivateKeyAttrs: privateKeyAttributes,
     ]
+    if let keychain { attributes[kSecUseKeychain] = keychain }
     guard let key = SecKeyCreateRandomKey(attributes as CFDictionary, &error) else {
       throw QUICTransportError.keyGeneration(
         error?.takeRetainedValue().localizedDescription ?? "unknown Security.framework error")
@@ -114,14 +127,15 @@ enum QUICIdentityStore {
     return key
   }
 
-  private static func existingPrivateKey(applicationTag: Data) -> SecKey? {
-    let query: [CFString: Any] = [
+  private static func existingPrivateKey(applicationTag: Data, keychain: SecKeychain?) -> SecKey? {
+    var query: [CFString: Any] = [
       kSecClass: kSecClassKey,
       kSecAttrApplicationTag: applicationTag,
       kSecAttrKeyClass: kSecAttrKeyClassPrivate,
       kSecReturnRef: true,
       kSecMatchLimit: kSecMatchLimitOne,
     ]
+    if let keychain { query[kSecMatchSearchList] = [keychain] }
     var result: CFTypeRef?
     guard SecItemCopyMatching(query as CFDictionary, &result) == errSecSuccess,
       let key = result as! SecKey?
@@ -161,11 +175,13 @@ enum QUICIdentityStore {
   /// item is labeled. Any surplus certificates that share the host key (left
   /// behind by the old per-launch minting) are deleted here so an
   /// already-polluted keychain collapses back to a single cert on next launch.
-  private static func loadMatchingCertificate(publicKeyData: Data) throws -> SecCertificate? {
-    let matches = try matchingCertificates(publicKeyData: publicKeyData)
+  private static func loadMatchingCertificate(
+    publicKeyData: Data, keychain: SecKeychain?
+  ) throws -> SecCertificate? {
+    let matches = try matchingCertificates(publicKeyData: publicKeyData, keychain: keychain)
     guard let keep = matches.first else { return nil }
     for duplicate in matches.dropFirst() {
-      let status = deleteCertificate(duplicate)
+      let status = deleteCertificate(duplicate, keychain: keychain)
       guard status == errSecSuccess || status == errSecItemNotFound else {
         throw QUICTransportError.keychain(status)
       }
@@ -176,12 +192,15 @@ enum QUICIdentityStore {
   /// Enumerates every stored certificate whose public key equals the host key.
   /// A P-256 point comparison is exact, so unrelated (e.g. system-root)
   /// certificates never match. This runs once per launch, not per handshake.
-  private static func matchingCertificates(publicKeyData: Data) throws -> [SecCertificate] {
-    let query: [CFString: Any] = [
+  private static func matchingCertificates(
+    publicKeyData: Data, keychain: SecKeychain?
+  ) throws -> [SecCertificate] {
+    var query: [CFString: Any] = [
       kSecClass: kSecClassCertificate,
       kSecReturnRef: true,
       kSecMatchLimit: kSecMatchLimitAll,
     ]
+    if let keychain { query[kSecMatchSearchList] = [keychain] }
     var result: CFTypeRef?
     let status = SecItemCopyMatching(query as CFDictionary, &result)
     if status == errSecItemNotFound { return [] }
@@ -197,18 +216,23 @@ enum QUICIdentityStore {
   }
 
   @discardableResult
-  private static func deleteCertificate(_ certificate: SecCertificate) -> OSStatus {
-    SecItemDelete([
+  private static func deleteCertificate(
+    _ certificate: SecCertificate, keychain: SecKeychain?
+  ) -> OSStatus {
+    var query: [CFString: Any] = [
       kSecClass: kSecClassCertificate,
       kSecValueRef: certificate,
-    ] as CFDictionary)
+    ]
+    if let keychain { query[kSecMatchSearchList] = [keychain] }
+    return SecItemDelete(query as CFDictionary)
   }
 
   // Exposed to the test suite so it can reproduce the legacy per-launch leak
   // (several distinct certs sharing one host key) and prove the self-heal.
   static func createAndStoreCertificate(
     privateKey: SecKey,
-    certificateLabel: String
+    certificateLabel: String,
+    keychain: SecKeychain? = nil
   ) throws -> SecCertificate {
     let publicKeyData = try externalRepresentation(of: publicKey(for: privateKey))
     let spki = try SubjectPublicKeyInfo.p256(publicKeyData: publicKeyData)
@@ -270,11 +294,12 @@ enum QUICIdentityStore {
     // macOS ignores `kSecAttrLabel` for a certificate added by ref and labels
     // it by subject CN; this is kept only so the intent is documented at the
     // add site. Reuse is enforced by `loadMatchingCertificate`, not the label.
-    let addQuery: [CFString: Any] = [
+    var addQuery: [CFString: Any] = [
       kSecClass: kSecClassCertificate,
       kSecValueRef: certificate,
       kSecAttrLabel: certificateLabel,
     ]
+    if let keychain { addQuery[kSecUseKeychain] = keychain }
     let addStatus = SecItemAdd(addQuery as CFDictionary, nil)
     guard addStatus == errSecSuccess || addStatus == errSecDuplicateItem else {
       throw QUICTransportError.keychain(addStatus)

@@ -9,22 +9,37 @@ if (!token) {
 }
 
 async function request(path, init = {}) {
-  const response = await fetch(`https://api.cloudflare.com/client/v4${path}`, {
-    ...init,
-    headers: {
-      authorization: `Bearer ${token}`,
-      "content-type": "application/json",
-      ...init.headers,
-    },
-  });
-  const body = await response.json().catch(() => ({}));
-  if (!response.ok || body.success === false) {
-    const message =
-      body.errors?.map((error) => `${error.code}: ${error.message}`).join("; ") ||
-      response.statusText;
-    throw new Error(`${init.method || "GET"} ${path}: ${response.status} ${message}`);
+  const signal = AbortSignal.timeout(30_000);
+  try {
+    const response = await fetch(`https://api.cloudflare.com/client/v4${path}`, {
+      ...init,
+      signal,
+      headers: {
+        authorization: `Bearer ${token}`,
+        "content-type": "application/json",
+        ...init.headers,
+      },
+    });
+    const body = await response.json().catch(() => ({}));
+    signal.throwIfAborted();
+    if (!response.ok || body.success === false) {
+      const message =
+        body.errors?.map((error) => `${error.code}: ${error.message}`).join("; ") ||
+        response.statusText;
+      throw new Error(`${init.method || "GET"} ${path}: ${response.status} ${message}`);
+    }
+    return body.result;
+  } catch (error) {
+    if (signal.aborted) {
+      throw new Error(
+        `${init.method || "GET"} ${path}: Cloudflare request timed out after 30 seconds`,
+        {
+          cause: error,
+        },
+      );
+    }
+    throw error;
   }
-  return body.result;
 }
 
 async function zone(name) {

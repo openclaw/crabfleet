@@ -217,47 +217,25 @@ final class MacVideoEncoder: @unchecked Sendable {
 
     var createdSession: VTCompressionSession?
     var usedLowLatency = false
-    var status = VTCompressionSessionCreate(
-      allocator: kCFAllocatorDefault,
-      width: Int32(width),
-      height: Int32(height),
-      codecType: codec.videoToolboxType,
-      encoderSpecification: lowLatencySpecification,
-      imageBufferAttributes: nil,
-      compressedDataAllocator: nil,
-      outputCallback: Self.outputCallback,
-      refcon: Unmanaged.passUnretained(callbackContext).toOpaque(),
-      compressionSessionOut: &createdSession
-    )
-    if status == noErr {
-      usedLowLatency = true
-    } else {
+    var status: OSStatus = noErr
+    let specifications: [CFDictionary?] = [lowLatencySpecification, hardwareSpecification, nil]
+    for (index, specification) in specifications.enumerated() {
       status = VTCompressionSessionCreate(
         allocator: kCFAllocatorDefault,
         width: Int32(width),
         height: Int32(height),
         codecType: codec.videoToolboxType,
-        encoderSpecification: hardwareSpecification,
+        encoderSpecification: specification,
         imageBufferAttributes: nil,
         compressedDataAllocator: nil,
         outputCallback: Self.outputCallback,
         refcon: Unmanaged.passUnretained(callbackContext).toOpaque(),
         compressionSessionOut: &createdSession
       )
-    }
-    if status != noErr {
-      status = VTCompressionSessionCreate(
-        allocator: kCFAllocatorDefault,
-        width: Int32(width),
-        height: Int32(height),
-        codecType: codec.videoToolboxType,
-        encoderSpecification: nil,
-        imageBufferAttributes: nil,
-        compressedDataAllocator: nil,
-        outputCallback: Self.outputCallback,
-        refcon: Unmanaged.passUnretained(callbackContext).toOpaque(),
-        compressionSessionOut: &createdSession
-      )
+      if status == noErr {
+        usedLowLatency = index == 0
+        break
+      }
     }
     guard status == noErr, let createdSession else {
       stream.continuation.finish()
@@ -374,7 +352,7 @@ final class MacVideoEncoder: @unchecked Sendable {
       infoFlagsOut: nil)
     lock.unlock()
     if status != noErr {
-      fail()
+      invalidate()
       return false
     }
     return true
@@ -600,87 +578,46 @@ final class MacVideoEncoder: @unchecked Sendable {
     from formatDescription: CMFormatDescription,
     codec: MacVideoCodec
   ) throws -> (parameterSets: [Data], nalUnitHeaderLength: Int) {
-    switch codec {
+    let getParameterSet = switch codec {
     case .h264:
-      try h264ParameterSets(from: formatDescription)
+      CMVideoFormatDescriptionGetH264ParameterSetAtIndex
     case .hevc:
-      try hevcParameterSets(from: formatDescription)
+      CMVideoFormatDescriptionGetHEVCParameterSetAtIndex
     }
-  }
-
-  private static func h264ParameterSets(from formatDescription: CMFormatDescription) throws
-    -> (parameterSets: [Data], nalUnitHeaderLength: Int)
-  {
     var parameterSetCount = 0
     var nalUnitHeaderLength: Int32 = 0
     var pointer: UnsafePointer<UInt8>?
     var size = 0
-    let firstStatus = CMVideoFormatDescriptionGetH264ParameterSetAtIndex(
+    let firstStatus = getParameterSet(
       formatDescription,
-      parameterSetIndex: 0,
-      parameterSetPointerOut: &pointer,
-      parameterSetSizeOut: &size,
-      parameterSetCountOut: &parameterSetCount,
-      nalUnitHeaderLengthOut: &nalUnitHeaderLength)
+      0,
+      &pointer,
+      &size,
+      &parameterSetCount,
+      &nalUnitHeaderLength)
     guard firstStatus == noErr else { throw MacVideoEncoderError.invalidSample }
 
     var parameterSets: [Data] = []
     for index in 0..<parameterSetCount {
       pointer = nil
       size = 0
-      let status = CMVideoFormatDescriptionGetH264ParameterSetAtIndex(
+      let status = getParameterSet(
         formatDescription,
-        parameterSetIndex: index,
-        parameterSetPointerOut: &pointer,
-        parameterSetSizeOut: &size,
-        parameterSetCountOut: nil,
-        nalUnitHeaderLengthOut: nil)
+        index,
+        &pointer,
+        &size,
+        nil,
+        nil)
       guard status == noErr, let pointer, size > 0 else {
         throw MacVideoEncoderError.invalidSample
       }
       parameterSets.append(Data(bytes: pointer, count: size))
+    }
+    if codec == .hevc {
+      guard parameterSets.count >= 3 else { throw MacVideoEncoderError.invalidSample }
+      return (Array(parameterSets.prefix(3)), Int(nalUnitHeaderLength))
     }
     return (parameterSets, Int(nalUnitHeaderLength))
-  }
-
-  private static func hevcParameterSets(from formatDescription: CMFormatDescription) throws
-    -> (parameterSets: [Data], nalUnitHeaderLength: Int)
-  {
-    var parameterSetCount = 0
-    var nalUnitHeaderLength: Int32 = 0
-    var pointer: UnsafePointer<UInt8>?
-    var size = 0
-    let firstStatus = CMVideoFormatDescriptionGetHEVCParameterSetAtIndex(
-      formatDescription,
-      parameterSetIndex: 0,
-      parameterSetPointerOut: &pointer,
-      parameterSetSizeOut: &size,
-      parameterSetCountOut: &parameterSetCount,
-      nalUnitHeaderLengthOut: &nalUnitHeaderLength)
-    guard firstStatus == noErr else { throw MacVideoEncoderError.invalidSample }
-
-    var parameterSets: [Data] = []
-    for index in 0..<parameterSetCount {
-      pointer = nil
-      size = 0
-      let status = CMVideoFormatDescriptionGetHEVCParameterSetAtIndex(
-        formatDescription,
-        parameterSetIndex: index,
-        parameterSetPointerOut: &pointer,
-        parameterSetSizeOut: &size,
-        parameterSetCountOut: nil,
-        nalUnitHeaderLengthOut: nil)
-      guard status == noErr, let pointer, size > 0 else {
-        throw MacVideoEncoderError.invalidSample
-      }
-      parameterSets.append(Data(bytes: pointer, count: size))
-    }
-    guard parameterSets.count >= 3 else { throw MacVideoEncoderError.invalidSample }
-    return (Array(parameterSets.prefix(3)), Int(nalUnitHeaderLength))
-  }
-
-  private func fail() {
-    invalidate()
   }
 
   private static func setProperty(

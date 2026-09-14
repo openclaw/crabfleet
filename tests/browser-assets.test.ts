@@ -47,3 +47,21 @@ test("browser assets build from paths with spaces and include every worklet", as
   assert.match(APP_HTML, /Your computers/);
   assert.doesNotMatch(APP_HTML, /Ghostty|New crabbox|api\/terminal/);
 });
+
+test("browser assets reject a hash in the checkout path before invoking Vite", async (t) => {
+  const fixture = await mkdtemp(join(tmpdir(), "crabfleet build #"));
+  t.after(() => rm(fixture, { recursive: true, force: true }));
+  await mkdir(join(fixture, "scripts"));
+  await cp(
+    new URL("../scripts/generate-assets.mjs", import.meta.url),
+    join(fixture, "scripts/generate-assets.mjs"),
+  );
+  assert.throws(
+    () =>
+      execFileSync(process.execPath, ["scripts/generate-assets.mjs"], {
+        cwd: fixture,
+        stdio: "pipe",
+      }),
+    /Vite cannot package audio worklets from a checkout path containing '#'. Rename or move the checkout/,
+  );
+});

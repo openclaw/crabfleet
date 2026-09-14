@@ -36,11 +36,7 @@ struct QUICConnectionConfiguration: Equatable, Hashable, Sendable {
 
   init?(port: Int?, certHash: String?) {
     guard let port, (1...65_535).contains(port), let certHash,
-      certHash.utf8.count == 43,
-      certHash.utf8.allSatisfy({
-        (0x30...0x39).contains($0) || (0x41...0x5a).contains($0)
-          || (0x61...0x7a).contains($0) || $0 == 0x2d || $0 == 0x5f
-      })
+      QUICCertificatePin.isValid(certHash)
     else { return nil }
     self.port = port
     self.certHash = certHash
@@ -156,40 +152,6 @@ struct VNCConnectionProfile: Identifiable, Codable, Hashable {
     self.lastConnectedAt = lastConnectedAt
   }
 
-  private enum CodingKeys: String, CodingKey {
-    case id
-    case name
-    case host
-    case port
-    case username
-    case favorite
-    case prefersPasswordOnlyARD
-    case macAddress
-    case wakeOnLanBroadcast
-    case wakeOnLanAutomatically
-    case createdAt
-    case lastConnectedAt
-  }
-
-  init(from decoder: any Decoder) throws {
-    let container = try decoder.container(keyedBy: CodingKeys.self)
-    id = try container.decode(String.self, forKey: .id)
-    name = try container.decode(String.self, forKey: .name)
-    host = try container.decode(String.self, forKey: .host)
-    port = try container.decode(Int.self, forKey: .port)
-    username = try container.decode(String.self, forKey: .username)
-    favorite = try container.decode(Bool.self, forKey: .favorite)
-    prefersPasswordOnlyARD = try container.decodeIfPresent(
-      Bool.self, forKey: .prefersPasswordOnlyARD)
-    macAddress = try container.decodeIfPresent(String.self, forKey: .macAddress)
-    wakeOnLanBroadcast = try container.decodeIfPresent(
-      String.self, forKey: .wakeOnLanBroadcast)
-    wakeOnLanAutomatically = try container.decodeIfPresent(
-      Bool.self, forKey: .wakeOnLanAutomatically)
-    createdAt = try container.decode(Date.self, forKey: .createdAt)
-    lastConnectedAt = try container.decodeIfPresent(Date.self, forKey: .lastConnectedAt)
-  }
-
   var address: VNCAddress {
     .init(host: host, port: port, username: username)
   }
@@ -209,42 +171,16 @@ struct DesktopTarget: Identifiable, Hashable {
   let subtitle: String
   let detail: String
   let source: DesktopSource
-  let status: LeaseStatus?
   let owner: String?
-  let repository: String?
-  let branch: String?
   let updatedAt: Date
   let endpoint: VNCAddress?
   let quic: QUICConnectionConfiguration?
   let desktopAvailable: Bool
   let profileID: String?
-  let nativeVncSessionID: String?
   let prefersPasswordOnlyARD: Bool
   let macAddress: String?
   let wakeOnLanBroadcast: String?
   let wakeOnLanAutomatically: Bool
-
-  init(lease: CrabboxLease) {
-    id = "fleet:\(lease.id)"
-    title = lease.displayName
-    subtitle = lease.repositoryName
-    detail = lease.summary.isEmpty ? lease.lastEvent : lease.summary
-    source = .crabfleet
-    status = lease.status
-    owner = lease.owner
-    repository = lease.repository
-    branch = lease.branch
-    updatedAt = lease.updatedAt
-    endpoint = nil
-    quic = nil
-    desktopAvailable = lease.desktopAvailable
-    profileID = nil
-    nativeVncSessionID = lease.nativeVncSessionID
-    prefersPasswordOnlyARD = false
-    macAddress = nil
-    wakeOnLanBroadcast = nil
-    wakeOnLanAutomatically = false
-  }
 
   init(profile: VNCConnectionProfile) {
     id = "saved:\(profile.id)"
@@ -252,16 +188,12 @@ struct DesktopTarget: Identifiable, Hashable {
     subtitle = profile.address.displayValue
     detail = profile.favorite ? "Favorite connection" : "Saved VNC connection"
     source = .saved
-    status = nil
     owner = nil
-    repository = nil
-    branch = nil
     updatedAt = profile.lastConnectedAt ?? profile.createdAt
     endpoint = profile.address
     quic = nil
     desktopAvailable = true
     profileID = profile.id
-    nativeVncSessionID = nil
     prefersPasswordOnlyARD = profile.prefersPasswordOnlyARD ?? false
     macAddress = profile.macAddress
     wakeOnLanBroadcast = profile.wakeOnLanBroadcast
@@ -274,16 +206,12 @@ struct DesktopTarget: Identifiable, Hashable {
     subtitle = host.relayOnly ? "Browser relay" : "\(host.address):\(host.port)"
     detail = host.relayOnly ? "Open this desktop in Crabfleet's browser viewer" : "Registered private desktop"
     source = .crabfleet
-    status = nil
     owner = host.owner
-    repository = nil
-    branch = nil
     updatedAt = host.updatedAt
     endpoint = host.relayOnly ? nil : .init(host: host.address, port: host.port, username: "")
     quic = QUICConnectionConfiguration(port: host.quicPort, certHash: host.quicCertHash)
     desktopAvailable = !host.relayOnly
     profileID = nil
-    nativeVncSessionID = nil
     prefersPasswordOnlyARD = true
     macAddress = nil
     wakeOnLanBroadcast = nil
@@ -293,7 +221,7 @@ struct DesktopTarget: Identifiable, Hashable {
   func matches(_ query: String) -> Bool {
     let normalized = query.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
     guard !normalized.isEmpty else { return true }
-    return [title, subtitle, detail, owner ?? "", repository ?? "", branch ?? ""]
+    return [title, subtitle, detail, owner ?? ""]
       .contains { $0.lowercased().contains(normalized) }
   }
 }

@@ -3,6 +3,7 @@ package connector
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -69,5 +70,27 @@ func TestClientLoginPublicationAndRenewal(t *testing.T) {
 	}
 	if _, err := client.Renew(context.Background()); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestOwnershipResponseValidation(t *testing.T) {
+	for _, token := range []string{"", "short", strings.Repeat("x", 16), strings.Repeat("x", 200), strings.Repeat("x", 201)} {
+		t.Run(fmt.Sprintf("length-%d", len(token)), func(t *testing.T) {
+			api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				_ = json.NewEncoder(w).Encode(map[string]string{"ownershipToken": token})
+			}))
+			defer api.Close()
+			client, err := NewClient(api.URL, "fixture-token")
+			if err != nil {
+				t.Fatal(err)
+			}
+			valid := len(token) >= 16 && len(token) <= 200
+			if _, err := client.Register(context.Background(), "linux-fixture", "fixture-publication", Host{}); (err == nil) != valid {
+				t.Fatalf("register validation: %v", err)
+			}
+			if got, err := client.Recover(context.Background(), "linux-fixture", "fixture-publication"); (err == nil) != (valid || token == "") || got != token {
+				t.Fatalf("recovery validation: %v", err)
+			}
+		})
 	}
 }

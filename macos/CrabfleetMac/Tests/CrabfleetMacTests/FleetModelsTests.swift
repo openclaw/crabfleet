@@ -4,66 +4,7 @@ import Testing
 
 @testable import CrabfleetMac
 
-private let nativeVNCTicket = "native_vnc_0123456789abcdef0123456789abcdef"
-
-private func nativeVNCGrant(leaseID: String = "cbx_native123") -> NativeVNCGrant {
-  .init(
-    brokerURL: URL(string: "https://crabbox.example.test")!,
-    leaseID: leaseID,
-    ticket: nativeVNCTicket,
-    expiresAt: Date().addingTimeInterval(60)
-  )
-}
-
 struct FleetModelsTests {
-  @Test
-  func crabboxReceivesOnlyItsMinimalSubprocessEnvironment() {
-    let environment = CrabboxVNCBridge.commandEnvironment(
-      from: [
-        "HOME": "/Users/tester",
-        "PATH": "/tmp/untrusted",
-        "SSH_AUTH_SOCK": "/tmp/agent.sock",
-        "HTTPS_PROXY": "http://proxy.example.test:8443",
-        "NO_PROXY": "localhost,.example.test",
-        "SSL_CERT_FILE": "/etc/ssl/custom-ca.pem",
-        "SSL_CERT_DIR": "/etc/ssl/custom-certs",
-        "CRABBOX_CONFIG": "/Users/tester/.config/crabbox/config.yaml",
-        "XDG_CONFIG_HOME": "/Users/tester/.config",
-        "XDG_STATE_HOME": "/Users/tester/.local/state",
-        "CRABFLEET_SESSION_COOKIE": "secret",
-        "NODE_TLS_REJECT_UNAUTHORIZED": "0",
-      ]
-    )
-
-    #expect(environment["HOME"] == "/Users/tester")
-    #expect(environment["PATH"] == SubprocessEnvironment.safePath)
-    #expect(environment["SSH_AUTH_SOCK"] == "/tmp/agent.sock")
-    #expect(environment["HTTPS_PROXY"] == "http://proxy.example.test:8443")
-    #expect(environment["NO_PROXY"] == "localhost,.example.test")
-    #expect(environment["SSL_CERT_FILE"] == "/etc/ssl/custom-ca.pem")
-    #expect(environment["SSL_CERT_DIR"] == "/etc/ssl/custom-certs")
-    #expect(environment["CRABBOX_CONFIG"] == "/Users/tester/.config/crabbox/config.yaml")
-    #expect(environment["XDG_CONFIG_HOME"] == "/Users/tester/.config")
-    #expect(environment["XDG_STATE_HOME"] == "/Users/tester/.local/state")
-    #expect(environment["CRABFLEET_SESSION_COOKIE"] == nil)
-    #expect(environment["NODE_TLS_REJECT_UNAUTHORIZED"] == nil)
-  }
-
-  @Test
-  func crabboxRejectsUnsafeConfigEnvironmentPaths() {
-    let environment = CrabboxVNCBridge.commandEnvironment(
-      from: [
-        "CRABBOX_CONFIG": "relative/config.yaml",
-        "XDG_CONFIG_HOME": "/Users/tester/../other-config",
-        "XDG_STATE_HOME": "/" + String(repeating: "a", count: Int(PATH_MAX)),
-      ]
-    )
-
-    #expect(environment["CRABBOX_CONFIG"] == nil)
-    #expect(environment["XDG_CONFIG_HOME"] == nil)
-    #expect(environment["XDG_STATE_HOME"] == nil)
-  }
-
   @Test
   func sizesRemoteDesktopToEvenViewportPixelsWithinPerformanceCap() {
     #expect(
@@ -81,152 +22,21 @@ struct FleetModelsTests {
     #expect(VNCViewportSize.fitting(CGSize(width: 319, height: 240)) == nil)
   }
 
-  @Test
-  func startsAndStopsBoundedCrabboxNativeHandoff() async throws {
-    let directory = FileManager.default.temporaryDirectory
-      .appendingPathComponent("CrabfleetMacTests.\(UUID().uuidString)")
-    try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-    defer { try? FileManager.default.removeItem(at: directory) }
-    let executable = directory.appendingPathComponent("crabbox")
-    let pidFile = directory.appendingPathComponent("helper.pid")
-    let drainFile = directory.appendingPathComponent("stderr-drained")
-    let ticketFile = directory.appendingPathComponent("ticket")
-    let argumentsFile = directory.appendingPathComponent("arguments")
-    try Data(
-      """
-      #!/bin/sh
-      trap '' TERM
-      IFS= read -r ticket
-      printf '%s' "$ticket" > '\(ticketFile.path)'
-      printf '%s\n' "$@" > '\(argumentsFile.path)'
-      printf '%s' "$$" > '\(pidFile.path)'
-      printf '%s\\n' '{"schema":"crabbox/vnc-handoff/v1","host":"127.0.0.1","port":15901,"username":"dev","password":"secret"}'
-      dd if=/dev/zero bs=131072 count=1 2>/dev/null | cat >&2
-      : > '\(drainFile.path)'
-      while :; do sleep 1; done
-      """.utf8
-    ).write(to: executable)
-    try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: executable.path)
-
-    var bridge: CrabboxVNCBridge? = try await CrabboxVNCBridge.start(
-      grant: nativeVNCGrant(leaseID: "cloud/project/box-42"),
-      executableURL: executable,
-      timeout: 2
-    )
-    #expect(bridge?.request.host == "127.0.0.1")
-    #expect(bridge?.request.port == 15901)
-    #expect(bridge?.request.username == "dev")
-    #expect(bridge?.request.password == "secret")
-    #expect(try String(contentsOf: ticketFile, encoding: .utf8) == nativeVNCTicket)
-    let arguments = try String(contentsOf: argumentsFile, encoding: .utf8)
-    #expect(arguments.contains("--native-grant-url"))
-    #expect(arguments.contains("--native-grant-stdin"))
-    #expect(!arguments.contains(nativeVNCTicket))
-    #expect(
-      await waitUntil(timeout: .seconds(2)) {
-        FileManager.default.fileExists(atPath: drainFile.path)
-      }
-    )
-
-    let pid = try #require(readProcessID(from: pidFile))
-    #expect(Darwin.kill(pid, 0) == 0)
-    bridge?.stop()
-    bridge = nil
-
-    let deadline = Date().addingTimeInterval(3)
-    while Darwin.kill(pid, 0) == 0 && Date() < deadline {
-      try await Task.sleep(for: .milliseconds(50))
-    }
-    #expect(Darwin.kill(pid, 0) != 0)
-  }
-
   @Test @MainActor
-  func revokingNativeAccessStopsPendingCrabboxBridge() async throws {
-    let directory = FileManager.default.temporaryDirectory
-      .appendingPathComponent("CrabfleetMacTests.\(UUID().uuidString)")
-    try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-    defer { try? FileManager.default.removeItem(at: directory) }
-    let executable = directory.appendingPathComponent("crabbox")
-    let pidFile = directory.appendingPathComponent("helper.pid")
-    try Data(
-      """
-      #!/bin/sh
-      trap '' TERM
-      IFS= read -r ticket
-      printf '%s' "$$" > '\(pidFile.path)'
-      while :; do sleep 1; done
-      """.utf8
-    ).write(to: executable)
-    try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: executable.path)
-
+  func reconcilesRemovedDesktopWithoutReplacingSurvivingSessions() {
     let pool = VNCSessionPool()
-    pool.connectCrabbox(
-      targetID: "fleet-native",
-      sessionID: "IS-257",
-      executableURL: executable,
-      grant: { nativeVNCGrant() }
-    )
-    let launched = await waitUntil(timeout: .seconds(2)) {
-      readProcessID(from: pidFile) != nil
-    }
-    let pid = try #require(launched ? readProcessID(from: pidFile) : nil)
+    let removed = pool.session(for: "host:removed")
+    let saved = pool.session(for: "saved:local")
+    let registered = pool.session(for: "host:registered")
+    pool.focus(targetID: "host:removed")
 
-    pool.reconcile(validTargetIDs: ["fleet-native"], nativeSessionIDs: [:])
-    let stopped = await waitUntil(timeout: .seconds(3)) {
-      Darwin.kill(pid, 0) != 0
-    }
-    #expect(stopped)
-  }
+    pool.reconcile(validTargetIDs: ["saved:local", "host:registered"])
 
-  @Test
-  func rejectsNonLoopbackCrabboxNativeHandoff() async throws {
-    let directory = FileManager.default.temporaryDirectory
-      .appendingPathComponent("CrabfleetMacTests.\(UUID().uuidString)")
-    try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-    defer { try? FileManager.default.removeItem(at: directory) }
-    let executable = directory.appendingPathComponent("crabbox")
-    try Data(
-      """
-      #!/bin/sh
-      printf '%s\\n' '{"schema":"crabbox/vnc-handoff/v1","host":"desktop.example","port":5900,"username":"","password":"secret"}'
-      sleep 5
-      """.utf8
-    ).write(to: executable)
-    try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: executable.path)
-
-    await #expect(throws: CrabboxVNCBridgeError.invalidHandoff) {
-      _ = try await CrabboxVNCBridge.start(
-        grant: nativeVNCGrant(),
-        executableURL: executable,
-        timeout: 2
-      )
-    }
-  }
-
-  @Test
-  func rejectsHTTPSNativeGrantWithoutAHost() async {
-    let grant = NativeVNCGrant(
-      brokerURL: URL(string: "https:///native-vnc")!,
-      leaseID: "cbx_native123",
-      ticket: nativeVNCTicket,
-      expiresAt: Date().addingTimeInterval(60)
-    )
-
-    await #expect(throws: CrabboxVNCBridgeError.invalidHandoff) {
-      _ = try await CrabboxVNCBridge.start(grant: grant)
-    }
-  }
-
-  @Test
-  func acceptsCaseInsensitiveNativeGrantSchemes() {
-    let grant = NativeVNCGrant(
-      brokerURL: URL(string: "HTTPS://crabbox.example.test/native-vnc")!,
-      leaseID: "cbx_native123",
-      ticket: nativeVNCTicket,
-      expiresAt: Date().addingTimeInterval(60)
-    )
-
-    #expect(CrabboxVNCBridge.validGrant(grant))
+    #expect(pool.focusedSessionID == nil)
+    #expect(pool.session(for: "saved:local") === saved)
+    #expect(pool.session(for: "host:registered") === registered)
+    #expect(pool.session(for: "host:removed") !== removed)
+    pool.disconnectAll()
   }
 
   @Test
@@ -396,31 +206,6 @@ struct FleetModelsTests {
   }
 
   @Test
-  func searchMatchesLeaseIdentityAndRepository() {
-    let lease = CrabboxLease(
-      id: "IS-248",
-      leaseID: "blue-lobster",
-      nativeVncSessionID: nil,
-      owner: "operator",
-      repository: "openclaw/crabfleet",
-      branch: "codex/native-fleet",
-      runtime: "crabbox",
-      status: .attached,
-      purpose: "Native fleet client",
-      summary: "Building the Metal-backed macOS viewer",
-      lastEvent: "Workspace active",
-      updatedAt: .now,
-      desktopAvailable: true,
-      terminalAvailable: true
-    )
-
-    #expect(lease.matches("blue-lobster"))
-    #expect(lease.matches("CRABFLEET"))
-    #expect(lease.matches("native-fleet"))
-    #expect(!lease.matches("unrelated-project"))
-  }
-
-  @Test
   func decodesFleetResponseTimestamps() throws {
     let data = Data(
       """
@@ -463,16 +248,12 @@ struct FleetModelsTests {
     )
 
     let response = try JSONDecoder().decode(FleetAPIEnvelope.self, from: data)
-    let lease = try #require(response.fleet.sessions.first?.lease())
-
-    #expect(lease.displayName == "blue-lobster")
-    #expect(lease.desktopAvailable)
-    #expect(lease.updatedAt.timeIntervalSince1970 == 1_770_000_000)
     let host = try #require(response.fleet.desktopHosts?.first?.desktopHost())
     #expect(host.id == "studio")
     #expect(host.name == "Mac Studio")
     #expect(host.address == "100.68.201.40")
     #expect(host.port == 5901)
+    #expect(host.updatedAt.timeIntervalSince1970 == 1_770_000_000)
     #expect(host.quicPort == 5911)
     #expect(host.quicCertHash == "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA")
     #expect(!host.webtransport)
@@ -483,9 +264,6 @@ struct FleetModelsTests {
     #expect(target.quic?.port == 5911)
     #expect(target.quic?.certHash == "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA")
     #expect(target.desktopAvailable)
-
-    let fleetTarget = DesktopTarget(lease: lease)
-    #expect(fleetTarget.nativeVncSessionID == "IS-257")
   }
 
   @Test

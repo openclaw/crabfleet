@@ -22,8 +22,9 @@ struct OpenH264EncodingTests {
 			Data([0x67, 1]), Data([0x68, 2]), Data([0x41, 3]),
 			Data([0x67, 4]), Data([0x68, 5]),
 		]
-		let sets = OpenH264AnnexB.parameterSets(in: units)
+		let sets = OpenH264AnnexB.videoParameterSets(in: units, codec: .h264)
 
+		#expect(sets.vps == nil)
 		#expect(sets.sps == Data([0x67, 4]))
 		#expect(sets.pps == Data([0x68, 5]))
 	}
@@ -159,9 +160,11 @@ struct OpenH264EncodingTests {
 	func boundsRetainedParameterSets() {
 		let maximum = OpenH264AnnexB.maximumParameterSetBytes
 		#expect(OpenH264AnnexB.parameterSetsFitLimit(
+			vps: nil,
 			sps: Data(repeating: 0, count: maximum - 1),
 			pps: Data([0])))
 		#expect(!OpenH264AnnexB.parameterSetsFitLimit(
+			vps: nil,
 			sps: Data(repeating: 0, count: maximum),
 			pps: Data([0])))
 	}

@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"io"
 	"net"
-	"net/netip"
 	"os"
 	"strings"
 
@@ -106,12 +105,6 @@ func configureFeatures(ctx context.Context, selected string, options *shareOptio
 			client, err := connector.NewClient(state.Server, state.AccessToken)
 			if err != nil {
 				return fail(err)
-			}
-			if features.advertise != "" {
-				address, err := netip.ParseAddr(features.advertise)
-				if err != nil || !netip.MustParsePrefix("100.64.0.0/10").Contains(address) {
-					return fail(errors.New("advertise must be a Tailscale IPv4 address"))
-				}
 			}
 			name := features.name
 			if name == "" {

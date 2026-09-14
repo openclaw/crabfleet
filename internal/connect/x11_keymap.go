@@ -36,8 +36,6 @@ type x11Keymap struct {
 	bindings       map[uint32]x11KeyBinding
 	modifierKeys   map[byte]struct{}
 	modifierMasks  map[byte]uint16
-	shiftKeycodes  map[byte]struct{}
-	modeKeycodes   map[byte]struct{}
 	preferredShift byte
 	preferredMode  byte
 	modeMask       uint16
@@ -58,8 +56,6 @@ func buildX11Keymap(
 		bindings:      make(map[uint32]x11KeyBinding),
 		modifierKeys:  make(map[byte]struct{}),
 		modifierMasks: make(map[byte]uint16),
-		shiftKeycodes: make(map[byte]struct{}),
-		modeKeycodes:  make(map[byte]struct{}),
 	}
 	symbolsByKeycode := make(map[byte][]uint32, count)
 	for keyOffset := 0; keyOffset < count; keyOffset++ {
@@ -114,7 +110,6 @@ func buildX11Keymap(
 		if keycode == 0 {
 			continue
 		}
-		result.shiftKeycodes[keycode] = struct{}{}
 		if result.preferredShift == 0 {
 			result.preferredShift = keycode
 		}
@@ -140,11 +135,6 @@ func buildX11Keymap(
 			}
 		}
 		if modeKeycode != 0 {
-			for _, keycode := range modifiers[modifier] {
-				if keycode != 0 {
-					result.modeKeycodes[keycode] = struct{}{}
-				}
-			}
 			result.modeMask |= 1 << modifier
 			if result.preferredMode == 0 {
 				result.preferredMode = modeKeycode

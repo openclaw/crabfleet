@@ -425,16 +425,37 @@ test("same-publication retries remain recoverable after the publication migratio
     createdAt: 1,
   };
 
-  await repository.upsert({
+  const initial = await repository.upsert({
     ...host,
+    quicPort: 5911,
+    quicCertHash: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+    webtransport: true,
     ownershipToken: "token-a",
     updatedAt: 2,
   });
-  await repository.upsert({
+  assert.equal(initial.quicPort, 5911);
+  assert.equal(initial.webtransport, true);
+  const replacement = await repository.upsert({
     ...host,
+    name: "Relay Studio",
+    relayOnly: true,
+    address: "",
+    createdAt: 99,
     ownershipToken: "token-b",
     updatedAt: 3,
   });
+  assert.deepEqual(replacement, {
+    ...host,
+    name: "Relay Studio",
+    relayOnly: true,
+    address: "",
+    ownershipToken: "token-b",
+    updatedAt: 3,
+    quicPort: null,
+    quicCertHash: null,
+    webtransport: false,
+  });
+  assert.deepEqual(await repository.list(host.ownerSubject), [replacement]);
 
   assert.deepEqual(
     {

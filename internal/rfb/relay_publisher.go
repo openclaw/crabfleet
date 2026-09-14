@@ -49,31 +49,12 @@ func (server *Server) PublishRelay(ctx context.Context, origin, hostID, ownershi
 	defer socket.CloseNow()
 	connection := relayConnection{websocket.NetConn(ctx, socket, websocket.MessageBinary)}
 	socket.SetReadLimit(512 << 10)
-	input := server.inputs.newSession()
-	server.mu.Lock()
-	if input == nil || server.closed || len(server.active) >= server.config.MaxSessions {
-		server.mu.Unlock()
-		if input != nil {
-			input.release(context.Background())
-		}
-		return errors.New("connector session limit reached")
+	config, finish, err := server.beginSession(connection)
+	if err != nil {
+		return err
 	}
-	server.active[connection] = struct{}{}
-	server.wg.Add(1)
-	server.mu.Unlock()
-	defer server.wg.Done()
-	defer func() {
-		server.mu.Lock()
-		delete(server.active, connection)
-		server.mu.Unlock()
-		cleanup, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
-		defer cancel()
-		input.release(cleanup)
-	}()
-	config := server.config.Session
+	defer finish()
 	config.relay = true
-	config.ChallengeReader = server.challenge
-	config.Backend = &coordinatedBackend{Backend: config.Backend, input: input, capture: server.captures}
 	return ServeConn(ctx, connection, config)
 }
 

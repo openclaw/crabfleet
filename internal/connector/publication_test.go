@@ -5,6 +5,7 @@ package connector
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -138,5 +139,52 @@ func TestReplacedPublicationStopsWithoutReclaimingOrDeletingHost(t *testing.T) {
 	loaded, err := store.Load()
 	if err != nil || loaded.PublicationID != "" || loaded.OwnershipToken != "" {
 		t.Fatal("retained replaced publication state")
+	}
+}
+
+func TestPublicationStopsAfterTerminalRegistrationRecoveryError(t *testing.T) {
+	store, err := OpenStore(filepath.Join(t.TempDir(), "config"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	state, err := store.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	registrations := 0
+	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/api/connector/v1/auth/renew":
+			_ = json.NewEncoder(w).Encode(map[string]int64{"expiresAt": time.Now().Add(24 * time.Hour).UnixMilli()})
+		case r.Method == "PUT":
+			registrations++
+			w.WriteHeader(http.StatusServiceUnavailable)
+		case r.Method == "POST":
+			w.WriteHeader(http.StatusForbidden)
+		default:
+			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+			w.WriteHeader(http.StatusBadRequest)
+		}
+	}))
+	defer api.Close()
+	client, err := NewClient(api.URL, "fixture-access-token")
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := Publication{Client: client, Store: store, State: state, Host: Host{Name: "Test", RelayOnly: true}}
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	err = p.Run(ctx, func(context.Context, string, string, string) error {
+		t.Error("published after recovery failed")
+		return nil
+	})
+	var apiError *APIError
+	if !errors.As(err, &apiError) || apiError.Status != http.StatusForbidden || ctx.Err() != nil || registrations != 1 {
+		t.Fatalf("recovery: err=%v context=%v registrations=%d", err, ctx.Err(), registrations)
+	}
+	loaded, err := store.Load()
+	if err != nil || loaded.PublicationID == "" {
+		t.Fatalf("lost pending cleanup identity: %v", err)
 	}
 }

@@ -146,7 +146,7 @@ type framebufferRequest struct {
 	Height      uint16
 }
 
-func parseFramebufferRequest(reader io.Reader, frameWidth, frameHeight int) (framebufferRequest, error) {
+func parseFramebufferRequest(reader io.Reader) (framebufferRequest, error) {
 	payload := make([]byte, 9)
 	if _, err := io.ReadFull(reader, payload); err != nil {
 		return framebufferRequest{}, err
@@ -161,8 +161,6 @@ func parseFramebufferRequest(reader io.Reader, frameWidth, frameHeight int) (fra
 	// The RFB rectangle is a hint. Its intersection with the framebuffer may
 	// be empty, and oversized requests are cropped by the server. Crabfleet's
 	// negotiated Tight profile still responds with one full-frame rectangle.
-	_ = frameWidth
-	_ = frameHeight
 	return request, nil
 }
 

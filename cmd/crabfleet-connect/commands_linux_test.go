@@ -95,3 +95,31 @@ func TestDesktopEnvironmentSelectsPortal(t *testing.T) {
 		t.Fatal("overrode wlroots")
 	}
 }
+
+func TestAdvertiseValidationPrecedesServiceInstallAndShareSetup(t *testing.T) {
+	for _, address := range []string{"192.168.1.2", "100.128.0.1", "not-an-address", "::ffff:100.64.0.1"} {
+		t.Run(address, func(t *testing.T) {
+			directory := filepath.Join(t.TempDir(), "config")
+			args := []string{"--fleet", "--bind", "0.0.0.0", "--advertise", address, "--config-dir", directory, "--synthetic"}
+			for _, validateOnly := range []bool{false, true} {
+				var out bytes.Buffer
+				err := runShare(context.Background(), args, &out, &out, validateOnly)
+				if err == nil || err.Error() != "advertise must be a Tailscale IPv4 address" {
+					t.Fatalf("validateOnly=%v: %v", validateOnly, err)
+				}
+			}
+			if _, err := os.Stat(directory); !os.IsNotExist(err) {
+				t.Fatalf("invalid options touched connector state: %v", err)
+			}
+			if _, _, err := serviceFiles("/home/test/bin/crabfleet-connect", args); err == nil {
+				t.Fatal("installed invalid advertised address")
+			}
+		})
+	}
+	for _, address := range []string{"100.64.0.1", "100.127.255.254"} {
+		args := []string{"--fleet", "--bind", address, "--advertise", address}
+		if _, _, err := serviceFiles("/home/test/bin/crabfleet-connect", args); err != nil {
+			t.Fatalf("rejected Tailscale address %s: %v", address, err)
+		}
+	}
+}
