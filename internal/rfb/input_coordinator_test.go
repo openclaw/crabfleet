@@ -14,7 +14,7 @@ func TestInputCoordinatorPreservesSessionOwnership(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	coordinator := newInputCoordinator(backend)
+	coordinator := newInputCoordinator(backend, 2)
 	first := coordinator.newSession()
 	second := coordinator.newSession()
 	ctx := context.Background()
@@ -59,7 +59,7 @@ func (*transientReleaseSink) Close() error                                      
 func TestInputCoordinatorRetainsFailedReleaseForRetry(t *testing.T) {
 	t.Parallel()
 	sink := &transientReleaseSink{failRelease: true}
-	coordinator := newInputCoordinator(sink)
+	coordinator := newInputCoordinator(sink, 1)
 	input := coordinator.newSession()
 	if err := input.Key(context.Background(), connect.KeyEvent{Down: true, Keysym: 65}); err != nil {
 		t.Fatal(err)
@@ -68,12 +68,21 @@ func TestInputCoordinatorRetainsFailedReleaseForRetry(t *testing.T) {
 	if len(coordinator.sessions) != 1 || coordinator.keyRefs[65] != 1 {
 		t.Fatal("failed release state was forgotten")
 	}
+	if coordinator.newSession() != nil {
+		t.Fatal("failed cleanup bypassed the session bound")
+	}
+	if err := input.Key(context.Background(), connect.KeyEvent{Down: true, Keysym: 66}); err == nil {
+		t.Fatal("retired session accepted new input")
+	}
 	input.release(context.Background())
 	if len(coordinator.sessions) != 0 || len(coordinator.keyRefs) != 0 {
 		t.Fatal("retired release state was not cleared")
 	}
 	if len(sink.events) != 2 || sink.events[1].Down {
 		t.Fatalf("release events = %+v", sink.events)
+	}
+	if coordinator.newSession() == nil {
+		t.Fatal("successful cleanup did not free the session slot")
 	}
 }
 
@@ -83,7 +92,7 @@ func TestInputCoordinatorReferenceCountsPointerButtons(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	coordinator := newInputCoordinator(backend)
+	coordinator := newInputCoordinator(backend, 2)
 	first := coordinator.newSession()
 	second := coordinator.newSession()
 	ctx := context.Background()

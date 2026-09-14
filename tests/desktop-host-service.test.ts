@@ -79,6 +79,7 @@ test("desktop hosts are canonicalized and isolated to their stable owner", async
   const host = registration.host;
 
   assert.deepEqual(host, {
+    relayOnly: false,
     id: "studio.one",
     owner: "alice",
     name: "Peter's Mac Studio",
@@ -351,4 +352,32 @@ test("desktop host registration round-trips QUIC and probe-only WebTransport fie
   assert.equal(registration.host.quicCertHash, quicCertHash);
   assert.equal(registration.host.webtransport, false);
   assert.deepEqual(await service.list(alice), [registration.host]);
+});
+
+test("relay-only desktops require token ownership and retain owner isolation", async () => {
+  const store = new MemoryDesktopHostStore();
+  const service = new DesktopHostService(
+    store,
+    () => 42,
+    () => "ownership-relay",
+  );
+  await assert.rejects(
+    service.register(alice, "linux", { name: "Linux", relayOnly: true }),
+    /token ownership/,
+  );
+  const registration = await service.register(
+    alice,
+    "linux",
+    { name: "Linux", relayOnly: true },
+    "token-v1",
+    "publication-linux",
+  );
+  assert.equal(registration.host.relayOnly, true);
+  assert.equal(registration.host.relayCapable, true);
+  assert.equal(registration.host.address, "");
+  assert.deepEqual(await service.list(bob), []);
+  await service.remove(alice, "linux", "wrong-token");
+  assert.equal((await service.list(alice)).length, 1);
+  await service.remove(alice, "linux", registration.ownershipToken);
+  assert.deepEqual(await service.list(alice), []);
 });

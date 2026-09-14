@@ -299,6 +299,10 @@ pnpm build
 # Run type checks
 pnpm check
 
+# Run Worker/browser and current-OS native tests (Go toolchain required)
+pnpm test
+pnpm test:native
+
 # Run linter
 pnpm lint
 
@@ -307,6 +311,12 @@ pnpm format
 ```
 
 ### Test Stack
+
+Run `pnpm check`, `pnpm test`, and `pnpm test:native` locally on the OS you
+have. Native validation runs Go tests with the race detector and Go vet; on
+macOS it also runs the RoyalVNCKit and app tests through `pnpm macos:test`
+(full Xcode required). Other hosts explicitly report the macOS suite as not
+run. Crabbox is optional for remote or additional platform coverage.
 
 - `tsc --noEmit` through `pnpm build`
 - `oxlint` for linting
@@ -430,32 +440,35 @@ Full documentation available at [docs.crabfleet.ai](https://docs.crabfleet.ai):
 - [Runs](https://docs.crabfleet.ai/runs) – Runtime selection and execution
 - [GitHub Actions Sessions](https://docs.crabfleet.ai/github-actions-sessions) – Durable runner relay and steering
 - [Native macOS Client](https://docs.crabfleet.ai/macos-native-client) – Prototype scope and security boundary
+- [Linux Connector](docs/linux-connector.md) – X11 and Wayland desktop sharing
 - [Admin](https://docs.crabfleet.ai/admin) – Access control and policies
 - [API](https://docs.crabfleet.ai/api) – REST and WebSocket APIs
 - [Spec](https://docs.crabfleet.ai/spec) – Complete product specification
 
 ## Crabfleet Connect for Linux and Windows
 
-`crabfleet-connect` is the first cross-platform host foundation for sharing a
-Linux or Windows machine to the native macOS viewer or browser client. It
-provides a Go RFB 3.8 server, a fresh per-run VNC password, Tight/JPEG frames,
-client-side cursor updates, remote input, a synthetic test backend, a Linux X11
-MIT-SHM/XFixes/XTest backend, and a pure-Go Windows backend using synchronized
-GDI `BitBlt` primary-display capture plus `SendInput`. The Windows key path
-combines virtual keys for named keys and active-layout shortcuts with Unicode
-text injection and canonical legacy X11 keysym conversion. Both native paths
-cross-compile, but neither has been validated on physical target hardware yet.
+`crabfleet-connect` shares Linux desktops in Fleet's browser viewer and over
+private VNC connections. It supports X11, Hyprland/wlroots through wayvnc 0.10+,
+and GNOME/KDE through the desktop portal and PipeWire. A common Go RFB server
+provides negotiated H.264/HEVC, Tight/JPEG and RAW video, UTF-8 clipboard, opt-in
+system audio, explicitly selected shared folders, and view-only controls.
 
-The CLI listens on loopback by default because VNC-DES does not encrypt RFB
-traffic. Remote use requires an explicit `--bind` on an already protected
-private path.
+Build with `go build -o ./dist/crabfleet-connect ./cmd/crabfleet-connect`, sign in
+with `crabfleet-connect login --server https://fleet.example`, then run
+`crabfleet-connect share --fleet` from your desktop session. The connector
+maintains an authenticated browser relay and cleans up its own registration.
+A systemd user service can start sharing at graphical login. Direct VNC defaults
+to loopback and requires an SSH tunnel or an explicitly bound protected interface.
 
-This increment does not provide ARD host authentication, H.264 or HEVC
-encoding, Wayland/PipeWire capture, Windows DXGI Desktop Duplication,
-Windows multi-monitor or per-monitor-DPI support, multi-group XKB input, audio,
-clipboard synchronization, or service packaging. See
-[`cmd/crabfleet-connect/README.md`](cmd/crabfleet-connect/README.md)
-for the exact boundary and run command.
+The [Linux connector guide](docs/linux-connector.md) describes dependencies,
+permissions, video and audio options, file limits, native viewer access, service
+management, and real compositor validation. Linux amd64 and arm64 archives are
+included in the release configuration.
+
+The Windows connector retains primary-display GDI capture and SendInput with
+Tight/JPEG, cursor support, and VNC authentication. Linux-specific helpers and
+Fleet/service commands do not change its existing direct VNC workflow. See the
+[connector README](cmd/crabfleet-connect/README.md) for platform boundaries.
 
 ## Security
 

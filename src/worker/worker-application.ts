@@ -197,7 +197,7 @@ export class WorkerApplication {
   nativeRoutes(context: ExecutionContext): NativeRouteDependencies {
     const auth = this.nativeAuth();
     return {
-      startDevice: (clientName, remoteIp) => auth.start(clientName, remoteIp),
+      startDevice: (clientName, remoteIp, scope) => auth.start(clientName, remoteIp, scope),
       pollToken: (deviceCode) => auth.poll(deviceCode),
       requireUser: (request) => auth.authenticate(request),
       revokeToken: (request) => auth.revoke(request),

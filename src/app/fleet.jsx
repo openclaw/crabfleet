@@ -168,11 +168,11 @@ export function FleetPage(props) {
 function DesktopHosts({ hosts }) {
   if (!hosts.length) return null;
   return (
-    <section class="desktop-hosts" aria-label="Shared Macs">
+    <section class="desktop-hosts" aria-label="Shared desktops">
       <header>
         <div>
           <div class="section-kicker">PRIVATE DESKTOPS</div>
-          <h2>Share This Mac</h2>
+          <h2>Shared desktops</h2>
         </div>
         <span>{hosts.length} registered</span>
       </header>
@@ -180,13 +180,11 @@ function DesktopHosts({ hosts }) {
         {hosts.map((host) => (
           <article class="desktop-host-card" key={host.id}>
             <span class="desktop-host-mark" aria-hidden="true">
-              MAC
+              PC
             </span>
             <div>
               <strong>{host.name}</strong>
-              <span>
-                {host.address}:{host.port}
-              </span>
+              <span>{host.relayOnly ? "Browser relay" : `${host.address}:${host.port}`}</span>
             </div>
             {host.relayCapable ? (
               <button
@@ -196,7 +194,9 @@ function DesktopHosts({ hosts }) {
                 Open in browser
               </button>
             ) : (
-              <span class="desktop-host-relay-unavailable">Re-share Mac for browser access</span>
+              <span class="desktop-host-relay-unavailable">
+                Re-share desktop for browser access
+              </span>
             )}
           </article>
         ))}

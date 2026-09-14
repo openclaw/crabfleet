@@ -24,7 +24,8 @@
     "macos:test": "pnpm macos:test:vendor && sh macos/CrabfleetMac/scripts/run-tests.sh",
     "macos:test:vendor": "swift test --package-path macos/CrabfleetMac/Vendor/RoyalVNCKit",
     "test": "node --test --experimental-strip-types tests/*.test.ts",
-    "test:changed": "pnpm run test"
+    "test:changed": "pnpm run test",
+    "test:native": "node scripts/test-native.mjs"
   },
   "dependencies": {
     "@cloudflare/sandbox": "0.12.8",

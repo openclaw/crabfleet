@@ -3,6 +3,7 @@ import type { RuntimeEnv } from "./env.ts";
 import { conflict } from "./http.ts";
 
 export type DesktopHostRow = {
+  relayOnly?: boolean;
   ownerSubject: string;
   id: string;
   owner: string;
@@ -61,6 +62,7 @@ export class DesktopHostRepository implements DesktopHostStore, DesktopRelayRegi
       .orderBy("id")
       .execute();
     return rows.map((row) => ({
+      relayOnly: row.relay_only === 1,
       quicPort: row.quic_port ?? null,
       quicCertHash: row.quic_cert_hash ?? null,
       webtransport: row.webtransport === 1,
@@ -109,6 +111,7 @@ export class DesktopHostRepository implements DesktopHostStore, DesktopRelayRegi
     const row = await database(this.env)
       .insertInto("desktop_hosts")
       .values({
+        relay_only: host.relayOnly === true ? 1 : 0,
         quic_port: host.quicPort ?? null,
         quic_cert_hash: host.quicCertHash ?? null,
         webtransport: host.webtransport === true ? 1 : 0,
@@ -128,6 +131,7 @@ export class DesktopHostRepository implements DesktopHostStore, DesktopRelayRegi
         const update = conflict.columns(["owner_subject", "id"]);
         return host.ownershipToken
           ? update.doUpdateSet({
+              relay_only: host.relayOnly === true ? 1 : 0,
               quic_port: host.quicPort ?? null,
               quic_cert_hash: host.quicCertHash ?? null,
               webtransport: host.webtransport === true ? 1 : 0,
@@ -154,6 +158,7 @@ export class DesktopHostRepository implements DesktopHostStore, DesktopRelayRegi
       .executeTakeFirst();
     if (!row) throw desktopHostOwnershipConflict();
     return {
+      relayOnly: row.relay_only === 1,
       quicPort: row.quic_port ?? null,
       quicCertHash: row.quic_cert_hash ?? null,
       webtransport: row.webtransport === 1,

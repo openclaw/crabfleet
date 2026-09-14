@@ -63,6 +63,7 @@ export type SessionTable = {
 };
 
 export type DesktopHostTable = {
+  relay_only: Generated<number>;
   owner_subject: string;
   id: string;
   owner: string;
@@ -80,6 +81,7 @@ export type DesktopHostTable = {
 };
 
 export type NativeDeviceAuthorizationTable = {
+  scope: Generated<string>;
   device_code_hash: string;
   link_code_hash: string;
   client_name: string;

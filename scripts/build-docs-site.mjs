@@ -24,7 +24,14 @@ const sections = [
   ["Start", ["index.md", "quickstart.md", "architecture.md"]],
   [
     "Features",
-    ["cards.md", "runs.md", "github-actions-sessions.md", "macos-native-client.md", "admin.md"],
+    [
+      "cards.md",
+      "runs.md",
+      "github-actions-sessions.md",
+      "macos-native-client.md",
+      "linux-connector.md",
+      "admin.md",
+    ],
   ],
   ["Reference", ["api.md", "spec.md", "spec-v2.md"]],
 ];

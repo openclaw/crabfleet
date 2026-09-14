@@ -2,6 +2,7 @@ package rfb
 
 import (
 	"bytes"
+	"context"
 	"encoding/binary"
 	"encoding/hex"
 	"image/jpeg"
@@ -154,7 +155,8 @@ func TestClientCutTextIsConsumedWithStrictBounds(t *testing.T) {
 	legacy := append([]byte{0, 0, 0, 0, 0, 0, 3}, []byte("abc")...)
 	legacy = append(legacy, 0xaa)
 	reader := bytes.NewReader(legacy)
-	if err := consumeClientCutText(reader); err != nil {
+	clipboard := clipboardSession{extended: true}
+	if _, err := clipboard.receive(context.Background(), reader); err != nil {
 		t.Fatal(err)
 	}
 	remaining, err := io.ReadAll(reader)
@@ -165,9 +167,9 @@ func TestClientCutTextIsConsumedWithStrictBounds(t *testing.T) {
 		t.Fatalf("remaining bytes = %x", remaining)
 	}
 
-	extended := []byte{0, 0, 0, 0xff, 0xff, 0xff, 0xfc, 0, 0, 0, 1, 0xbb}
+	extended := []byte{0, 0, 0, 0xff, 0xff, 0xff, 0xfc, 4, 0, 0, 0, 0xbb}
 	reader = bytes.NewReader(extended)
-	if err := consumeClientCutText(reader); err != nil {
+	if _, err := clipboard.receive(context.Background(), reader); err != nil {
 		t.Fatal(err)
 	}
 	remaining, err = io.ReadAll(reader)
@@ -179,7 +181,7 @@ func TestClientCutTextIsConsumedWithStrictBounds(t *testing.T) {
 	}
 
 	oversized := []byte{0, 0, 0, 0, 0x10, 0, 1}
-	if err := consumeClientCutText(bytes.NewReader(oversized)); err == nil {
+	if _, err := clipboard.receive(context.Background(), bytes.NewReader(oversized)); err == nil {
 		t.Fatal("accepted oversized clipboard payload")
 	}
 }

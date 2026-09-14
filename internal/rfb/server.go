@@ -56,14 +56,33 @@ func NewServer(config ServerConfig) (*Server, error) {
 	if config.MaxSessions < 1 || config.MaxSessions > 1024 {
 		return nil, errors.New("invalid maximum session count")
 	}
-	return &Server{
+	server := &Server{
 		config:    config,
 		active:    make(map[net.Conn]struct{}),
 		closedCh:  make(chan struct{}),
-		inputs:    newInputCoordinator(config.Session.Backend),
+		inputs:    newInputCoordinator(config.Session.Backend, config.MaxSessions),
 		captures:  &captureCoordinator{backend: config.Session.Backend},
 		challenge: &lockedReader{reader: config.Session.ChallengeReader},
-	}, nil
+	}
+	server.wg.Add(1)
+	go server.retryInputCleanup()
+	return server, nil
+}
+
+func (server *Server) retryInputCleanup() {
+	defer server.wg.Done()
+	ticker := time.NewTicker(250 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-server.closedCh:
+			return
+		case <-ticker.C:
+			ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+			server.inputs.releaseAll(ctx)
+			cancel()
+		}
+	}
 }
 
 func (server *Server) Serve(ctx context.Context, listener net.Listener) error {
@@ -99,14 +118,18 @@ func (server *Server) Serve(ctx context.Context, listener net.Listener) error {
 			}
 			return err
 		}
+		// Input may be waiting on the desktop. Keep Close free to unblock it.
+		input := server.inputs.newSession()
 		server.mu.Lock()
-		if server.closed || len(server.active) >= server.config.MaxSessions {
+		if input == nil || server.closed || len(server.active) >= server.config.MaxSessions {
 			server.mu.Unlock()
 			_ = connection.Close()
+			if input != nil {
+				input.release(context.Background())
+			}
 			continue
 		}
 		server.active[connection] = struct{}{}
-		input := server.inputs.newSession()
 		server.wg.Add(1)
 		server.mu.Unlock()
 		go func() {

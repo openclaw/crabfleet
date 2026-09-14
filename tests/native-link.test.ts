@@ -10,6 +10,7 @@ import type {
   NativeDeviceAuthorizationRecord,
 } from "../src/worker/native-auth.ts";
 import { handleNativeLink } from "../src/worker/native-link.ts";
+import { connectorAccessScope } from "../src/worker/native-auth.ts";
 
 const link: NativeDeviceAuthorizationRecord = {
   deviceCodeHash: "device-hash",
@@ -69,10 +70,10 @@ function d1(user: User, githubTokenCiphertext: string | null = null): D1Database
   } as unknown as D1Database;
 }
 
-function service(approvals: string[]): NativeAuthService {
+function service(approvals: string[], record = link): NativeAuthService {
   return {
     async link() {
-      return link;
+      return record;
     },
     async approve(_code: string, user: User, githubToken?: string) {
       approvals.push(`${user.subject}:${githubToken ?? ""}`);
@@ -125,6 +126,20 @@ test("trusted-proxy native approval uses asserted identity and exact Origin with
   assert.equal(get.headers.get("x-frame-options"), "DENY");
   const csrf = (await get.text()).match(/name="csrf" value="([^"]+)"/)?.[1];
   assert.ok(csrf);
+
+  const connectorPage = await handleNativeLink(
+    new Request("https://backend.example/native/link/link-code"),
+    "link-code",
+    requestAuth,
+    env,
+    service([], { ...link, clientName: "Linux fixture", scope: connectorAccessScope }),
+  );
+  const connectorHtml = await connectorPage.text();
+  assert.match(connectorHtml, /Authorize Crabfleet Connect/);
+  assert.match(connectorHtml, /publish and manage your shared desktops/);
+  assert.match(connectorHtml, /renew this authorization/);
+  assert.match(connectorHtml, /Desktop capture and control still require permission/);
+  assert.doesNotMatch(connectorHtml, /read your visible Crabfleet sessions for 24 hours/);
 
   const post = await handleNativeLink(
     new Request("https://backend.example/native/link/link-code", {

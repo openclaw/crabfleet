@@ -11,7 +11,8 @@ import (
 // inputCoordinator preserves input ownership when several viewers share one
 // capture/input backend. A viewer can release only keys and buttons it pressed.
 type inputCoordinator struct {
-	sink connect.InputSink
+	sink        connect.InputSink
+	maxSessions int
 
 	mu          sync.Mutex
 	nextID      uint64
@@ -44,17 +45,22 @@ type coordinatedBackend struct {
 	capture *captureCoordinator
 }
 
-func newInputCoordinator(sink connect.InputSink) *inputCoordinator {
+func newInputCoordinator(sink connect.InputSink, maxSessions int) *inputCoordinator {
 	return &inputCoordinator{
-		sink:     sink,
-		sessions: make(map[uint64]*sessionInputState),
-		keyRefs:  make(map[uint32]int),
+		sink:        sink,
+		maxSessions: maxSessions,
+		sessions:    make(map[uint64]*sessionInputState),
+		keyRefs:     make(map[uint32]int),
 	}
 }
 
 func (coordinator *inputCoordinator) newSession() *coordinatedInput {
 	coordinator.mu.Lock()
 	defer coordinator.mu.Unlock()
+	// Failed releases retain their slot until the backend accepts cleanup.
+	if len(coordinator.sessions) >= coordinator.maxSessions {
+		return nil
+	}
 	coordinator.nextID++
 	id := coordinator.nextID
 	coordinator.sessions[id] = &sessionInputState{keys: make(map[uint32]struct{})}
@@ -66,7 +72,7 @@ func (input *coordinatedInput) Key(ctx context.Context, event connect.KeyEvent) 
 	coordinator.mu.Lock()
 	defer coordinator.mu.Unlock()
 	state := coordinator.sessions[input.id]
-	if state == nil {
+	if state == nil || state.closing {
 		return errors.New("input session is closed")
 	}
 	_, held := state.keys[event.Keysym]
@@ -104,7 +110,7 @@ func (input *coordinatedInput) Pointer(ctx context.Context, event connect.Pointe
 	coordinator.mu.Lock()
 	defer coordinator.mu.Unlock()
 	state := coordinator.sessions[input.id]
-	if state == nil {
+	if state == nil || state.closing {
 		return errors.New("input session is closed")
 	}
 	previousMask := state.buttonMask

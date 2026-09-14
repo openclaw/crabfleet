@@ -146,7 +146,16 @@ export class H264Decoder {
     this.#decoder = new Decoder({
       output: (frame) => {
         const pending = this.#pending.shift();
-        Promise.resolve(this.#output(frame)).then(pending?.resolve, pending?.reject);
+        if (!pending) {
+          frame.close();
+          return;
+        }
+        Promise.resolve()
+          .then(() => this.#output(frame))
+          .then(pending.resolve, (error: Error) => {
+            frame.close();
+            pending.reject(error);
+          });
       },
       error: (decodeError) => {
         error(decodeError);

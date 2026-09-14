@@ -20,6 +20,8 @@ import { handleBrowserSessionRoute } from "./worker/routes/browser-sessions";
 import { handleControlPlaneRoute } from "./worker/routes/control-plane";
 import { handleOpenClawRoute } from "./worker/routes/openclaw";
 import { handleNativeRoute } from "./worker/routes/native";
+import { handleConnectorRoute } from "./worker/routes/connector";
+import { DesktopHostService } from "./worker/desktop-host-service";
 import { handleProvisioningRoute } from "./worker/routes/provisioning";
 import { handleSessionIngressRoute } from "./worker/routes/session-ingress";
 import { handleServiceSessionRoute } from "./worker/routes/service-sessions";
@@ -233,6 +235,15 @@ async function api(
     application.nativeRoutes(context),
   );
   if (nativeResponse) return nativeResponse;
+
+  const connectorResponse = await handleConnectorRoute(
+    request,
+    url,
+    requestAuth,
+    application.nativeAuth(),
+    new DesktopHostService(new DesktopHostRepository(env)),
+  );
+  if (connectorResponse) return connectorResponse;
 
   const user = await requireUser(request, env, requestAuth);
 

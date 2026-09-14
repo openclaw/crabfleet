@@ -93,6 +93,118 @@ func TestServerCloseCancelsBlockedCapture(t *testing.T) {
 	}
 }
 
+func TestServerRetriesDisconnectedInputWithFreshContext(t *testing.T) {
+	t.Parallel()
+	backend, err := connect.NewSynthetic(connect.SyntheticOptions{Width: 4, Height: 4})
+	if err != nil {
+		t.Fatal(err)
+	}
+	server, err := NewServer(ServerConfig{Session: SessionConfig{Backend: backend, Password: "fixture"}, MaxSessions: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer server.Close()
+	input := server.inputs.newSession()
+	if err := input.Key(context.Background(), connect.KeyEvent{Down: true, Keysym: 65}); err != nil {
+		t.Fatal(err)
+	}
+	if err := input.Pointer(context.Background(), connect.PointerEvent{ButtonMask: 1, X: 2, Y: 3}); err != nil {
+		t.Fatal(err)
+	}
+	expired, cancel := context.WithCancel(context.Background())
+	cancel()
+	input.release(expired)
+	deadline := time.After(2 * time.Second)
+	ticker := time.NewTicker(10 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		server.inputs.mu.Lock()
+		clean := len(server.inputs.sessions) == 0 && len(server.inputs.keyRefs) == 0 && server.inputs.globalButtonMask() == 0
+		server.inputs.mu.Unlock()
+		if clean {
+			break
+		}
+		select {
+		case <-deadline:
+			t.Fatal("failed disconnect cleanup was not retried during normal operation")
+		case <-ticker.C:
+		}
+	}
+	events := backend.Events()
+	if len(events) != 4 || events[2].Key == nil || events[2].Key.Down || events[3].Pointer == nil || events[3].Pointer.ButtonMask != 0 {
+		t.Fatalf("input releases = %+v", events)
+	}
+	if input := server.inputs.newSession(); input == nil {
+		t.Fatal("cleanup did not restore admission capacity")
+	} else {
+		input.release(context.Background())
+	}
+}
+
+type blockingInputBackend struct {
+	connect.Backend
+	entered chan struct{}
+	closed  chan struct{}
+}
+
+func (backend *blockingInputBackend) Key(context.Context, connect.KeyEvent) error {
+	close(backend.entered)
+	<-backend.closed
+	return connect.ErrClosed
+}
+
+func (backend *blockingInputBackend) Close() error {
+	close(backend.closed)
+	return backend.Backend.Close()
+}
+
+func TestServerCloseUnblocksInputAndPendingAdmission(t *testing.T) {
+	t.Parallel()
+	synthetic, err := connect.NewSynthetic(connect.SyntheticOptions{Width: 4, Height: 4})
+	if err != nil {
+		t.Fatal(err)
+	}
+	backend := &blockingInputBackend{Backend: synthetic, entered: make(chan struct{}), closed: make(chan struct{})}
+	server, err := NewServer(ServerConfig{Session: SessionConfig{Backend: backend, Password: "fixture"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	serveDone := make(chan error, 1)
+	go func() { serveDone <- server.Serve(context.Background(), listener) }()
+	input := server.inputs.newSession()
+	inputDone := make(chan struct{})
+	go func() {
+		_ = input.Key(context.Background(), connect.KeyEvent{Down: true, Keysym: 65})
+		close(inputDone)
+	}()
+	<-backend.entered
+	client, err := net.Dial("tcp", listener.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+	// Allow Accept to reach the input coordinator while desktop input is blocked.
+	time.Sleep(20 * time.Millisecond)
+	closed := make(chan error, 1)
+	go func() { closed <- server.Close() }()
+	select {
+	case err := <-closed:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Close waited for admission instead of unblocking the desktop")
+	}
+	<-inputDone
+	if err := <-serveDone; err != nil {
+		t.Fatal(err)
+	}
+}
+
 type repeatReader struct{}
 
 func (*repeatReader) Read(payload []byte) (int, error) {

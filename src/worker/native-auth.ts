@@ -24,11 +24,13 @@ export const nativeDeviceAuthorizationSeconds = 10 * 60;
 export const nativeAccessTokenSeconds = 24 * 60 * 60;
 export const nativePollIntervalSeconds = 5;
 export const nativeAccessScope = "fleet:read";
+export const connectorAccessScope = "desktop:publish";
 
 const nativeDeviceAttemptsPerAddress = 20;
 const nativeDeviceAttemptsWithoutAddress = 100;
 
 export type NativeDeviceAuthorizationRecord = {
+  scope?: string;
   deviceCodeHash: string;
   linkCodeHash: string;
   clientName: string;
@@ -80,6 +82,7 @@ export type NativeAuthStore = {
   readDeviceByLinkCode(linkCodeHash: string): Promise<NativeDeviceAuthorizationRecord | null>;
   readDeviceByDeviceCode(deviceCodeHash: string): Promise<NativeDeviceAuthorizationRecord | null>;
   approveDevice(input: {
+    scope?: string;
     linkCodeHash: string;
     subject: string;
     accessTokenHash: string;
@@ -94,6 +97,7 @@ export type NativeAuthStore = {
   readAccessToken(tokenHash: string, now: number): Promise<NativeAccessTokenRecord | null>;
   touchAccessToken(tokenHash: string, now: number): Promise<void>;
   revokeAccessToken(tokenHash: string, now: number): Promise<void>;
+  renewAccessToken(tokenHash: string, now: number, expiresAt: number): Promise<boolean>;
 };
 
 export type NativeAuthServiceDependencies = {
@@ -114,7 +118,13 @@ export class NativeAuthService {
     this.dependencies = dependencies;
   }
 
-  async start(clientNameValue: unknown, remoteIpValue: unknown): Promise<NativeDeviceStartResult> {
+  async start(
+    clientNameValue: unknown,
+    remoteIpValue: unknown,
+    scopeValue: unknown = nativeAccessScope,
+  ): Promise<NativeDeviceStartResult> {
+    if (scopeValue !== nativeAccessScope && scopeValue !== connectorAccessScope)
+      throw badRequest("unsupported native authorization scope");
     const clientName = cleanClientName(clientNameValue);
     if (!clientName) throw badRequest("clientName is required");
     const remoteIp = clean(remoteIpValue, 120) || null;
@@ -130,6 +140,7 @@ export class NativeAuthService {
     const linkCode = this.dependencies.randomSecret();
     const expiresAt = now + nativeDeviceAuthorizationSeconds * 1000;
     const record = {
+      scope: scopeValue,
       deviceCodeHash: await sha256(deviceCode),
       linkCodeHash: await sha256(linkCode),
       clientName,
@@ -193,6 +204,7 @@ export class NativeAuthService {
     const now = this.dependencies.now();
     const accessTokenExpiresAt = now + nativeAccessTokenSeconds * 1000;
     const approved = await this.dependencies.store.approveDevice({
+      scope: record.scope ?? nativeAccessScope,
       linkCodeHash: record.linkCodeHash,
       subject: user.subject,
       accessTokenHash,
@@ -253,9 +265,9 @@ export class NativeAuthService {
     };
   }
 
-  async authenticate(request: Request): Promise<User> {
+  async authenticate(request: Request, scope: string = nativeAccessScope): Promise<User> {
     const now = this.dependencies.now();
-    const { tokenHash, record } = await this.localAccess(request, now);
+    const { tokenHash, record } = await this.localAccess(request, now, scope);
     const user = await this.currentAccessUser(record, now);
     await this.dependencies.store.touchAccessToken(tokenHash, now);
     return user;
@@ -263,8 +275,18 @@ export class NativeAuthService {
 
   async revoke(request: Request): Promise<void> {
     const now = this.dependencies.now();
-    const { tokenHash } = await this.localAccess(request, now);
+    const { tokenHash } = await this.localAccess(request, now, null);
     await this.dependencies.store.revokeAccessToken(tokenHash, now);
+  }
+
+  async renewConnector(request: Request): Promise<{ expiresAt: number }> {
+    const now = this.dependencies.now();
+    const { tokenHash, record } = await this.localAccess(request, now, connectorAccessScope);
+    await this.currentAccessUser(record, now);
+    const expiresAt = now + nativeAccessTokenSeconds * 1000;
+    if (!(await this.dependencies.store.renewAccessToken(tokenHash, now, expiresAt)))
+      throw unauthorized();
+    return { expiresAt };
   }
 
   async pruneExpired(now = this.dependencies.now()): Promise<void> {
@@ -274,12 +296,18 @@ export class NativeAuthService {
   private async localAccess(
     request: Request,
     now: number,
+    scope: string | null = nativeAccessScope,
   ): Promise<{ tokenHash: string; record: NativeAccessTokenRecord }> {
     const token = validSecret(bearerToken(request));
     if (!token) throw unauthorized();
     const tokenHash = await sha256(token);
     const record = await this.dependencies.store.readAccessToken(tokenHash, now);
-    if (!record || record.scope !== nativeAccessScope) throw unauthorized();
+    if (
+      !record ||
+      ![nativeAccessScope, connectorAccessScope].includes(record.scope) ||
+      (scope !== null && record.scope !== scope)
+    )
+      throw unauthorized();
     return { tokenHash, record };
   }
 
@@ -388,11 +416,11 @@ class D1NativeAuthStore implements NativeAuthStore {
       INSERT INTO native_device_authorizations
         (device_code_hash, link_code_hash, client_name, remote_ip, subject,
          access_token_hash, access_token_ciphertext, access_token_expires_at,
-         expires_at, next_poll_at, approved_at, consumed_at, created_at)
+         expires_at, next_poll_at, approved_at, consumed_at, created_at, scope)
       SELECT
         ${record.deviceCodeHash}, ${record.linkCodeHash}, ${record.clientName}, ${record.remoteIp},
         NULL, NULL, NULL, NULL, ${record.expiresAt}, ${record.nextPollAt}, NULL, NULL,
-        ${record.createdAt}
+        ${record.createdAt}, ${record.scope ?? nativeAccessScope}
       WHERE (
         SELECT count(*)
         FROM native_device_authorizations
@@ -431,6 +459,7 @@ class D1NativeAuthStore implements NativeAuthStore {
   }
 
   async approveDevice(input: {
+    scope?: string;
     linkCodeHash: string;
     subject: string;
     accessTokenHash: string;
@@ -447,7 +476,7 @@ class D1NativeAuthStore implements NativeAuthStore {
           (token_hash, subject, scope, client_name, github_token_ciphertext,
            expires_at, created_at, last_used_at, revoked_at)
         SELECT
-          ${input.accessTokenHash}, ${input.subject}, ${nativeAccessScope}, ${input.clientName},
+          ${input.accessTokenHash}, ${input.subject}, ${input.scope ?? nativeAccessScope}, ${input.clientName},
           ${input.githubTokenCiphertext}, ${input.accessTokenExpiresAt}, ${input.now}, ${input.now},
           NULL
         FROM native_device_authorizations
@@ -558,10 +587,23 @@ class D1NativeAuthStore implements NativeAuthStore {
       .where("revoked_at", "is", null)
       .execute();
   }
+
+  async renewAccessToken(tokenHash: string, now: number, expiresAt: number): Promise<boolean> {
+    const result = await database(this.env)
+      .updateTable("native_access_tokens")
+      .set({ expires_at: expiresAt, last_used_at: now })
+      .where("token_hash", "=", tokenHash)
+      .where("scope", "=", connectorAccessScope)
+      .where("expires_at", ">", now)
+      .where("revoked_at", "is", null)
+      .executeTakeFirst();
+    return result.numUpdatedRows === 1n;
+  }
 }
 
 function deviceRow(record: NativeDeviceAuthorizationRecord) {
   return {
+    scope: record.scope ?? nativeAccessScope,
     device_code_hash: record.deviceCodeHash,
     link_code_hash: record.linkCodeHash,
     client_name: record.clientName,
@@ -580,6 +622,7 @@ function deviceRow(record: NativeDeviceAuthorizationRecord) {
 
 function deviceRecord(row: ReturnType<typeof deviceRow>): NativeDeviceAuthorizationRecord {
   return {
+    scope: row.scope ?? nativeAccessScope,
     deviceCodeHash: row.device_code_hash,
     linkCodeHash: row.link_code_hash,
     clientName: row.client_name,

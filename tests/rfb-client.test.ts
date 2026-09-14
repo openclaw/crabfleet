@@ -561,6 +561,46 @@ test("remote clipboard reads expose only snapshots approved by explicit sends", 
   await assert.rejects(running, /scripted server ended/);
 });
 
+for (const failure of ["disconnect", "malformed response"] as const) {
+  test(`pending file requests are rejected after ${failure}`, async () => {
+    const name = new TextEncoder().encode("Synthetic desktop");
+    const transport = new InteractiveTransport();
+    transport.append(
+      new TextEncoder().encode("RFB 003.008\n"),
+      [1, 1],
+      uint32(0),
+      uint16(800),
+      uint16(600),
+      new Uint8Array(16),
+      uint32(name.byteLength),
+      name,
+    );
+    const capabilities: Array<string | null> = [];
+    const client = new RFBClient(transport, {
+      h264: false,
+      onFileSharing: (capability) => capabilities.push(capability?.displayName ?? null),
+    });
+    const running = client.start();
+    await waitForSent(transport, 6);
+    transport.append([202, 1, 1, 0, 0, 6], new TextEncoder().encode("Shared"));
+    for (let attempt = 0; attempt < 100 && !capabilities.length; attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    }
+    assert.deepEqual(capabilities, ["Shared"]);
+    const listing = assert.rejects(client.listFiles(), /file transfer disconnected/);
+    await waitForSent(transport, 7);
+    const stopped = assert.rejects(
+      running,
+      failure === "disconnect" ? /scripted server ended/ : /invalid FSH1 capability padding/,
+    );
+    if (failure === "disconnect") transport.end();
+    else transport.append([202, 1, 2, 0]);
+    await Promise.all([listing, stopped]);
+    assert.deepEqual(capabilities, ["Shared", null]);
+    await assert.rejects(client.listFiles(), /this host is not sharing a folder/);
+  });
+}
+
 test("rejected clipboard text is not approved for later remote requests", async () => {
   const name = new TextEncoder().encode("Studio");
   const requestBody = uint32((1 << 25) | 1);

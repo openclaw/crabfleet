@@ -75,6 +75,7 @@ The web app at [crabfleet.openclaw.ai/app](https://crabfleet.openclaw.ai/app/) e
 - **Understanding the system.** [Architecture](/architecture/) explains the Worker, D1/Kysely, runtime descriptors, and workflow config.
 - **Operating cards.** [Cards](/cards/) and [Runs](/runs/) cover task state, attempts, terminal attach, and replay.
 - **Steerable Actions.** [GitHub Actions Sessions](/github-actions-sessions/) covers durable work keys, outbound runner PTYs, browser steering, work-state heartbeats, resumption, completion, and cancellation.
+- **Sharing Linux.** [Linux Connector](/linux-connector/) covers X11 and Hyprland/wlroots desktop sharing, view-only access, and SSH tunnels.
 - **Managing access.** [Admin](/admin/) covers users, teams, repos, roles, caps, and policy defaults.
 - **Building against it.** [API Reference](/api/) lists REST and internal SSH gateway endpoints.
 - **Reading the contract.** [Complete Spec](/spec/) separates shipped behavior from explicit product boundaries.

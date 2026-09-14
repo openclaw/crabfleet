@@ -12,7 +12,7 @@ import { sha256 } from "./crypto.ts";
 import { browserAppOrigin } from "./deployment.ts";
 import type { RuntimeEnv } from "./env.ts";
 import { badRequest, cookie, cookies, forbidden, redirect, text } from "./http.ts";
-import type { NativeAuthService } from "./native-auth.ts";
+import { connectorAccessScope, type NativeAuthService } from "./native-auth.ts";
 
 export const nativeLinkCookie = "crabbox_native_link";
 const nativeLinkCsrfCookie = "crabbox_native_link_csrf";
@@ -96,7 +96,7 @@ export async function handleNativeLink(
     }
     const approved = await service.approve(code, user, githubToken);
     const response = text(
-      nativeLinkSuccessHtml(approved.clientName, actor(user)),
+      nativeLinkSuccessHtml(approved.clientName, actor(user), link.scope === connectorAccessScope),
       "text/html; charset=utf-8",
       nativeLinkHtmlHeaders,
     );
@@ -123,7 +123,13 @@ export async function handleNativeLink(
 
   const csrf = crypto.randomUUID() + crypto.randomUUID();
   const response = text(
-    nativeLinkConfirmHtml(code, csrf, link.clientName, actor(user)),
+    nativeLinkConfirmHtml(
+      code,
+      csrf,
+      link.clientName,
+      actor(user),
+      link.scope === connectorAccessScope,
+    ),
     "text/html; charset=utf-8",
     nativeLinkHtmlHeaders,
   );
@@ -141,13 +147,14 @@ function nativeLinkConfirmHtml(
   csrf: string,
   clientName: string,
   user: string,
+  connector = false,
 ): string {
   return `<!doctype html>
 <html lang="en">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
-  <title>Authorize Crabfleet for macOS</title>
+  <title>${connector ? "Authorize Crabfleet Connect" : "Authorize Crabfleet for macOS"}</title>
   <style>
     body{font:16px/1.45 system-ui,sans-serif;margin:3rem;max-width:44rem;color:#111;background:#fff}
     code{background:#f3f4f6;padding:.15rem .35rem;border-radius:.25rem;word-break:break-all}
@@ -155,24 +162,24 @@ function nativeLinkConfirmHtml(
   </style>
 </head>
 <body>
-  <h1>Authorize Crabfleet for macOS</h1>
+  <h1>${connector ? "Authorize Crabfleet Connect" : "Authorize Crabfleet for macOS"}</h1>
   <p>Signed in as <strong>${htmlEscape(user)}</strong>.</p>
-  <p>Allow <code>${htmlEscape(clientName)}</code> to read your visible Crabfleet sessions for 24 hours?</p>
+  <p>Allow <code>${htmlEscape(clientName)}</code> to ${connector ? "publish and manage your shared desktops? The connector can renew this authorization while it is running. Desktop capture and control still require permission on that computer." : "read your visible Crabfleet sessions for 24 hours?"}</p>
   <form method="post" action="/native/link/${encodeURIComponent(code)}">
     <input type="hidden" name="csrf" value="${htmlEscape(csrf)}">
-    <button type="submit">Authorize this Mac</button>
+    <button type="submit">${connector ? "Authorize this connector" : "Authorize this Mac"}</button>
   </form>
 </body>
 </html>`;
 }
 
-function nativeLinkSuccessHtml(clientName: string, user: string): string {
+function nativeLinkSuccessHtml(clientName: string, user: string, connector = false): string {
   return `<!doctype html>
 <html lang="en">
 <head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Crabfleet authorized</title></head>
 <body style="font:16px/1.45 system-ui,sans-serif;margin:3rem;max-width:44rem">
   <h1>Crabfleet authorized</h1>
-  <p><strong>${htmlEscape(clientName)}</strong> can now read the sessions visible to ${htmlEscape(user)}. You can close this window.</p>
+  <p><strong>${htmlEscape(clientName)}</strong> can now ${connector ? "publish shared desktops for" : "read the sessions visible to"} ${htmlEscape(user)}. You can close this window.</p>
 </body>
 </html>`;
 }

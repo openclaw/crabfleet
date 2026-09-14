@@ -37,9 +37,11 @@ export function replaceDesktopRelayPeer(
   let replaced = 0;
   for (const peer of peers) {
     if (peer.readyState === webSocketClosed) continue;
+    const stillPaired = desktopRelayShouldPropagateClose(peer);
     setDesktopRelayClosePropagation(peer, false);
     if (peer.readyState <= webSocketOpen) peer.close(1000, `${role} replaced`);
-    replaced += 1;
+    // A peer detached by the previous replacement must not close its successor's peer.
+    if (stillPaired) replaced += 1;
   }
   return replaced;
 }

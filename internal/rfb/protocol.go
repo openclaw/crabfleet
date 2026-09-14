@@ -14,6 +14,11 @@ const (
 	SecurityARD = 30
 
 	EncodingTight           int32 = 7
+	EncodingRaw             int32 = 0
+	EncodingH264            int32 = 50
+	EncodingHEVC            int32 = 0x48455631
+	EncodingAudio           int32 = 0x43414631
+	EncodingClipboard       int32 = -1063131698
 	EncodingPointerPosition int32 = -232
 	EncodingCursor          int32 = -239
 	EncodingCursorWithAlpha int32 = -314
@@ -35,10 +40,11 @@ var (
 )
 
 type Encodings struct {
-	Tight           bool
-	CursorWithAlpha bool
-	Cursor          bool
-	PointerPosition bool
+	Raw, H264, HEVC, Audio, Clipboard, FileSharing bool
+	Tight                                          bool
+	CursorWithAlpha                                bool
+	Cursor                                         bool
+	PointerPosition                                bool
 }
 
 func (e Encodings) cursorEncoding() int32 {
@@ -100,6 +106,18 @@ func parseSetEncodings(reader io.Reader) (Encodings, error) {
 	var result Encodings
 	for offset := 0; offset < len(payload); offset += 4 {
 		switch int32(binary.BigEndian.Uint32(payload[offset:])) {
+		case EncodingRaw:
+			result.Raw = true
+		case EncodingH264:
+			result.H264 = true
+		case EncodingHEVC:
+			result.HEVC = true
+		case EncodingAudio:
+			result.Audio = true
+		case EncodingClipboard:
+			result.Clipboard = true
+		case EncodingFileSharing:
+			result.FileSharing = true
 		case EncodingTight:
 			result.Tight = true
 		case EncodingCursorWithAlpha:

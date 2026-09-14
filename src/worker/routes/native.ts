@@ -7,7 +7,7 @@ import type { User } from "../models.ts";
 const nativeJsonBodyLimitBytes = 1024;
 
 export type NativeRouteDependencies = {
-  startDevice(clientName: unknown, remoteIp: unknown): Promise<unknown>;
+  startDevice(clientName: unknown, remoteIp: unknown, scope?: unknown): Promise<unknown>;
   pollToken(deviceCode: unknown): Promise<
     | { kind: "pending"; intervalSeconds: number }
     | { kind: "slow_down"; intervalSeconds: number }
@@ -36,9 +36,13 @@ export async function handleNativeRoute(
 ): Promise<Response | null> {
   if (request.method === "POST" && url.pathname === "/api/native/v1/auth/device") {
     rejectAmbiguousProxyBearer(request, requestAuth);
-    const body = await readNativeJson<{ clientName?: unknown }>(request);
+    const body = await readNativeJson<{ clientName?: unknown; scope?: unknown }>(request);
     return json(
-      await dependencies.startDevice(body.clientName, request.headers.get("cf-connecting-ip")),
+      await dependencies.startDevice(
+        body.clientName,
+        request.headers.get("cf-connecting-ip"),
+        body.scope,
+      ),
       { status: 201 },
     );
   }
@@ -106,7 +110,7 @@ function rejectAmbiguousProxyBearer(request: Request, requestAuth: TrustedProxyA
   }
 }
 
-async function readNativeJson<T>(request: Request): Promise<T> {
+export async function readNativeJson<T>(request: Request): Promise<T> {
   const contentType = request.headers.get("content-type") ?? "";
   if (!/^application\/json(?:\s*;|$)/iu.test(contentType)) {
     throw badRequest("content-type must be application/json");

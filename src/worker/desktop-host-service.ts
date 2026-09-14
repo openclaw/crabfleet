@@ -4,6 +4,7 @@ import { tenantSubject } from "./tenancy.ts";
 import type { DesktopHostRow, DesktopHostStore } from "./desktop-host-repository.ts";
 
 export type DesktopHostInput = {
+  relayOnly?: unknown;
   name?: unknown;
   address?: unknown;
   port?: unknown;
@@ -13,6 +14,7 @@ export type DesktopHostInput = {
 };
 
 export type DesktopHost = {
+  relayOnly: boolean;
   id: string;
   owner: string;
   name: string;
@@ -66,8 +68,11 @@ export class DesktopHostService {
   ): Promise<DesktopHostRegistration> {
     const id = desktopHostID(rawID);
     const name = boundedText(input.name, "name", 100);
-    const address = tailscaleIPv4(input.address);
-    const port = desktopHostPort(input.port);
+    const relayOnly = optionalCapability(input.relayOnly, "relayOnly");
+    if (relayOnly && ownershipMode !== desktopHostTokenOwnershipMode)
+      throw badRequest("relay-only desktops require token ownership");
+    const address = relayOnly ? "" : tailscaleIPv4(input.address);
+    const port = relayOnly ? 5900 : desktopHostPort(input.port);
     const quicPort = optionalDesktopHostPort(input.quicPort, "quicPort");
     const quicCertHash = optionalQUICCertHash(input.quicCertHash);
     if ((quicPort === null) !== (quicCertHash === null)) {
@@ -82,6 +87,7 @@ export class DesktopHostService {
     const ownershipToken =
       ownershipMode === desktopHostTokenOwnershipMode ? this.createOwnershipToken() : "";
     const host: DesktopHostRow = {
+      relayOnly,
       ownerSubject: tenantSubject(user),
       id,
       owner: user.login || user.email || user.name || user.subject,
@@ -131,6 +137,7 @@ function randomOwnershipToken(): string {
 
 function presentDesktopHost(row: DesktopHostRow): DesktopHost {
   return {
+    relayOnly: row.relayOnly === true,
     id: row.id,
     owner: row.owner,
     name: row.name,
