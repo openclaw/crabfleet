@@ -20,8 +20,11 @@ func runPlatformCommand(ctx context.Context, args []string, stdout, stderr io.Wr
 	if command == "service" {
 		return runService(ctx, args[1:], stdout, stderr)
 	}
+	if command == "greeter" {
+		return runGreeter(ctx, args[1:], stdout, stderr)
+	}
 	if command != "login" && command != "logout" && command != "status" && command != "doctor" && command != "password" {
-		return fmt.Errorf("unknown command %q; use share, login, logout, status, doctor, password, or service", command)
+		return fmt.Errorf("unknown command %q; use share, login, logout, status, doctor, password, service, or greeter", command)
 	}
 	flags := flag.NewFlagSet(command, flag.ContinueOnError)
 	flags.SetOutput(stderr)

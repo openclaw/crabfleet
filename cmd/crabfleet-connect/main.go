@@ -22,20 +22,22 @@ import (
 var version = "dev"
 
 type shareOptions struct {
-	output            string
-	viewOnly          bool
-	session           rfb.SessionConfig
-	publish           func(context.Context, *rfb.Server) error
-	portalRestore     string
-	savePortalRestore func(string) error
-	clipboardEnabled  bool
-	password          string
-	quiet             bool
+	output                   string
+	allMonitors, allowResize bool
+	viewOnly                 bool
+	session                  rfb.SessionConfig
+	publish                  func(context.Context, *rfb.Server) error
+	portalRestore            string
+	savePortalRestore        func(string) error
+	clipboardEnabled         bool
+	password                 string
+	quiet                    bool
 }
 
 type featureOptions struct {
 	clipboard, audio, fleet                         bool
 	video, folder, configDirectory, advertise, name string
+	encoder, renderDevice                           string
 	folderWrite                                     bool
 	port                                            int
 }
@@ -63,7 +65,7 @@ func runShare(ctx context.Context, arguments []string, stdout, stderr io.Writer,
 	flags.SetOutput(stderr)
 	flags.Usage = func() {
 		fmt.Fprintln(stderr, "Usage: crabfleet-connect [share] [options]")
-		fmt.Fprintln(stderr, "Linux commands: login, logout, status, password, doctor, service")
+		fmt.Fprintln(stderr, "Linux commands: login, logout, status, password, doctor, service, greeter")
 		flags.PrintDefaults()
 	}
 	display := flags.String("display", "", "X11 display to capture (defaults to DISPLAY)")
@@ -71,6 +73,8 @@ func runShare(ctx context.Context, arguments []string, stdout, stderr io.Writer,
 	clipboard := flags.Bool("clipboard", true, "share text clipboard (use --clipboard=false to disable)")
 	audio := flags.Bool("audio", false, "share system output audio (requires ffmpeg and pactl)")
 	video := flags.String("video", "auto", "video encoder: auto, jpeg, h264, or hevc (ffmpeg)")
+	encoder := flags.String("encoder", "auto", "encoding implementation: auto, software, vaapi, or nvenc")
+	renderDevice := flags.String("render-device", "/dev/dri/renderD128", "VA-API DRM render device")
 	folder := flags.String("shared-folder", "", "folder available to authenticated viewers")
 	folderWrite := flags.Bool("shared-folder-write", false, "allow new files and folders inside the shared folder")
 	fleet := flags.Bool("fleet", false, "register with Fleet and publish an authenticated browser relay")
@@ -78,6 +82,8 @@ func runShare(ctx context.Context, arguments []string, stdout, stderr io.Writer,
 	advertise := flags.String("advertise", "", "Tailscale IPv4 address for native viewers (otherwise Fleet is relay only)")
 	name := flags.String("name", "", "desktop name shown in Fleet")
 	output := flags.String("output", "", "Wayland output to share, for example DP-1 (defaults to first output)")
+	allMonitors := flags.Bool("all-monitors", false, "share all outputs or allow multiple monitors in the portal dialog")
+	allowResize := flags.Bool("allow-resize", false, "allow controlling viewers to change supported monitor modes")
 	viewOnly := flags.Bool("view-only", false, "disable remote keyboard and pointer input")
 	bind := flags.String("bind", "127.0.0.1", "listener address; use a private interface explicitly for remote access")
 	port := flags.Int("port", 5900, "TCP port for the direct RFB listener")
@@ -112,11 +118,17 @@ func runShare(ctx context.Context, arguments []string, stdout, stderr io.Writer,
 	if *advertise != "" && !*fleet {
 		return errors.New("--advertise requires --fleet")
 	}
+	if *allMonitors && *output != "" {
+		return errors.New("--all-monitors cannot be combined with --output")
+	}
 	if *folderWrite && *folder == "" {
 		return errors.New("--shared-folder-write requires --shared-folder")
 	}
 	if *video != "auto" && *video != "jpeg" && *video != "h264" && *video != "hevc" {
 		return errors.New("video must be auto, jpeg, h264, or hevc")
+	}
+	if *encoder != "auto" && *encoder != "software" && *encoder != "vaapi" && *encoder != "nvenc" {
+		return errors.New("encoder must be auto, software, vaapi, or nvenc")
 	}
 	selected, err := resolveBackend(*backendName, *display, *output, *synthetic, runtime.GOOS, os.Getenv("WAYLAND_DISPLAY"), os.Getenv("XDG_SESSION_TYPE"))
 	if err != nil {
@@ -131,8 +143,8 @@ func runShare(ctx context.Context, arguments []string, stdout, stderr io.Writer,
 	if validateOnly {
 		return nil
 	}
-	options := shareOptions{output: *output, viewOnly: *viewOnly, quiet: *quiet}
-	features := featureOptions{clipboard: *clipboard, audio: *audio, video: *video, folder: *folder, folderWrite: *folderWrite, fleet: *fleet, configDirectory: *configDirectory, advertise: *advertise, name: *name, port: *port}
+	options := shareOptions{allMonitors: *allMonitors, allowResize: *allowResize, output: *output, viewOnly: *viewOnly, quiet: *quiet}
+	features := featureOptions{clipboard: *clipboard, audio: *audio, video: *video, encoder: *encoder, renderDevice: *renderDevice, folder: *folder, folderWrite: *folderWrite, fleet: *fleet, configDirectory: *configDirectory, advertise: *advertise, name: *name, port: *port}
 	cleanup, err := configureFeatures(ctx, selected, &options, features, stderr)
 	if err != nil {
 		return err
@@ -173,6 +185,7 @@ func runShare(ctx context.Context, arguments []string, stdout, stderr io.Writer,
 
 func serveBackend(ctx context.Context, listener net.Listener, options shareOptions, password, desktopName string, stdout io.Writer, backend connect.Backend, description string) error {
 	config := options.session
+	config.AllowResize = options.allowResize
 	config.Backend, config.Password, config.DesktopName, config.ViewOnly = backend, password, desktopName, options.viewOnly
 	server, err := rfb.NewServer(rfb.ServerConfig{Session: config})
 	if err != nil {

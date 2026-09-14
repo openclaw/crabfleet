@@ -372,6 +372,92 @@ test("native links canonicalize before lookup or host cookies", async () => {
   assert.deepEqual(approvals, []);
 });
 
+test("finished native authorization links offer recovery without another approval", async () => {
+  for (const [record, heading] of [
+    [{ ...link, expiresAt: Date.now() - 1 }, "This sign-in link expired"],
+    [{ ...link, approvedAt: Date.now() }, "This link has already been used"],
+    [{ ...link, consumedAt: Date.now() }, "This link has already been used"],
+  ] as const) {
+    const approvals: string[] = [];
+    const response = await handleNativeLink(
+      new Request("https://fleet.example/native/link/link-code"),
+      "link-code",
+      { kind: "disabled" },
+      {} as RuntimeEnv,
+      service(approvals, record),
+    );
+    assert.equal(response.status, 410);
+    assert.equal(response.headers.get("content-type"), "text/html; charset=utf-8");
+    assert.equal(response.headers.get("cache-control"), "no-store");
+    assert.equal(response.headers.has("set-cookie"), false);
+    assert.match(response.headers.get("content-security-policy") ?? "", /frame-ancestors 'none'/);
+    const html = await response.text();
+    assert.ok(html.includes(`<h1>${heading}</h1>`));
+    assert.match(html, /your computer/);
+    assert.doesNotMatch(html, /<form|name="csrf"/);
+    assert.deepEqual(approvals, []);
+  }
+});
+
+test("native authorization safely renders long device names and preserves explicit approval", async () => {
+  const user: User = {
+    subject: "proxy:viewer@example.com",
+    login: null,
+    email: "viewer@example.com",
+    name: "Viewer",
+    role: "viewer",
+    allowed: true,
+    teams: [],
+  };
+  const approvals: string[] = [];
+  const response = await handleNativeLink(
+    new Request("https://fleet.example/native/link/link-code"),
+    "link-code",
+    {
+      kind: "authenticated",
+      identity: {
+        subject: user.subject,
+        identity: user.email!,
+        login: null,
+        email: user.email,
+        name: user.name!,
+      },
+    },
+    { DB: d1(user), CRABFLEET_TRUSTED_PROXY_AUTO_ROLE: "viewer" } as RuntimeEnv,
+    service(approvals, {
+      ...link,
+      clientName: `${"workstation".repeat(12)}<ScRiPt>alert(1)</ScRiPt>`,
+      scope: connectorAccessScope,
+    }),
+  );
+  assert.equal(response.status, 200);
+  const html = await response.text();
+  assert.match(html, /&lt;ScRiPt&gt;alert\(1\)&lt;\/ScRiPt&gt;/);
+  assert.doesNotMatch(html, /<script\b/i);
+  assert.match(html, /<form method="post" action="\/native\/link\/link-code">/);
+  assert.match(html, /name="csrf" value="[^"]+"/);
+  assert.match(html, /Authorize this connector/);
+  assert.deepEqual(approvals, []);
+});
+
+test("native sign-in recovery keeps unauthenticated access unauthorized", async () => {
+  const approvals: string[] = [];
+  const response = await handleNativeLink(
+    new Request("https://fleet.example/native/link/link-code"),
+    "link-code",
+    { kind: "disabled" },
+    {} as RuntimeEnv,
+    service(approvals),
+  );
+  assert.equal(response.status, 401);
+  assert.equal(response.headers.get("cache-control"), "no-store");
+  const html = await response.text();
+  assert.match(html, /Sign in to continue/);
+  assert.match(html, /href="\/">Open Crabfleet/);
+  assert.doesNotMatch(html, /<form|name="csrf"/);
+  assert.deepEqual(approvals, []);
+});
+
 function httpStatus(error: unknown): number | undefined {
   return typeof error === "object" && error && "status" in error ? Number(error.status) : undefined;
 }

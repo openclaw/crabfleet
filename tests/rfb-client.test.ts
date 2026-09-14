@@ -770,3 +770,49 @@ function bytes(...parts: Array<Uint8Array | number[]>): Uint8Array {
   }
   return result;
 }
+
+test("administratively prohibited resizing is not retried by later layout or viewport changes", async () => {
+  const layout = (reason: number, status: number) =>
+    bytes(
+      [0, 0, 0, 1],
+      uint16(reason),
+      uint16(status),
+      uint16(1280),
+      uint16(720),
+      uint32(RFB_ENCODINGS.extendedDesktopSize),
+      [1, 0, 0, 0],
+      uint32(42),
+      uint16(0),
+      uint16(0),
+      uint16(1280),
+      uint16(720),
+      uint32(0),
+    );
+  const transport = new ScriptedTransport(
+    bytes(
+      new TextEncoder().encode("RFB 003.008\n"),
+      [1, 1],
+      uint32(0),
+      uint16(1280),
+      uint16(720),
+      new Uint8Array(16),
+      uint32(0),
+      layout(0, 0),
+      layout(1, 1),
+      layout(0, 0),
+    ),
+  );
+  const states: string[] = [];
+  const client = new RFBClient(transport, {
+    h264: false,
+    onResize: () => client.resize(800, 600),
+    onState: (state) => states.push(state),
+  });
+  await assert.rejects(client.start(), /scripted server ended/);
+  client.resize(1024, 768);
+  assert.equal(transport.sent.filter((message) => message[0] === 251).length, 1);
+  assert.equal(
+    states.some((state) => state.startsWith("Resize rejected")),
+    false,
+  );
+});

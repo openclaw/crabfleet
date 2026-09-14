@@ -109,7 +109,7 @@ function App() {
     `${host.name} ${host.owner}`.toLowerCase().includes(query.toLowerCase()),
   );
   return (
-    <main class="shell">
+    <main class={`shell ${user ? "signed-in" : "signed-out"}`}>
       <header class="masthead">
         <a class="wordmark" href="/app/">
           <img src="/crabbox-logo.png" alt="" />
@@ -138,16 +138,33 @@ function App() {
         </nav>
       </header>
       <section class="intro">
-        <p class="eyebrow">REMOTE DESKTOP</p>
+        <p class="eyebrow">{user ? "YOUR PRIVATE CONNECTIONS" : "AT HOME. FROM ANYWHERE."}</p>
         <h1>
-          Your computers,
-          <br />
-          <em>within reach.</em>
+          {user ? (
+            <>
+              A familiar place.
+              <br />
+              <em>A click away.</em>
+            </>
+          ) : (
+            <>
+              Your computers,
+              <br />
+              <em>within reach.</em>
+            </>
+          )}
         </h1>
         <p>
-          Connect with Crabfleet for Mac. Share a desktop, save your VNC connections, and pick up
-          where you left off.
+          {user
+            ? "All your shared desktops, together. Choose a computer and pick up where you left off."
+            : "The computer you know. The screen in front of you. Sign in to bring your shared desktops a little closer."}
         </p>
+        {!user && (
+          <div class="connection-note">
+            <span class="connection-line" aria-hidden="true" />
+            <span>Native VNC. Private desktop sharing.</span>
+          </div>
+        )}
       </section>
       {error && (
         <p role="alert" class="notice">
@@ -155,38 +172,47 @@ function App() {
         </p>
       )}
       {loading ? (
-        <p role="status">Loading your desktops…</p>
+        <p role="status" class="loading-state">
+          Loading your desktops…
+        </p>
       ) : !user ? (
         <section class="login-panel">
-          <h2>Access your desktops</h2>
+          <p class="eyebrow">WELCOME TO CRABFLEET</p>
+          <h2>Welcome back.</h2>
           <p>Sign in to discover your shared computers and connect from this browser.</p>
           {auth.github && (
             <a class="button primary" href="/login/github">
-              Continue with GitHub
+              <span>Continue with GitHub</span>
+              <span aria-hidden="true">↗</span>
             </a>
           )}
           {auth.token && (
-            <form
-              onSubmit={(event) => {
-                event.preventDefault();
-                const form = event.currentTarget;
-                const token = new FormData(form).get("token");
-                perform(async () => {
-                  const result = await api("/api/login/token", {
-                    method: "POST",
-                    body: JSON.stringify({ token }),
+            <details class="token-login" open={!auth.github}>
+              <summary>Use an owner recovery token</summary>
+              <form
+                onSubmit={(event) => {
+                  event.preventDefault();
+                  const form = event.currentTarget;
+                  const token = new FormData(form).get("token");
+                  perform(async () => {
+                    const result = await api("/api/login/token", {
+                      method: "POST",
+                      body: JSON.stringify({ token }),
+                    });
+                    form.reset();
+                    setUser(result.user);
                   });
-                  form.reset();
-                  setUser(result.user);
-                });
-              }}
-            >
-              <label>
-                Owner recovery token
-                <input type="password" name="token" required autoComplete="off" />
-              </label>
-              <button disabled={pending}>Sign in</button>
-            </form>
+                }}
+              >
+                <label>
+                  Owner recovery token
+                  <input type="password" name="token" required autoComplete="off" />
+                </label>
+                <button class="primary" disabled={pending}>
+                  {pending ? "Signing in…" : "Sign in"}
+                </button>
+              </form>
+            </details>
           )}
           {auth.devIdentity && (
             <button
@@ -210,10 +236,10 @@ function App() {
           <p class="muted">Saved VNC connections in the Mac app work without an account.</p>
         </section>
       ) : (
-        <section aria-label="Your desktops">
+        <section class="desktops" aria-label="Your desktops">
           <div class="section-heading">
             <h2>
-              Your desktops <span>{hosts.length}</span>
+              Your desktops <span class="count">{hosts.length}</span>
             </h2>
             <input
               aria-label="Search desktops"
@@ -243,7 +269,10 @@ function App() {
               {visibleHosts.map((host) => (
                 <article class="computer" key={host.id}>
                   <div class="monitor" aria-hidden="true">
-                    <span>{host.name.slice(0, 1).toUpperCase()}</span>
+                    <span class="monitor-monogram">{host.name.slice(0, 1).toUpperCase()}</span>
+                    <span class="monitor-caption">
+                      {host.relayCapable ? "BROWSER CONNECTION" : "NATIVE CONNECTION"}
+                    </span>
                   </div>
                   <div class="computer-details">
                     <h3>{host.name}</h3>
@@ -254,10 +283,11 @@ function App() {
                       class="primary"
                       onClick={() => navigate(`/app/desktops/${encodeURIComponent(host.id)}`)}
                     >
-                      Connect
+                      <span>Connect</span>
+                      <span aria-hidden="true">↗</span>
                     </button>
                   ) : (
-                    <span class="muted">Connect with the Mac app</span>
+                    <span class="native-note">Connect with the Mac app</span>
                   )}
                 </article>
               ))}
@@ -267,6 +297,7 @@ function App() {
           {user.role === "owner" && (
             <section class="access">
               <button
+                aria-expanded={Boolean(allow)}
                 disabled={pending}
                 onClick={() =>
                   perform(async () =>
@@ -283,10 +314,12 @@ function App() {
                   <ul>
                     {allow.map((entry) => (
                       <li key={entry.value}>
-                        <span>
-                          {entry.value} · {entry.role}
+                        <span class="access-person">
+                          {entry.value}
+                          <small>{entry.role}</small>
                         </span>
                         <button
+                          aria-label={`Remove ${entry.value}`}
                           disabled={pending}
                           onClick={() =>
                             perform(async () =>
@@ -336,7 +369,8 @@ function App() {
         </section>
       )}
       <footer>
-        Crabfleet <span>Native VNC. Private desktop sharing.</span>
+        <span class="footer-brand">Crabfleet</span>
+        <span>Your computers. Your corner of the world.</span>
       </footer>
     </main>
   );

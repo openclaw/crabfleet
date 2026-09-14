@@ -164,6 +164,8 @@ function codecStringForProfile(profile: HEVCProfileTierLevel): string {
 
 export class HEVCDecoder {
   #decoder: BrowserVideoDecoder | null = null;
+  #decoderGeneration = 0;
+  #configurationDirty = false;
   #vps = new Map<number, Uint8Array>();
   #sps = new Map<number, Uint8Array>();
   #pps = new Map<number, Uint8Array>();
@@ -200,13 +202,18 @@ export class HEVCDecoder {
       const key = units.some((unit) => isIrap("hevc", unit.type));
       if (rebuildDescription && key) this.#gate.reset();
       if (!this.#gate.shouldDecode(units)) continue;
-      if (this.#decoder.state === "unconfigured" || (rebuildDescription && key)) this.#configure();
-      if (this.#decoder.decodeQueueSize >= 4) {
+      if (this.#configurationDirty && key && this.#decoder.state === "configured") {
+        this.#decoderGeneration += 1;
+        this.#decoder.close();
+        this.#createDecoder();
+      }
+      if (this.#decoder!.state === "unconfigured" || (rebuildDescription && key)) this.#configure();
+      if (this.#decoder!.decodeQueueSize >= 4) {
         this.reset();
         this.#needsRefresh();
         break;
       }
-      this.#decoder.decode(
+      this.#decoder!.decode(
         new (encodedVideoChunkAPI())({
           type: key ? "key" : "delta",
           timestamp: this.#timestamp,
@@ -219,6 +226,7 @@ export class HEVCDecoder {
   }
 
   reset(): void {
+    this.#decoderGeneration += 1;
     if (this.#decoder?.state !== "closed") this.#decoder?.close();
     this.#vps.clear();
     this.#sps.clear();
@@ -229,25 +237,41 @@ export class HEVCDecoder {
   }
 
   close(): void {
+    this.#decoderGeneration += 1;
     if (this.#decoder?.state !== "closed") this.#decoder?.close();
   }
 
   #createDecoder(): void {
     const Decoder = videoDecoderAPI();
     if (!Decoder) throw new Error("WebCodecs VideoDecoder is unavailable");
+    const generation = ++this.#decoderGeneration;
     this.#decoder = new Decoder({
       output: (frame) => {
+        if (generation !== this.#decoderGeneration) {
+          frame.close();
+          return;
+        }
         if (this.#presentations.size >= 2) {
           frame.close();
           return;
         }
         const presentation = Promise.resolve()
-          .then(() => this.#output(frame))
-          .catch((error: unknown) => this.#recordFailure(asError(error)))
+          .then(() => {
+            if (generation !== this.#decoderGeneration) {
+              frame.close();
+              return;
+            }
+            return this.#output(frame);
+          })
+          .catch((error: unknown) => {
+            if (generation === this.#decoderGeneration) this.#recordFailure(asError(error));
+          })
           .finally(() => this.#presentations.delete(presentation));
         this.#presentations.add(presentation);
       },
-      error: (error) => this.#recordFailure(error),
+      error: (error) => {
+        if (generation === this.#decoderGeneration) this.#recordFailure(error);
+      },
     });
   }
 
@@ -264,6 +288,7 @@ export class HEVCDecoder {
       optimizeForLatency: true,
       hardwareAcceleration: "prefer-hardware",
     });
+    this.#configurationDirty = false;
   }
 
   #recordFailure(error: Error): void {
@@ -282,6 +307,14 @@ export class HEVCDecoder {
       0,
     );
     if (total > 64 * 1_024) throw new Error("HEVC parameter sets exceed 64 KiB");
+    if (
+      !sameParameterSets(this.#vps, vps) ||
+      !sameParameterSets(this.#sps, sps) ||
+      !sameParameterSets(this.#pps, pps)
+    ) {
+      this.#configurationDirty = true;
+      this.#gate.reset();
+    }
     this.#vps = vps;
     this.#sps = sps;
     this.#pps = pps;
@@ -466,4 +499,21 @@ class BitReader {
 
 export function hevcUnits(data: readonly Uint8Array[]): AnnexBNalUnit[] {
   return data.map((unit) => ({ type: (unit[0]! >> 1) & 0x3f, data: unit }));
+}
+
+function sameParameterSets(
+  left: ReadonlyMap<number, Uint8Array>,
+  right: ReadonlyMap<number, Uint8Array>,
+): boolean {
+  if (left.size !== right.size) return false;
+  for (const [id, bytes] of left) {
+    const other = right.get(id);
+    if (
+      !other ||
+      bytes.length !== other.length ||
+      bytes.some((value, index) => value !== other[index])
+    )
+      return false;
+  }
+  return true;
 }

@@ -35,7 +35,7 @@ func configureFeatures(ctx context.Context, selected string, options *shareOptio
 	}
 	fail := func(err error) (func(), error) { cleanup(); return nil, err }
 	if features.video != "jpeg" && selected != "synthetic" {
-		video, err := connect.NewFFmpegVideo(ctx)
+		video, err := connect.NewFFmpegVideo(ctx, connect.VideoOptions{Encoder: features.encoder, Device: features.renderDevice, Report: func(message string) { fmt.Fprintln(stderr, message) }})
 		if err != nil {
 			if features.video != "auto" {
 				return fail(err)
@@ -146,7 +146,7 @@ func servePortal(ctx context.Context, listener net.Listener, options shareOption
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	fmt.Fprintln(stdout, "Approve the monitor and device permissions in your desktop's sharing dialog.")
-	backend, err := connect.NewPortal(ctx, connect.PortalOptions{ViewOnly: options.viewOnly, Clipboard: options.clipboardEnabled, RestoreToken: options.portalRestore, SaveRestoreToken: options.savePortalRestore})
+	backend, err := connect.NewPortal(ctx, connect.PortalOptions{AllMonitors: options.allMonitors, ViewOnly: options.viewOnly, Clipboard: options.clipboardEnabled, RestoreToken: options.portalRestore, SaveRestoreToken: options.savePortalRestore})
 	if err != nil {
 		return err
 	}

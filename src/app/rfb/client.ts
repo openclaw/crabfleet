@@ -116,6 +116,7 @@ export class RFBClient {
   #serverClipboardMaximum = 0;
   #screenLayout: RFBScreenLayout | null = null;
   #pendingResize: { width: number; height: number } | null = null;
+  #resizeProhibited = false;
   #h264Enabled: boolean;
   #hevcEnabled: boolean;
   #chroma444Enabled: boolean;
@@ -326,6 +327,7 @@ export class RFBClient {
   }
 
   resize(width: number, height: number): void {
+    if (this.#resizeProhibited) return;
     const boundedWidth = Math.max(1, Math.min(0xffff, Math.round(width)));
     const boundedHeight = Math.max(1, Math.min(0xffff, Math.round(height)));
     if (!this.#screenLayout) {
@@ -544,7 +546,11 @@ export class RFBClient {
           this.#pendingResize = null;
           if (pending) this.resize(pending.width, pending.height);
         }
-        if (x === 1 && y !== 0) this.#options.onState?.(`Resize rejected (${y})`);
+        if (x === 1 && y === 1) {
+          this.#resizeProhibited = true;
+          this.#pendingResize = null;
+        }
+        if (x === 1 && y !== 0 && y !== 1) this.#options.onState?.(`Resize rejected (${y})`);
       } else if (encoding === RFB_ENCODINGS.cursorWithAlpha) {
         const nestedEncoding = readInt32(await this.transport.readExactly(4));
         // Crabfleet's negotiated CursorWithAlpha profile fixes the nested

@@ -30,27 +30,27 @@ const portalClipboard = "org.freedesktop.portal.Clipboard"
 
 type PortalOptions struct {
 	ViewOnly, Clipboard bool
+	AllMonitors         bool
 	RestoreToken        string
 	SaveRestoreToken    func(string) error
 }
 type PortalBackend struct {
-	bus                         *dbus.Conn
-	object                      dbus.BusObject
-	owner                       string
-	session                     dbus.ObjectPath
-	ctx                         context.Context
-	cancel                      context.CancelFunc
-	closeOnce                   sync.Once
-	mu, inputMu                 sync.Mutex
-	frame                       Frame
-	logicalWidth, logicalHeight int
-	node, devices               uint32
-	buttons                     byte
-	clipboardEnabled            bool
-	clipboard, selectionMIME    string
-	ownSelection                bool
-	ready, done, signalsDone    chan struct{}
-	err                         error
+	bus                      *dbus.Conn
+	object                   dbus.BusObject
+	owner                    string
+	session                  dbus.ObjectPath
+	ctx                      context.Context
+	cancel                   context.CancelFunc
+	closeOnce                sync.Once
+	mu, inputMu              sync.Mutex
+	frame                    Frame
+	devices                  uint32
+	buttons                  byte
+	clipboardEnabled         bool
+	clipboard, selectionMIME string
+	ownSelection             bool
+	ready, done, signalsDone chan struct{}
+	err                      error
 }
 type portalStream struct {
 	Node       uint32
@@ -119,7 +119,7 @@ func NewPortal(ctx context.Context, options PortalOptions) (_ *PortalBackend, er
 	if _, err = p.request(setup, remoteDesktop+".SelectDevices", []any{p.session}, selection); err != nil {
 		return nil, err
 	}
-	if _, err = p.request(setup, screenCast+".SelectSources", []any{p.session}, map[string]dbus.Variant{"types": dbus.MakeVariant(uint32(1)), "multiple": dbus.MakeVariant(false), "cursor_mode": dbus.MakeVariant(uint32(2))}); err != nil {
+	if _, err = p.request(setup, screenCast+".SelectSources", []any{p.session}, map[string]dbus.Variant{"types": dbus.MakeVariant(uint32(1)), "multiple": dbus.MakeVariant(options.AllMonitors), "cursor_mode": dbus.MakeVariant(uint32(2))}); err != nil {
 		return nil, err
 	}
 	if options.Clipboard {
@@ -140,20 +140,20 @@ func NewPortal(ctx context.Context, options PortalOptions) (_ *PortalBackend, er
 		return nil, errors.New("clipboard permission was not granted")
 	}
 	var streams []portalStream
-	if err = dbus.Store([]any{results["streams"].Value()}, &streams); err != nil || len(streams) != 1 {
-		return nil, errors.New("select exactly one monitor in the desktop portal")
+	if results["streams"].Value() == nil {
+		return nil, errors.New("portal did not report monitor streams")
 	}
-	stream := streams[0]
-	p.node = stream.Node
-	var size struct{ Width, Height int32 }
-	if err = dbus.Store([]any{stream.Properties["size"].Value()}, &size); err != nil {
-		return nil, errors.New("portal did not report monitor dimensions")
+	if err = dbus.Store([]any{results["streams"].Value()}, &streams); err != nil {
+		return nil, errors.New("portal returned invalid monitor streams")
 	}
-	p.logicalWidth, p.logicalHeight = int(size.Width), int(size.Height)
-	if p.logicalWidth < 1 || p.logicalHeight < 1 || p.logicalWidth > MaxDimension || p.logicalHeight > MaxDimension || int64(size.Width)*int64(size.Height)*4 > MaxFrameBytes {
-		return nil, errors.New("invalid portal monitor dimensions")
+	layout, err := portalLayout(streams, options.AllMonitors)
+	if err != nil {
+		return nil, err
 	}
-	p.frame = Frame{Width: p.logicalWidth, Height: p.logicalHeight, Stride: p.logicalWidth * 4}
+	p.frame = Frame{Width: layout.Width, Height: layout.Height, Stride: layout.Width * 4, Screens: layout.Screens, Pixels: make([]byte, layout.Width*layout.Height*4)}
+	for i := 3; i < len(p.frame.Pixels); i += 4 {
+		p.frame.Pixels[i] = 255
+	}
 	if token, ok := results["restore_token"].Value().(string); ok && token != "" && options.SaveRestoreToken != nil {
 		if len(token) > 4096 {
 			return nil, errors.New("invalid portal restore token")
@@ -161,27 +161,6 @@ func NewPortal(ctx context.Context, options PortalOptions) (_ *PortalBackend, er
 		if err = options.SaveRestoreToken(token); err != nil {
 			return nil, err
 		}
-	}
-	var fd dbus.UnixFD
-	if err = p.object.CallWithContext(setup, screenCast+".OpenPipeWireRemote", 0, p.session, map[string]dbus.Variant{}).Store(&fd); err != nil {
-		return nil, err
-	}
-	remote := os.NewFile(uintptr(fd), "portal-pipewire")
-	defer remote.Close()
-	args := []string{"-q", "pipewiresrc", "fd=3", "do-timestamp=true"}
-	if serial, ok := stream.Properties["pipewire-serial"].Value().(uint64); ok && serial != 0 {
-		args = append(args, "target-object="+strconv.FormatUint(serial, 10))
-	} else {
-		args = append(args, "path="+strconv.FormatUint(uint64(stream.Node), 10))
-	}
-	args = append(args, "!", "queue", "max-size-buffers=2", "max-size-bytes=0", "max-size-time=0", "leaky=downstream", "!", "videoconvert", "!", "videoscale", "!", fmt.Sprintf("video/x-raw,format=RGBA,width=%d,height=%d", p.frame.Width, p.frame.Height), "!", "fdsink", "fd=1", "sync=false")
-	cmd := exec.CommandContext(ctx, helper, args...)
-	cmd.ExtraFiles = []*os.File{remote}
-	cmd.WaitDelay = time.Second
-	cmd.Stderr = &BoundedBuffer{Limit: 16 << 10}
-	pipe, err := cmd.StdoutPipe()
-	if err != nil {
-		return nil, err
 	}
 	signals := make(chan *dbus.Signal, 32)
 	bus.Signal(signals)
@@ -193,38 +172,23 @@ func NewPortal(ctx context.Context, options PortalOptions) (_ *PortalBackend, er
 		bus.RemoveSignal(signals)
 		return nil, err
 	}
-	if err = cmd.Start(); err != nil {
-		bus.RemoveSignal(signals)
-		return nil, err
+	var captures []portalCapture
+	for i, stream := range streams {
+		capture, captureErr := p.startCapture(setup, helper, stream, layout.Screens[i])
+		if captureErr != nil {
+			cancel()
+			for _, previous := range captures {
+				_ = previous.pipe.Close()
+				_ = previous.cmd.Wait()
+			}
+			bus.RemoveSignal(signals)
+			return nil, captureErr
+		}
+		captures = append(captures, capture)
 	}
 	started = true
 	go p.signalLoop(signals)
-	go func() {
-		defer close(p.done)
-		stopPipe := context.AfterFunc(ctx, func() { _ = pipe.Close() })
-		defer stopPipe()
-		for {
-			pixels := make([]byte, p.frame.Stride*p.frame.Height)
-			if _, readErr := io.ReadFull(pipe, pixels); readErr != nil {
-				p.mu.Lock()
-				if ctx.Err() == nil {
-					p.err = errors.New("portal capture stopped unexpectedly")
-				}
-				p.mu.Unlock()
-				cancel()
-				_ = cmd.Wait()
-				return
-			}
-			p.mu.Lock()
-			p.frame.Pixels = pixels
-			p.frame.Sequence++
-			first := p.frame.Sequence == 1
-			p.mu.Unlock()
-			if first {
-				close(p.ready)
-			}
-		}
-	}()
+	go p.captureStreams(captures)
 	select {
 	case <-p.ready:
 		return p, nil
@@ -234,6 +198,134 @@ func NewPortal(ctx context.Context, options PortalOptions) (_ *PortalBackend, er
 		return nil, setup.Err()
 	}
 }
+func portalLayout(streams []portalStream, multiple bool) (DesktopLayout, error) {
+	if len(streams) < 1 || len(streams) > MaxScreens || (!multiple && len(streams) != 1) {
+		return DesktopLayout{}, errors.New("invalid portal monitor count; selecting multiple monitors requires --all-monitors")
+	}
+	layout := DesktopLayout{Screens: make([]Screen, len(streams))}
+	var minX, minY, maxX, maxY int64
+	for i, stream := range streams {
+		var size struct{ Width, Height int32 }
+		if stream.Properties["size"].Value() == nil || dbus.Store([]any{stream.Properties["size"].Value()}, &size) != nil || size.Width < 1 || size.Height < 1 || size.Width > MaxDimension || size.Height > MaxDimension {
+			return DesktopLayout{}, errors.New("portal did not report valid monitor dimensions")
+		}
+		var position struct{ X, Y int32 }
+		if len(streams) > 1 && (stream.Properties["position"].Value() == nil || dbus.Store([]any{stream.Properties["position"].Value()}, &position) != nil) {
+			return DesktopLayout{}, errors.New("portal did not report positions for all selected monitors")
+		}
+		x, y := int64(position.X), int64(position.Y)
+		if i == 0 {
+			minX, minY, maxX, maxY = x, y, x, y
+		}
+		minX, minY = min(minX, x), min(minY, y)
+		maxX, maxY = max(maxX, x+int64(size.Width)), max(maxY, y+int64(size.Height))
+		layout.Screens[i] = Screen{ID: stream.Node, X: int(position.X), Y: int(position.Y), Width: int(size.Width), Height: int(size.Height)}
+	}
+	if maxX-minX > MaxDimension || maxY-minY > MaxDimension || (maxX-minX)*(maxY-minY)*4 > MaxFrameBytes {
+		return DesktopLayout{}, errors.New("selected portal monitors exceed desktop capture limits")
+	}
+	layout.Width, layout.Height = int(maxX-minX), int(maxY-minY)
+	for i := range layout.Screens {
+		screen := &layout.Screens[i]
+		screen.X, screen.Y = int(int64(screen.X)-minX), int(int64(screen.Y)-minY)
+		for _, other := range layout.Screens[:i] {
+			if screen.X < other.X+other.Width && other.X < screen.X+screen.Width && screen.Y < other.Y+other.Height && other.Y < screen.Y+screen.Height {
+				return DesktopLayout{}, errors.New("portal reported overlapping monitors")
+			}
+		}
+	}
+	return layout, layout.Validate()
+}
+
+type portalCapture struct {
+	cmd    *exec.Cmd
+	pipe   io.ReadCloser
+	screen Screen
+}
+
+func (p *PortalBackend) startCapture(ctx context.Context, helper string, stream portalStream, screen Screen) (portalCapture, error) {
+	// Each PipeWire client needs its own connection, not a duplicated socket.
+	var fd dbus.UnixFD
+	if err := p.object.CallWithContext(ctx, screenCast+".OpenPipeWireRemote", 0, p.session, map[string]dbus.Variant{}).Store(&fd); err != nil {
+		return portalCapture{}, err
+	}
+	remote := os.NewFile(uintptr(fd), "portal-pipewire")
+	defer remote.Close()
+	args := []string{"-q", "pipewiresrc", "fd=3", "do-timestamp=true"}
+	if serial, ok := stream.Properties["pipewire-serial"].Value().(uint64); ok && serial != 0 {
+		args = append(args, "target-object="+strconv.FormatUint(serial, 10))
+	} else {
+		args = append(args, "path="+strconv.FormatUint(uint64(stream.Node), 10))
+	}
+	args = append(args, "!", "queue", "max-size-buffers=2", "max-size-bytes=0", "max-size-time=0", "leaky=downstream", "!", "videoconvert", "!", "videoscale", "!", fmt.Sprintf("video/x-raw,format=RGBA,width=%d,height=%d", screen.Width, screen.Height), "!", "fdsink", "fd=1", "sync=false")
+	cmd := exec.CommandContext(p.ctx, helper, args...)
+	cmd.ExtraFiles = []*os.File{remote}
+	cmd.WaitDelay = time.Second
+	cmd.Stderr = &BoundedBuffer{Limit: 16 << 10}
+	pipe, err := cmd.StdoutPipe()
+	if err != nil {
+		return portalCapture{}, err
+	}
+	if err := cmd.Start(); err != nil {
+		_ = pipe.Close()
+		return portalCapture{}, err
+	}
+	return portalCapture{cmd: cmd, pipe: pipe, screen: screen}, nil
+}
+
+func (p *PortalBackend) captureStreams(captures []portalCapture) {
+	defer close(p.done)
+	var workers sync.WaitGroup
+	remaining := len(captures)
+	for _, capture := range captures {
+		workers.Go(func() {
+			stopPipe := context.AfterFunc(p.ctx, func() { _ = capture.pipe.Close() })
+			defer stopPipe()
+			defer capture.pipe.Close()
+			defer capture.cmd.Wait()
+			pixels := make([]byte, capture.screen.Width*capture.screen.Height*4)
+			first := true
+			for {
+				if _, err := io.ReadFull(capture.pipe, pixels); err != nil {
+					p.mu.Lock()
+					if p.ctx.Err() == nil {
+						p.err = errors.New("portal capture stopped unexpectedly")
+					}
+					p.mu.Unlock()
+					p.cancel()
+					return
+				}
+				p.mu.Lock()
+				for y := 0; y < capture.screen.Height; y++ {
+					dst := (capture.screen.Y+y)*p.frame.Stride + capture.screen.X*4
+					src := y * capture.screen.Width * 4
+					copy(p.frame.Pixels[dst:dst+capture.screen.Width*4], pixels[src:src+capture.screen.Width*4])
+				}
+				p.frame.Sequence++
+				if first {
+					first = false
+					remaining--
+					if remaining == 0 {
+						close(p.ready)
+					}
+				}
+				p.mu.Unlock()
+			}
+		})
+	}
+	workers.Wait()
+}
+
+func portalPointer(screens []Screen, event PointerEvent) (uint32, float64, float64, bool) {
+	x, y := int(event.X), int(event.Y)
+	for _, screen := range screens {
+		if x >= screen.X && y >= screen.Y && x < screen.X+screen.Width && y < screen.Y+screen.Height {
+			return screen.ID, float64(x - screen.X), float64(y - screen.Y), true
+		}
+	}
+	return 0, 0, 0, false
+}
+
 func portalToken() (string, error) {
 	var b [16]byte
 	if _, err := rand.Read(b[:]); err != nil {
@@ -306,6 +398,7 @@ func (p *PortalBackend) Capture(ctx context.Context) (Frame, error) {
 	}
 	f := p.frame
 	f.Pixels = bytes.Clone(f.Pixels)
+	f.Screens = append([]Screen(nil), f.Screens...)
 	return f, nil
 }
 func (p *PortalBackend) notify(ctx context.Context, method string, args ...any) error {
@@ -329,11 +422,14 @@ func (p *PortalBackend) Pointer(ctx context.Context, event PointerEvent) error {
 	}
 	p.inputMu.Lock()
 	defer p.inputMu.Unlock()
-	if int(event.X) >= p.frame.Width || int(event.Y) >= p.frame.Height {
-		return errors.New("pointer outside monitor")
-	}
-	if err := p.notify(ctx, "NotifyPointerMotionAbsolute", p.node, float64(event.X)*float64(p.logicalWidth)/float64(p.frame.Width), float64(event.Y)*float64(p.logicalHeight)/float64(p.frame.Height)); err != nil {
-		return err
+	node, x, y, inside := portalPointer(p.frame.Screens, event)
+	if inside {
+		if err := p.notify(ctx, "NotifyPointerMotionAbsolute", node, x, y); err != nil {
+			return err
+		}
+	} else {
+		// Gaps have no target stream, but a release must still end a drag.
+		event.ButtonMask &= p.buttons & 7
 	}
 	for index, button := range []int32{272, 274, 273} {
 		mask := byte(1 << index)

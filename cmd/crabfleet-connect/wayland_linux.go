@@ -5,6 +5,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -13,11 +14,13 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strings"
 	"sync"
 	"syscall"
 	"time"
 
+	"github.com/openclaw/crabfleet/internal/connect"
 	"github.com/openclaw/crabfleet/internal/rfbclient"
 	"golang.org/x/sys/unix"
 )
@@ -45,22 +48,137 @@ func serveWayland(ctx context.Context, listener net.Listener, options shareOptio
 		return fmt.Errorf("create private Wayland runtime directory: %w", err)
 	}
 	defer os.RemoveAll(directory)
-	socket := filepath.Join(directory, "vnc.sock")
-	config, err := waylandConfig(password)
+	// Pdeathsig belongs to the spawning thread. Keep it alive until every
+	// helper has been stopped and reaped.
+	runtime.LockOSThread()
+	defer runtime.UnlockOSThread()
+	helperContext, stopHelpers := context.WithCancel(ctx)
+	defer stopHelpers()
+	var helpers []*waylandHelper
+	defer func() {
+		stopHelpers()
+		for _, helper := range helpers {
+			helper.close()
+		}
+	}()
+	start := func(index int, output string) (*waylandHelper, error) {
+		helperOptions := options
+		helperOptions.output = output
+		h, err := startWaylandHelper(helperContext, helper, directory, index, helperOptions, password, desktopName)
+		if err != nil {
+			return nil, err
+		}
+		helpers = append(helpers, h)
+		return h, nil
+	}
+	first, err := start(0, options.output)
 	if err != nil {
+		if ctx.Err() != nil {
+			return nil
+		}
 		return err
 	}
-	defer config.Close()
+	outputs := []waylandOutput{{Name: options.output}}
+	if options.allMonitors {
+		outputs, err = listWaylandOutputs(helperContext, first.control)
+		if err != nil {
+			return fmt.Errorf("enumerate Wayland outputs: %w", err)
+		}
+		// Enumeration has no public viewer. Restart with explicit output names so
+		// every long-lived helper is assigned exactly one selected monitor.
+		first.close()
+		helpers = nil
+	}
+	var backends []connect.Backend
+	defer func() {
+		for _, backend := range backends {
+			_ = backend.Close()
+		}
+	}()
+	for index, output := range outputs {
+		h := first
+		if options.allMonitors {
+			h, err = start(index+1, output.Name)
+			if err != nil {
+				return err
+			}
+		}
+		go func(h *waylandHelper) {
+			select {
+			case <-h.exited:
+				stopHelpers()
+			case <-helperContext.Done():
+			}
+		}(h)
+		var guard *waylandOutputGuard
+		if options.allMonitors || output.Name != "" {
+			guard = &waylandOutputGuard{output: output.Name, control: h.control, stop: stopHelpers, aggregate: options.allMonitors}
+			if err := guard.check(helperContext); err != nil {
+				return err
+			}
+		}
+		upstream, err := (&net.Dialer{Timeout: time.Second}).DialContext(helperContext, "unix", h.socket)
+		if err != nil {
+			return err
+		}
+		backend, err := rfbclient.New(helperContext, upstream, password)
+		if err != nil {
+			return err
+		}
+		if guard != nil {
+			guard.backend = backend
+			backends = append(backends, guard)
+		} else {
+			backends = append(backends, backend)
+		}
+	}
+	var backend connect.Backend = backends[0]
+	if options.allMonitors {
+		backend = newWaylandDesktop(backends, options.allowResize)
+	}
+	err = serveBackend(helperContext, listener, options, password, desktopName, stdout, backend, "Linux Wayland (wayvnc)")
+	if ctx.Err() != nil {
+		return nil
+	}
+	for _, backend := range backends {
+		if guard, ok := backend.(*waylandOutputGuard); ok {
+			if failure := guard.failure(); failure != nil {
+				return failure
+			}
+		}
+	}
+	for _, h := range helpers {
+		select {
+		case <-h.exited:
+			helperErr := h.err
+			if helperErr == nil {
+				helperErr = errors.New("helper stopped unexpectedly")
+			}
+			return waylandFailure(fmt.Errorf("wayvnc exited: %w", helperErr), h.logs, password)
+		default:
+		}
+	}
+	return err
+}
 
-	helperContext, stopHelper := context.WithCancel(ctx)
-	defer stopHelper()
+type waylandHelper struct {
+	socket, control string
+	cancel          context.CancelFunc
+	exited          chan struct{}
+	err             error
+	logs            *helperLog
+}
+
+func (h *waylandHelper) close() { h.cancel(); <-h.exited }
+
+func waylandArguments(directory string, index int, options shareOptions, desktopName string) []string {
 	arguments := []string{
 		"--config=/proc/self/fd/3",
-		"--socket=" + filepath.Join(directory, "control.sock"),
-		"--name=" + desktopName,
-		"--max-fps=30",
-		"--disable-resizing",
-		"--log-level=error",
+		"--socket=" + filepath.Join(directory, fmt.Sprintf("control-%d.sock", index)),
+		"--name=" + desktopName, "--max-fps=30", "--log-level=error",
+	}
+	if !options.allowResize {
+		arguments = append(arguments, "--disable-resizing")
 	}
 	if options.output != "" {
 		arguments = append(arguments, "--output="+options.output)
@@ -68,77 +186,98 @@ func serveWayland(ctx context.Context, listener net.Listener, options shareOptio
 	if options.viewOnly {
 		arguments = append(arguments, "--disable-input")
 	}
-	arguments = append(arguments, "unix:"+socket)
-	command := exec.CommandContext(helperContext, helper, arguments...)
+	return append(arguments, "unix:"+filepath.Join(directory, fmt.Sprintf("vnc-%d.sock", index)))
+}
+
+func startWaylandHelper(ctx context.Context, executable, directory string, index int, options shareOptions, password, desktopName string) (*waylandHelper, error) {
+	config, err := waylandConfig(password)
+	if err != nil {
+		return nil, err
+	}
+	defer config.Close()
+	helperContext, cancel := context.WithCancel(ctx)
+	h := &waylandHelper{socket: filepath.Join(directory, fmt.Sprintf("vnc-%d.sock", index)), control: filepath.Join(directory, fmt.Sprintf("control-%d.sock", index)), cancel: cancel, exited: make(chan struct{}), logs: &helperLog{}}
+	command := exec.CommandContext(helperContext, executable, waylandArguments(directory, index, options, desktopName)...)
 	command.ExtraFiles = []*os.File{config}
 	command.WaitDelay = waylandStopTimeout
 	command.Cancel = func() error { return command.Process.Signal(syscall.SIGTERM) }
 	command.SysProcAttr = &syscall.SysProcAttr{Pdeathsig: syscall.SIGTERM}
-	logs := &helperLog{}
-	command.Stdout, command.Stderr = logs, logs
-	// Pdeathsig is tied to the creating OS thread. Keep that thread alive until
-	// Wait has reaped the helper, including during ordinary Go thread retirement.
-	runtime.LockOSThread()
-	defer runtime.UnlockOSThread()
+	command.Stdout, command.Stderr = h.logs, h.logs
 	if err := command.Start(); err != nil {
-		return fmt.Errorf("start wayvnc: %w", err)
+		cancel()
+		return nil, fmt.Errorf("start wayvnc: %w", err)
 	}
-	_ = config.Close()
-	exited := make(chan struct{})
-	var helperErr error
-	go func() {
-		helperErr = command.Wait()
-		close(exited)
-	}()
-	defer func() {
-		stopHelper()
-		<-exited
-	}()
-
+	go func() { h.err = command.Wait(); close(h.exited) }()
 	startupContext, stopStartup := context.WithTimeout(ctx, waylandStartupTimeout)
-	err = waitWaylandReady(startupContext, exited, socket)
+	err = waitWaylandReady(startupContext, h.exited, h.socket)
 	stopStartup()
 	if err != nil {
-		stopHelper()
-		<-exited
-		if ctx.Err() != nil {
-			return nil
-		}
-		return waylandFailure(fmt.Errorf("Wayland sharing did not start: %w", err), logs, password)
+		h.close()
+		return nil, waylandFailure(fmt.Errorf("Wayland sharing did not start: %w", err), h.logs, password)
 	}
-	if ctx.Err() != nil {
-		return nil
-	}
-	proxyContext, stopProxy := context.WithCancel(ctx)
-	defer stopProxy()
-	go func() {
-		select {
-		case <-exited:
-			stopProxy()
-		case <-proxyContext.Done():
-		}
-	}()
-	upstream, err := (&net.Dialer{Timeout: time.Second}).DialContext(proxyContext, "unix", socket)
+	return h, nil
+}
+
+type waylandOutput struct {
+	Name     string `json:"name"`
+	Width    int    `json:"width"`
+	Height   int    `json:"height"`
+	Captured bool   `json:"captured"`
+}
+
+// wayvnc output-list does not expose compositor positions. Present monitors in
+// stable name order, side by side, using their actual captured pixel sizes.
+func listWaylandOutputs(ctx context.Context, socket string) ([]waylandOutput, error) {
+	return readWaylandOutputs(ctx, socket, true)
+}
+
+func readWaylandOutputs(ctx context.Context, socket string, aggregate bool) ([]waylandOutput, error) {
+	conn, err := (&net.Dialer{Timeout: time.Second}).DialContext(ctx, "unix", socket)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	backend, err := rfbclient.New(proxyContext, upstream, password)
-	if err != nil {
-		return err
+	defer conn.Close()
+	deadline := time.Now().Add(2 * time.Second)
+	if end, ok := ctx.Deadline(); ok && end.Before(deadline) {
+		deadline = end
 	}
-	err = serveBackend(proxyContext, listener, options, password, desktopName, stdout, backend, "Linux Wayland (wayvnc)")
-	if ctx.Err() != nil {
-		return nil
+	if err := conn.SetDeadline(deadline); err != nil {
+		return nil, err
 	}
-	select {
-	case <-exited:
-		if helperErr == nil {
-			helperErr = errors.New("helper stopped unexpectedly")
+	stop := context.AfterFunc(ctx, func() { _ = conn.Close() })
+	defer stop()
+	if _, err := io.WriteString(conn, `{ "method": "output-list", "id": 1 }`); err != nil {
+		return nil, err
+	}
+	var response struct {
+		Code *int            `json:"code"`
+		ID   int             `json:"id"`
+		Data []waylandOutput `json:"data"`
+	}
+	if err := json.NewDecoder(io.LimitReader(conn, 64*1024)).Decode(&response); err != nil {
+		return nil, err
+	}
+	if response.Code == nil || *response.Code != 0 || response.ID != 1 {
+		return nil, errors.New("wayvnc output-list failed")
+	}
+	if len(response.Data) < 1 || len(response.Data) > 16 {
+		return nil, errors.New("Wayland sharing requires between 1 and 16 outputs")
+	}
+	seen := make(map[string]bool)
+	width, height := 0, 0
+	for _, output := range response.Data {
+		if output.Name == "" || len(output.Name) > 256 || strings.ContainsAny(output.Name, "\x00\r\n") || seen[output.Name] || output.Width < 1 || output.Height < 1 || output.Width > connect.MaxDimension || output.Height > connect.MaxDimension {
+			return nil, errors.New("wayvnc returned invalid output metadata")
 		}
-		return waylandFailure(fmt.Errorf("wayvnc exited: %w", helperErr), logs, password)
-	default:
-		return err
+		seen[output.Name] = true
+		width += output.Width
+		height = max(height, output.Height)
+		if aggregate && (width > connect.MaxDimension || int64(width)*int64(height)*4 > connect.MaxFrameBytes) {
+			return nil, errors.New("combined Wayland desktop exceeds framebuffer limits")
+		}
 	}
+	sort.Slice(response.Data, func(i, j int) bool { return response.Data[i].Name < response.Data[j].Name })
+	return response.Data, nil
 }
 
 func waylandConfig(password string) (*os.File, error) {

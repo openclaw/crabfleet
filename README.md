@@ -23,8 +23,8 @@ The Mac app works with ordinary VNC servers without an account. Optional sign-in
 - **Share This Mac:** up to four displays, password-authenticated direct connections over Tailscale, pinned QUIC with TCP fallback, and owner-authenticated browser relay.
 - **Negotiated media:** HEVC, H.264, Tight/JPEG fallback, client-side cursors, Auto/Sharp/Smooth quality modes, and opt-in system audio.
 - **Clipboard and files:** UTF-8 clipboard synchronization and explicitly selected shared folders with bounded transfers.
-- **Linux connector:** X11, Hyprland/wlroots, and GNOME/KDE portal capture, optional audio, private persistent state, and graphical-session startup.
-- **Windows connector:** primary-display capture, keyboard and pointer input, password authentication, and Tight/JPEG. Account sign-in, browser publication, audio, clipboard, file sharing, and service commands are currently Linux-only connector features.
+- **Linux connector:** X11, Hyprland/wlroots, and GNOME/KDE portal capture; simultaneous monitors, VAAPI/NVENC hardware video with software fallback, live desktop geometry, opt-in supported mode changes, optional audio, private state, and graphical-session startup.
+- **Windows connector:** primary-display capture, keyboard and pointer input, password authentication, Tight/JPEG, and client-side cursors. Account sign-in, browser publication, audio, clipboard, file sharing, and service commands are currently Linux-only connector features.
 
 ## Get started
 
@@ -48,6 +48,8 @@ go build -o ./dist/crabfleet-connect ./cmd/crabfleet-connect
 ```
 
 Approve the connector in your browser, then open **Your desktops → Connect** in the browser companion. For a native Mac connection, the Linux host must also advertise a reachable Tailscale address; see the [Linux guide](docs/linux-connector.md).
+
+Use `--all-monitors` to share multiple outputs, `--encoder vaapi` to select VAAPI explicitly, and `--allow-resize` to permit supported display mode changes. Portal capture requires desktop consent and cannot change physical modes. A separate administrator-configured [SDDM Wayland greeter wrapper](docs/linux-greeter.md) supports login-screen sharing with its own authenticated state.
 
 See the [quickstart](docs/quickstart.md), [Mac guide](docs/macos-native-client.md), [Linux guide](docs/linux-connector.md), and [Windows guide](docs/windows-connector.md) for requirements and platform-specific setup. [Connection modes](docs/connections.md) explains which paths need an account, Tailscale, or the relay.
 

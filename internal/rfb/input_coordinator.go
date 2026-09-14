@@ -23,8 +23,9 @@ type inputCoordinator struct {
 }
 
 type captureCoordinator struct {
-	backend connect.Backend
-	mu      sync.Mutex
+	backend         connect.Backend
+	desktopRevision uint64
+	mu              sync.Mutex
 }
 
 type sessionInputState struct {
@@ -231,11 +232,17 @@ func (backend *coordinatedBackend) releaseSessionInput(ctx context.Context) {
 func (coordinator *captureCoordinator) Capture(ctx context.Context) (connect.Frame, error) {
 	coordinator.mu.Lock()
 	defer coordinator.mu.Unlock()
+	return coordinator.captureLocked(ctx)
+}
+
+func (coordinator *captureCoordinator) captureLocked(ctx context.Context) (connect.Frame, error) {
 	frame, err := coordinator.backend.Capture(ctx)
 	if err != nil {
 		return connect.Frame{}, err
 	}
 	frame.Pixels = append([]byte(nil), frame.Pixels...)
+	frame.Screens = append([]connect.Screen(nil), frame.Screens...)
+	frame.DesktopRevision = coordinator.desktopRevision
 	frame.DirtyRects = append([]connect.Rect(nil), frame.DirtyRects...)
 	return frame, nil
 }
@@ -253,4 +260,39 @@ func (coordinator *captureCoordinator) Cursor(ctx context.Context) (connect.Curs
 	}
 	cursor.RGBA = append([]byte(nil), cursor.RGBA...)
 	return cursor, nil
+}
+
+func (backend *coordinatedBackend) DesktopResizeSupported() bool {
+	backend.capture.mu.Lock()
+	defer backend.capture.mu.Unlock()
+	source, ok := backend.capture.backend.(connect.DesktopResizer)
+	return ok && source.DesktopResizeSupported()
+}
+
+func (backend *coordinatedBackend) ResizeDesktop(ctx context.Context, layout connect.DesktopLayout) error {
+	backend.capture.mu.Lock()
+	defer backend.capture.mu.Unlock()
+	source, ok := backend.capture.backend.(connect.DesktopResizer)
+	if !ok {
+		return connect.ErrResizeUnsupported
+	}
+	if err := source.ResizeDesktop(ctx, layout); err != nil {
+		return err
+	}
+	backend.capture.desktopRevision++
+	return nil
+}
+
+func (backend *coordinatedBackend) resizeDesktopFrame(ctx context.Context, layout connect.DesktopLayout) (connect.Frame, error) {
+	backend.capture.mu.Lock()
+	defer backend.capture.mu.Unlock()
+	source, ok := backend.capture.backend.(connect.DesktopResizer)
+	if !ok {
+		return connect.Frame{}, connect.ErrResizeUnsupported
+	}
+	if err := source.ResizeDesktop(ctx, layout); err != nil {
+		return connect.Frame{}, err
+	}
+	backend.capture.desktopRevision++
+	return backend.capture.captureLocked(ctx)
 }

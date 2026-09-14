@@ -29,6 +29,8 @@ Crabfleet exposes desktop identity, private discovery, host registration, and an
 
 Open `verificationUri` in a signed-in browser and approve the device. Poll `POST /api/native/v1/auth/token` with `{ "deviceCode": "…" }`. Pending responses use 202; polling too quickly returns 429 with `retry-after`. Approval returns `accessToken`, `tokenType`, `expiresAt`, and `user`. Store the token securely for that deployment.
 
+Approval and completion pages adapt to phone screens; the link can be opened on another device signed into the same deployment. GET never approves a device. POST requires the authenticated browser identity and exact public origin, plus the link-bound CSRF cookie for cookie-authenticated sessions. Expired or already-used links return `410` with an HTML recovery page. An unauthenticated deployment without GitHub login returns `401` with a link to sign in.
+
 | Method     | Route                       | Authorization                                                      |
 | ---------- | --------------------------- | ------------------------------------------------------------------ |
 | GET        | `/api/native/v1/session`    | Native bearer; returns user and deployment                         |

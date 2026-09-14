@@ -31,6 +31,7 @@ type SessionConfig struct {
 	MediaTimeout     time.Duration
 	JPEGQuality      int
 	ViewOnly         bool
+	AllowResize      bool
 	Clipboard        connect.Clipboard
 	SharedFolder     *SharedFolder
 	Audio            connect.AudioSource
@@ -259,9 +260,13 @@ func messageLoop(ctx context.Context, connection net.Conn, config SessionConfig,
 	}
 	defer stopAudio()
 	width, height := initialFrame.Width, initialFrame.Height
+	layout := initialFrame.DesktopLayout()
+	lastDesktopRevision := initialFrame.DesktopRevision
+	layoutSent := false
 	var encodings Encodings
 	var negotiated bool
 	var lastCursorShape *connect.Cursor
+	var videoState videoSession
 	pressedKeys := make(map[uint32]struct{})
 	var lastPointer connect.PointerEvent
 	defer func() { releaseInput(config.Backend, pressedKeys, lastPointer) }()
@@ -282,6 +287,7 @@ func messageLoop(ctx context.Context, connection net.Conn, config SessionConfig,
 			}
 			fileSharingStarted := next.FileSharing && !encodings.FileSharing
 			encodings = next
+			layoutSent = false
 			negotiated = true
 			lastCursorShape = nil
 			clipboard.extended = next.Clipboard
@@ -360,7 +366,8 @@ func messageLoop(ctx context.Context, connection net.Conn, config SessionConfig,
 				}()
 			}
 		case 3:
-			if _, err := parseFramebufferRequest(connection, width, height); err != nil {
+			request, err := parseFramebufferRequest(connection, width, height)
+			if err != nil {
 				return err
 			}
 			if !negotiated || (!encodings.Tight && !encodings.Raw && !encodings.H264 && !encodings.HEVC) {
@@ -373,13 +380,40 @@ func messageLoop(ctx context.Context, connection net.Conn, config SessionConfig,
 			if err := frame.Validate(); err != nil {
 				return err
 			}
-			if frame.Width != width || frame.Height != height {
+			nextLayout := frame.DesktopLayout()
+			sizeChanged := frame.Width != width || frame.Height != height
+			layoutChanged := !layout.Equal(nextLayout)
+			if sizeChanged && !encodings.ExtendedDesktopSize && !encodings.DesktopSize {
 				return errors.New("framebuffer size changed without resize negotiation")
 			}
+			if (encodings.ExtendedDesktopSize && (!request.Incremental || !layoutSent || layoutChanged)) || (encodings.DesktopSize && sizeChanged) {
+				reason := 0
+				if request.Incremental && frame.DesktopRevision != lastDesktopRevision {
+					reason = 2
+				}
+				if !encodings.ExtendedDesktopSize {
+					reason = 0
+				}
+				metadata, err := desktopSizeUpdate(nextLayout, encodings.ExtendedDesktopSize, reason, 0)
+				if err != nil {
+					return err
+				}
+				// Control metadata is a separate update and cannot be dropped:
+				// all subsequent pixels and pointer coordinates depend on it.
+				if err := send(metadata); err != nil {
+					return err
+				}
+				layoutSent = true
+				videoState.resetPending = true
+			}
+			layout = nextLayout
+			lastDesktopRevision = frame.DesktopRevision
+			width, height = frame.Width, frame.Height
 			video, err := encodeVideoRectangle(ctx, config, encodings, frame)
 			if err != nil {
 				return err
 			}
+			nextVideoContext := videoState.prepare(video)
 			rectangles := [][]byte{video}
 			var nextCursorShape *connect.Cursor
 			if source, ok := config.Backend.(connect.CursorCapturer); ok && encodings.cursorEncoding() != 0 {
@@ -423,6 +457,7 @@ func messageLoop(ctx context.Context, connection net.Conn, config SessionConfig,
 				}
 				continue
 			}
+			videoState.sent(nextVideoContext)
 			if nextCursorShape != nil {
 				lastCursorShape = nextCursorShape
 			}
@@ -477,6 +512,54 @@ func messageLoop(ctx context.Context, connection net.Conn, config SessionConfig,
 			if err := send(response); err != nil {
 				return err
 			}
+		case 251:
+			requested, err := parseSetDesktopSize(connection)
+			if err != nil {
+				return err
+			}
+			if !encodings.ExtendedDesktopSize {
+				return errors.New("desktop resizing was not negotiated")
+			}
+			status := 0
+			var resizedFrame connect.Frame
+			if requested.Validate() != nil {
+				status = 3
+			} else if config.ViewOnly || !config.AllowResize {
+				status = 1
+			} else if resizer, ok := config.Backend.(connect.DesktopResizer); !ok || !resizer.DesktopResizeSupported() {
+				status = 1
+			} else {
+				resizeContext, cancelResize := context.WithTimeout(ctx, defaultMediaTimeout)
+				resizedFrame, err = resizeDesktopFrame(resizeContext, config.Backend, resizer, requested)
+				cancelResize()
+				if errors.Is(err, connect.ErrResizeProhibited) {
+					status = 1
+				} else if errors.Is(err, connect.ErrResizeUnsupported) {
+					status = 3
+				} else if err != nil {
+					status = 2
+				}
+			}
+			// Failed replies do not change client geometry. If a platform
+			// partially applied a request, the next capture announces its real
+			// layout as a separate server-side change before sending pixels.
+			if status == 0 {
+				layout = resizedFrame.DesktopLayout()
+				width, height = resizedFrame.Width, resizedFrame.Height
+				lastDesktopRevision = resizedFrame.DesktopRevision
+			}
+			response, err := desktopSizeUpdate(layout, true, 1, status)
+			if err != nil {
+				return err
+			}
+			if err := send(response); err != nil {
+				return err
+			}
+			layoutSent = true
+			if status == 0 {
+				videoState.resetPending = true
+			}
+			lastCursorShape = nil
 		case 202:
 			if !encodings.FileSharing || config.SharedFolder == nil {
 				return errors.New("file sharing was not negotiated")
