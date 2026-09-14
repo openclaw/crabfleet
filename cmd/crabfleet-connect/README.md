@@ -6,10 +6,15 @@ Fleet sign-in, browser relay, native VNC connections, and service management.
 
 Linux supports X11 capture/input, Hyprland and wlroots through a supervised
 wayvnc 0.10+ process, and GNOME/KDE through the desktop portal and PipeWire.
-Negotiated features include software H.264/HEVC with Tight/JPEG and RAW fallback,
+Negotiated features include hardware or software H.264/HEVC with Tight/JPEG and RAW fallback,
 UTF-8 clipboard, opt-in system output audio, and explicitly selected shared folders.
 Fleet publication uses its own consent scope and durable ownership recovery.
 A systemd user service and desktop autostart provide graphical-session startup.
+Use `--all-monitors` for simultaneous outputs and `--allow-resize` to permit
+supported monitor-mode changes. `--encoder auto` selects detected NVENC or VAAPI
+before software; explicit backend selection is also available. An optional
+[SDDM Wayland greeter wrapper](../../docs/linux-greeter.md) shares the login screen
+under a separate greeter identity while preserving normal OS authentication.
 
 ```sh
 go build -o ./dist/crabfleet-connect ./cmd/crabfleet-connect

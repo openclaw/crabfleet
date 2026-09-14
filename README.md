@@ -441,6 +441,7 @@ Full documentation available at [docs.crabfleet.ai](https://docs.crabfleet.ai):
 - [GitHub Actions Sessions](https://docs.crabfleet.ai/github-actions-sessions) – Durable runner relay and steering
 - [Native macOS Client](https://docs.crabfleet.ai/macos-native-client) – Prototype scope and security boundary
 - [Linux Connector](docs/linux-connector.md) – X11 and Wayland desktop sharing
+- [Linux Login Screen](docs/linux-greeter.md) – Optional SDDM Wayland greeter sharing
 - [Admin](https://docs.crabfleet.ai/admin) – Access control and policies
 - [API](https://docs.crabfleet.ai/api) – REST and WebSocket APIs
 - [Spec](https://docs.crabfleet.ai/spec) – Complete product specification
@@ -451,7 +452,10 @@ Full documentation available at [docs.crabfleet.ai](https://docs.crabfleet.ai):
 private VNC connections. It supports X11, Hyprland/wlroots through wayvnc 0.10+,
 and GNOME/KDE through the desktop portal and PipeWire. A common Go RFB server
 provides negotiated H.264/HEVC, Tight/JPEG and RAW video, UTF-8 clipboard, opt-in
-system audio, explicitly selected shared folders, and view-only controls.
+system audio, explicitly selected shared folders, and view-only controls. Linux
+video supports VAAPI/NVENC hardware encoding with software fallback. Multiple
+monitors can share one view, geometry changes are negotiated with viewers, and
+supported display modes can be changed with explicit `--allow-resize` permission.
 
 Build with `go build -o ./dist/crabfleet-connect ./cmd/crabfleet-connect`, sign in
 with `crabfleet-connect login --server https://fleet.example`, then run
@@ -459,6 +463,8 @@ with `crabfleet-connect login --server https://fleet.example`, then run
 maintains an authenticated browser relay and cleans up its own registration.
 A systemd user service can start sharing at graphical login. Direct VNC defaults
 to loopback and requires an SSH tunnel or an explicitly bound protected interface.
+An administrator can separately configure SDDM Wayland greeter sharing; it retains
+normal Linux login and uses a dedicated connector identity.
 
 The [Linux connector guide](docs/linux-connector.md) describes dependencies,
 permissions, video and audio options, file limits, native viewer access, service

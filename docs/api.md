@@ -72,8 +72,11 @@ deployments also require the link-bound CSRF cookie; trusted-proxy deployments
 use their asserted browser identity plus exact-Origin enforcement because the
 Worker strips upstream cookies. Development identities cannot approve native
 clients. When `GITHUB_REDIRECT_URI` names another authoritative origin, the
-link redirects there before lookup or cookie creation. An expired or
-already-used link returns `410`.
+link redirects there before lookup or cookie creation. Approval and completion
+pages adapt to phone screens; the link can be opened on another device signed
+into the same deployment. An expired or already-used link returns `410` with an
+HTML recovery page, and an unauthenticated deployment without GitHub login
+returns `401` with a link back to its sign-in page.
 
 When the trusted-proxy public origin is also the OAuth callback origin, an
 already authenticated proxy request is served on the configured backend origin

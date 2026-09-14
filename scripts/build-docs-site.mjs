@@ -30,6 +30,7 @@ const sections = [
       "github-actions-sessions.md",
       "macos-native-client.md",
       "linux-connector.md",
+      "linux-greeter.md",
       "admin.md",
     ],
   ],

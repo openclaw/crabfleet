@@ -802,8 +802,17 @@ test("administratively prohibited resizing is not retried by later layout or vie
       layout(0, 0),
     ),
   );
-  const client = new RFBClient(transport, { h264: false, onResize: () => client.resize(800, 600) });
+  const states: string[] = [];
+  const client = new RFBClient(transport, {
+    h264: false,
+    onResize: () => client.resize(800, 600),
+    onState: (state) => states.push(state),
+  });
   await assert.rejects(client.start(), /scripted server ended/);
   client.resize(1024, 768);
   assert.equal(transport.sent.filter((message) => message[0] === 251).length, 1);
+  assert.equal(
+    states.some((state) => state.startsWith("Resize rejected")),
+    false,
+  );
 });

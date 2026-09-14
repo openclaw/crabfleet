@@ -31,7 +31,7 @@ The Go executable is self-contained. Install the helpers for your session:
 | X11 text clipboard                 | `xclip`                                                                                                                                      |
 | Hyprland, Sway, compatible wlroots | `wayvnc` 0.10 or newer; `wl-copy` and `wl-paste` for clipboard                                                                               |
 | GNOME or KDE Wayland               | `xdg-desktop-portal`, the matching GNOME/KDE portal backend, PipeWire, `gst-launch-1.0` with `pipewiresrc`, `videoconvert`, and `videoscale` |
-| H.264 / HEVC video                 | FFmpeg with `libx264` / `libx265`                                                                                                            |
+| H.264 / HEVC video                 | FFmpeg with VAAPI, NVENC, or `libx264` / `libx265`; hardware encoding also needs a compatible GPU driver and device access                   |
 | System output audio                | FFmpeg with PulseAudio input and AAC encoding; `pactl`; PulseAudio or PipeWire's Pulse server                                                |
 | Background startup                 | A systemd user manager and graphical desktop autostart                                                                                       |
 
@@ -78,6 +78,8 @@ The connector's `desktop:publish` token cannot use those viewer endpoints.
 ```sh
 crabfleet-connect share --fleet                         # automatic selection
 crabfleet-connect share --backend wayland --output DP-1
+crabfleet-connect share --fleet --all-monitors
+crabfleet-connect share --fleet --allow-resize
 crabfleet-connect share --backend portal --fleet        # GNOME/KDE dialog
 crabfleet-connect share --display :0                    # an actual X11 session
 crabfleet-connect share --view-only
@@ -88,26 +90,44 @@ Automatic selection prefers Wayland over XWayland when `WAYLAND_DISPLAY` or
 sessions select wayvnc. An explicit `--display` selects X11. Unsupported capture
 or missing permissions fail startup; synthetic pixels require `--synthetic`.
 
-Wayvnc shares one named output or its first output. Use `hyprctl monitors` or
-`swaymsg -t get_outputs` to find its name. The connector supervises a private
-wayvnc process with a sealed anonymous password configuration and a Unix socket
+Wayvnc shares one named output or its first output. `--all-monitors` selects the
+active outputs at startup and arranges them side by side in stable output-name
+order; it does not reproduce their physical arrangement. Restart sharing after
+adding or removing an output. `--output` and `--all-monitors` are mutually
+exclusive. Use `hyprctl monitors` or `swaymsg -t get_outputs` to find names.
+The connector supervises a private wayvnc process per selected output, each with
+a sealed anonymous password configuration and a Unix socket
 inside a private temporary directory. Your existing wayvnc configuration is
 not read or changed. The private RFB client authenticates, captures RAW frames,
-and forwards input into the common Crabfleet RFB server. Viewer-requested
-monitor resizing is disabled. Shutdown terminates and reaps the helper.
+and forwards input into the common Crabfleet RFB server. Crossing between
+wayvnc outputs releases and reapplies held buttons on their separate input
+devices, so a cross-monitor drag may be interrupted. Shutdown terminates and
+reaps all helpers.
 
 The GNOME/KDE portal asks you to select a monitor and approve input and clipboard
-permissions. Select exactly one monitor. Portal restore tokens are saved and
+permissions. By default select one monitor; `--all-monitors` requests permission
+for multiple monitors, with up to 16 selected streams arranged using the portal's
+logical positions. The desktop decides which monitors you may select. Portal restore tokens are saved and
 rotated when the desktop supports persistence; the desktop may still require
 approval after sign-out, revocation, or an upgrade. This is sharing of a logged-in
-graphical session, not a login-screen service. Revoking the portal session stops
+graphical session. For supported login screens, use the separate
+[SDDM greeter integration](../linux-greeter/). Revoking the portal session stops
 sharing. A capture-process failure exits with an error so a service can restart.
 Older portals without clipboard support need `--clipboard=false`.
 
-X11 captures the default screen and uses the session's `DISPLAY` and Xauthority.
-Multi-group XKB keyboards use the primary group's base and Shift levels.
-Frames retain their initial dimensions for a connection; reconnect after a
-monitor mode change. The portal scales capture to its selected logical size.
+X11 captures the default screen, including its RandR monitors, and uses the
+session's `DISPLAY` and Xauthority. Multi-group XKB keyboards use the primary
+group's base and Shift levels. Capture adapts to root geometry and monitor-layout
+changes. Portal streams scale to their selected logical sizes.
+
+Desktop geometry changes are announced through negotiated RFB desktop-size
+extensions before new pixels. Clients without those extensions disconnect before
+receiving incompatible dimensions. Viewer-requested mode changes are off by
+default: `--allow-resize` enables them on supported X11/RandR and wayvnc outputs;
+`--view-only` still prohibits them. X11 supports existing single-monitor RandR
+modes. Compositors may reject unsupported modes. The portal cannot change the
+physical display mode. Fleet's browser stops automatically requesting resize
+when a host prohibits it.
 
 ## Clipboard, audio, video, and files
 
@@ -121,6 +141,8 @@ keyboard, pointer, clipboard writes, and shared-folder writes.
 crabfleet-connect share --fleet --audio
 crabfleet-connect share --fleet --video h264
 crabfleet-connect share --fleet --video hevc
+crabfleet-connect share --fleet --encoder vaapi
+crabfleet-connect share --fleet --encoder software
 crabfleet-connect share --fleet --shared-folder "$HOME/Public"
 crabfleet-connect share --fleet --shared-folder "$HOME/Public" --shared-folder-write
 ```
@@ -130,12 +152,22 @@ default microphone. It uses negotiated AAC-LC, 48 kHz stereo, with bounded queue
 and dropped late packets. Select the output device before starting the connector.
 
 Video defaults to negotiated HEVC, then H.264, then Tight/JPEG, with RAW available
-for basic VNC clients. FFmpeg uses persistent software encoders and independent
+for basic VNC clients. FFmpeg uses persistent encoders and independent
 frames so a new viewer can decode immediately. HEVC uses Main profile for browser
 compatibility while keeping every frame independently decodable. A missing encoder or an unsupported
 frame size falls back to JPEG/RAW when the viewer offers them. `--video h264` or
 `hevc` restricts the preferred codec; it still permits the negotiated fallback.
-Hardware encoding and adaptive frame resizing are not implemented.
+`--encoder auto` tries detected NVIDIA NVENC, then VAAPI, then software. VAAPI
+uses `/dev/dri/renderD128` unless overridden with `--render-device`; the desktop
+user needs access to that render node. Explicit `--encoder vaapi`, `nvenc`, or
+`software` restricts the encoder backend while preserving negotiated codec and
+JPEG/RAW fallback. Failures are cached for up to four recent frame sizes per
+codec/backend, so another size can retry hardware after a resize-related failure.
+Missing or non-device hardware paths are disabled until sharing restarts.
+Selection and bounded failure diagnostics are reported once. Hardware
+minimum dimensions and supported profiles vary by GPU and driver. Odd video
+dimensions use the negotiated fallback without disabling an otherwise healthy
+encoder.
 
 File sharing is off until you select a folder. Crabfleet peers negotiate the
 same FSH1 list, download, upload, and create-directory protocol as the Mac host.
@@ -207,6 +239,7 @@ pnpm check
 pnpm test
 pnpm test:native
 CRABFLEET_TEST_MEDIA=1 go test -race ./internal/connect -run TestFFmpegLive -v
+CRABFLEET_TEST_MEDIA=1 CRABFLEET_TEST_VIDEO_ENCODER=vaapi go test -race ./internal/connect -run FFmpeg -v
 sh scripts/test-linux-connector.sh
 sh scripts/test-linux-audio.sh
 ```

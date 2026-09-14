@@ -550,7 +550,7 @@ export class RFBClient {
           this.#resizeProhibited = true;
           this.#pendingResize = null;
         }
-        if (x === 1 && y !== 0) this.#options.onState?.(`Resize rejected (${y})`);
+        if (x === 1 && y !== 0 && y !== 1) this.#options.onState?.(`Resize rejected (${y})`);
       } else if (encoding === RFB_ENCODINGS.cursorWithAlpha) {
         const nestedEncoding = readInt32(await this.transport.readExactly(4));
         // Crabfleet's negotiated CursorWithAlpha profile fixes the nested
