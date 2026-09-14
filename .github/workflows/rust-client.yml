@@ -1,0 +1,64 @@
+name: rust-client
+
+on:
+  pull_request:
+    paths:
+      - "client/**"
+      - ".github/workflows/rust-client.yml"
+  push:
+    branches: [main]
+    paths:
+      - "client/**"
+      - ".github/workflows/rust-client.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: rust-client-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  validate:
+    name: Rust Linux and WASM
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - name: Check out
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up Rust
+        run: |
+          rustup toolchain install 1.98.1 --profile minimal --component rustfmt --component clippy --target wasm32-unknown-unknown
+          rustup override set 1.98.1
+
+      - name: Set up Node
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "24"
+
+      - name: Install native media dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y pkg-config libssl-dev libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev libgstreamer-plugins-bad1.0-dev gstreamer1.0-plugins-good gstreamer1.0-plugins-bad gstreamer1.0-nice gstreamer1.0-libav
+
+      - name: Check formatting
+        run: cargo fmt --all --manifest-path client/Cargo.toml -- --check
+
+      - name: Test native workspace and web loader
+        run: |
+          cargo test --locked --manifest-path client/Cargo.toml --workspace
+          node --test client/web/main.test.mjs
+
+      - name: Lint native and WASM targets
+        run: |
+          cargo clippy --locked --manifest-path client/Cargo.toml --workspace --all-targets -- -D warnings
+          cargo clippy --locked --manifest-path client/Cargo.toml --target wasm32-unknown-unknown -p crabfleet-viewer --lib -- -D warnings
+          cargo clippy --locked --manifest-path client/Cargo.toml --target wasm32-unknown-unknown -p crabfleet-rtc -p crabfleet-fluid -p crabfleet-cloud --all-targets -- -D warnings
+
+      - name: Build native viewer and standalone web app
+        run: |
+          cargo build --locked --manifest-path client/Cargo.toml -p crabfleet-viewer
+          cargo install wasm-bindgen-cli --version 0.2.128 --locked --root client/tools
+          bash client/scripts/build-web.sh

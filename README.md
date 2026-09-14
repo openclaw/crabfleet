@@ -55,6 +55,8 @@ See the [quickstart](docs/quickstart.md), [Mac guide](docs/macos-native-client.m
 
 ## Development
 
+The experimental [independent Rust client](client/README.md) connects to Jump Desktop accounts and Fluid hosts from native Linux or a browser, using a shared egui UI. It supports email/password and MFA sign-in, computer discovery, host authentication, video, input, audio, explicit clipboard transfer, view-only controls, and bounded reconnect. It is separate from the VNC companion above and uses its own Rust gateway in the browser. See the client guide for build instructions, tested Mac and Windows configurations, and limitations such as unfinished provider/SSO login.
+
 ```sh
 pnpm install --frozen-lockfile
 pnpm check

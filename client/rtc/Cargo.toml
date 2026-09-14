@@ -1,0 +1,60 @@
+[package]
+name = "crabfleet-rtc"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+gst = { package = "gstreamer", version = "0.25.3", features = ["v1_22"] }
+gst-app = { package = "gstreamer-app", version = "0.25.2", features = ["v1_22"] }
+gst-sdp = { package = "gstreamer-sdp", version = "0.25.2", features = ["v1_22"] }
+gst-video = { package = "gstreamer-video", version = "0.25.3", features = ["v1_22"] }
+gst-webrtc = { package = "gstreamer-webrtc", version = "0.25.2", features = ["v1_22"] }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wasm-bindgen = "=0.2.128"
+wasm-bindgen-futures = "=0.4.78"
+js-sys = "=0.3.105"
+web-sys = { version = "=0.3.105", features = [
+  "Window",
+  "Document",
+  "Element",
+  "HtmlElement",
+  "Event",
+  "MessageEvent",
+  "RtcPeerConnection",
+  "RtcConfiguration",
+  "RtcIceServer",
+  "RtcBundlePolicy",
+  "RtcSessionDescriptionInit",
+  "RtcSdpType",
+  "RtcSignalingState",
+  "RtcPeerConnectionState",
+  "RtcPeerConnectionIceEvent",
+  "RtcIceCandidate",
+  "RtcIceCandidateInit",
+  "RtcDataChannel",
+  "RtcDataChannelState",
+  "RtcDataChannelEvent",
+  "RtcDataChannelType",
+  "RtcTrackEvent",
+  "MediaStream",
+  "MediaStreamTrack",
+  "HtmlMediaElement",
+  "HtmlVideoElement",
+  "HtmlAudioElement",
+  "HtmlCanvasElement",
+  "CanvasRenderingContext2d",
+  "ImageData",
+] }
+
+[dependencies]
+crabfleet-fluid = { path = "../fluid" }
+
+[target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
+serde_json = "1.0.151"
+
+[target.'cfg(target_arch = "wasm32")'.dev-dependencies]
+wasm-bindgen-test = "=0.3.78"

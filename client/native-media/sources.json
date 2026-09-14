@@ -1,0 +1,27 @@
+{
+  "version": "1.28.6",
+  "baseUrl": "https://raw.githubusercontent.com/GStreamer/gstreamer/1.28.6/subprojects/gst-plugins-bad/ext/dtls/",
+  "files": {
+    "gstdtlsagent.c": "3250da9507b3ea73fd7f1b06be4cef08f98f5355f00f7b63eab3f04172f1ab0a",
+    "gstdtlsagent.h": "6b9b7b2a7b83578931710af897980d07920ba42bff805d11e8735943f1564688",
+    "gstdtlscertificate.c": "f7e8d384d639631e9595bad117eadc45472330bfc01052ad12133c7381fc4e61",
+    "gstdtlscertificate.h": "ae39c3ea58fb9d0524c8424d30a85a6150c6574f9a4bee490136fa2407db8b56",
+    "gstdtlsconnection.c": "a33cc0ef4811063deb695055424371c6f52223c073142c341108241fcb9de108",
+    "gstdtlsconnection.h": "d70edff4ae44a052fad58c11b120edcc41d8bb7cd786acf2987094b514715a01",
+    "gstdtlsdec.c": "75e58378ef5ff32079fbf51c58b28893a9ca04eb74ffdd573c27584e733c7c06",
+    "gstdtlsdec.h": "9c0be3822d91262db8ecfc11c2b12fff632a536b601197a019c1fa6cee253897",
+    "gstdtlselement.c": "536ccb6bf7889c3b78a17daccd63aba6a40124bcbc3fdaacaa76644b3ec88e5d",
+    "gstdtlselements.h": "8ad4fe7086faed722452c4528b24ebff6b15d58b2dff0002b7dba7492be6e1e5",
+    "gstdtlsenc.c": "e248f674569dcf11c47918ba35578d56c7ace5cb2a7d05dfad3f0373c2bc8305",
+    "gstdtlsenc.h": "34dc89c40e7d93a887ca0c69265abde6cd2d2d6d67c9bf430f8499e62979e830",
+    "gstdtlssrtpbin.c": "0705836767676d02c81c28df8b8e4377c88ca035d03c82316da9adfa9ac823ea",
+    "gstdtlssrtpbin.h": "85fa83ff11be92791fe85c672432345c893e0329fc370cbeb735156e90886c36",
+    "gstdtlssrtpdec.c": "b995d75440654304a091e548cd373aeb62d34531e2f31b49a52ae89678bd93ca",
+    "gstdtlssrtpdec.h": "a7f0eec241239cd80e48d85e8b81ae93c4a8c94727d431cdefedd5016549fc84",
+    "gstdtlssrtpdemux.c": "45b3100fdebb3773f1eec5f6e6729abd291b4321eaae502916b6bf6f0b8288a1",
+    "gstdtlssrtpdemux.h": "2b9b9cc3d9c807445420765446ea9b4168d7a807f265b47f57b106999ed7919f",
+    "gstdtlssrtpenc.c": "9b732e9d02f943683af913eb5adf97f9286913e934204234d20586f98038aac2",
+    "gstdtlssrtpenc.h": "92a3ec4e840e44a6e5b949bfda9443ce1c574ccbfc33ef9bbafbfa0969b3fcd7",
+    "plugin.c": "f6a8c3b7bc501a44b20f1c6f264666bc8e9ad2475accd8433ab750f75602a244"
+  }
+}

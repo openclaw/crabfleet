@@ -1,0 +1,47 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Crabfleet Desktop</title>
+    <style>
+      html,
+      body {
+        margin: 0;
+        width: 100%;
+        height: 100%;
+        overflow: hidden;
+        background: #0d1419;
+        color: #e2ebe9;
+      }
+      canvas {
+        display: block;
+        width: 100%;
+        height: 100%;
+        touch-action: none;
+        outline: none;
+      }
+      #loading {
+        position: fixed;
+        inset: 0;
+        display: grid;
+        place-content: center;
+        gap: 16px;
+        font: 16px monospace;
+        text-align: center;
+        padding: 24px;
+      }
+      #loading strong {
+        color: #6de5bc;
+        letter-spacing: 0.15em;
+      }
+    </style>
+  </head>
+  <body>
+    <canvas id="viewer" aria-label="Crabfleet desktop viewer" tabindex="0"></canvas>
+    <div id="loading" role="status">
+      <strong>CRABFLEET</strong><span>Starting the Rust viewer…</span>
+    </div>
+    <script type="module" src="./main.js"></script>
+  </body>
+</html>

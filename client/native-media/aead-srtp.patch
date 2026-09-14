@@ -1,0 +1,306 @@
+--- a/gstdtlsagent.c
++++ b/gstdtlsagent.c
+@@ -197,7 +197,13 @@
+   }
+ 
+   SSL_CTX_set_verify_depth (priv->ssl_context, 2);
+-  SSL_CTX_set_tlsext_use_srtp (priv->ssl_context, "SRTP_AES128_CM_SHA1_80");
++  if (SSL_CTX_set_tlsext_use_srtp (priv->ssl_context,
++          "SRTP_AEAD_AES_256_GCM:SRTP_AEAD_AES_128_GCM:SRTP_AES128_CM_SHA1_80") != 0) {
++    GST_ERROR_OBJECT (self, "Could not configure DTLS-SRTP protection profiles");
++    SSL_CTX_free (priv->ssl_context);
++    priv->ssl_context = NULL;
++    return;
++  }
+   SSL_CTX_set_cipher_list (priv->ssl_context,
+       "ALL:!ADH:!LOW:!EXP:!MD5:@STRENGTH");
+   SSL_CTX_set_read_ahead (priv->ssl_context, 1);
+--- a/gstdtlsconnection.c
++++ b/gstdtlsconnection.c
+@@ -52,8 +52,6 @@
+ GST_DEBUG_CATEGORY_STATIC (gst_dtls_connection_debug);
+ #define GST_CAT_DEFAULT gst_dtls_connection_debug
+ 
+-#define SRTP_KEY_LEN 16
+-#define SRTP_SALT_LEN 14
+ 
+ enum
+ {
+@@ -863,49 +861,15 @@
+ static gboolean
+ export_srtp_keys (GstDtlsConnection * self, GError ** err)
+ {
+-  typedef struct
+-  {
+-    guint8 v[SRTP_KEY_LEN];
+-  } Key;
+-
+-  typedef struct
+-  {
+-    guint8 v[SRTP_SALT_LEN];
+-  } Salt;
+-
+-  struct
+-  {
+-    Key client_key;
+-    Key server_key;
+-    Salt client_salt;
+-    Salt server_salt;
+-  } exported_keys;
+-
+-  struct
+-  {
+-    Key key;
+-    Salt salt;
+-  } client_key, server_key;
+-
++  guint8 exported_keys[88] = { 0 };
++  guint8 client_key[44] = { 0 }, server_key[44] = { 0 };
++  gsize key_length = 16, salt_length = 14;
+   SRTP_PROTECTION_PROFILE *profile;
+   GstDtlsSrtpCipher cipher;
+   GstDtlsSrtpAuth auth;
+   gint success;
+ 
+   static gchar export_string[] = "EXTRACTOR-dtls_srtp";
+-
+-  success = SSL_export_keying_material (self->priv->ssl,
+-      (gpointer) & exported_keys, 60, export_string, strlen (export_string),
+-      NULL, 0, 0);
+-
+-  if (!success) {
+-    GST_WARNING_OBJECT (self, "Failed to export SRTP keys");
+-    if (err)
+-      *err =
+-          g_error_new_literal (GST_RESOURCE_ERROR, GST_RESOURCE_ERROR_READ,
+-          "Failed to export SRTP keys");
+-    return FALSE;
+-  }
+ 
+   profile = SSL_get_selected_srtp_profile (self->priv->ssl);
+ 
+@@ -930,6 +894,17 @@
+       cipher = GST_DTLS_SRTP_CIPHER_AES_128_ICM;
+       auth = GST_DTLS_SRTP_AUTH_HMAC_SHA1_32;
+       break;
++    case SRTP_AEAD_AES_128_GCM:
++      cipher = GST_DTLS_SRTP_CIPHER_AES_128_GCM;
++      auth = GST_DTLS_SRTP_AUTH_NULL;
++      salt_length = 12;
++      break;
++    case SRTP_AEAD_AES_256_GCM:
++      cipher = GST_DTLS_SRTP_CIPHER_AES_256_GCM;
++      auth = GST_DTLS_SRTP_AUTH_NULL;
++      key_length = 32;
++      salt_length = 12;
++      break;
+     default:
+       GST_WARNING_OBJECT (self,
+           "Invalid/unsupported crypto suite set by handshake");
+@@ -940,10 +915,23 @@
+       return FALSE;
+   }
+ 
+-  client_key.key = exported_keys.client_key;
+-  server_key.key = exported_keys.server_key;
+-  client_key.salt = exported_keys.client_salt;
+-  server_key.salt = exported_keys.server_salt;
++  success = SSL_export_keying_material (self->priv->ssl,
++      exported_keys, 2 * (key_length + salt_length), export_string,
++      strlen (export_string), NULL, 0, 0);
++  if (!success) {
++    OPENSSL_cleanse (exported_keys, sizeof (exported_keys));
++    if (err)
++      *err = g_error_new_literal (GST_RESOURCE_ERROR, GST_RESOURCE_ERROR_READ,
++          "Failed to export SRTP keys");
++    return FALSE;
++  }
++
++  /* RFC 5764 exports client key, server key, client salt, server salt. */
++  memcpy (client_key, exported_keys, key_length);
++  memcpy (server_key, exported_keys + key_length, key_length);
++  memcpy (client_key + key_length, exported_keys + 2 * key_length, salt_length);
++  memcpy (server_key + key_length, exported_keys + 2 * key_length + salt_length,
++      salt_length);
+ 
+   if (self->priv->is_client) {
+     g_signal_emit (self, signals[SIGNAL_ON_ENCODER_KEY], 0, &client_key, cipher,
+@@ -956,6 +944,10 @@
+     g_signal_emit (self, signals[SIGNAL_ON_DECODER_KEY], 0, &client_key, cipher,
+         auth);
+   }
++
++  OPENSSL_cleanse (exported_keys, sizeof (exported_keys));
++  OPENSSL_cleanse (client_key, sizeof (client_key));
++  OPENSSL_cleanse (server_key, sizeof (server_key));
+ 
+   self->priv->keys_exported = TRUE;
+ 
+--- a/gstdtlsconnection.h
++++ b/gstdtlsconnection.h
+@@ -48,7 +48,9 @@
+  * SRTP Cipher selected by the DTLS handshake, should match the enums in gstsrtp
+  */
+ typedef enum {
+-    GST_DTLS_SRTP_CIPHER_AES_128_ICM = 1
++    GST_DTLS_SRTP_CIPHER_AES_128_ICM = 1,
++    GST_DTLS_SRTP_CIPHER_AES_128_GCM = 3,
++    GST_DTLS_SRTP_CIPHER_AES_256_GCM = 4
+ } GstDtlsSrtpCipher;
+ 
+ /**
+@@ -59,11 +61,21 @@
+  * SRTP Auth selected by the DTLS handshake, should match the enums in gstsrtp
+  */
+ typedef enum {
++    GST_DTLS_SRTP_AUTH_NULL = 0,
+     GST_DTLS_SRTP_AUTH_HMAC_SHA1_32 = 1,
+     GST_DTLS_SRTP_AUTH_HMAC_SHA1_80 = 2
+ } GstDtlsSrtpAuth;
+ 
+-#define GST_DTLS_SRTP_MASTER_KEY_LENGTH 30
++static inline gsize
++gst_dtls_srtp_master_key_length (guint cipher)
++{
++  switch (cipher) {
++    case GST_DTLS_SRTP_CIPHER_AES_128_ICM: return 30;
++    case GST_DTLS_SRTP_CIPHER_AES_128_GCM: return 28;
++    case GST_DTLS_SRTP_CIPHER_AES_256_GCM: return 44;
++    default: return 0;
++  }
++}
+ 
+ typedef enum
+ {
+--- a/gstdtlsdec.c
++++ b/gstdtlsdec.c
+@@ -175,7 +175,7 @@
+       "SRTP cipher",
+       "The SRTP cipher selected in the DTLS handshake. "
+       "The value will be set to an GstDtlsSrtpCipher.",
+-      0, GST_DTLS_SRTP_CIPHER_AES_128_ICM, DEFAULT_SRTP_CIPHER,
++      0, GST_DTLS_SRTP_CIPHER_AES_256_GCM, DEFAULT_SRTP_CIPHER,
+       G_PARAM_READABLE | G_PARAM_STATIC_STRINGS);
+ 
+   properties[PROP_SRTP_AUTH] =
+@@ -443,24 +443,23 @@
+     guint auth, GstDtlsDec * self)
+ {
+   GstBuffer *new_decoder_key;
+-  gchar *key_str;
++  gsize key_length = gst_dtls_srtp_master_key_length (cipher);
+ 
+   g_return_if_fail (GST_IS_DTLS_DEC (self));
++  g_return_if_fail (key_length > 0);
+ 
+   self->srtp_cipher = cipher;
+   self->srtp_auth = auth;
+ 
+   new_decoder_key =
+-      gst_buffer_new_memdup (key, GST_DTLS_SRTP_MASTER_KEY_LENGTH);
++      gst_buffer_new_memdup (key, key_length);
+ 
+   if (self->decoder_key)
+     gst_buffer_unref (self->decoder_key);
+ 
+   self->decoder_key = new_decoder_key;
+ 
+-  key_str = g_base64_encode (key, GST_DTLS_SRTP_MASTER_KEY_LENGTH);
+-  GST_INFO_OBJECT (self, "received key: %s", key_str);
+-  g_free (key_str);
++  GST_INFO_OBJECT (self, "received SRTP decoder key");
+ 
+   g_signal_emit (self, signals[SIGNAL_ON_KEY_RECEIVED], 0);
+ }
+--- a/gstdtlsenc.c
++++ b/gstdtlsenc.c
+@@ -155,7 +155,7 @@
+       "SRTP cipher",
+       "The SRTP cipher selected in the DTLS handshake. "
+       "The value will be set to an GstDtlsSrtpCipher.",
+-      0, GST_DTLS_SRTP_CIPHER_AES_128_ICM, DEFAULT_SRTP_CIPHER,
++      0, GST_DTLS_SRTP_CIPHER_AES_256_GCM, DEFAULT_SRTP_CIPHER,
+       G_PARAM_READABLE | G_PARAM_STATIC_STRINGS);
+ 
+   properties[PROP_SRTP_AUTH] =
+@@ -675,25 +675,24 @@
+     guint auth, GstDtlsEnc * self)
+ {
+   GstBuffer *new_encoder_key;
+-  gchar *key_str;
++  gsize key_length = gst_dtls_srtp_master_key_length (cipher);
+ 
+   g_return_if_fail (GST_IS_DTLS_ENC (self));
++  g_return_if_fail (key_length > 0);
+   g_return_if_fail (GST_IS_DTLS_CONNECTION (connection));
+ 
+   self->srtp_cipher = cipher;
+   self->srtp_auth = auth;
+ 
+   new_encoder_key =
+-      gst_buffer_new_memdup (key, GST_DTLS_SRTP_MASTER_KEY_LENGTH);
++      gst_buffer_new_memdup (key, key_length);
+ 
+   if (self->encoder_key)
+     gst_buffer_unref (self->encoder_key);
+ 
+   self->encoder_key = new_encoder_key;
+ 
+-  key_str = g_base64_encode (key, GST_DTLS_SRTP_MASTER_KEY_LENGTH);
+-  GST_INFO_OBJECT (self, "received key: %s", key_str);
+-  g_free (key_str);
++  GST_INFO_OBJECT (self, "received SRTP encoder key");
+ 
+   g_signal_emit (self, signals[SIGNAL_ON_KEY_RECEIVED], 0);
+ }
+--- a/gstdtlssrtpdec.c
++++ b/gstdtlssrtpdec.c
+@@ -424,14 +424,33 @@
+     g_object_get (bin->dtls_element,
+         "srtp-cipher", &cipher, "srtp-auth", &auth, NULL);
+ 
+-    g_return_val_if_fail (cipher == GST_DTLS_SRTP_CIPHER_AES_128_ICM, NULL);
++    const gchar *cipher_name;
++    switch (cipher) {
++      case GST_DTLS_SRTP_CIPHER_AES_128_ICM: cipher_name = "aes-128-icm"; break;
++      case GST_DTLS_SRTP_CIPHER_AES_128_GCM: cipher_name = "aes-128-gcm"; break;
++      case GST_DTLS_SRTP_CIPHER_AES_256_GCM: cipher_name = "aes-256-gcm"; break;
++      default:
++        gst_buffer_unref (key_buffer);
++        return NULL;
++    }
+ 
+     key_caps = gst_caps_new_simple ("application/x-srtp",
+         "srtp-key", GST_TYPE_BUFFER, key_buffer,
+-        "srtp-cipher", G_TYPE_STRING, "aes-128-icm",
+-        "srtcp-cipher", G_TYPE_STRING, "aes-128-icm", NULL);
++        "srtp-cipher", G_TYPE_STRING, cipher_name,
++        "srtcp-cipher", G_TYPE_STRING, cipher_name, NULL);
+ 
+     switch (auth) {
++      case GST_DTLS_SRTP_AUTH_NULL:
++        if (cipher == GST_DTLS_SRTP_CIPHER_AES_128_ICM) {
++          gst_buffer_unref (key_buffer);
++          gst_caps_unref (key_caps);
++          return NULL;
++        }
++        /* GCM supplies its own mandatory 128-bit authentication tag. */
++        gst_caps_set_simple (key_caps,
++            "srtp-auth", G_TYPE_STRING, "null",
++            "srtcp-auth", G_TYPE_STRING, "null", NULL);
++        break;
+       case GST_DTLS_SRTP_AUTH_HMAC_SHA1_32:
+         gst_caps_set_simple (key_caps,
+             "srtp-auth", G_TYPE_STRING, "hmac-sha1-32",
+@@ -443,8 +462,9 @@
+             "srtcp-auth", G_TYPE_STRING, "hmac-sha1-80", NULL);
+         break;
+       default:
+-        g_return_val_if_reached (NULL);
+-        break;
++        gst_buffer_unref (key_buffer);
++        gst_caps_unref (key_caps);
++        return NULL;
+     }
+ 
+     gst_buffer_unref (key_buffer);

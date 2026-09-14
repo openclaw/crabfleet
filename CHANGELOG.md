@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Add an experimental independent Rust/egui client for Jump Desktop on Linux and browser WASM, with account/MFA and host authentication, discovery, desktop video, keyboard/pointer input, audio, explicit clipboard transfer, remote cursors, view-only controls, and bounded reconnect; validate Mac and Windows hosts plus Firefox and Edge, with provider/SSO login and broader host compatibility still pending.
 - Update desktop documentation with platform-specific setup, direct-versus-relay connection guidance, Windows connector limits, and the current discovery API; remove workspace-era navigation and installation hints, and emit the docs 404 page at the correct path.
 - Redesign the public website, documentation, sign-in, and desktop companion with responsive layouts and a shared visual system; put mobile authentication first, retain failed token input, and make connector authorization, completion, and recovery pages work on phone screens.
 - Add Linux VAAPI/NVENC video selection with recoverable software fallback, negotiated live desktop sizing with decoder resets and opt-in supported mode changes, simultaneous X11/Wayland/portal monitor sharing, and an administrator-configured SDDM Wayland greeter wrapper with separate authenticated state and bounded helper cleanup.

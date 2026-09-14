@@ -1,0 +1,18 @@
+[workspace]
+members = ["core", "fluid", "rtc", "cloud", "viewer", "demo-server", "web-gateway"]
+resolver = "3"
+
+[workspace.package]
+edition = "2024"
+rust-version = "1.95"
+license = "MIT"
+version = "0.1.0"
+publish = false
+
+[workspace.dependencies]
+crabfleet-client-core = { path = "core" }
+tungstenite = "0.30.0"
+
+[profile.release]
+lto = "thin"
+strip = true
