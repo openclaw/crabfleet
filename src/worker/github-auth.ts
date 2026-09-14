@@ -11,9 +11,8 @@ import { nativeLinkCookie } from "./native-link.ts";
 
 const oauthStateCookie = "crabbox_oauth_state";
 const oauthFlowParameter = "flow";
-export const sshLinkCookie = "crabbox_ssh_link";
 
-type OAuthReturnTarget = { kind: "ssh" | "native"; code: string };
+type OAuthReturnTarget = { kind: "native"; code: string };
 type OAuthStateBinding = {
   nonce: string;
   returnTo: OAuthReturnTarget | null;
@@ -40,7 +39,7 @@ export async function githubLogin(request: Request, env: RuntimeEnv): Promise<Re
   const target = new URL("https://github.com/login/oauth/authorize");
   target.searchParams.set("client_id", env.GITHUB_CLIENT_ID);
   target.searchParams.set("redirect_uri", redirectUri);
-  target.searchParams.set("scope", "read:user read:org repo");
+  target.searchParams.set("scope", "read:user user:email read:org");
   target.searchParams.set("state", nonce);
 
   return redirect(target.toString(), {
@@ -80,7 +79,7 @@ export async function githubCallback(
     headers: {
       accept: "application/json",
       "content-type": "application/json",
-      "user-agent": "crabbox-ai",
+      "user-agent": "crabfleet",
     },
     body: JSON.stringify({
       client_id: env.GITHUB_CLIENT_ID,
@@ -135,11 +134,9 @@ export async function githubCallback(
     ? legacyOAuthReturnTarget(requestCookies)
     : stateBinding.returnTo;
   return redirect(
-    returnTo?.kind === "ssh"
-      ? `/ssh/link/${encodeURIComponent(returnTo.code)}`
-      : returnTo?.kind === "native"
-        ? `/native/link/${encodeURIComponent(returnTo.code)}`
-        : "/app?login=github",
+    returnTo?.kind === "native"
+      ? `/native/link/${encodeURIComponent(returnTo.code)}`
+      : "/app?login=github",
     {
       "set-cookie": session,
     },
@@ -151,8 +148,8 @@ function requestedOAuthReturnTarget(
   requestCookies: ReadonlyMap<string, string>,
 ): OAuthReturnTarget | null {
   const kind = url.searchParams.get(oauthFlowParameter);
-  if (kind !== "ssh" && kind !== "native") return null;
-  const code = requestCookies.get(kind === "ssh" ? sshLinkCookie : nativeLinkCookie);
+  if (kind !== "native") return null;
+  const code = requestCookies.get(nativeLinkCookie);
   return validOAuthLinkCode(code) ? { kind, code } : null;
 }
 
@@ -172,7 +169,7 @@ function readOAuthStateBinding(value: string | undefined): OAuthStateBinding | n
     }
     const kind = parsed.returnTo?.kind;
     const code = parsed.returnTo?.code;
-    if ((kind !== "ssh" && kind !== "native") || !validOAuthLinkCode(code)) return null;
+    if (kind !== "native" || !validOAuthLinkCode(code)) return null;
     return { nonce: parsed.nonce, returnTo: { kind, code }, legacy: false };
   } catch {
     return validOAuthNonce(value) ? { nonce: value, returnTo: null, legacy: true } : null;
@@ -182,8 +179,6 @@ function readOAuthStateBinding(value: string | undefined): OAuthStateBinding | n
 function legacyOAuthReturnTarget(
   requestCookies: ReadonlyMap<string, string>,
 ): OAuthReturnTarget | null {
-  const sshCode = requestCookies.get(sshLinkCookie);
-  if (validOAuthLinkCode(sshCode)) return { kind: "ssh", code: sshCode };
   const nativeCode = requestCookies.get(nativeLinkCookie);
   return validOAuthLinkCode(nativeCode) ? { kind: "native", code: nativeCode } : null;
 }

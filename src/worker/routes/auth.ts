@@ -1,10 +1,8 @@
 import type { TrustedProxyAuthResult } from "../../trusted-proxy-auth.ts";
-import type { User } from "../models.ts";
 
 export type PublicAuthRouteDependencies = {
   githubLogin(request: Request): Promise<Response>;
   githubCallback(request: Request): Promise<Response>;
-  sshLink(request: Request, code: string, requestAuth: TrustedProxyAuthResult): Promise<Response>;
   nativeLink(
     request: Request,
     code: string,
@@ -14,10 +12,6 @@ export type PublicAuthRouteDependencies = {
   devIdentityLogin(request: Request): Promise<Response>;
   logout(request: Request): Promise<Response>;
   authState(request: Request): Response;
-};
-
-export type SessionAuthRouteDependencies = {
-  sessionState(request: Request, user: User): Response;
 };
 
 export async function handlePublicAuthRoute(
@@ -31,10 +25,6 @@ export async function handlePublicAuthRoute(
   }
   if (url.pathname === "/auth/github/callback") {
     return dependencies.githubCallback(request);
-  }
-  const sshLinkMatch = url.pathname.match(/^\/ssh\/link\/([^/]+)$/);
-  if (sshLinkMatch && (request.method === "GET" || request.method === "POST")) {
-    return dependencies.sshLink(request, decodeURIComponent(sshLinkMatch[1] ?? ""), requestAuth);
   }
   const nativeLinkMatch = url.pathname.match(/^\/native\/link\/([^/]+)$/);
   if (nativeLinkMatch && (request.method === "GET" || request.method === "POST")) {
@@ -57,15 +47,4 @@ export async function handlePublicAuthRoute(
     return dependencies.authState(request);
   }
   return null;
-}
-
-export function handleSessionAuthRoute(
-  request: Request,
-  url: URL,
-  user: User,
-  dependencies: SessionAuthRouteDependencies,
-): Response | null {
-  return request.method === "GET" && url.pathname === "/api/session"
-    ? dependencies.sessionState(request, user)
-    : null;
 }

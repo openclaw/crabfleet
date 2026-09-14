@@ -13,27 +13,17 @@ const cname = readCname();
 const siteBase = cname ? `https://${cname}` : "";
 
 const productName = "Crabfleet";
-const productTagline = "SSH-first Codex crabbox fleet";
+const productTagline = "Your computers, within reach.";
 const productDescription =
-  "Crabfleet is a Cloudflare Worker control plane for OpenClaw Codex crabboxes and run attempts - repo-ready workspaces, fleet visibility grouped by person, WebVNC, prompt cards, repo gates, workflow policy, and attachable Ghostty WASM session views.";
-const installCommand = "ssh link@crabd.sh";
+  "Crabfleet is a native VNC app for private desktop sharing, with Mac viewing and Linux and Windows hosts.";
+const installCommand = "open /Applications/Crabfleet.app";
 const codePlaceholder = String.fromCharCode(0);
 const codePlaceholderPattern = new RegExp(`${codePlaceholder}(\\d+)${codePlaceholder}`, "g");
 
 const sections = [
   ["Start", ["index.md", "quickstart.md", "architecture.md"]],
-  [
-    "Features",
-    [
-      "cards.md",
-      "runs.md",
-      "github-actions-sessions.md",
-      "macos-native-client.md",
-      "linux-connector.md",
-      "admin.md",
-    ],
-  ],
-  ["Reference", ["api.md", "spec.md", "spec-v2.md"]],
+  ["Desktops", ["macos-native-client.md", "linux-connector.md"]],
+  ["Reference", ["admin.md", "api.md", "screen-recording-indicator.md"]],
 ];
 
 // Skip these from page generation (internal notes, generated subpages we don't want as their own
@@ -89,7 +79,6 @@ for (const page of pages) {
 fs.writeFileSync(path.join(outDir, "favicon.svg"), faviconSvg(), "utf8");
 
 copyStaticAsset("crabbox-logo.png");
-copyStaticAsset("crabfleet-og.png");
 fs.writeFileSync(path.join(outDir, ".nojekyll"), "", "utf8");
 if (cname) fs.writeFileSync(path.join(outDir, "CNAME"), cname, "utf8");
 validateLinks(outDir);
@@ -476,7 +465,7 @@ function homeHero(page) {
     ? hrefToOutRel(pageMap.get("architecture.md").outRel, page.outRel)
     : "architecture.html";
   return `<header class="home-hero">
-        <p class="eyebrow">OpenClaw · Codex Control Plane</p>
+        <p class="eyebrow">Crabfleet · Remote Desktop</p>
         <h1>${escapeHtml(productTagline)}</h1>
         <p class="lede">${escapeHtml(description)}</p>
         <div class="home-cta">
@@ -484,7 +473,7 @@ function homeHero(page) {
           <a class="btn btn-ghost" href="${repoBase}" rel="noopener">GitHub</a>
         </div>
         <div class="home-install"><span class="prompt">$</span><code>${escapeHtml(installCommand)}</code></div>
-        <div class="home-services"><span>Cloudflare Worker</span><span>GitHub OAuth</span><span>Ghostty WASM</span><span>SSH Gateway</span></div>
+        <div class="home-services"><span>Native Mac app</span><span>VNC</span><span>Private sharing</span><span>Linux connector</span></div>
         <p class="muted"><a href="${archRel}">Architecture overview →</a></p>
       </header>`;
 }
@@ -518,7 +507,7 @@ function layout({ page, html, toc, prev, next, sectionName }) {
     page.frontmatter.description ||
     (home ? productDescription : `${page.title} — ${productName} CLI documentation.`);
   const canonicalUrl = pageCanonicalUrl(page);
-  const socialImage = siteBase ? `${siteBase}/crabfleet-og.png` : `${rootPrefix}crabfleet-og.png`;
+  const socialImage = siteBase ? `${siteBase}/crabbox-logo.png` : `${rootPrefix}crabbox-logo.png`;
   const socialMeta = [
     ["link", "rel", "canonical", "href", canonicalUrl],
     ["meta", "property", "og:type", "content", "website"],

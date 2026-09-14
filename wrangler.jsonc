@@ -1,5 +1,6 @@
 {
   "$schema": "node_modules/wrangler/config-schema.json",
+  // Preserve the deployed Worker and database identities for existing desktop clients.
   "name": "crabbox-ai",
   "main": "src/index.ts",
   "compatibility_date": "2026-06-09",
@@ -8,25 +9,15 @@
     "command": "node scripts/generate-assets.mjs",
     "watch_dir": [
       "scripts/generate-assets.mjs",
-      "scripts/worker-markdown.mjs",
       "vite.config.mjs",
       "src/app.html",
-      "src/index.ts",
       "src/app",
       "src/assets",
-      "docs/spec.md",
-      "docs/spec-v2.md",
     ],
   },
   "account_id": "91b59577e757131d68d55a471fe32aca",
   "vars": {
-    "BACKUP_BUCKET_NAME": "crabfleet-session-logs",
-    "CLOUDFLARE_ACCOUNT_ID": "91b59577e757131d68d55a471fe32aca",
     "CRABFLEET_DEV_LOGIN_ENABLED": "false",
-    "CRABFLEET_TENANCY_MODE": "shared",
-    "CRABBOX_COORDINATOR_ORIGIN": "https://crabbox.openclaw.ai",
-    "CRABBOX_RUNTIME_ADAPTER_NAMESPACE": "openclaw",
-    "CRABBOX_RUNTIME_ADAPTER_URL": "https://crabbox.openclaw.ai",
     "GITHUB_REDIRECT_URI": "https://crabfleet.openclaw.ai/auth/github/callback",
   },
   "d1_databases": [
@@ -36,67 +27,17 @@
       "database_id": "0866ed65-a568-4d9f-a78a-aec41fe75e06",
     },
   ],
-  "r2_buckets": [
-    {
-      "binding": "SESSION_LOGS",
-      "bucket_name": "crabfleet-session-logs",
-    },
-    {
-      "binding": "BACKUP_BUCKET",
-      "bucket_name": "crabfleet-session-logs",
-    },
-  ],
-  "services": [
-    {
-      "binding": "CRABBOX_COORDINATOR",
-      "service": "crabbox-coordinator",
-    },
-  ],
-  "containers": [
-    {
-      "class_name": "Sandbox",
-      "image": "./Dockerfile",
-      "instance_type": "standard-2",
-      "max_instances": 20,
-    },
-  ],
   "durable_objects": {
-    "bindings": [
-      {
-        "name": "SANDBOX",
-        "class_name": "Sandbox",
-      },
-      {
-        "name": "SESSION_CONTROL",
-        "class_name": "SessionControlDO",
-      },
-      {
-        "name": "DESKTOP_RELAY",
-        "class_name": "DesktopRelayDO",
-      },
-    ],
+    "bindings": [{ "name": "DESKTOP_RELAY", "class_name": "DesktopRelayDO" }],
   },
   "migrations": [
-    {
-      "tag": "sandbox-v1",
-      "new_sqlite_classes": ["Sandbox"],
-    },
-    {
-      "tag": "session-control-v1",
-      "new_sqlite_classes": ["SessionControlDO"],
-    },
-    {
-      "tag": "desktop-relay-v1",
-      "new_sqlite_classes": ["DesktopRelayDO"],
-    },
+    { "tag": "sandbox-v1", "new_sqlite_classes": ["Sandbox"] },
+    { "tag": "session-control-v1", "new_sqlite_classes": ["SessionControlDO"] },
+    { "tag": "desktop-relay-v1", "new_sqlite_classes": ["DesktopRelayDO"] },
+    { "tag": "desktop-only-v1", "deleted_classes": ["Sandbox", "SessionControlDO"] },
   ],
   "workers_dev": false,
-  "triggers": {
-    "crons": ["* * * * *"],
-  },
-  // Worker Custom Domains are converged by ensure-cloudflare-domains.mjs so
-  // the regular deploy token does not need zone-route permissions.
-  "observability": {
-    "enabled": true,
-  },
+  "triggers": { "crons": ["0 * * * *"] },
+  // Existing app and product Custom Domains are maintained by ensure-cloudflare-domains.mjs.
+  "observability": { "enabled": true },
 }

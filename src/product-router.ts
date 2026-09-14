@@ -1,4 +1,4 @@
-import { routeProductRequest } from "./canonical-host";
+import { routeProductRequest } from "./canonical-host.ts";
 
 export default {
   fetch(request: Request): Response {

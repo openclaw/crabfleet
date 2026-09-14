@@ -6,20 +6,6 @@ changelog:
   disable: true
 
 builds:
-  - id: crabfleet
-    main: ./cmd/crabfleet
-    binary: crabfleet
-    env:
-      - CGO_ENABLED=0
-    ldflags:
-      - -s -w -X main.version={{ .Version }}
-    targets:
-      - darwin_amd64
-      - darwin_arm64
-      - linux_amd64
-      - linux_arm64
-      - windows_amd64
-      - windows_arm64
   - id: crabfleet-connect
     main: ./cmd/crabfleet-connect
     binary: crabfleet-connect
@@ -32,16 +18,6 @@ builds:
       - linux_arm64
 
 archives:
-  - id: crabfleet
-    ids:
-      - crabfleet
-    formats:
-      - tar.gz
-    name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
-    format_overrides:
-      - goos: windows
-        formats:
-          - zip
   - id: crabfleet-connect
     ids:
       - crabfleet-connect

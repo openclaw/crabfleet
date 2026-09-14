@@ -164,7 +164,7 @@ function nativeLinkConfirmHtml(
 <body>
   <h1>${connector ? "Authorize Crabfleet Connect" : "Authorize Crabfleet for macOS"}</h1>
   <p>Signed in as <strong>${htmlEscape(user)}</strong>.</p>
-  <p>Allow <code>${htmlEscape(clientName)}</code> to ${connector ? "publish and manage your shared desktops? The connector can renew this authorization while it is running. Desktop capture and control still require permission on that computer." : "read your visible Crabfleet sessions for 24 hours?"}</p>
+  <p>Allow <code>${htmlEscape(clientName)}</code> to ${connector ? "publish and manage your shared desktops? The connector can renew this authorization while it is running. Desktop capture and control still require permission on that computer." : "discover your shared desktops for 24 hours?"}</p>
   <form method="post" action="/native/link/${encodeURIComponent(code)}">
     <input type="hidden" name="csrf" value="${htmlEscape(csrf)}">
     <button type="submit">${connector ? "Authorize this connector" : "Authorize this Mac"}</button>
@@ -179,7 +179,7 @@ function nativeLinkSuccessHtml(clientName: string, user: string, connector = fal
 <head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Crabfleet authorized</title></head>
 <body style="font:16px/1.45 system-ui,sans-serif;margin:3rem;max-width:44rem">
   <h1>Crabfleet authorized</h1>
-  <p><strong>${htmlEscape(clientName)}</strong> can now ${connector ? "publish shared desktops for" : "read the sessions visible to"} ${htmlEscape(user)}. You can close this window.</p>
+  <p><strong>${htmlEscape(clientName)}</strong> can now ${connector ? "publish shared desktops for" : "discover the desktops shared by"} ${htmlEscape(user)}. You can close this window.</p>
 </body>
 </html>`;
 }

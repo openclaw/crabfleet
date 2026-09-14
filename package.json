@@ -1,10 +1,9 @@
 {
-  "name": "crabfleet-ai",
+  "name": "crabfleet",
   "private": true,
   "type": "module",
   "scripts": {
     "build": "node scripts/generate-assets.mjs && tsc --noEmit",
-    "build:static": "node scripts/generate-assets.mjs --static",
     "check": "node scripts/generate-assets.mjs && tsc --noEmit && oxlint --ignore-pattern node_modules --ignore-pattern src/generated.ts . && oxfmt --check .",
     "check:changed": "pnpm run check",
     "crabbox:hydrate": "crabbox actions hydrate",
@@ -16,7 +15,7 @@
     "deploy:domains:product": "node scripts/ensure-cloudflare-domains.mjs --product-only",
     "deploy:product": "pnpm deploy:product:worker && pnpm deploy:domains:product",
     "deploy:product:worker": "wrangler deploy --config wrangler.product.jsonc",
-    "format": "oxfmt --check .",
+    "format": "oxfmt --write .",
     "lint": "oxlint --ignore-pattern node_modules --ignore-pattern src/generated.ts .",
     "macos:build": "swift build --package-path macos/CrabfleetMac",
     "macos:bundle": "sh macos/CrabfleetMac/scripts/build-app.sh",
@@ -25,13 +24,11 @@
     "macos:test:vendor": "swift test --package-path macos/CrabfleetMac/Vendor/RoyalVNCKit",
     "test": "node --test --experimental-strip-types tests/*.test.ts",
     "test:changed": "pnpm run test",
-    "test:native": "node scripts/test-native.mjs"
+    "test:native": "node scripts/test-native.mjs",
+    "build:docs": "node scripts/build-docs-site.mjs"
   },
   "dependencies": {
-    "@cloudflare/sandbox": "0.12.8",
-    "@openclaw/libterminal": "0.3.2",
     "kysely": "^0.29.5",
-    "lucide-static": "^1.34.0",
     "preact": "^10.29.8"
   },
   "devDependencies": {
