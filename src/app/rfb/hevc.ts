@@ -239,7 +239,6 @@ export class HEVCDecoder {
       codec: codecStringForProfile(profile),
       description: hevcDescription(vps, sps, pps),
       optimizeForLatency: true,
-      hardwareAcceleration: "prefer-hardware",
     });
     this.#configurationDirty = false;
   }

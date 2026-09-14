@@ -99,7 +99,7 @@ test("Annex-B parser rejects pathological NAL counts", () => {
   assert.throws(() => parseAnnexB(payload, "h264"), /too many NAL units/);
 });
 
-test("H.264 replaces changed unflagged SPS configuration and ignores retired decoder callbacks", async (t) => {
+test("H.264 leaves acceleration to the browser across SPS changes and fences retired callbacks", async (t) => {
   const previousDecoder = Object.getOwnPropertyDescriptor(globalThis, "VideoDecoder");
   const previousChunk = Object.getOwnPropertyDescriptor(globalThis, "EncodedVideoChunk");
   t.after(() => {
@@ -118,6 +118,11 @@ test("H.264 replaces changed unflagged SPS configuration and ignores retired dec
       instances.push(this);
     }
     configure(configuration: Record<string, unknown>): void {
+      assert.equal(
+        configuration.hardwareAcceleration ?? "no-preference",
+        "no-preference",
+        "configuration must allow the browser to choose hardware or software decoding",
+      );
       this.configuration = configuration;
       this.state = "configured";
     }

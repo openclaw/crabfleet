@@ -413,10 +413,12 @@ fullscreen Preact viewer speaks RFB 3.8 over the owner-authenticated relay,
 offers feature-probed HEVC, Open H.264, and Tight/JPEG in that order, and never
 changes the host's default BGRA pixel format. HEVC is advertised only when the
 browser accepts the Main profile; the separate `C444` capability requires the
-RExt 4:4:4 probe. Decoder failure renegotiates HEVC to H.264 to Tight without
-affecting older hosts or clients. Framebuffer requests remain paced one at a
-time, including empty updates, and ExtendedDesktopSize requests are debounced
-until the host announces its screen layout.
+RExt 4:4:4 probe. Probes and decoder configuration let the browser choose
+hardware or software decoding. Probes cover representative profiles; an
+unsupported stream profile or decoder failure still renegotiates HEVC to H.264
+to Tight without affecting older hosts or clients. Framebuffer requests remain
+paced one at a time, including empty updates, and ExtendedDesktopSize requests
+are debounced until the host announces its screen layout.
 
 When the browser RFB client is used with a direct tailnet transport, it selects
 VNC authentication. A direct-transport embedding awaits the exported

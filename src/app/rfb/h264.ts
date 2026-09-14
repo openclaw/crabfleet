@@ -147,7 +147,6 @@ export class H264Decoder {
       codec: `avc1.${hex}`,
       description: avcDescription(this.#sps, this.#pps),
       optimizeForLatency: true,
-      hardwareAcceleration: "prefer-hardware",
     });
     this.#configurationDirty = false;
   }

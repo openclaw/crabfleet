@@ -357,7 +357,7 @@ class BitWriter {
   }
 }
 
-test("HEVC replaces the decoder when unflagged SPS dimensions change and fences old callbacks", async (t) => {
+test("HEVC leaves acceleration to the browser across SPS changes and fences retired callbacks", async (t) => {
   type Frame = {
     width: number;
     height: number;
@@ -384,6 +384,11 @@ test("HEVC replaces the decoder when unflagged SPS dimensions change and fences 
       instances.push(this);
     }
     configure(configuration: Record<string, unknown>): void {
+      assert.equal(
+        configuration.hardwareAcceleration ?? "no-preference",
+        "no-preference",
+        "configuration must allow the browser to choose hardware or software decoding",
+      );
       this.configuration = configuration;
       this.state = "configured";
     }
