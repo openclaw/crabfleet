@@ -2,19 +2,19 @@
 title: Native macOS Client
 layout: default
 permalink: /macos-native-client/
-description: "Scope, integration boundary, and security notes for the native macOS prototype."
+description: "Native Mac VNC viewing, desktop sharing, and integration details."
 ---
 
-# Native macOS client experiment
+# Crabfleet for macOS
 
-Status: early prototype. The app lives in `macos/CrabfleetMac` and provides a
+The app lives in `macos/CrabfleetMac` and provides a
 SwiftUI fleet browser, an AppKit-hosted Metal-rendered VNC surface, and an
 app-owned private desktop host for Mac-to-Mac access.
 
 ## Product shape
 
 - Screens-style desktop deck combining saved generic VNC connections and
-  Crabfleet leases, with source filters, search, status, and Quick Connect.
+  shared desktops, with source filters, search, status, and Quick Connect.
 - Fast matched card-to-desktop transition, full-screen focus mode, desktop
   switcher, reconnect controls, and retained framebuffer previews.
 - Stable app-owned session controllers. Up to six user-opened desktops stay
@@ -510,7 +510,7 @@ Keep further changes narrow and upstreamable:
 
 ## Integration boundary
 
-The prototype connects to a user-entered Crabfleet deployment through the
+The app connects to a user-entered Crabfleet deployment through the
 versioned native API. It creates a short-lived device authorization, opens the
 same-origin `/native/link/*` page for browser approval, exchanges the approved
 device code for a 24-hour `fleet:read` bearer, validates the native session, and
@@ -521,29 +521,6 @@ synchronously before starting best-effort server revocation; if local removal
 fails, the existing connection is kept so the user can retry instead of
 silently orphaning a restorable credential. Switching deployments applies the
 same local-cleanup fence.
-
-When a deployment gateway redirects the initial device request, the client can
-instead follow the same-origin `resource_metadata` URL in the protected route's
-Bearer challenge and its explicit read-only scope, dynamically register a
-public client, use authorization-code PKCE, and receive the callback on the
-exact loopback redirect URI returned by registration. The resulting gateway
-bearer and optional refresh grant are
-stored under the same deployment-scoped Keychain policy and are sent only to
-`/mcp/crabfleet/native/v1/session`, `/mcp/crabfleet/native/v1/fleet`, and
-`/mcp/crabfleet/native/v1/native-vnc`.
-The client requires each RFC 9728 route challenge to identify its exact
-protected resource and requests all identifiers. For gateways that return
-authorization-server metadata directly, a `resource` field is rejected and an
-explicit `api://` scope must match the issued JWT's `aud` claim before use.
-The app asks for explicit trust before contacting any OAuth provider origin
-outside the deployment itself and rejects oversized aggregate scope lists
-before registration.
-An unauthorized read rotates an available refresh grant in Keychain before one
-retry; a rejected refresh grant expires the saved connection.
-Those gateway routes must authenticate the user, strip the gateway bearer
-before proxying, and map only those exact read methods to Crabfleet's
-authenticated native session, Fleet, and VNC-grant routes. Unknown paths,
-queries, other mutations, and WebSocket upgrades remain closed.
 
 Saved and ad-hoc VNC profiles are also available through an explicit local-only
 mode. That mode does not contact a deployment, synthesize Fleet data, or create
@@ -559,8 +536,7 @@ the app retries transient network and `503` failures without opening a second
 browser approval, including transient session validation after the token
 handoff. Cancellation or permanent validation failure revokes a handed-off
 token from a fresh cleanup task. The device-link bearer exposes only the current
-user's redacted, tenant-visible Fleet registry; it cannot mutate sessions,
-attach terminals, mint desktop connections, or call the browser REST surface.
+user's private desktop registry; publication requires a separate host credential.
 Retired deployment clients finish their cleanup and explicitly invalidate the
 delegate-backed URL session so reconnects do not retain old network stacks.
 
@@ -580,41 +556,19 @@ team state, and the deployment allowlist before handoff and on every native API
 use. The encrypted GitHub credential used for those checks remains server-side
 and is never exposed to the app.
 
-The app also accepts a manual loopback host, port, and in-memory credential for
-the actual RFB connection. The Worker browser endpoint
-`/api/interactive-sessions/:id/vnc` redirects to browser/noVNC desktop
-connections; it is not a raw-RFB contract for native clients.
-
-For a controllable desktop-capable Crabbox lease, the native Fleet response
-includes its non-secret provider lease identifier. The app starts the installed
-`crabbox vnc --native-handoff` helper directly, consumes one bounded JSON line
-from a private stdout pipe, and connects only to the returned IPv4 loopback
-endpoint. The helper owns the SSH tunnel in the foreground. Closing, replacing,
-evicting, or losing the VNC session terminates that helper and tunnel. The VNC
-password remains in process memory and never enters argv, a URL, defaults, or a
-file. Manual entry remains the fallback for non-Crabbox targets.
-
-Share This Mac does not use the runtime-adapter boundary. Its direct Mac-to-Mac
-path depends only on the local Tailscale client; registered token-owned shares
-may also publish the optional owner-scoped browser relay described above.
+The app also accepts a manual host, port, and credential for direct RFB connections.
+Share This Mac connects over the local Tailscale network; registered token-owned shares
+can additionally publish an owner-scoped browser relay. Workspace adapter handoffs are
+no longer provided by the desktop service.
 
 ## Build
 
 ```sh
 pnpm macos:test
-pnpm macos:bundle
+CODE_SIGN_IDENTITY="Developer ID Application: OpenClaw Foundation (FWJYW4S8P8)" pnpm macos:bundle
 ```
 
-The bundle command creates an ad-hoc signed local app for visual testing by
-default. For a stable Screen Recording permission across rebuilds, create or
-synchronize an Apple Development identity in Xcode Settings > Accounts, then
-use it consistently:
-
-```sh
-CODE_SIGN_IDENTITY="Apple Development: Your Name (TEAMID)" pnpm macos:bundle
-```
-
-Production needs a Developer ID Application identity, hardened runtime, secure
-timestamp, notarization, and final third-party-notice review. The bundle script
-enables the signing-side distribution requirements when
-`CODE_SIGN_HARDENED_RUNTIME=1` is set with a Developer ID identity.
+Use the full Xcode toolchain for tests. Always sign with a real Developer ID and
+install to `/Applications/Crabfleet.app` before testing capture, input, or stored
+Keychain credentials. Reuse that identity and stable path so macOS permissions
+survive rebuilding. Distribution also requires notarization and final third-party notices.

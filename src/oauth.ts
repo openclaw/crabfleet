@@ -35,25 +35,6 @@ export function githubOAuthCanonicalLoginUrl(
   return `${callback.origin}${githubOAuthLoginPath}`;
 }
 
-export function githubOAuthCanonicalSshLinkUrl(
-  requestUrl: string | URL,
-  code: string,
-  configured?: string,
-): string | null {
-  if (configured === undefined) return null;
-  const callback = new URL(configuredGitHubOAuthRedirectUri(configured));
-  const request = new URL(requestUrl);
-  if (
-    request.protocol === "https:" &&
-    !request.username &&
-    !request.password &&
-    request.origin === callback.origin
-  ) {
-    return null;
-  }
-  return `${callback.origin}/ssh/link/${encodeURIComponent(code)}`;
-}
-
 export function githubOAuthCanonicalNativeLinkUrl(
   requestUrl: string | URL,
   code: string,

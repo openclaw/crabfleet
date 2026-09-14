@@ -88,13 +88,7 @@ export async function optionalUser(
   } catch (error) {
     const status =
       typeof error === "object" && error && "status" in error ? Number(error.status) : 0;
-    const url = new URL(request.url);
-    if (
-      status === 401 ||
-      (status === 403 && url.pathname === "/api/terminal/ws" && url.searchParams.has("token"))
-    ) {
-      return null;
-    }
+    if (status === 401) return null;
     throw error;
   }
 }

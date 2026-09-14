@@ -2,8 +2,9 @@
 
 ## Unreleased
 
-- Redesign the public website, documentation, sign-in, and Fleet dashboard with responsive layouts and a shared visual system; put mobile authentication first, fix oversized SSH controls, retain failed token input, and make connector authorization, completion, and recovery pages work on phone screens.
+- Redesign the public website, documentation, sign-in, and desktop companion with responsive layouts and a shared visual system; put mobile authentication first, retain failed token input, and make connector authorization, completion, and recovery pages work on phone screens.
 - Add Linux VAAPI/NVENC video selection with recoverable software fallback, negotiated live desktop sizing with decoder resets and opt-in supported mode changes, simultaneous X11/Wayland/portal monitor sharing, and an administrator-configured SDDM Wayland greeter wrapper with separate authenticated state and bounded helper cleanup.
+- Focus Crabfleet on native VNC and private desktop sharing: remove the Codex board, workspace runtimes, terminals, agent CLI/SSH gateway, and related deployment machinery; retain desktop sign-in, discovery, host publication, and the browser VNC relay.
 - Keep Linux HEVC video in the browser-compatible Main profile while preserving independently decodable frames, avoiding an unnecessary H.264 fallback; label shared-desktop keyboard and clipboard controls correctly for Linux as well as Mac hosts.
 - Run native validation for the current OS with `pnpm test:native`, including Go race tests and vet, plus Swift suites on macOS; make local Linux validation independent of Crabbox authentication or Mac runner access.
 - Add a Linux desktop connector with X11, Hyprland/wlroots and GNOME/KDE portal capture; scoped Fleet sign-in and reconnecting browser relay; negotiated H.264/HEVC, UTF-8 clipboard, opt-in system audio and confined shared folders; systemd user service/autostart; private persistent state and publication recovery; Linux amd64/arm64 archives and protocol, media and compositor tests. Direct VNC now offers only its implemented password authentication so native viewers no longer select the old ARD stub.

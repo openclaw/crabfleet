@@ -1,5 +1,4 @@
 node_modules
-src/spec.generated.ts
 # Rebuilt from canonical sources by pnpm check/build/deploy; do not commit.
 src/generated.ts
 dist/

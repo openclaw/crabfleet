@@ -13,28 +13,17 @@ const cname = readCname();
 const siteBase = cname ? `https://${cname}` : "";
 
 const productName = "Crabfleet";
-const productTagline = "Your agent work. One clear view.";
+const productTagline = "Your computers, within reach.";
 const productDescription =
-  "Crabfleet is a Cloudflare Worker control plane for OpenClaw Codex crabboxes and run attempts - repo-ready workspaces, fleet visibility grouped by person, WebVNC, prompt cards, repo gates, workflow policy, and attachable Ghostty WASM session views.";
-const installCommand = "ssh link@crabd.sh";
+  "Crabfleet is a native VNC app for private desktop sharing, with Mac viewing and Linux and Windows hosts.";
+const installCommand = "open /Applications/Crabfleet.app";
 const codePlaceholder = String.fromCharCode(0);
 const codePlaceholderPattern = new RegExp(`${codePlaceholder}(\\d+)${codePlaceholder}`, "g");
 
 const sections = [
   ["Start", ["index.md", "quickstart.md", "architecture.md"]],
-  [
-    "Features",
-    [
-      "cards.md",
-      "runs.md",
-      "github-actions-sessions.md",
-      "macos-native-client.md",
-      "linux-connector.md",
-      "linux-greeter.md",
-      "admin.md",
-    ],
-  ],
-  ["Reference", ["api.md", "spec.md", "spec-v2.md"]],
+  ["Desktops", ["macos-native-client.md", "linux-connector.md", "linux-greeter.md"]],
+  ["Reference", ["admin.md", "api.md", "screen-recording-indicator.md"]],
 ];
 
 // Skip these from page generation (internal notes, generated subpages we don't want as their own
@@ -90,7 +79,6 @@ for (const page of pages) {
 fs.writeFileSync(path.join(outDir, "favicon.svg"), faviconSvg(), "utf8");
 
 copyStaticAsset("crabbox-logo.png");
-copyStaticAsset("crabfleet-og.png");
 fs.writeFileSync(path.join(outDir, ".nojekyll"), "", "utf8");
 if (cname) fs.writeFileSync(path.join(outDir, "CNAME"), cname, "utf8");
 validateLinks(outDir);
@@ -470,36 +458,38 @@ function isHomePage(page) {
 
 function homeHero(page) {
   const quickstartRel = hrefToOutRel(pageMap.get("quickstart.md").outRel, page.outRel);
+  const macRel = hrefToOutRel(pageMap.get("macos-native-client.md").outRel, page.outRel);
+  const linuxRel = hrefToOutRel(pageMap.get("linux-connector.md").outRel, page.outRel);
   const archRel = hrefToOutRel(pageMap.get("architecture.md").outRel, page.outRel);
   return `<header class="home-hero">
     <div class="home-intro">
-      <p class="eyebrow"><span class="status-dot"></span> MISSION CONTROL FOR AGENT WORK</p>
-      <h1>Your fleet.<br><em>Within reach.</em></h1>
-      <p class="lede">A home for your agent workspaces, live terminals, and shared desktops. Keep the whole picture in view. Get back to the work that matters.</p>
+      <p class="eyebrow"><span class="status-dot"></span> REMOTE DESKTOP, CLOSE TO HOME</p>
+      <h1>Your computers.<br><em>Within reach.</em></h1>
+      <p class="lede">Connect to your computers, share a desktop, and pick up where you left off. A native Mac viewer and private sharing for the screens you depend on.</p>
       <div class="home-cta">
-        <a class="btn btn-primary" href="https://crabfleet.openclaw.ai/app/">Open your fleet <span aria-hidden="true">↗</span></a>
-        <a class="btn btn-ghost" href="${quickstartRel}">Get started <span aria-hidden="true">→</span></a>
+        <a class="btn btn-primary" href="${quickstartRel}">Get started <span aria-hidden="true">→</span></a>
+        <a class="btn btn-ghost" href="https://crabfleet.openclaw.ai/app/">Open web viewer <span aria-hidden="true">↗</span></a>
       </div>
-      <div class="home-install"><span class="prompt">$</span><code>${escapeHtml(installCommand)}</code></div>
-      <p class="home-caption">Prefer the terminal? Link your SSH key and you're in.</p>
+      <div class="home-platforms"><span>NATIVE MAC VIEWER</span><span>LINUX &amp; WINDOWS HOSTS</span><span>VNC COMPATIBLE</span></div>
+      <p class="home-caption">Ordinary VNC connections work without an account.</p>
     </div>
-    <div class="fleet-preview" aria-label="Illustration of a Crabfleet workspace">
-      <div class="preview-top"><span><img src="crabbox-logo.png" alt="" width="22" height="22"> Crabfleet</span><span>WORKSPACE PREVIEW</span></div>
-      <div class="preview-heading"><span>Your fleet</span><span class="preview-badge">3 connected</span></div>
-      <div class="preview-count"><strong>Work in motion.</strong><span>One place to see it through.</span></div>
-      <div class="preview-session"><span class="preview-avatar">01</span><div><strong>Workspace</strong><span>Repo ready · terminal attached</span></div><i></i></div>
-      <div class="preview-session"><span class="preview-avatar">02</span><div><strong>Build &amp; review</strong><span>GitHub Actions · live session</span></div><i></i></div>
-      <div class="preview-session"><span class="preview-avatar">03</span><div><strong>Shared desktop</strong><span>Native host · browser viewer</span></div><i></i></div>
-      <div class="preview-terminal"><span>~/workspace</span><code><span>$</span> crabfleet list<br><span>✓</span> Your next step is within reach.</code></div>
-      <div class="preview-bottom"><span class="status-dot"></span> SSH · BROWSER · NATIVE</div>
+    <div class="desktop-preview" aria-label="Illustration of shared computers in Crabfleet">
+      <div class="preview-top"><span><img src="crabbox-logo.png" alt="" width="22" height="22"> Crabfleet</span><span>DESKTOP PREVIEW</span></div>
+      <div class="preview-heading"><span>Your computers</span><span class="preview-badge">Private</span></div>
+      <div class="preview-count"><strong>A familiar place to return to.</strong><span>Three example desktops. One clear view.</span></div>
+      <div class="preview-session"><span class="preview-avatar">01</span><div><strong>Office Mac</strong><span>macOS · shared display</span></div><i></i></div>
+      <div class="preview-session"><span class="preview-avatar">02</span><div><strong>Linux workstation</strong><span>Linux · desktop connector</span></div><i></i></div>
+      <div class="preview-session"><span class="preview-avatar">03</span><div><strong>Windows PC</strong><span>Windows · direct VNC</span></div><i></i></div>
+      <div class="preview-note"><span>YOUR DESKTOP, YOUR WAY</span><p>View on your Mac. Share a computer.<br>Connect through your browser.</p></div>
+      <div class="preview-bottom"><span class="status-dot"></span> MAC · LINUX · WINDOWS</div>
     </div>
   </header>
-  <section class="home-principles" aria-label="Ways to work">
-    <article><span class="principle-number">01 / START</span><h2>A workspace.<br>Without the busywork.</h2><p>Create a repo-ready crabbox from SSH, the CLI, or your browser. Your next task has a place to live.</p><a href="${quickstartRel}">Launch your first workspace →</a></article>
-    <article><span class="principle-number">02 / CONNECT</span><h2>Right there.<br>Wherever you are.</h2><p>Attach a live terminal or open a shared desktop. Move between your machines without losing the thread.</p><a href="${hrefToOutRel(pageMap.get("macos-native-client.md").outRel, page.outRel)}">Explore desktop sharing →</a></article>
-    <article><span class="principle-number">03 / SEE IT THROUGH</span><h2>The whole fleet.<br>A clearer picture.</h2><p>See work grouped by operator, follow session progress, and find the tasks that need your attention.</p><a href="${archRel}">See how it fits together →</a></article>
+  <section class="home-principles" aria-label="Ways to connect">
+    <article><span class="principle-number">01 / CONNECT</span><h2>At home.<br>On your Mac.</h2><p>Save your connections, open a desktop with Quick Connect, and switch between warm sessions in a native Mac viewer.</p><a href="${macRel}">Explore the Mac app →</a></article>
+    <article><span class="principle-number">02 / SHARE</span><h2>Every computer.<br>A little closer.</h2><p>Share your Mac, or host a Linux or Windows desktop with Crabfleet Connect. Choose the screens and access you need.</p><a href="${linuxRel}">Set up a Linux host →</a></article>
+    <article><span class="principle-number">03 / CHOOSE</span><h2>Use VNC.<br>On your terms.</h2><p>Connect directly without an account. Add the optional desktop service for private discovery and authenticated browser access.</p><a href="${archRel}">See how it fits together →</a></article>
   </section>
-  <div class="overview-heading"><p class="eyebrow">THE FIELD GUIDE</p><h2>Everything you need to get underway.</h2><p>Explore what ships today, how it works, and where to go next.</p></div>`;
+  <div class="overview-heading"><p class="eyebrow">THE DESKTOP GUIDE</p><h2>A closer look at Crabfleet.</h2><p>Get connected, choose what to share, and make yourself at home.</p></div>`;
 }
 
 function standardHero(page, sectionName, editUrl) {
@@ -529,9 +519,9 @@ function layout({ page, html, toc, prev, next, sectionName }) {
     : `${page.title} — ${productName}`;
   const description =
     page.frontmatter.description ||
-    (home ? productDescription : `${page.title} — ${productName} CLI documentation.`);
+    (home ? productDescription : `${page.title} — ${productName} desktop documentation.`);
   const canonicalUrl = pageCanonicalUrl(page);
-  const socialImage = siteBase ? `${siteBase}/crabfleet-og.png` : `${rootPrefix}crabfleet-og.png`;
+  const socialImage = siteBase ? `${siteBase}/crabbox-logo.png` : `${rootPrefix}crabbox-logo.png`;
   const socialMeta = [
     ["link", "rel", "canonical", "href", canonicalUrl],
     ["meta", "property", "og:type", "content", "website"],
@@ -572,11 +562,11 @@ function layout({ page, html, toc, prev, next, sectionName }) {
       <div class="sidebar-head">
         <a class="brand" href="${hrefToOutRel("index.html", page.outRel)}" aria-label="${productName} docs home">
           <img class="mark" src="${rootPrefix}crabbox-logo.png" alt="" width="28" height="28">
-          <span><strong>${escapeHtml(productName)}</strong><small>Control plane docs</small></span>
+          <span><strong>${escapeHtml(productName)}</strong><small>Desktop guides</small></span>
         </a>
         ${themeToggleHtml()}
       </div>
-      <label class="search"><span>Search</span><input id="doc-search" type="search" placeholder="cards, runs, admin"></label>
+      <label class="search"><span>Search</span><input id="doc-search" type="search" placeholder="Mac, Linux, sharing"></label>
       <nav>${navHtml(page)}</nav>
     </aside>
     <main id="main-content">

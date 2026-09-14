@@ -3,7 +3,7 @@ import { desktopHostID, desktopHostOwnershipHeader } from "./desktop-host-servic
 import type { RuntimeEnv } from "./env.ts";
 import { badRequest, forbidden, notFound, serviceUnavailable, unauthorized } from "./http.ts";
 import type { User } from "./models.ts";
-import { validateTerminalWebSocketOrigin } from "./session-terminal-route.ts";
+import { validateDesktopWebSocketOrigin } from "./desktop-origin.ts";
 import { tenantSubject } from "./tenancy.ts";
 
 export type DesktopRelayRoute = {
@@ -33,7 +33,7 @@ export class DesktopRelayService {
 
   async openViewer(request: Request, user: User, rawHostID: string): Promise<Response> {
     requireWebSocketUpgrade(request);
-    validateTerminalWebSocketOrigin(request, this.env, false);
+    validateDesktopWebSocketOrigin(request, this.env);
     const hostID = desktopHostID(rawHostID);
     const ownerSubject = tenantSubject(user);
     const registration = await this.registrations.findOwnedTokenRegistration(ownerSubject, hostID);

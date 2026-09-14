@@ -9,7 +9,6 @@ on:
       - "internal/**"
       - "go.mod"
       - "go.sum"
-      - "Dockerfile.ssh-gateway"
       - ".github/workflows/cli.yml"
       - ".goreleaser.yaml"
       - "scripts/test-linux-connector.sh"
@@ -20,7 +19,6 @@ on:
       - "internal/**"
       - "go.mod"
       - "go.sum"
-      - "Dockerfile.ssh-gateway"
       - ".github/workflows/cli.yml"
       - ".goreleaser.yaml"
       - "scripts/test-linux-connector.sh"
@@ -36,7 +34,7 @@ concurrency:
 
 jobs:
   go:
-    name: Go CLI
+    name: Desktop connector
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -58,12 +56,6 @@ jobs:
       - name: Vet
         run: go vet ./...
 
-      - name: Build crabfleet
-        run: go build -trimpath -o /tmp/crabfleet ./cmd/crabfleet
-
-      - name: Build SSH gateway
-        run: go build -trimpath -o /tmp/crabbox-ssh-gateway ./cmd/crabbox-ssh-gateway
-
       - name: Build Linux connector
         run: |
           CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -o /tmp/crabfleet-connect ./cmd/crabfleet-connect
@@ -74,17 +66,10 @@ jobs:
           CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -trimpath -o /tmp/crabfleet-connect-amd64.exe ./cmd/crabfleet-connect
           CGO_ENABLED=0 GOOS=windows GOARCH=arm64 go build -trimpath -o /tmp/crabfleet-connect-arm64.exe ./cmd/crabfleet-connect
 
-      - name: Smoke CLI help
+      - name: Smoke connector help
         run: |
-          /tmp/crabfleet --version
-          /tmp/crabfleet --help
-          /tmp/crabfleet new --help
-          /tmp/crabfleet login --help
           /tmp/crabfleet-connect --version
           /tmp/crabfleet-connect --help
-
-      - name: Build SSH gateway image
-        run: docker build -f Dockerfile.ssh-gateway .
 
   linux-desktop:
     name: Linux desktop and media
