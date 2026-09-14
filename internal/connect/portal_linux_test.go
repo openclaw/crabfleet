@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -25,22 +26,41 @@ func TestPortalDBusContract(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-	defer cancel()
-	cmd := exec.CommandContext(ctx, "dbus-run-session", "--", executable, "-test.run=^TestPortalDBusChild$", "-test.v")
-	cmd.Env = append(os.Environ(), "CRABFLEET_PORTAL_CONTRACT=1")
-	output, err := cmd.CombinedOutput()
-	if err != nil {
-		t.Fatalf("portal contract failed: %v\n%s", err, output)
+	for _, multiple := range []bool{false, true} {
+		t.Run(fmt.Sprintf("multiple=%t", multiple), func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+			defer cancel()
+			cmd := exec.CommandContext(ctx, "dbus-run-session", "--", executable, "-test.run=^TestPortalDBusChild$", "-test.v")
+			cmd.Env = append(os.Environ(), "CRABFLEET_PORTAL_CONTRACT=1", "CRABFLEET_PORTAL_MULTIPLE="+strconv.FormatBool(multiple))
+			output, err := cmd.CombinedOutput()
+			if err != nil {
+				t.Fatalf("portal contract failed: %v\n%s", err, output)
+			}
+		})
 	}
+
 }
 func TestPortalCaptureHelper(t *testing.T) {
 	if os.Getenv("CRABFLEET_PORTAL_HELPER") != "1" {
 		return
 	}
-	pixels := make([]byte, 32*24*4)
+	width, height, red := 0, 0, byte(7)
+	for _, arg := range os.Args {
+		if strings.HasPrefix(arg, "video/x-raw,") {
+			if _, err := fmt.Sscanf(arg, "video/x-raw,format=RGBA,width=%d,height=%d", &width, &height); err != nil {
+				os.Exit(2)
+			}
+		}
+		if arg == "path=43" {
+			red = 19
+		}
+	}
+	if width < 1 || height < 1 || width > 80 || height > 80 {
+		os.Exit(2)
+	}
+	pixels := make([]byte, width*height*4)
 	for i := 0; i < len(pixels); i += 4 {
-		pixels[i], pixels[i+1], pixels[i+2], pixels[i+3] = 7, 9, 11, 255
+		pixels[i], pixels[i+1], pixels[i+2], pixels[i+3] = red, 9, 11, 255
 	}
 	for {
 		if _, err := os.Stdout.Write(pixels); err != nil {
@@ -50,6 +70,15 @@ func TestPortalCaptureHelper(t *testing.T) {
 	}
 }
 
+type fixtureButton struct {
+	button int32
+	state  uint32
+}
+type fixtureMotion struct {
+	node uint32
+	x, y float64
+}
+
 type fixturePortal struct {
 	bus             *dbus.Conn
 	session         dbus.ObjectPath
@@ -57,7 +86,11 @@ type fixturePortal struct {
 	requested       uint32
 	clipboard       bool
 	keys            chan int32
-	buttons         chan int32
+	buttons         chan fixtureButton
+	motions         chan fixtureMotion
+	selections      chan bool
+	multiple        bool
+	remoteCalls     atomic.Int32
 	closed          chan struct{}
 	deny            atomic.Bool
 	readFD, writeFD *os.File
@@ -85,12 +118,23 @@ func (f *fixturePortal) SelectSources(_ dbus.ObjectPath, options map[string]dbus
 	if _, ok := options["persist_mode"]; ok {
 		return "", dbus.NewError("org.example.BadPersistence", nil)
 	}
+	multiple, _ := options["multiple"].Value().(bool)
+	f.selections <- multiple
 	return f.respond(options, nil)
 }
 func (f *fixturePortal) Start(_ dbus.ObjectPath, _ string, options map[string]dbus.Variant) (dbus.ObjectPath, *dbus.Error) {
-	return f.respond(options, map[string]dbus.Variant{"devices": dbus.MakeVariant(f.requested), "clipboard_enabled": dbus.MakeVariant(f.clipboard), "restore_token": dbus.MakeVariant("fixture-restore"), "streams": dbus.MakeVariant([]portalStream{{Node: 42, Properties: map[string]dbus.Variant{"size": dbus.MakeVariant(struct{ Width, Height int32 }{32, 24}), "pipewire-serial": dbus.MakeVariant(uint64(1234))}}})})
+	streams := []portalStream{{Node: 42, Properties: map[string]dbus.Variant{"size": dbus.MakeVariant(struct{ Width, Height int32 }{32, 24}), "pipewire-serial": dbus.MakeVariant(uint64(1234))}}}
+	if f.multiple {
+		streams[0].Properties["position"] = dbus.MakeVariant(struct{ X, Y int32 }{-40, -12})
+		streams = append(streams, portalStream{Node: 43, Properties: map[string]dbus.Variant{
+			"size":     dbus.MakeVariant(struct{ Width, Height int32 }{40, 24}),
+			"position": dbus.MakeVariant(struct{ X, Y int32 }{0, 0}),
+		}})
+	}
+	return f.respond(options, map[string]dbus.Variant{"devices": dbus.MakeVariant(f.requested), "clipboard_enabled": dbus.MakeVariant(f.clipboard), "restore_token": dbus.MakeVariant("fixture-restore"), "streams": dbus.MakeVariant(streams)})
 }
 func (f *fixturePortal) OpenPipeWireRemote(dbus.ObjectPath, map[string]dbus.Variant) (dbus.UnixFD, *dbus.Error) {
+	f.remoteCalls.Add(1)
 	return dbus.UnixFD(f.fd.Fd()), nil
 }
 func (f *fixturePortal) RequestClipboard(dbus.ObjectPath, map[string]dbus.Variant) *dbus.Error {
@@ -116,13 +160,11 @@ func (f *fixturePortal) NotifyKeyboardKeysym(_ dbus.ObjectPath, _ map[string]dbu
 	return nil
 }
 func (f *fixturePortal) NotifyPointerMotionAbsolute(_ dbus.ObjectPath, _ map[string]dbus.Variant, node uint32, x, y float64) *dbus.Error {
-	if node != 42 || x != 10 || y != 12 {
-		return dbus.NewError("org.example.WrongCoordinates", nil)
-	}
+	f.motions <- fixtureMotion{node: node, x: x, y: y}
 	return nil
 }
-func (f *fixturePortal) NotifyPointerButton(_ dbus.ObjectPath, _ map[string]dbus.Variant, button int32, _ uint32) *dbus.Error {
-	f.buttons <- button
+func (f *fixturePortal) NotifyPointerButton(_ dbus.ObjectPath, _ map[string]dbus.Variant, button int32, state uint32) *dbus.Error {
+	f.buttons <- fixtureButton{button: button, state: state}
 	return nil
 }
 func (f *fixturePortal) Close() *dbus.Error {
@@ -161,7 +203,7 @@ func TestPortalDBusChild(t *testing.T) {
 	}
 	defer receive.Close()
 	defer writeFD.Close()
-	f := &fixturePortal{bus: bus, session: "/org/freedesktop/portal/desktop/session/fixture/session", fd: fd, keys: make(chan int32, 4), buttons: make(chan int32, 4), closed: make(chan struct{}), readFD: readFD, writeFD: writeFD, selectionDone: make(chan bool, 1)}
+	f := &fixturePortal{bus: bus, session: "/org/freedesktop/portal/desktop/session/fixture/session", fd: fd, keys: make(chan int32, 4), buttons: make(chan fixtureButton, 4), motions: make(chan fixtureMotion, 4), selections: make(chan bool, 4), multiple: os.Getenv("CRABFLEET_PORTAL_MULTIPLE") == "true", closed: make(chan struct{}), readFD: readFD, writeFD: writeFD, selectionDone: make(chan bool, 1)}
 	for _, iface := range []string{remoteDesktop, screenCast, portalClipboard} {
 		if err := bus.Export(f, portalPath, iface); err != nil {
 			t.Fatal(err)
@@ -175,7 +217,7 @@ func TestPortalDBusChild(t *testing.T) {
 	}
 	executable, _ := os.Executable()
 	bin := t.TempDir()
-	script := fmt.Sprintf("#!/bin/sh\nexport CRABFLEET_PORTAL_HELPER=1\nexec '%s' -test.run=^TestPortalCaptureHelper$\n", strings.ReplaceAll(executable, "'", "'\\''"))
+	script := fmt.Sprintf("#!/bin/sh\nexport CRABFLEET_PORTAL_HELPER=1\nexec '%s' -test.run=^TestPortalCaptureHelper$ -- \"$@\"\n", strings.ReplaceAll(executable, "'", "'\\''"))
 	if err := os.WriteFile(filepath.Join(bin, "gst-launch-1.0"), []byte(script), 0700); err != nil {
 		t.Fatal(err)
 	}
@@ -183,7 +225,7 @@ func TestPortalDBusChild(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	var restore string
-	backend, err := NewPortal(ctx, PortalOptions{Clipboard: true, SaveRestoreToken: func(value string) error { restore = value; return nil }})
+	backend, err := NewPortal(ctx, PortalOptions{AllMonitors: f.multiple, Clipboard: true, SaveRestoreToken: func(value string) error { restore = value; return nil }})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -192,7 +234,14 @@ func TestPortalDBusChild(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if frame.Width != 32 || frame.Height != 24 || frame.Pixels[0] != 7 || frame.Pixels[1] != 9 || frame.Pixels[2] != 11 || restore != "fixture-restore" {
+	if selected := <-f.selections; selected != f.multiple {
+		t.Fatal("multiple source selection must be explicitly requested")
+	}
+	width, height, streams := 32, 24, 1
+	if f.multiple {
+		width, height, streams = 80, 36, 2
+	}
+	if frame.Width != width || frame.Height != height || len(frame.Screens) != streams || int(f.remoteCalls.Load()) != streams || frame.Pixels[0] != 7 || frame.Pixels[1] != 9 || frame.Pixels[2] != 11 || restore != "fixture-restore" {
 		t.Fatal("portal frame or restore token was lost")
 	}
 	if err := backend.Key(ctx, KeyEvent{Keysym: 'a', Down: true}); err != nil {
@@ -204,8 +253,41 @@ func TestPortalDBusChild(t *testing.T) {
 	if err := backend.Pointer(ctx, PointerEvent{X: 10, Y: 12, ButtonMask: 1}); err != nil {
 		t.Fatal(err)
 	}
-	if button := <-f.buttons; button != 272 {
+	if button := <-f.buttons; button != (fixtureButton{272, 1}) {
 		t.Fatal("incorrect evdev button")
+	}
+	if motion := <-f.motions; motion != (fixtureMotion{42, 10, 12}) {
+		t.Fatalf("incorrect initial pointer coordinates: %+v", motion)
+	}
+	if f.multiple {
+		if frame.Screens[0] != (Screen{ID: 42, Width: 32, Height: 24}) || frame.Screens[1] != (Screen{ID: 43, X: 40, Y: 12, Width: 40, Height: 24}) {
+			t.Fatalf("incorrect normalized monitor geometry: %+v", frame.Screens)
+		}
+		if frame.Pixels[12*frame.Stride+40*4] != 19 || frame.Pixels[14*frame.Stride+36*4] != 0 || frame.Pixels[14*frame.Stride+36*4+3] != 255 {
+			t.Fatal("monitor frames or the opaque desktop gap were composited incorrectly")
+		}
+		if err := backend.Pointer(ctx, PointerEvent{X: 50, Y: 20, ButtonMask: 1}); err != nil {
+			t.Fatal(err)
+		}
+		if motion := <-f.motions; motion != (fixtureMotion{43, 10, 8}) {
+			t.Fatalf("incorrect coordinates crossing monitors: %+v", motion)
+		}
+		if err := backend.Pointer(ctx, PointerEvent{X: 36, Y: 14}); err != nil {
+			t.Fatal(err)
+		}
+		if button := <-f.buttons; button != (fixtureButton{272, 0}) {
+			t.Fatal("button release in monitor gap was lost")
+		}
+		if err := backend.Pointer(ctx, PointerEvent{X: 36, Y: 14, ButtonMask: 1}); err != nil {
+			t.Fatal(err)
+		}
+		select {
+		case motion := <-f.motions:
+			t.Fatalf("gap injected motion: %+v", motion)
+		case button := <-f.buttons:
+			t.Fatalf("gap injected a new button press: %+v", button)
+		default:
+		}
 	}
 	if err := bus.Emit(portalPath, portalClipboard+".SelectionOwnerChanged", f.session, map[string]dbus.Variant{"mime_types": dbus.MakeVariant([]string{"text/plain;charset=utf-8"}), "session_is_owner": dbus.MakeVariant(false)}); err != nil {
 		t.Fatal(err)
@@ -270,5 +352,53 @@ func TestPortalDBusChild(t *testing.T) {
 	if denied, err := NewPortal(ctx, PortalOptions{}); err == nil {
 		_ = denied.Close()
 		t.Fatal("portal permission denial did not fail startup")
+	}
+}
+
+func TestPortalLayoutBounds(t *testing.T) {
+	stream := func(node uint32, x, y, width, height int32) portalStream {
+		return portalStream{Node: node, Properties: map[string]dbus.Variant{
+			"position": dbus.MakeVariant(struct{ X, Y int32 }{x, y}),
+			"size":     dbus.MakeVariant(struct{ Width, Height int32 }{width, height}),
+		}}
+	}
+	for _, test := range []struct {
+		name     string
+		streams  []portalStream
+		multiple bool
+	}{
+		{"empty", nil, true},
+		{"opt-in-required", []portalStream{stream(1, 0, 0, 32, 24), stream(2, 32, 0, 32, 24)}, false},
+		{"too-many", make([]portalStream, MaxScreens+1), true},
+		{"missing-size", []portalStream{{Node: 1}}, false},
+		{"missing-position", []portalStream{stream(1, 0, 0, 32, 24), {Node: 2, Properties: map[string]dbus.Variant{"size": dbus.MakeVariant(struct{ W, H int32 }{32, 24})}}}, true},
+		{"invalid-size", []portalStream{stream(1, 0, 0, -1, 24)}, false},
+		{"duplicate-node", []portalStream{stream(1, 0, 0, 32, 24), stream(1, 32, 0, 32, 24)}, true},
+		{"overlap", []portalStream{stream(1, 0, 0, 32, 24), stream(2, 31, 0, 32, 24)}, true},
+		{"wide-gap", []portalStream{stream(1, -2147483648, 0, 32, 24), stream(2, 2147483647, 0, 32, 24)}, true},
+		{"frame-memory", []portalStream{stream(1, 0, 0, 16384, 8192)}, false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if _, err := portalLayout(test.streams, test.multiple); err == nil {
+				t.Fatal("invalid monitor metadata accepted")
+			}
+		})
+	}
+	// A single monitor does not require a compositor position; its capture is
+	// scaled to the portal's logical size for the same input coordinate space.
+	single := stream(1, -500, 300, 32, 24)
+	delete(single.Properties, "position")
+	layout, err := portalLayout([]portalStream{single}, false)
+	if err != nil || layout.Width != 32 || layout.Height != 24 || layout.Screens[0].X != 0 || layout.Screens[0].Y != 0 {
+		t.Fatalf("single monitor without position rejected: %+v, %v", layout, err)
+	}
+	for _, test := range []struct {
+		x, y   uint16
+		inside bool
+	}{{0, 0, true}, {31, 23, true}, {32, 23, false}, {31, 24, false}, {65535, 65535, false}} {
+		_, _, _, inside := portalPointer(layout.Screens, PointerEvent{X: test.x, Y: test.y})
+		if inside != test.inside {
+			t.Fatalf("wrong edge mapping at %d,%d", test.x, test.y)
+		}
 	}
 }

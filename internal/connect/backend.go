@@ -27,15 +27,22 @@ type Rect struct {
 // padding after each row. DirtyRects is advisory; an empty slice means the
 // whole frame may have changed.
 type Frame struct {
-	Width      int
-	Height     int
-	Stride     int
-	Pixels     []byte
-	DirtyRects []Rect
-	Sequence   uint64
+	Width           int
+	Height          int
+	Stride          int
+	Pixels          []byte
+	DirtyRects      []Rect
+	Sequence        uint64
+	Screens         []Screen
+	DesktopRevision uint64
 }
 
 func (f Frame) Validate() error {
+	if len(f.Screens) != 0 {
+		if err := f.DesktopLayout().Validate(); err != nil {
+			return err
+		}
+	}
 	if f.Width < 1 || f.Width > MaxDimension || f.Height < 1 || f.Height > MaxDimension {
 		return fmt.Errorf("invalid frame dimensions %dx%d", f.Width, f.Height)
 	}

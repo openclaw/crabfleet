@@ -6,13 +6,16 @@ import (
 	"bytes"
 	"context"
 	"encoding/binary"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"os"
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"syscall"
@@ -21,6 +24,7 @@ import (
 
 	"github.com/openclaw/crabfleet/internal/connect"
 	"github.com/openclaw/crabfleet/internal/rfb"
+	"github.com/openclaw/crabfleet/internal/rfbclient"
 )
 
 func TestNativeFailureDoesNotShareSyntheticDesktop(t *testing.T) {
@@ -123,7 +127,7 @@ func TestWayvncHelperProcess(t *testing.T) {
 		_, _ = os.Stderr.WriteString("fixture1: compositor unavailable")
 		os.Exit(23)
 	}
-	var socket string
+	var socket, control, selectedOutput string
 	for _, argument := range os.Args {
 		if strings.Contains(argument, "fixture1") {
 			t.Fatal("password leaked into helper arguments")
@@ -131,6 +135,16 @@ func TestWayvncHelperProcess(t *testing.T) {
 		if strings.HasPrefix(argument, "unix:") {
 			socket = strings.TrimPrefix(argument, "unix:")
 		}
+		if strings.HasPrefix(argument, "--socket=") {
+			control = strings.TrimPrefix(argument, "--socket=")
+		}
+		if strings.HasPrefix(argument, "--output=") {
+			selectedOutput = strings.TrimPrefix(argument, "--output=")
+		}
+	}
+	if mode == "all-fail" && selectedOutput == "DP-2" {
+		_, _ = os.Stderr.WriteString("fixture1: second output unavailable")
+		os.Exit(24)
 	}
 	info, err := os.Stat(filepath.Dir(socket))
 	if err != nil || info.Mode().Perm() != 0o700 {
@@ -143,7 +157,45 @@ func TestWayvncHelperProcess(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	backend, err := connect.NewSynthetic(connect.SyntheticOptions{Width: 32, Height: 18})
+	if strings.HasPrefix(mode, "all") || selectedOutput != "" {
+		controlListener, err := net.Listen("unix", control)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer controlListener.Close()
+		go func() {
+			for {
+				conn, err := controlListener.Accept()
+				if err != nil {
+					return
+				}
+				var request map[string]any
+				_ = json.NewDecoder(conn).Decode(&request)
+				outputs := []waylandOutput{{Name: "DP-2", Width: 16, Height: 12, Captured: selectedOutput == "DP-2"}, {Name: "DP-1", Width: 32, Height: 18, Captured: selectedOutput != "DP-2"}}
+				if mode == "all-oversized" {
+					for i := range outputs {
+						outputs[i].Width = 4096
+						outputs[i].Height = 16384
+					}
+				}
+				if mode == "all-switched" {
+					outputs[0].Captured = true
+					outputs[1].Captured = false
+				}
+				_ = json.NewEncoder(conn).Encode(struct {
+					Code int             `json:"code"`
+					ID   int             `json:"id"`
+					Data []waylandOutput `json:"data"`
+				}{ID: 1, Data: outputs})
+				_ = conn.Close()
+			}
+		}()
+	}
+	width, height := 32, 18
+	if selectedOutput == "DP-2" {
+		width, height = 16, 12
+	}
+	backend, err := connect.NewSynthetic(connect.SyntheticOptions{Width: width, Height: height})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -451,4 +503,246 @@ func TestWaylandLiveInput(t *testing.T) {
 	waitEvent("sym: a")
 	waitEvent("button: 272")
 	t.Log("independent Wayland client observed the remote key and mouse button")
+}
+
+func TestWaylandArgumentsRequireResizeOptIn(t *testing.T) {
+	for _, allow := range []bool{false, true} {
+		arguments := waylandArguments("/private", 3, shareOptions{allowResize: allow, output: "DP-1", viewOnly: true}, "Fixture")
+		joined := strings.Join(arguments, " ")
+		if strings.Contains(joined, "--disable-resizing") == allow || !strings.Contains(joined, "--output=DP-1") || !strings.Contains(joined, "--disable-input") || !strings.Contains(joined, "unix:/private/vnc-3.sock") {
+			t.Fatalf("incorrect helper arguments: %v", arguments)
+		}
+	}
+}
+
+func TestWaylandOutputListValidatesAndSortsPrivateResponse(t *testing.T) {
+	for _, test := range []struct {
+		name, response string
+		invalid        bool
+	}{
+		{"valid", `{"code":0,"id":1,"data":[{"name":"DP-2","width":8,"height":4},{"name":"DP-1","width":4,"height":8}]}`, false},
+		{"empty", `{"code":0,"id":1,"data":[]}`, true},
+		{"duplicate", `{"code":0,"id":1,"data":[{"name":"DP-1","width":8,"height":4},{"name":"DP-1","width":4,"height":8}]}`, true},
+		{"missing code", `{"id":1,"data":[]}`, true},
+		{"wrong id", `{"code":0,"id":2,"data":[]}`, true},
+		{"failed", `{"code":2,"id":1,"data":[]}`, true},
+		{"bad dimensions", `{"code":0,"id":1,"data":[{"name":"DP-1","width":0,"height":4}]}`, true},
+		{"combined width", `{"code":0,"id":1,"data":[{"name":"DP-1","width":40000,"height":1},{"name":"DP-2","width":40000,"height":1}]}`, true},
+		{"combined memory", `{"code":0,"id":1,"data":[{"name":"DP-1","width":4096,"height":16384},{"name":"DP-2","width":4096,"height":16384}]}`, true},
+		{"oversized", strings.Repeat(" ", 65536) + `{}`, true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			socket := filepath.Join(t.TempDir(), "control.sock")
+			listener, err := net.Listen("unix", socket)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer listener.Close()
+			done := make(chan struct{})
+			go func() {
+				defer close(done)
+				conn, err := listener.Accept()
+				if err != nil {
+					return
+				}
+				defer conn.Close()
+				var request struct {
+					Method string `json:"method"`
+					ID     int    `json:"id"`
+				}
+				if err := json.NewDecoder(conn).Decode(&request); err != nil || request.Method != "output-list" || request.ID != 1 {
+					return
+				}
+				_, _ = io.WriteString(conn, test.response)
+			}()
+			outputs, err := listWaylandOutputs(context.Background(), socket)
+			<-done
+			if (err != nil) != test.invalid {
+				t.Fatalf("outputs=%v error=%v", outputs, err)
+			}
+			if !test.invalid && outputs[0].Name != "DP-1" {
+				t.Fatal("output order was unstable")
+			}
+		})
+	}
+}
+
+func TestWaylandAllOutputsPrivateHelperLifecycle(t *testing.T) {
+	socketRecord := installWaylandFixture(t, "all")
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	output := &readyOutput{ready: make(chan struct{})}
+	done := make(chan error, 1)
+	go func() {
+		done <- serveWayland(ctx, listener, shareOptions{allMonitors: true}, "fixture1", "Fixture", output)
+	}()
+	select {
+	case <-output.ready:
+	case err := <-done:
+		t.Fatalf("all-output startup: %v", err)
+	case <-time.After(10 * time.Second):
+		t.Fatal("all-output startup timed out")
+	}
+	client := authenticateWaylandViewer(t, listener.Addr().String(), "fixture1", true)
+	_, _ = client.Write([]byte{1})
+	init := make([]byte, 24)
+	if _, err := io.ReadFull(client, init); err != nil {
+		t.Fatal(err)
+	}
+	if binary.BigEndian.Uint16(init) != 48 || binary.BigEndian.Uint16(init[2:]) != 18 {
+		t.Fatalf("aggregate dimensions: %dx%d", binary.BigEndian.Uint16(init), binary.BigEndian.Uint16(init[2:]))
+	}
+	_ = client.Close()
+	cancel()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(8 * time.Second):
+		t.Fatal("helpers were not reaped")
+	}
+	socket, err := os.ReadFile(socketRecord)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Dir(string(socket))); !os.IsNotExist(err) {
+		t.Fatal("private helper sockets survived shutdown")
+	}
+}
+
+// A separate opt-in requires two disposable headless outputs and changes only
+// their temporary modes. It must never run against the operator's compositor.
+func TestWaylandLiveAllOutputsResize(t *testing.T) {
+	if os.Getenv("CRABFLEET_TEST_WAYLAND_ALL") != "1" {
+		t.Skip("requires a disposable two-output Wayland compositor")
+	}
+	executable, err := exec.LookPath("wayvnc")
+	if err != nil {
+		t.Fatal(err)
+	}
+	directory, err := os.MkdirTemp("", "crabfleet-wayland-proof-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(directory)
+	runtime.LockOSThread()
+	defer runtime.UnlockOSThread()
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	var backends []connect.Backend
+	for i, name := range []string{"HEADLESS-1", "HEADLESS-2"} {
+		helper, err := startWaylandHelper(ctx, executable, directory, i, shareOptions{output: name, allowResize: true, viewOnly: true}, "fixture1", "Synthetic Wayland proof")
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer helper.close()
+		if i == 0 {
+			outputs, err := listWaylandOutputs(ctx, helper.control)
+			if err != nil || len(outputs) != 2 {
+				t.Fatalf("expected two disposable outputs: %v, %v", outputs, err)
+			}
+		}
+		upstream, err := (&net.Dialer{Timeout: time.Second}).DialContext(ctx, "unix", helper.socket)
+		if err != nil {
+			t.Fatal(err)
+		}
+		backend, err := rfbclient.New(ctx, upstream, "fixture1")
+		if err != nil {
+			t.Fatal(err)
+		}
+		backends = append(backends, &waylandOutputGuard{backend: backend, output: name, control: helper.control, stop: cancel, aggregate: true})
+		defer backend.Close()
+	}
+	desktop := newWaylandDesktop(backends, true)
+	frame, err := desktop.Capture(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if frame.Width != 1280 || frame.Height != 480 || len(frame.Screens) != 2 {
+		t.Fatalf("unexpected headless geometry: %+v", frame.DesktopLayout())
+	}
+	if !desktop.DesktopResizeSupported() {
+		t.Fatal("headless helper did not negotiate resize support")
+	}
+	target := connect.DesktopLayout{Width: 1440, Height: 600, Screens: []connect.Screen{{ID: 1, Width: 800, Height: 600}, {ID: 2, X: 800, Width: 640, Height: 480}}}
+	if err := desktop.ResizeDesktop(ctx, target); err != nil {
+		t.Fatal(err)
+	}
+	frame, err = desktop.Capture(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !frame.DesktopLayout().Equal(target) {
+		t.Fatalf("headless modes did not change: %+v", frame.DesktopLayout())
+	}
+	t.Logf("captured two real headless outputs, resized first output from 640x480 to 800x600, aggregate is %dx%d", frame.Width, frame.Height)
+}
+
+func TestWaylandAllOutputsStartupFailureCleansHelpers(t *testing.T) {
+	socketRecord := installWaylandFixture(t, "all-fail")
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	var output bytes.Buffer
+	err = serveWayland(context.Background(), listener, shareOptions{allMonitors: true}, "fixture1", "Fixture", &output)
+	if err == nil || !strings.Contains(err.Error(), "second output unavailable") || strings.Contains(err.Error(), "fixture1") || output.Len() != 0 {
+		t.Fatalf("bad multi-output failure: %v, output=%q", err, output.String())
+	}
+	socket, err := os.ReadFile(socketRecord)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Dir(string(socket))); !os.IsNotExist(err) {
+		t.Fatal("partial startup retained helper sockets")
+	}
+}
+
+func TestWaylandRejectsOversizedDesktopBeforeStartingOutputHelpers(t *testing.T) {
+	socketRecord := installWaylandFixture(t, "all-oversized")
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	var output bytes.Buffer
+	err = serveWayland(context.Background(), listener, shareOptions{allMonitors: true}, "fixture1", "Fixture", &output)
+	if err == nil || !strings.Contains(err.Error(), "combined Wayland desktop exceeds framebuffer limits") || output.Len() != 0 {
+		t.Fatalf("oversized desktop accepted: %v", err)
+	}
+	socket, err := os.ReadFile(socketRecord)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if filepath.Base(string(socket)) != "vnc-0.sock" {
+		t.Fatal("started an output helper before aggregate bounds validation")
+	}
+	if _, err := os.Stat(filepath.Dir(string(socket))); !os.IsNotExist(err) {
+		t.Fatal("oversized desktop retained bootstrap helper")
+	}
+}
+
+func TestWaylandNamedHelperIdentitySwitchNeverAnnouncesShare(t *testing.T) {
+	for _, options := range []shareOptions{{allMonitors: true}, {output: "DP-1"}} {
+		t.Run(fmt.Sprintf("all=%t", options.allMonitors), func(t *testing.T) {
+			installWaylandFixture(t, "all-switched")
+			listener, err := net.Listen("tcp", "127.0.0.1:0")
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer listener.Close()
+			var output bytes.Buffer
+			err = serveWayland(context.Background(), listener, options, "fixture1", "Fixture", &output)
+			if err == nil || !strings.Contains(err.Error(), "changed selected output") || output.Len() != 0 {
+				t.Fatalf("helper fallback announced a share: %v", err)
+			}
+		})
+	}
 }
