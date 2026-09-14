@@ -1,19 +1,9 @@
 import { render } from "preact";
 import { useEffect, useState } from "preact/hooks";
+import { api } from "./api.js";
 import { DesktopViewer, desktopViewerHostID } from "./desktop-viewer.jsx";
 import "./style.css";
 import "./desktop-viewer.css";
-
-async function api(path, options = {}) {
-  const response = await fetch(path, {
-    ...options,
-    headers: { "content-type": "application/json", ...options.headers },
-  });
-  const value = await response.json();
-  if (!response.ok)
-    throw Object.assign(new Error(value.error || "Request failed"), { status: response.status });
-  return value;
-}
 
 function App() {
   const [user, setUser] = useState(null);
