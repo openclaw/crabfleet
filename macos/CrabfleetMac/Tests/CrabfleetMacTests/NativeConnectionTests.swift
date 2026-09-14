@@ -663,6 +663,22 @@ struct NativeConnectionTests {
     #expect(fleet.leases.isEmpty)
     #expect(fleet.desktopHosts.map(\.id) == ["studio"])
     #expect(fleet.desktopHosts.first?.address == "100.64.0.8")
+    #expect(fleet.desktopHosts.first?.relayOnly == false)
+  }
+
+  @Test
+  func relayOnlyDesktopDoesNotCreateAnEmptyDirectEndpoint() throws {
+    let data = Data(
+      """
+      {"id":"linux","owner":"operator","name":"Linux desktop","address":"",
+       "port":5900,"relayOnly":true,"createdAt":1730000000000,"updatedAt":1730000001000}
+      """.utf8)
+    let host = try JSONDecoder().decode(FleetAPIDesktopHost.self, from: data).desktopHost()
+    let target = DesktopTarget(host: host)
+    #expect(host.relayOnly)
+    #expect(target.endpoint == nil)
+    #expect(!target.desktopAvailable)
+    #expect(target.subtitle == "Browser relay")
   }
 
   @Test

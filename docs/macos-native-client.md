@@ -1,20 +1,43 @@
 ---
-title: Native macOS Client
+title: Mac App
 layout: default
 permalink: /macos-native-client/
-description: "Scope, integration boundary, and security notes for the native macOS prototype."
+description: "Native Mac VNC viewing, desktop sharing, and integration details."
 ---
 
-# Native macOS client experiment
+# Crabfleet for macOS
 
-Status: early prototype. The app lives in `macos/CrabfleetMac` and provides a
-SwiftUI fleet browser, an AppKit-hosted Metal-rendered VNC surface, and an
-app-owned private desktop host for Mac-to-Mac access.
+Crabfleet is a native Mac app for connecting to remote computers and sharing your
+own Mac. Save VNC connections, use Quick Connect, and switch between open desktops.
+Ordinary VNC connections work without a desktop-service account.
+
+## Start here
+
+Follow the [quickstart](/quickstart/) to build and install the signed app at
+`/Applications/Crabfleet.app`. Choose **Use Local VNC Only**, add a computer or use
+**Quick Connect**, and enter its address and VNC credentials. Host names,
+`host:port`, `vnc://` URLs, and bracketed IPv6 addresses are supported.
+
+To host your Mac, run Tailscale on both Macs under the same user identity, choose
+**Share This Mac**, grant Screen Recording, and enable Accessibility if you want
+remote control. Connect from the other Mac using the displayed address and share
+password. Keep the host app running.
+
+Signing in to a desktop service adds discovery. The native `fleet:read` credential
+does not publish your Mac: publication currently needs `CRABFLEET_API_URL` and a
+separate `CRABFLEET_SESSION_COOKIE` browser session supplied in the app's launch
+environment. Published hosts can enable **Allow browser access via Crabfleet**.
+Treat that browser session as a credential; keep it out of shell history, logs,
+and shared files. Direct Mac sharing works without publication.
+
+See [connection modes](/connections/) before choosing native or browser access.
+The rest of this guide covers capabilities, host behavior, and implementation
+details. Source lives in `macos/CrabfleetMac`.
 
 ## Product shape
 
-- Screens-style desktop deck combining saved generic VNC connections and
-  Crabfleet leases, with source filters, search, status, and Quick Connect.
+- A desktop deck combining saved generic VNC connections and
+  shared desktops, with source filters, search, status, and Quick Connect.
 - Fast matched card-to-desktop transition, full-screen focus mode, desktop
   switcher, reconnect controls, and retained framebuffer previews.
 - Stable app-owned session controllers. Up to six user-opened desktops stay
@@ -63,31 +86,30 @@ full UTF-8 text with servers that negotiate it; against servers without the
 extension, standard cut text must encode losslessly as ISO-8859-1 and
 unsupported text is rejected instead of silently becoming empty data.
 
-## Linux and Windows Connect foundation
+## Linux and Windows Connect
 
-The native viewer can also connect directly to the first
-`crabfleet-connect` Linux and Windows host foundation. That Go host speaks RFB
-3.8 with a fresh per-run VNC-DES password, Tight/JPEG full-frame updates,
-client-side cursor rectangles, and pointer/key input. Its synthetic backend
-provides the portable CI and protocol-test path. The Linux backend implements
-X11 capture with MIT-SHM `XShmGetImage`, cursor images with XFixes, and input
-with XTest. The pure-Go Windows backend captures the primary display into RGBA
-frames with synchronized GDI `BitBlt` and injects absolute pointer, wheel, and
-keyboard input with `SendInput`; named keys and active-layout shortcuts use
-virtual keys, while text uses Unicode injection plus canonical legacy X11
-keysym conversion. Both native paths cross-compile for amd64 and arm64. Neither
-has been exercised on physical target hardware in these increments.
+The native viewer can connect to `crabfleet-connect` over a protected VNC path.
+Linux supports X11, Hyprland/wlroots through wayvnc 0.10+, and GNOME/KDE through
+the desktop portal and PipeWire. Its common Go server negotiates H.264/HEVC,
+Tight/JPEG or RAW video, clipboard, opt-in AAC system audio, and FSH1 shared-folder
+transfer. Direct listeners offer VNC password authentication.
 
-The Connect listener defaults to loopback because VNC-DES does not encrypt RFB
-traffic. A remote listener requires an explicit private bind on a separately
-protected network path.
+Use `share --fleet --bind <Tailscale IPv4> --advertise <Tailscale IPv4>` to register
+a direct endpoint for the Mac viewer. Enter the connector's share password.
+A Fleet share without an advertised address is a browser relay; its native card
+explains that it must be opened in the browser and does not attempt an empty
+VNC endpoint. `--view-only` disables remote input, clipboard writes, and file writes.
 
-The Connect host still advertises the direct-listener ARD security type for wire
-compatibility, but ARD host authentication fails closed and viewers must select
-VNC password authentication. H.264/HEVC encoding, Wayland/PipeWire, audio,
-Windows DXGI Desktop Duplication, Windows multi-monitor and per-monitor-DPI
-support, multi-group XKB input, clipboard synchronization, service packaging,
-and real-hardware validation remain follow-up work.
+The listener defaults to loopback because VNC-DES does not encrypt desktop
+traffic. Use an SSH tunnel or an explicit bind on an already protected private
+network. The [Linux connector guide](linux-connector.md) covers setup, permissions,
+service startup, and validation. The [Windows connector guide](windows-connector.md)
+covers source builds and its direct-only feature set. The synthetic backend remains explicitly opt-in.
+
+Windows retains its pure-Go GDI primary-display capture and SendInput backend,
+including Unicode text injection and canonical legacy X11 keysym conversion.
+Linux and Windows cross-compile for amd64 and arm64. Windows DXGI Desktop
+Duplication, multiple displays, and per-monitor DPI remain follow-up work.
 
 ## Wake-on-LAN
 
@@ -385,7 +407,8 @@ on cancellation while retaining bounded backoff for transient failures.
 
 ### Browser viewer
 
-Fleet lists each owned registration with an **Open in browser** action. The
+The browser companion lists relay-capable registrations under **Your desktops**
+with a **Connect** action. The
 fullscreen Preact viewer speaks RFB 3.8 over the owner-authenticated relay,
 offers feature-probed HEVC, Open H.264, and Tight/JPEG in that order, and never
 changes the host's default BGRA pixel format. HEVC is advertised only when the
@@ -511,7 +534,7 @@ Keep further changes narrow and upstreamable:
 
 ## Integration boundary
 
-The prototype connects to a user-entered Crabfleet deployment through the
+The app connects to a user-entered Crabfleet deployment through the
 versioned native API. It creates a short-lived device authorization, opens the
 same-origin `/native/link/*` page for browser approval, exchanges the approved
 device code for a 24-hour `fleet:read` bearer, validates the native session, and
@@ -522,29 +545,6 @@ synchronously before starting best-effort server revocation; if local removal
 fails, the existing connection is kept so the user can retry instead of
 silently orphaning a restorable credential. Switching deployments applies the
 same local-cleanup fence.
-
-When a deployment gateway redirects the initial device request, the client can
-instead follow the same-origin `resource_metadata` URL in the protected route's
-Bearer challenge and its explicit read-only scope, dynamically register a
-public client, use authorization-code PKCE, and receive the callback on the
-exact loopback redirect URI returned by registration. The resulting gateway
-bearer and optional refresh grant are
-stored under the same deployment-scoped Keychain policy and are sent only to
-`/mcp/crabfleet/native/v1/session`, `/mcp/crabfleet/native/v1/fleet`, and
-`/mcp/crabfleet/native/v1/native-vnc`.
-The client requires each RFC 9728 route challenge to identify its exact
-protected resource and requests all identifiers. For gateways that return
-authorization-server metadata directly, a `resource` field is rejected and an
-explicit `api://` scope must match the issued JWT's `aud` claim before use.
-The app asks for explicit trust before contacting any OAuth provider origin
-outside the deployment itself and rejects oversized aggregate scope lists
-before registration.
-An unauthorized read rotates an available refresh grant in Keychain before one
-retry; a rejected refresh grant expires the saved connection.
-Those gateway routes must authenticate the user, strip the gateway bearer
-before proxying, and map only those exact read methods to Crabfleet's
-authenticated native session, Fleet, and VNC-grant routes. Unknown paths,
-queries, other mutations, and WebSocket upgrades remain closed.
 
 Saved and ad-hoc VNC profiles are also available through an explicit local-only
 mode. That mode does not contact a deployment, synthesize Fleet data, or create
@@ -560,8 +560,7 @@ the app retries transient network and `503` failures without opening a second
 browser approval, including transient session validation after the token
 handoff. Cancellation or permanent validation failure revokes a handed-off
 token from a fresh cleanup task. The device-link bearer exposes only the current
-user's redacted, tenant-visible Fleet registry; it cannot mutate sessions,
-attach terminals, mint desktop connections, or call the browser REST surface.
+user's private desktop registry; publication requires a separate host credential.
 Retired deployment clients finish their cleanup and explicitly invalidate the
 delegate-backed URL session so reconnects do not retain old network stacks.
 
@@ -581,41 +580,18 @@ team state, and the deployment allowlist before handoff and on every native API
 use. The encrypted GitHub credential used for those checks remains server-side
 and is never exposed to the app.
 
-The app also accepts a manual loopback host, port, and in-memory credential for
-the actual RFB connection. The Worker browser endpoint
-`/api/interactive-sessions/:id/vnc` redirects to browser/noVNC desktop
-connections; it is not a raw-RFB contract for native clients.
-
-For a controllable desktop-capable Crabbox lease, the native Fleet response
-includes its non-secret provider lease identifier. The app starts the installed
-`crabbox vnc --native-handoff` helper directly, consumes one bounded JSON line
-from a private stdout pipe, and connects only to the returned IPv4 loopback
-endpoint. The helper owns the SSH tunnel in the foreground. Closing, replacing,
-evicting, or losing the VNC session terminates that helper and tunnel. The VNC
-password remains in process memory and never enters argv, a URL, defaults, or a
-file. Manual entry remains the fallback for non-Crabbox targets.
-
-Share This Mac does not use the runtime-adapter boundary. Its direct Mac-to-Mac
-path depends only on the local Tailscale client; registered token-owned shares
-may also publish the optional owner-scoped browser relay described above.
+The app also accepts a manual host, port, and credential for direct RFB connections.
+Share This Mac connects over the local Tailscale network; registered token-owned shares
+can additionally publish an owner-scoped browser relay.
 
 ## Build
 
 ```sh
 pnpm macos:test
-pnpm macos:bundle
+CODE_SIGN_IDENTITY="Developer ID Application: OpenClaw Foundation (FWJYW4S8P8)" pnpm macos:bundle
 ```
 
-The bundle command creates an ad-hoc signed local app for visual testing by
-default. For a stable Screen Recording permission across rebuilds, create or
-synchronize an Apple Development identity in Xcode Settings > Accounts, then
-use it consistently:
-
-```sh
-CODE_SIGN_IDENTITY="Apple Development: Your Name (TEAMID)" pnpm macos:bundle
-```
-
-Production needs a Developer ID Application identity, hardened runtime, secure
-timestamp, notarization, and final third-party-notice review. The bundle script
-enables the signing-side distribution requirements when
-`CODE_SIGN_HARDENED_RUNTIME=1` is set with a Developer ID identity.
+Use the full Xcode toolchain for tests. Always sign with a real Developer ID and
+install to `/Applications/Crabfleet.app` before testing capture, input, or stored
+Keychain credentials. Reuse that identity and stable path so macOS permissions
+survive rebuilding. Distribution also requires notarization and final third-party notices.

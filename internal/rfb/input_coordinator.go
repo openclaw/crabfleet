@@ -11,7 +11,8 @@ import (
 // inputCoordinator preserves input ownership when several viewers share one
 // capture/input backend. A viewer can release only keys and buttons it pressed.
 type inputCoordinator struct {
-	sink connect.InputSink
+	sink        connect.InputSink
+	maxSessions int
 
 	mu          sync.Mutex
 	nextID      uint64
@@ -22,8 +23,9 @@ type inputCoordinator struct {
 }
 
 type captureCoordinator struct {
-	backend connect.Backend
-	mu      sync.Mutex
+	backend         connect.Backend
+	desktopRevision uint64
+	mu              sync.Mutex
 }
 
 type sessionInputState struct {
@@ -44,17 +46,22 @@ type coordinatedBackend struct {
 	capture *captureCoordinator
 }
 
-func newInputCoordinator(sink connect.InputSink) *inputCoordinator {
+func newInputCoordinator(sink connect.InputSink, maxSessions int) *inputCoordinator {
 	return &inputCoordinator{
-		sink:     sink,
-		sessions: make(map[uint64]*sessionInputState),
-		keyRefs:  make(map[uint32]int),
+		sink:        sink,
+		maxSessions: maxSessions,
+		sessions:    make(map[uint64]*sessionInputState),
+		keyRefs:     make(map[uint32]int),
 	}
 }
 
 func (coordinator *inputCoordinator) newSession() *coordinatedInput {
 	coordinator.mu.Lock()
 	defer coordinator.mu.Unlock()
+	// Failed releases retain their slot until the backend accepts cleanup.
+	if len(coordinator.sessions) >= coordinator.maxSessions {
+		return nil
+	}
 	coordinator.nextID++
 	id := coordinator.nextID
 	coordinator.sessions[id] = &sessionInputState{keys: make(map[uint32]struct{})}
@@ -66,7 +73,7 @@ func (input *coordinatedInput) Key(ctx context.Context, event connect.KeyEvent) 
 	coordinator.mu.Lock()
 	defer coordinator.mu.Unlock()
 	state := coordinator.sessions[input.id]
-	if state == nil {
+	if state == nil || state.closing {
 		return errors.New("input session is closed")
 	}
 	_, held := state.keys[event.Keysym]
@@ -104,7 +111,7 @@ func (input *coordinatedInput) Pointer(ctx context.Context, event connect.Pointe
 	coordinator.mu.Lock()
 	defer coordinator.mu.Unlock()
 	state := coordinator.sessions[input.id]
-	if state == nil {
+	if state == nil || state.closing {
 		return errors.New("input session is closed")
 	}
 	previousMask := state.buttonMask
@@ -225,11 +232,17 @@ func (backend *coordinatedBackend) releaseSessionInput(ctx context.Context) {
 func (coordinator *captureCoordinator) Capture(ctx context.Context) (connect.Frame, error) {
 	coordinator.mu.Lock()
 	defer coordinator.mu.Unlock()
+	return coordinator.captureLocked(ctx)
+}
+
+func (coordinator *captureCoordinator) captureLocked(ctx context.Context) (connect.Frame, error) {
 	frame, err := coordinator.backend.Capture(ctx)
 	if err != nil {
 		return connect.Frame{}, err
 	}
 	frame.Pixels = append([]byte(nil), frame.Pixels...)
+	frame.Screens = append([]connect.Screen(nil), frame.Screens...)
+	frame.DesktopRevision = coordinator.desktopRevision
 	frame.DirtyRects = append([]connect.Rect(nil), frame.DirtyRects...)
 	return frame, nil
 }
@@ -247,4 +260,39 @@ func (coordinator *captureCoordinator) Cursor(ctx context.Context) (connect.Curs
 	}
 	cursor.RGBA = append([]byte(nil), cursor.RGBA...)
 	return cursor, nil
+}
+
+func (backend *coordinatedBackend) DesktopResizeSupported() bool {
+	backend.capture.mu.Lock()
+	defer backend.capture.mu.Unlock()
+	source, ok := backend.capture.backend.(connect.DesktopResizer)
+	return ok && source.DesktopResizeSupported()
+}
+
+func (backend *coordinatedBackend) ResizeDesktop(ctx context.Context, layout connect.DesktopLayout) error {
+	backend.capture.mu.Lock()
+	defer backend.capture.mu.Unlock()
+	source, ok := backend.capture.backend.(connect.DesktopResizer)
+	if !ok {
+		return connect.ErrResizeUnsupported
+	}
+	if err := source.ResizeDesktop(ctx, layout); err != nil {
+		return err
+	}
+	backend.capture.desktopRevision++
+	return nil
+}
+
+func (backend *coordinatedBackend) resizeDesktopFrame(ctx context.Context, layout connect.DesktopLayout) (connect.Frame, error) {
+	backend.capture.mu.Lock()
+	defer backend.capture.mu.Unlock()
+	source, ok := backend.capture.backend.(connect.DesktopResizer)
+	if !ok {
+		return connect.Frame{}, connect.ErrResizeUnsupported
+	}
+	if err := source.ResizeDesktop(ctx, layout); err != nil {
+		return connect.Frame{}, err
+	}
+	backend.capture.desktopRevision++
+	return backend.capture.captureLocked(ctx)
 }

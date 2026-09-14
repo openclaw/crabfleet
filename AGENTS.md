@@ -3,8 +3,10 @@
 ## Gates (all must pass before commit/land)
 
 - `pnpm check` — assets, TypeScript, oxlint, oxfmt. `pnpm format` first if line positions shifted.
-- `pnpm test` — Worker + browser (node:test).
-- `pnpm macos:test` — vendored RoyalVNCKit fork first, then the app package.
+- `pnpm test` — desktop backend + browser VNC (node:test).
+- `pnpm test:native` — Go tests with the race detector and Go vet on the current OS; on macOS, also test the vendored RoyalVNCKit fork and app package.
+- Run these gates on the available local OS; Crabbox is optional for additional remote proof. Linux work does not require access to a Mac. Report other-platform tests as not run, never as passing.
+- `pnpm macos:test` remains the explicit macOS-only suite; use a Mac for changes that need native macOS validation.
 - macOS tests need the full Xcode toolchain. If `xcode-select -p` shows CommandLineTools, swift-testing macros fail ("TestingMacros plugin not found"): `export DEVELOPER_DIR=/Applications/Xcode-beta.app/Contents/Developer` (or the installed Xcode) before `pnpm macos:test`.
 - Do not trust a worker/agent self-report that gates pass; re-run them.
 
@@ -25,6 +27,6 @@
 ## Layout
 
 - `macos/CrabfleetMac` — Swift package (host + native viewer); `Vendor/RoyalVNCKit` — vendored fork, zero third-party deps (OS crypto + in-fork BigNum).
-- `src/` — Cloudflare Worker + browser app (from-scratch TS RFB client in `src/app/rfb/`).
-- `migrations/` — D1; additive/rolling-safe only.
+- `src/` — desktop sign-in, discovery, registration, VNC relay, and browser viewer (TS RFB client in `src/app/rfb/`). No agent workspace, terminal, card, or sandbox product.
+- `migrations/` — historical D1 upgrade chain; preserve deployed desktop and identity data. Retired workspace tables are unused; no destructive schema cleanup.
 - Changelog: one dense line per user-visible change under `Unreleased`.

@@ -2,152 +2,61 @@
 title: Quickstart
 layout: default
 permalink: /quickstart/
-description: "Bootstrap Crabfleet, configure access, create a crabbox, and inspect a run attempt."
+description: "Connect to a VNC desktop and share your own computer with Crabfleet."
 ---
 
 # Quickstart
 
-This gets you from login to a real D1-backed crabbox, card, and run attempt.
+Crabfleet has two ways to connect: direct VNC in the Mac app, or an authenticated relay in the browser. Sign-in adds discovery; direct connections still need a reachable host and its VNC password. See [connection modes](/connections/) for the differences.
 
-## Prerequisites
+## Build and install the Mac app
 
-- OpenClaw GitHub org membership.
-- GitHub OAuth configured for browser access, or an SSH key to link through `crabd.sh`.
-- Access to `https://crabfleet.openclaw.ai/app/`.
+If you already have Crabfleet installed, continue to the next section. Source builds require macOS 14 or later, the full Xcode toolchain, Node.js 24 or later, and the pnpm version declared in `package.json`. Run from the repository root:
 
-## 1. Log In
-
-Open `https://crabfleet.openclaw.ai/app/`.
-
-- Use GitHub OAuth if configured.
-- Use `ssh link@crabd.sh` when you want terminal-first onboarding.
-- Use the bootstrap token only for owner break-glass setup/recovery.
-
-Bootstrap sessions last 1 hour. GitHub sessions last 15 minutes.
-
-## 2. Add Access
-
-Open Admin.
-
-Add users or teams:
-
-```text
-@steipete
-@openclaw/maintainer
+```sh
+pnpm install --frozen-lockfile
+CODE_SIGN_IDENTITY="Developer ID Application: OpenClaw Foundation (FWJYW4S8P8)" pnpm macos:bundle
+open -R macos/CrabfleetMac/.build/Crabfleet.app
 ```
 
-Roles:
+The example uses the maintainer's signing identity. Substitute your own real Developer ID for local builds. Quit any running copy, drag the revealed app into **Applications** in Finder, and choose **Replace** if prompted. Open `/Applications/Crabfleet.app` after installation. Replace the entire bundle on updates so removed files do not linger; keep the same signing identity and installation path so screen-capture, input, and Keychain access retain a stable app identity.
 
-- `owner`: full admin.
-- `maintainer`: create/start/control cards.
-- `viewer`: read Board/Fleet state and logs, use public share links, and request delegated terminal control. Session ownership still grants that session's management access.
+## Connect from a Mac
 
-## 3. Enable Repos
+Open Crabfleet and choose **Use Local VNC Only**. Add a saved VNC connection or use Quick Connect with your server address and password. Focus a desktop to control it; other open sessions can stay warm for switching.
 
-Add repos in `owner/repo` format. `openclaw/crabfleet` is sorted first and is the default repo in the card form.
+Addresses may be a host name, `host:port`, a `vnc://` URL, or bracketed IPv6. Crabfleet can remember connection details and optionally store the password in macOS Keychain.
 
-Enabled repos drive:
+Direct VNC authentication does not encrypt ordinary TCP traffic. Use a trusted private network or SSH tunnel for third-party VNC servers. Crabfleet's Mac sharing uses Tailscale and prefers pinned QUIC with TCP fallback.
 
-- Card creation.
-- Issue/PR preview search.
-- `CRABBOX.md` workflow evaluation.
-- Run allowlist checks.
+## Share a Mac
 
-## 4. Optional: Evaluate CRABBOX.md
+Run Tailscale on both Macs under the same user identity, then choose **Share This Mac**. Grant Screen Recording for capture and Accessibility if you want remote keyboard and pointer control. Use the signed app at `/Applications/Crabfleet.app` so macOS permissions retain a stable identity.
 
-In Admin → Workflows, enter a repo and refresh `CRABBOX.md`.
+Choose displays and optional system audio or a shared folder. On the other Mac, use Quick Connect with the displayed address and fresh share password. Keep Crabfleet running while sharing.
 
-Supported shape:
+## Discover your computers
 
-```yaml
----
-runtime:
-  default: auto
-merge:
-  default_policy: open_pr
----
+Connect the Mac app to `https://crabfleet.openclaw.ai` or your own desktop service, then approve its device link in the browser. The app stores a discovery credential in Keychain. Your account must be allowed by that service's owner.
+
+Native sign-in grants discovery only. Mac host publication currently needs a separate browser session supplied at launch through `CRABFLEET_API_URL` and `CRABFLEET_SESSION_COOKIE`; see the [Mac guide](/macos-native-client/) for that setup. Direct Mac sharing works independently of publication.
+
+The [browser companion](https://crabfleet.openclaw.ai/app/) lists your published desktops. Select **Connect** on a relay-capable computer to open it in the browser.
+
+## Share Linux
+
+```sh
+go build -o ./dist/crabfleet-connect ./cmd/crabfleet-connect
+./dist/crabfleet-connect login --server https://crabfleet.openclaw.ai
+./dist/crabfleet-connect share --fleet
 ```
 
-Invalid configs are visible and ignored. Only runtime and merge defaults are enforced; `stall_ms`, `cap`, `prompt_prefix`, and the Markdown body are stored for visibility.
+Run this inside the Linux graphical session and approve the connector's desktop publication permission. Open **Your desktops → Connect** in the browser companion. For native access, also bind and advertise the host's Tailscale address as described in the [Linux connector guide](/linux-connector/).
 
-For private repos, the Worker needs deployment `GITHUB_TOKEN` access to fetch `CRABBOX.md`; it does not use the logged-in user's OAuth token for this refresh.
+## Share Windows
 
-## 5. Create a Crabbox
+The Windows connector captures the primary display for direct VNC connections. Build it with Go and run it inside the signed-in Windows desktop. See the [Windows guide](/windows-connector/) for the PowerShell commands, private-network setup, and current feature limits.
 
-Click New crabbox or use the CLI:
+## If a connection does not appear
 
-```bash
-crabfleet new --repo openclaw/crabfleet "fix the failing check"
-```
-
-The CLI omits `runtime` unless `--runtime` is passed, so the deployment chooses via `CRABFLEET_DEFAULT_RUNTIME` (`container` when enabled, otherwise the only runtime enabled by `CRABFLEET_INTERACTIVE_RUNTIMES`). The OpenClaw deployment supports built-in Cloudflare Sandbox sessions and versioned Crabbox workspaces.
-
-End a session with `crabfleet delete <session-id>`. Versioned lifecycle adapters confirm runtime release, while built-in Sandbox sessions clean up their durable lease and credential policy. Crabfleet retains the final status and logs until you clean up the dead session record.
-
-Useful follow-up commands:
-
-```bash
-crabfleet status <session-id>
-crabfleet logs <session-id>
-crabfleet transcript <session-id>
-crabfleet message <session-id> "check CI"
-crabfleet summary <session-id> "waiting on CI"
-crabfleet vnc --open <session-id>
-crabfleet doctor
-```
-
-## 6. Create a Card
-
-Click New card.
-
-Required:
-
-- Repo
-- Prompt
-
-Optional:
-
-- Title
-- Runtime
-- Merge policy
-
-Blank title is generated from the prompt. Blank merge policy uses repo default, then `open_pr`.
-
-## 7. Create from Issue/PR Number
-
-Type `#76552` in board search. Crabfleet previews matches across enabled repos when `GITHUB_TOKEN` is configured; without it, preview falls back to the preferred repo or first enabled repo. Choose a match to create a card with the GitHub URL, title, body, repo, runtime `auto`, and repo-default policy.
-
-## 8. Start and Attach
-
-Click Start on a Todo card.
-
-The Worker will:
-
-- Check capacity, default cap `20`.
-- Verify repo allowlist.
-- Evaluate cached repo workflow defaults.
-- Select `container` or `crabbox`.
-- Store a run attempt with selection reason and capabilities.
-- Move the card to Running and append events.
-
-Click Attach to open the Ghostty WASM session grid. The grid immediately shows D1 event replay and switches to live PTY output through the terminal hub when the session has a Sandbox or provider terminal.
-
-The card attempt itself is scheduling/control evidence. It does not launch an autonomous Codex process; live work appears as a Fleet interactive session.
-
-## Troubleshooting
-
-### Repo blocked by allowlist
-
-Add the repo in Admin → Repos.
-
-### GitHub user not allowlisted
-
-Add a direct `@login` entry or the exact team slug, for example `@openclaw/maintainer`.
-
-### Capacity blocked
-
-Increase cap in Admin → Policy or move active runs out of Running.
-
-### Take over hidden
-
-Takeover appears only for active runs whose runtime capabilities include takeover. Container runs do not advertise takeover.
+Confirm the host is still sharing and that both browsers/apps use the same account and service. A Linux share without an advertised address is available through the browser relay only. A Mac sharing directly needs publication configured before it appears in discovery. For a saved connection, check the address, private-network reachability, and VNC password.

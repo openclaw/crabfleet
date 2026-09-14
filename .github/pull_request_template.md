@@ -8,11 +8,11 @@ type: user-facing description
 Use a parenthesized scope only when it adds clarity:
 fix(auth): login redirect loops when session cookie is expired
 
-Types: feat, fix, improve, refactor, docs, chore.
+Types: feat, fix, refactor, build, ci, chore, docs, style, perf, test.
 For fixes, describe the user-visible symptom and trigger:
-fix: task list fails to load when user has no environments
+fix: desktop list fails to load when no computers are registered
 Avoid implementation details such as:
-fix: add null check to task query
+fix: add null check to desktop query
 
 **MUST:** Keep **Allow edits from maintainers** enabled for this PR so maintainers
 can help update the branch when needed.

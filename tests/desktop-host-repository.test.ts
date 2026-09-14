@@ -6,66 +6,7 @@ import test from "node:test";
 import { DesktopHostRepository } from "../src/worker/desktop-host-repository.ts";
 import type { RuntimeEnv } from "../src/worker/env.ts";
 
-type BoundStatement = {
-  execute(): {
-    results: Record<string, unknown>[];
-    success: true;
-    meta: { changes: number; last_row_id?: number };
-  };
-};
-
-function sqliteRuntimeEnv(sqlite: DatabaseSync): RuntimeEnv {
-  function execute(sql: string, parameters: unknown[]) {
-    const statement = sqlite.prepare(sql);
-    if (/^\s*(?:select|pragma|with)\b|\breturning\b/i.test(sql)) {
-      const results = statement.all(...parameters).map((row) => ({ ...row }));
-      const changes = Number(sqlite.prepare("SELECT changes() AS changes").get()?.changes ?? 0);
-      return { results, success: true as const, meta: { changes } };
-    }
-    const result = statement.run(...parameters);
-    return {
-      results: [],
-      success: true as const,
-      meta: {
-        changes: Number(result.changes),
-        last_row_id: Number(result.lastInsertRowid),
-      },
-    };
-  }
-  return {
-    DB: {
-      prepare(sql: string) {
-        return {
-          bind(...parameters: unknown[]) {
-            const bound = {
-              execute: () => execute(sql, parameters),
-              async all() {
-                return bound.execute();
-              },
-              async run() {
-                return bound.execute();
-              },
-            };
-            return bound;
-          },
-        };
-      },
-      async batch(statements: D1PreparedStatement[]) {
-        sqlite.exec("BEGIN IMMEDIATE");
-        try {
-          const results = statements.map((statement) =>
-            (statement as unknown as BoundStatement).execute(),
-          );
-          sqlite.exec("COMMIT");
-          return results;
-        } catch (error) {
-          sqlite.exec("ROLLBACK");
-          throw error;
-        }
-      },
-    } as unknown as D1Database,
-  } as RuntimeEnv;
-}
+import { sqliteRuntimeEnv } from "./helpers/sqlite-env.ts";
 
 test("desktop host repository scopes reads, upserts, and deletes by owner subject", async () => {
   const executions: Array<{ sql: string; parameters: unknown[] }> = [];
@@ -110,6 +51,7 @@ test("desktop host repository scopes reads, upserts, and deletes by owner subjec
 
   assert.deepEqual(await repository.list("github:1"), [
     {
+      relayOnly: false,
       quicPort: 5911,
       quicCertHash: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
       webtransport: false,
@@ -300,6 +242,12 @@ test("legacy desktop host writes and cleanup cannot mutate token-owned rows", as
   sqlite.exec(
     readFileSync(new URL("../migrations/0042_desktop_host_quic.sql", import.meta.url), "utf8"),
   );
+  sqlite.exec(
+    readFileSync(
+      new URL("../migrations/0045_desktop_host_relay_only.sql", import.meta.url),
+      "utf8",
+    ),
+  );
   sqlite.exec(`
     INSERT INTO desktop_hosts (
       owner_subject, id, owner, name, address, port, ownership_token, publication_id,
@@ -352,6 +300,7 @@ test("legacy desktop host writes and cleanup preserve legacy rows", async () => 
     "0038_desktop_host_publication_identity.sql",
     "0041_desktop_host_ownership_errors.sql",
     "0042_desktop_host_quic.sql",
+    "0045_desktop_host_relay_only.sql",
   ]) {
     sqlite.exec(readFileSync(new URL(`../migrations/${migration}`, import.meta.url), "utf8"));
   }
@@ -392,6 +341,7 @@ test("desktop relay lookup excludes tokenless registrations", async () => {
     "0038_desktop_host_publication_identity.sql",
     "0041_desktop_host_ownership_errors.sql",
     "0042_desktop_host_quic.sql",
+    "0045_desktop_host_relay_only.sql",
   ]) {
     sqlite.exec(readFileSync(new URL(`../migrations/${migration}`, import.meta.url), "utf8"));
   }
@@ -422,6 +372,7 @@ test("desktop host publication recovery matches only the current publication", a
     "0038_desktop_host_publication_identity.sql",
     "0041_desktop_host_ownership_errors.sql",
     "0042_desktop_host_quic.sql",
+    "0045_desktop_host_relay_only.sql",
   ]) {
     sqlite.exec(readFileSync(new URL(`../migrations/${migration}`, import.meta.url), "utf8"));
   }
@@ -458,6 +409,7 @@ test("same-publication retries remain recoverable after the publication migratio
     "0038_desktop_host_publication_identity.sql",
     "0041_desktop_host_ownership_errors.sql",
     "0042_desktop_host_quic.sql",
+    "0045_desktop_host_relay_only.sql",
   ]) {
     sqlite.exec(readFileSync(new URL(`../migrations/${migration}`, import.meta.url), "utf8"));
   }

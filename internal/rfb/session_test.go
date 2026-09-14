@@ -36,7 +36,7 @@ func TestSyntheticBackendEndToEnd(t *testing.T) {
 
 	assertRead(t, client, Version38Banner)
 	assertWrite(t, client, Version38Banner)
-	assertRead(t, client, []byte{2, SecurityARD, SecurityVNC})
+	assertRead(t, client, []byte{1, SecurityVNC})
 	assertWrite(t, client, []byte{SecurityVNC})
 	challenge := readExactly(t, client, 16)
 	response, err := VNCChallengeResponse(challenge, sessionFixturePassword())
@@ -99,7 +99,7 @@ func TestSyntheticBackendEndToEnd(t *testing.T) {
 	}
 }
 
-func TestHandshakeRejectsSecurityNoneAndARDStub(t *testing.T) {
+func TestHandshakeOffersOnlyImplementedAuthentication(t *testing.T) {
 	t.Parallel()
 	for _, selection := range []byte{1, SecurityARD} {
 		selection := selection
@@ -118,16 +118,8 @@ func TestHandshakeRejectsSecurityNoneAndARDStub(t *testing.T) {
 			}()
 			assertRead(t, client, Version38Banner)
 			assertWrite(t, client, Version38Banner)
-			assertRead(t, client, []byte{2, SecurityARD, SecurityVNC})
+			assertRead(t, client, []byte{1, SecurityVNC})
 			assertWrite(t, client, []byte{selection})
-			if selection == SecurityARD {
-				status := readExactly(t, client, 4)
-				if binary.BigEndian.Uint32(status) != 1 {
-					t.Fatalf("ARD failure status = %x", status)
-				}
-				length := binary.BigEndian.Uint32(readExactly(t, client, 4))
-				_ = readExactly(t, client, int(length))
-			}
 			_ = client.Close()
 			if err := <-done; err == nil {
 				t.Fatal("security selection was accepted")
@@ -171,11 +163,45 @@ func TestSessionConfigurationRejectsLongVNCPassword(t *testing.T) {
 	}
 }
 
+func TestViewOnlyDiscardsInputAndStillServesFrames(t *testing.T) {
+	t.Parallel()
+	backend, err := connect.NewSynthetic(connect.SyntheticOptions{Width: 4, Height: 4})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer backend.Close()
+	server, client := net.Pipe()
+	defer server.Close()
+	defer client.Close()
+	_ = client.SetDeadline(time.Now().Add(3 * time.Second))
+	done := make(chan error, 1)
+	go func() {
+		done <- ServeConn(context.Background(), server, SessionConfig{
+			Backend: backend, Password: "fixture", ViewOnly: true,
+		})
+	}()
+	completeHandshake(t, client, "fixture")
+	init := readExactly(t, client, 24)
+	_ = readExactly(t, client, int(binary.BigEndian.Uint32(init[20:])))
+	assertWrite(t, client, []byte{4, 1, 0, 0, 0, 0, 0, 65})
+	assertWrite(t, client, []byte{5, 1, 0, 2, 0, 2})
+	assertWrite(t, client, encodeSetEncodings([]int32{EncodingTight}))
+	assertWrite(t, client, []byte{3, 0, 0, 0, 0, 0, 0, 4, 0, 4})
+	assertRead(t, client, []byte{0, 0, 0, 1})
+	_ = readExactly(t, client, 13)
+	_ = readExactly(t, client, readCompactFromConn(t, client))
+	_ = client.Close()
+	<-done
+	if events := backend.Events(); len(events) != 0 {
+		t.Fatalf("view-only session injected %d input events", len(events))
+	}
+}
+
 func completeHandshake(t *testing.T, client net.Conn, password string) {
 	t.Helper()
 	assertRead(t, client, Version38Banner)
 	assertWrite(t, client, Version38Banner)
-	assertRead(t, client, []byte{2, SecurityARD, SecurityVNC})
+	assertRead(t, client, []byte{1, SecurityVNC})
 	assertWrite(t, client, []byte{SecurityVNC})
 	challenge := readExactly(t, client, 16)
 	response, err := VNCChallengeResponse(challenge, password)

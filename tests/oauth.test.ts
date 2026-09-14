@@ -1,11 +1,9 @@
 import assert from "node:assert/strict";
-import { readFile } from "node:fs/promises";
 import { test } from "node:test";
 import {
   githubOAuthCallbackRequestMatches,
   githubOAuthCanonicalLoginUrl,
   githubOAuthCanonicalNativeLinkUrl,
-  githubOAuthCanonicalSshLinkUrl,
   githubOAuthRedirectUri,
 } from "../src/oauth.ts";
 import { githubCallback, githubLogin } from "../src/worker/github-auth.ts";
@@ -104,33 +102,6 @@ test("configured GitHub origin is authoritative across host mismatches", () => {
   );
 });
 
-test("SSH link state canonicalizes before host-only OAuth cookies", async () => {
-  const configured = "https://fleet.example/auth/github/callback";
-  assert.equal(
-    githubOAuthCanonicalSshLinkUrl(
-      "https://alias.example/ssh/link/code%2Fwith%2Fslashes",
-      "code/with/slashes",
-      configured,
-    ),
-    "https://fleet.example/ssh/link/code%2Fwith%2Fslashes",
-  );
-  assert.equal(
-    githubOAuthCanonicalSshLinkUrl(
-      "https://fleet.example/ssh/link/code%2Fwith%2Fslashes",
-      "code/with/slashes",
-      configured,
-    ),
-    null,
-  );
-  const source = await readFile(new URL("../src/worker/ssh-gateway.ts", import.meta.url), "utf8");
-  const linkStart = source.indexOf("async link(");
-  const linkEnd = source.indexOf("async authenticate(", linkStart);
-  const linkSource = source.slice(linkStart, linkEnd);
-  assert.match(linkSource, /githubOAuthCanonicalSshLinkUrl/);
-  assert.ok(linkSource.indexOf("canonicalLinkUrl") < linkSource.indexOf("sshLinkCookie"));
-  assert.match(linkSource, /redirect\("\/login\/github\?flow=ssh"/);
-});
-
 test("native link state canonicalizes to the authoritative OAuth origin", () => {
   const configured = "https://fleet.example/auth/github/callback";
   assert.equal(
@@ -227,7 +198,7 @@ test("OAuth state binds the intended link flow instead of stale competing cookie
     {
       query: "?flow=ssh",
       pendingCookies: "crabbox_ssh_link=new-ssh; crabbox_native_link=stale-native",
-      expected: "/ssh/link/new-ssh",
+      expected: "/app?login=github",
     },
     {
       query: "",
@@ -242,6 +213,11 @@ test("OAuth state binds the intended link flow instead of stale competing cookie
       env,
     );
     const authorize = new URL(login.headers.get("location") ?? "");
+    assert.deepEqual(authorize.searchParams.get("scope")?.split(" "), [
+      "read:user",
+      "user:email",
+      "read:org",
+    ]);
     const state = authorize.searchParams.get("state");
     const stateCookie = login.headers.get("set-cookie")?.split(";", 1)[0];
     assert.ok(state);

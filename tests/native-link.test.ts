@@ -10,6 +10,7 @@ import type {
   NativeDeviceAuthorizationRecord,
 } from "../src/worker/native-auth.ts";
 import { handleNativeLink } from "../src/worker/native-link.ts";
+import { connectorAccessScope } from "../src/worker/native-auth.ts";
 
 const link: NativeDeviceAuthorizationRecord = {
   deviceCodeHash: "device-hash",
@@ -69,10 +70,10 @@ function d1(user: User, githubTokenCiphertext: string | null = null): D1Database
   } as unknown as D1Database;
 }
 
-function service(approvals: string[]): NativeAuthService {
+function service(approvals: string[], record = link): NativeAuthService {
   return {
     async link() {
-      return link;
+      return record;
     },
     async approve(_code: string, user: User, githubToken?: string) {
       approvals.push(`${user.subject}:${githubToken ?? ""}`);
@@ -125,6 +126,20 @@ test("trusted-proxy native approval uses asserted identity and exact Origin with
   assert.equal(get.headers.get("x-frame-options"), "DENY");
   const csrf = (await get.text()).match(/name="csrf" value="([^"]+)"/)?.[1];
   assert.ok(csrf);
+
+  const connectorPage = await handleNativeLink(
+    new Request("https://backend.example/native/link/link-code"),
+    "link-code",
+    requestAuth,
+    env,
+    service([], { ...link, clientName: "Linux fixture", scope: connectorAccessScope }),
+  );
+  const connectorHtml = await connectorPage.text();
+  assert.match(connectorHtml, /Authorize Crabfleet Connect/);
+  assert.match(connectorHtml, /publish and manage your shared desktops/);
+  assert.match(connectorHtml, /renew this authorization/);
+  assert.match(connectorHtml, /Desktop capture and control still require permission/);
+  assert.doesNotMatch(connectorHtml, /read your visible Crabfleet sessions for 24 hours/);
 
   const post = await handleNativeLink(
     new Request("https://backend.example/native/link/link-code", {
@@ -354,6 +369,92 @@ test("native links canonicalize before lookup or host cookies", async () => {
   assert.equal(response.status, 302);
   assert.equal(response.headers.get("location"), "https://fleet.example/native/link/link-code");
   assert.equal(response.headers.has("set-cookie"), false);
+  assert.deepEqual(approvals, []);
+});
+
+test("finished native authorization links offer recovery without another approval", async () => {
+  for (const [record, heading] of [
+    [{ ...link, expiresAt: Date.now() - 1 }, "This sign-in link expired"],
+    [{ ...link, approvedAt: Date.now() }, "This link has already been used"],
+    [{ ...link, consumedAt: Date.now() }, "This link has already been used"],
+  ] as const) {
+    const approvals: string[] = [];
+    const response = await handleNativeLink(
+      new Request("https://fleet.example/native/link/link-code"),
+      "link-code",
+      { kind: "disabled" },
+      {} as RuntimeEnv,
+      service(approvals, record),
+    );
+    assert.equal(response.status, 410);
+    assert.equal(response.headers.get("content-type"), "text/html; charset=utf-8");
+    assert.equal(response.headers.get("cache-control"), "no-store");
+    assert.equal(response.headers.has("set-cookie"), false);
+    assert.match(response.headers.get("content-security-policy") ?? "", /frame-ancestors 'none'/);
+    const html = await response.text();
+    assert.ok(html.includes(`<h1>${heading}</h1>`));
+    assert.match(html, /your computer/);
+    assert.doesNotMatch(html, /<form|name="csrf"/);
+    assert.deepEqual(approvals, []);
+  }
+});
+
+test("native authorization safely renders long device names and preserves explicit approval", async () => {
+  const user: User = {
+    subject: "proxy:viewer@example.com",
+    login: null,
+    email: "viewer@example.com",
+    name: "Viewer",
+    role: "viewer",
+    allowed: true,
+    teams: [],
+  };
+  const approvals: string[] = [];
+  const response = await handleNativeLink(
+    new Request("https://fleet.example/native/link/link-code"),
+    "link-code",
+    {
+      kind: "authenticated",
+      identity: {
+        subject: user.subject,
+        identity: user.email!,
+        login: null,
+        email: user.email,
+        name: user.name!,
+      },
+    },
+    { DB: d1(user), CRABFLEET_TRUSTED_PROXY_AUTO_ROLE: "viewer" } as RuntimeEnv,
+    service(approvals, {
+      ...link,
+      clientName: `${"workstation".repeat(12)}<ScRiPt>alert(1)</ScRiPt>`,
+      scope: connectorAccessScope,
+    }),
+  );
+  assert.equal(response.status, 200);
+  const html = await response.text();
+  assert.match(html, /&lt;ScRiPt&gt;alert\(1\)&lt;\/ScRiPt&gt;/);
+  assert.doesNotMatch(html, /<script\b/i);
+  assert.match(html, /<form method="post" action="\/native\/link\/link-code">/);
+  assert.match(html, /name="csrf" value="[^"]+"/);
+  assert.match(html, /Authorize this connector/);
+  assert.deepEqual(approvals, []);
+});
+
+test("native sign-in recovery keeps unauthenticated access unauthorized", async () => {
+  const approvals: string[] = [];
+  const response = await handleNativeLink(
+    new Request("https://fleet.example/native/link/link-code"),
+    "link-code",
+    { kind: "disabled" },
+    {} as RuntimeEnv,
+    service(approvals),
+  );
+  assert.equal(response.status, 401);
+  assert.equal(response.headers.get("cache-control"), "no-store");
+  const html = await response.text();
+  assert.match(html, /Sign in to continue/);
+  assert.match(html, /href="\/">Open Crabfleet/);
+  assert.doesNotMatch(html, /<form|name="csrf"/);
   assert.deepEqual(approvals, []);
 });
 

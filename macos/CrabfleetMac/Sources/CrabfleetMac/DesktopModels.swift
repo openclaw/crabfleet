@@ -271,17 +271,17 @@ struct DesktopTarget: Identifiable, Hashable {
   init(host: RegisteredDesktopHost) {
     id = "host:\(host.id)"
     title = host.name
-    subtitle = "\(host.address):\(host.port)"
-    detail = "Registered private desktop"
+    subtitle = host.relayOnly ? "Browser relay" : "\(host.address):\(host.port)"
+    detail = host.relayOnly ? "Open this desktop in Crabfleet's browser viewer" : "Registered private desktop"
     source = .crabfleet
     status = nil
     owner = host.owner
     repository = nil
     branch = nil
     updatedAt = host.updatedAt
-    endpoint = .init(host: host.address, port: host.port, username: "")
+    endpoint = host.relayOnly ? nil : .init(host: host.address, port: host.port, username: "")
     quic = QUICConnectionConfiguration(port: host.quicPort, certHash: host.quicCertHash)
-    desktopAvailable = true
+    desktopAvailable = !host.relayOnly
     profileID = nil
     nativeVncSessionID = nil
     prefersPasswordOnlyARD = true

@@ -105,59 +105,8 @@ async function ensureCrabfleetDocsRecord() {
   }
 }
 
-async function ensureCrabdSshRecord() {
-  const crabd = await zone("crabd.sh");
-  const records = await request(
-    `/zones/${crabd.id}/dns_records?name=${encodeURIComponent("crabd.sh")}`,
-  );
-
-  const target = "87.99.128.60";
-  for (const record of records.filter((entry) => entry.type === "AAAA" || entry.type === "CNAME")) {
-    await request(`/zones/${crabd.id}/dns_records/${record.id}`, { method: "DELETE" });
-    console.log(`deleted conflicting crabd.sh ${record.type} record ${record.id}`);
-  }
-
-  const refreshed = await request(
-    `/zones/${crabd.id}/dns_records?name=${encodeURIComponent("crabd.sh")}`,
-  );
-  const [primaryA, ...extraARecords] = refreshed.filter((record) => record.type === "A");
-  if (primaryA) {
-    await request(`/zones/${crabd.id}/dns_records/${primaryA.id}`, {
-      method: "PUT",
-      body: JSON.stringify({
-        type: "A",
-        name: "crabd.sh",
-        content: target,
-        proxied: false,
-        ttl: 1,
-      }),
-    });
-    console.log("set crabd.sh A record to SSH gateway");
-  } else {
-    await request(`/zones/${crabd.id}/dns_records`, {
-      method: "POST",
-      body: JSON.stringify({
-        type: "A",
-        name: "crabd.sh",
-        content: target,
-        proxied: false,
-        ttl: 1,
-      }),
-    });
-    console.log("created crabd.sh SSH A record");
-  }
-
-  for (const record of extraARecords) {
-    await request(`/zones/${crabd.id}/dns_records/${record.id}`, { method: "DELETE" });
-    console.log(`deleted extra crabd.sh A record ${record.id}`);
-  }
-}
-
 if (!productOnly) {
   await ensureWorkerHosts(appWorkerScript, "openclaw.ai", ["crabfleet.openclaw.ai"]);
 }
 await ensureWorkerHosts(productWorkerScript, "crabfleet.ai", ["crabfleet.ai"]);
 await ensureCrabfleetDocsRecord();
-if (!productOnly) {
-  await ensureCrabdSshRecord();
-}

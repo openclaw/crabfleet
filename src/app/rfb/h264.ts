@@ -87,6 +87,8 @@ export async function supportsWebCodecsH264(): Promise<boolean> {
 
 export class H264Decoder {
   #decoder: BrowserVideoDecoder | null = null;
+  #decoderGeneration = 0;
+  #configurationDirty = false;
   #sps: Uint8Array | null = null;
   #pps: Uint8Array | null = null;
   #timestamp = 0;
@@ -108,13 +110,26 @@ export class H264Decoder {
     if (flags & 0x2) this.reset();
     const units = parseAnnexB(payload);
     for (const unit of units) {
-      if (unit.type === 7) this.#sps = unit.data;
-      if (unit.type === 8) this.#pps = unit.data;
+      if (unit.type === 7) {
+        this.#configurationDirty ||= !sameParameterSet(this.#sps, unit.data);
+        this.#sps = unit.data;
+      }
+      if (unit.type === 8) {
+        this.#configurationDirty ||= !sameParameterSet(this.#pps, unit.data);
+        this.#pps = unit.data;
+      }
     }
     if (!this.#decoder || this.#decoder.state === "closed") throw new Error("H.264 decoder closed");
-    if (this.#decoder.state === "unconfigured") this.#configure();
     const key = units.some((unit) => unit.type === 5);
-    this.#decoder.decode(
+    if (this.#configurationDirty && this.#decoder.state === "configured") {
+      if (!key) throw new Error("H.264 configuration change requires a key frame");
+      this.#decoderGeneration += 1;
+      this.#decoder.close();
+      this.#rejectPending(new Error("H.264 decoder configuration changed"));
+      this.#createDecoder(this.#error);
+    }
+    if (this.#decoder!.state === "unconfigured") this.#configure();
+    this.#decoder!.decode(
       new (encodedVideoChunkAPI())({
         type: key ? "key" : "delta",
         timestamp: this.#timestamp,
@@ -127,6 +142,7 @@ export class H264Decoder {
   }
 
   reset(): void {
+    this.#decoderGeneration += 1;
     if (!this.#decoder) return;
     if (this.#decoder.state !== "closed") this.#decoder.close();
     this.#rejectPending(new Error("H.264 decoder context reset"));
@@ -136,6 +152,7 @@ export class H264Decoder {
   }
 
   close(): void {
+    this.#decoderGeneration += 1;
     if (this.#decoder?.state !== "closed") this.#decoder?.close();
     this.#rejectPending(new Error("H.264 decoder closed"));
   }
@@ -143,12 +160,33 @@ export class H264Decoder {
   #createDecoder(error: (error: Error) => void): void {
     const Decoder = videoDecoderAPI();
     if (!Decoder) throw new Error("WebCodecs VideoDecoder is unavailable");
+    const generation = ++this.#decoderGeneration;
     this.#decoder = new Decoder({
       output: (frame) => {
+        if (generation !== this.#decoderGeneration) {
+          frame.close();
+          return;
+        }
         const pending = this.#pending.shift();
-        Promise.resolve(this.#output(frame)).then(pending?.resolve, pending?.reject);
+        if (!pending) {
+          frame.close();
+          return;
+        }
+        Promise.resolve()
+          .then(() => {
+            if (generation !== this.#decoderGeneration) {
+              frame.close();
+              return;
+            }
+            return this.#output(frame);
+          })
+          .then(pending.resolve, (error: Error) => {
+            frame.close();
+            pending.reject(error);
+          });
       },
       error: (decodeError) => {
+        if (generation !== this.#decoderGeneration) return;
         error(decodeError);
         this.#rejectPending(decodeError);
       },
@@ -166,9 +204,18 @@ export class H264Decoder {
       optimizeForLatency: true,
       hardwareAcceleration: "prefer-hardware",
     });
+    this.#configurationDirty = false;
   }
 
   #rejectPending(error: Error): void {
     for (const pending of this.#pending.splice(0)) pending.reject(error);
   }
+}
+
+function sameParameterSet(left: Uint8Array | null, right: Uint8Array): boolean {
+  return (
+    left !== null &&
+    left.length === right.length &&
+    left.every((value, index) => value === right[index])
+  );
 }

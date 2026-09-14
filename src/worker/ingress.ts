@@ -15,7 +15,6 @@ export type WorkerIngress = {
 export function prepareWorkerIngress(request: Request, env: TrustedProxyEnv): WorkerIngress {
   const trustedProxy = inspectTrustedProxyAssertion(request, env);
   if (trustedProxy.kind === "rejected") throw unauthorized();
-
   request = sanitizeTrustedProxyRequest(request, env);
   const independentServiceAuth = usesIndependentServiceAuth(request);
   if (trustedProxy.kind === "authenticated") {
@@ -24,38 +23,33 @@ export function prepareWorkerIngress(request: Request, env: TrustedProxyEnv): Wo
     headers.delete("cookie");
     request = new Request(request, { headers });
   }
-
   return { request, trustedProxy, independentServiceAuth };
 }
 
 export function enforceWorkerIngressAuth(ingress: WorkerIngress): void {
-  if (ingress.trustedProxy.kind === "missing" && !ingress.independentServiceAuth) {
+  if (ingress.trustedProxy.kind === "missing" && !ingress.independentServiceAuth)
     throw unauthorized();
-  }
 }
 
 export function usesIndependentServiceAuth(request: Request): boolean {
-  const pathname = new URL(request.url).pathname;
-  if (usesNativeServiceAuth(request.method, pathname)) return true;
-  if (pathname === "/api/terminal/ws") {
-    const headers = request.headers;
-    const hasAuthorization = Boolean(headers.get("authorization"));
-    const hasSshIdentity = Boolean(headers.get("x-crabfleet-ssh-fingerprint"));
-    const hasAgentIdentity = Boolean(headers.get("x-crabfleet-session-id"));
-    return hasAuthorization && (hasSshIdentity || hasAgentIdentity);
-  }
-  return ["/api/ssh/", "/api/agent/", "/api/openclaw/", "/api/provision/"].some((prefix) =>
-    pathname.startsWith(prefix),
-  );
-}
-
-function usesNativeServiceAuth(method: string, pathname: string): boolean {
+  const { pathname } = new URL(request.url);
+  const method = request.method;
   return (
     (method === "POST" &&
-      (pathname === "/api/native/v1/auth/device" || pathname === "/api/native/v1/auth/token")) ||
+      [
+        "/api/native/v1/auth/device",
+        "/api/native/v1/auth/token",
+        "/api/connector/v1/auth/renew",
+      ].includes(pathname)) ||
     (method === "DELETE" && pathname === "/api/native/v1/auth/token") ||
-    (method === "POST" && pathname === "/api/native/v1/native-vnc") ||
     (method === "GET" &&
-      (pathname === "/api/native/v1/session" || pathname === "/api/native/v1/fleet"))
+      ["/api/native/v1/session", "/api/native/v1/fleet", "/api/connector/v1/session"].includes(
+        pathname,
+      )) ||
+    (["PUT", "DELETE"].includes(method) &&
+      /^\/api\/connector\/v1\/desktop-hosts\/[a-z0-9._-]+$/u.test(pathname)) ||
+    (method === "POST" &&
+      /^\/api\/connector\/v1\/desktop-hosts\/[a-z0-9._-]+\/recover$/u.test(pathname)) ||
+    (method === "GET" && /^\/api\/desktop-hosts\/[^/]+\/relay\/host$/u.test(pathname))
   );
 }

@@ -13,20 +13,19 @@ const cname = readCname();
 const siteBase = cname ? `https://${cname}` : "";
 
 const productName = "Crabfleet";
-const productTagline = "SSH-first Codex crabbox fleet";
+const productTagline = "Your computers, within reach.";
 const productDescription =
-  "Crabfleet is a Cloudflare Worker control plane for OpenClaw Codex crabboxes and run attempts - repo-ready workspaces, fleet visibility grouped by person, WebVNC, prompt cards, repo gates, workflow policy, and attachable Ghostty WASM session views.";
-const installCommand = "ssh link@crabd.sh";
+  "Crabfleet is a native VNC app for private desktop sharing, with Mac viewing and Linux and Windows hosts.";
 const codePlaceholder = String.fromCharCode(0);
 const codePlaceholderPattern = new RegExp(`${codePlaceholder}(\\d+)${codePlaceholder}`, "g");
 
 const sections = [
-  ["Start", ["index.md", "quickstart.md", "architecture.md"]],
+  ["Start", ["index.md", "quickstart.md", "connections.md", "architecture.md"]],
   [
-    "Features",
-    ["cards.md", "runs.md", "github-actions-sessions.md", "macos-native-client.md", "admin.md"],
+    "Desktops",
+    ["macos-native-client.md", "linux-connector.md", "linux-greeter.md", "windows-connector.md"],
   ],
-  ["Reference", ["api.md", "spec.md", "spec-v2.md"]],
+  ["Reference", ["admin.md", "api.md", "screen-recording-indicator.md"]],
 ];
 
 // Skip these from page generation (internal notes, generated subpages we don't want as their own
@@ -82,7 +81,6 @@ for (const page of pages) {
 fs.writeFileSync(path.join(outDir, "favicon.svg"), faviconSvg(), "utf8");
 
 copyStaticAsset("crabbox-logo.png");
-copyStaticAsset("crabfleet-og.png");
 fs.writeFileSync(path.join(outDir, ".nojekyll"), "", "utf8");
 if (cname) fs.writeFileSync(path.join(outDir, "CNAME"), cname, "utf8");
 validateLinks(outDir);
@@ -95,14 +93,10 @@ function llmsTxt() {
   const name = typeof productName !== "undefined" ? productName : path.basename(root);
   const description =
     typeof productDescription !== "undefined" ? productDescription : `${name} documentation index.`;
-  const install = docsInstallHint();
   const docPages = docsLlmsPages().map(
     (page) => `- ${page.title}: ${pageUrl(origin, page.outRel)}`,
   );
   const lines = [`# ${name}`, "", description, "", "Canonical documentation:", ...docPages];
-  if (install) {
-    lines.push("", "Install:", `- ${install}`);
-  }
   if (source) {
     lines.push("", `Source: ${source}`);
   }
@@ -136,15 +130,6 @@ function docsSourceUrl() {
   if (typeof repoUrl !== "undefined") return repoUrl;
   if (typeof repoEditBase !== "undefined")
     return repoEditBase.replace(/\/edit\/main\/docs\/?$/, "");
-  return "";
-}
-
-function docsInstallHint() {
-  if (typeof installCommand !== "undefined") return installCommand;
-  if (typeof installLine !== "undefined") return installLine;
-  if (typeof installCmd !== "undefined") return installCmd;
-  if (typeof installSnippet !== "undefined") return installSnippet;
-  if (typeof brewInstall !== "undefined") return brewInstall;
   return "";
 }
 
@@ -220,6 +205,7 @@ function outPath(rel, frontmatter = {}) {
   if (frontmatter.permalink) {
     const permalink = normalizePermalink(frontmatter.permalink);
     if (permalink === "/") return "index.html";
+    if (permalink.endsWith(".html")) return permalink.slice(1);
     return `${permalink.slice(1)}/index.html`;
   }
   if (rel === "index.md") return "index.html";
@@ -461,25 +447,39 @@ function isHomePage(page) {
 }
 
 function homeHero(page) {
-  const description = page.frontmatter.description || productDescription;
-  const quickstartRel = pageMap.get("quickstart.md")?.outRel
-    ? hrefToOutRel(pageMap.get("quickstart.md").outRel, page.outRel)
-    : "quickstart.html";
-  const archRel = pageMap.get("architecture.md")?.outRel
-    ? hrefToOutRel(pageMap.get("architecture.md").outRel, page.outRel)
-    : "architecture.html";
+  const quickstartRel = hrefToOutRel(pageMap.get("quickstart.md").outRel, page.outRel);
+  const macRel = hrefToOutRel(pageMap.get("macos-native-client.md").outRel, page.outRel);
+  const linuxRel = hrefToOutRel(pageMap.get("linux-connector.md").outRel, page.outRel);
+  const archRel = hrefToOutRel(pageMap.get("architecture.md").outRel, page.outRel);
   return `<header class="home-hero">
-        <p class="eyebrow">OpenClaw · Codex Control Plane</p>
-        <h1>${escapeHtml(productTagline)}</h1>
-        <p class="lede">${escapeHtml(description)}</p>
-        <div class="home-cta">
-          <a class="btn btn-primary" href="${quickstartRel}">Quickstart</a>
-          <a class="btn btn-ghost" href="${repoBase}" rel="noopener">GitHub</a>
-        </div>
-        <div class="home-install"><span class="prompt">$</span><code>${escapeHtml(installCommand)}</code></div>
-        <div class="home-services"><span>Cloudflare Worker</span><span>GitHub OAuth</span><span>Ghostty WASM</span><span>SSH Gateway</span></div>
-        <p class="muted"><a href="${archRel}">Architecture overview →</a></p>
-      </header>`;
+    <div class="home-intro">
+      <p class="eyebrow"><span class="status-dot"></span> REMOTE DESKTOP, CLOSE TO HOME</p>
+      <h1>Your computers.<br><em>Within reach.</em></h1>
+      <p class="lede">Connect to your computers, share a desktop, and pick up where you left off. A native Mac viewer and private sharing for the screens you depend on.</p>
+      <div class="home-cta">
+        <a class="btn btn-primary" href="${quickstartRel}">Get started <span aria-hidden="true">→</span></a>
+        <a class="btn btn-ghost" href="https://crabfleet.openclaw.ai/app/">Open web viewer <span aria-hidden="true">↗</span></a>
+      </div>
+      <div class="home-platforms"><span>NATIVE MAC VIEWER</span><span>LINUX &amp; WINDOWS HOSTS</span><span>VNC COMPATIBLE</span></div>
+      <p class="home-caption">Ordinary VNC connections work without an account.</p>
+    </div>
+    <div class="desktop-preview" aria-label="Illustration of shared computers in Crabfleet">
+      <div class="preview-top"><span><img src="crabbox-logo.png" alt="" width="22" height="22"> Crabfleet</span><span>DESKTOP PREVIEW</span></div>
+      <div class="preview-heading"><span>Your computers</span><span class="preview-badge">Private</span></div>
+      <div class="preview-count"><strong>A familiar place to return to.</strong><span>Three example desktops. One clear view.</span></div>
+      <div class="preview-session"><span class="preview-avatar">01</span><div><strong>Office Mac</strong><span>macOS · shared display</span></div><i></i></div>
+      <div class="preview-session"><span class="preview-avatar">02</span><div><strong>Linux workstation</strong><span>Linux · desktop connector</span></div><i></i></div>
+      <div class="preview-session"><span class="preview-avatar">03</span><div><strong>Windows PC</strong><span>Windows · direct VNC</span></div><i></i></div>
+      <div class="preview-note"><span>YOUR DESKTOP, YOUR WAY</span><p>View on your Mac. Share a computer.<br>Connect through your browser.</p></div>
+      <div class="preview-bottom"><span class="status-dot"></span> MAC · LINUX · WINDOWS</div>
+    </div>
+  </header>
+  <section class="home-principles" aria-label="Ways to connect">
+    <article><span class="principle-number">01 / CONNECT</span><h2>At home.<br>On your Mac.</h2><p>Save your connections, open a desktop with Quick Connect, and switch between warm sessions in a native Mac viewer.</p><a href="${macRel}">Explore the Mac app →</a></article>
+    <article><span class="principle-number">02 / SHARE</span><h2>Every computer.<br>A little closer.</h2><p>Share your Mac, or host a Linux or Windows desktop with Crabfleet Connect. Choose the screens and access you need.</p><a href="${linuxRel}">Set up a Linux host →</a></article>
+    <article><span class="principle-number">03 / CHOOSE</span><h2>Use VNC.<br>On your terms.</h2><p>Connect directly without an account. Add the optional desktop service for private discovery and authenticated browser access.</p><a href="${archRel}">See how it fits together →</a></article>
+  </section>
+  <div class="overview-heading"><p class="eyebrow">THE DESKTOP GUIDE</p><h2>A closer look at Crabfleet.</h2><p>Get connected, choose what to share, and make yourself at home.</p></div>`;
 }
 
 function standardHero(page, sectionName, editUrl) {
@@ -509,9 +509,9 @@ function layout({ page, html, toc, prev, next, sectionName }) {
     : `${page.title} — ${productName}`;
   const description =
     page.frontmatter.description ||
-    (home ? productDescription : `${page.title} — ${productName} CLI documentation.`);
+    (home ? productDescription : `${page.title} — ${productName} desktop documentation.`);
   const canonicalUrl = pageCanonicalUrl(page);
-  const socialImage = siteBase ? `${siteBase}/crabfleet-og.png` : `${rootPrefix}crabfleet-og.png`;
+  const socialImage = siteBase ? `${siteBase}/crabbox-logo.png` : `${rootPrefix}crabbox-logo.png`;
   const socialMeta = [
     ["link", "rel", "canonical", "href", canonicalUrl],
     ["meta", "property", "og:type", "content", "website"],
@@ -520,9 +520,7 @@ function layout({ page, html, toc, prev, next, sectionName }) {
     ["meta", "property", "og:description", "content", description],
     ["meta", "property", "og:url", "content", canonicalUrl],
     ["meta", "property", "og:image", "content", socialImage],
-    ["meta", "property", "og:image:width", "content", "1200"],
-    ["meta", "property", "og:image:height", "content", "630"],
-    ["meta", "name", "twitter:card", "content", "summary_large_image"],
+    ["meta", "name", "twitter:card", "content", "summary"],
     ["meta", "name", "twitter:title", "content", titleSuffix],
     ["meta", "name", "twitter:description", "content", description],
     ["meta", "name", "twitter:image", "content", socialImage],
@@ -538,13 +536,12 @@ function layout({ page, html, toc, prev, next, sectionName }) {
   <meta name="description" content="${escapeAttr(description)}">
   ${socialMeta}
   <link rel="icon" href="${rootPrefix}favicon.svg" type="image/svg+xml">
-  <link rel="preconnect" href="https://fonts.googleapis.com">
-  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
   <script>${preThemeScript()}</script>
   <style>${css()}</style>
 </head>
 <body${home ? ' class="home"' : ""}>
+  <a class="skip-link" href="#main-content">Skip to content</a>
+  ${home ? `<header class="site-header"><a class="brand" href="./"><img class="mark" src="crabbox-logo.png" alt="" width="32" height="32"><strong>Crabfleet</strong></a><nav aria-label="Main"><a href="${hrefToOutRel(pageMap.get("quickstart.md").outRel, page.outRel)}">Documentation</a><a href="${repoBase}">GitHub ↗</a>${themeToggleHtml()}<a class="site-open" href="https://crabfleet.openclaw.ai/app/">Open app <span aria-hidden="true">↗</span></a></nav></header>` : ""}
   <button class="nav-toggle" type="button" aria-label="Toggle navigation" aria-expanded="false">
     <span aria-hidden="true"></span><span aria-hidden="true"></span><span aria-hidden="true"></span>
   </button>
@@ -553,14 +550,14 @@ function layout({ page, html, toc, prev, next, sectionName }) {
       <div class="sidebar-head">
         <a class="brand" href="${hrefToOutRel("index.html", page.outRel)}" aria-label="${productName} docs home">
           <img class="mark" src="${rootPrefix}crabbox-logo.png" alt="" width="28" height="28">
-          <span><strong>${escapeHtml(productName)}</strong><small>Control plane docs</small></span>
+          <span><strong>${escapeHtml(productName)}</strong><small>Desktop guides</small></span>
         </a>
         ${themeToggleHtml()}
       </div>
-      <label class="search"><span>Search</span><input id="doc-search" type="search" placeholder="cards, runs, admin"></label>
+      <label class="search"><span>Search</span><input id="doc-search" type="search" placeholder="Mac, Linux, sharing"></label>
       <nav>${navHtml(page)}</nav>
     </aside>
-    <main>
+    <main id="main-content">
       ${heroBlock}
       <div class="doc-grid${home ? " doc-grid-home" : ""}">
         <article class="${articleClass}">${html}${prevNext}</article>

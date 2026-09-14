@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"sync"
 	"time"
 
 	"github.com/openclaw/crabfleet/internal/connect"
@@ -29,6 +30,14 @@ type SessionConfig struct {
 	HandshakeTimeout time.Duration
 	MediaTimeout     time.Duration
 	JPEGQuality      int
+	ViewOnly         bool
+	AllowResize      bool
+	Clipboard        connect.Clipboard
+	SharedFolder     *SharedFolder
+	Audio            connect.AudioSource
+	Video            connect.VideoEncoder
+	// Set only by PublishRelay after the ownership-authenticated WebSocket opens.
+	relay bool
 }
 
 func (config SessionConfig) normalized() (SessionConfig, error) {
@@ -90,12 +99,16 @@ func ServeConn(ctx context.Context, connection net.Conn, config SessionConfig) e
 	}()
 	defer close(stopWatch)
 
-	if config.HandshakeTimeout > 0 {
+	if config.HandshakeTimeout > 0 && !config.relay {
 		if err := connection.SetDeadline(time.Now().Add(config.HandshakeTimeout)); err != nil {
 			return err
 		}
 	}
-	handshakeContext, cancelHandshake := context.WithTimeout(ctx, config.HandshakeTimeout)
+	handshakeContext, cancelHandshake := context.WithCancel(ctx)
+	if !config.relay {
+		cancelHandshake()
+		handshakeContext, cancelHandshake = context.WithTimeout(ctx, config.HandshakeTimeout)
+	}
 	frame, err := handshake(handshakeContext, connection, config)
 	cancelHandshake()
 	if err != nil {
@@ -121,45 +134,15 @@ func handshake(ctx context.Context, connection net.Conn, config SessionConfig) (
 	if string(clientBanner) != string(Version38Banner) {
 		return connect.Frame{}, errors.New("unsupported RFB version")
 	}
-	if err := writeFull(connection, []byte{2, SecurityARD, SecurityVNC}); err != nil {
-		return connect.Frame{}, err
-	}
-	selection := []byte{0}
-	if _, err := io.ReadFull(connection, selection); err != nil {
-		return connect.Frame{}, err
-	}
-	if selection[0] == SecurityARD {
-		err := sendSecurityFailure(connection, "ARD host authentication is not implemented by Crabfleet Connect yet.")
-		if err != nil {
+	if config.relay {
+		if err := connection.SetDeadline(time.Now().Add(config.HandshakeTimeout)); err != nil {
 			return connect.Frame{}, err
 		}
-		return connect.Frame{}, errors.New("ARD host authentication is deferred")
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, config.HandshakeTimeout)
+		defer cancel()
 	}
-	if selection[0] != SecurityVNC {
-		return connect.Frame{}, errors.New("unsupported RFB security selection")
-	}
-	challenge := make([]byte, 16)
-	if _, err := io.ReadFull(config.ChallengeReader, challenge); err != nil {
-		return connect.Frame{}, fmt.Errorf("generate VNC challenge: %w", err)
-	}
-	if err := writeFull(connection, challenge); err != nil {
-		return connect.Frame{}, err
-	}
-	response := make([]byte, 16)
-	if _, err := io.ReadFull(connection, response); err != nil {
-		return connect.Frame{}, err
-	}
-	accepted, err := VerifyVNCResponse(challenge, response, config.Password)
-	if err != nil {
-		return connect.Frame{}, err
-	}
-	if !accepted {
-		if err := sendSecurityFailure(connection, "Authentication failed."); err != nil {
-			return connect.Frame{}, err
-		}
-		return connect.Frame{}, errors.New("VNC authentication failed")
-	}
-	if err := writeFull(connection, []byte{0, 0, 0, 0}); err != nil {
+	if err := authenticateViewer(connection, config); err != nil {
 		return connect.Frame{}, err
 	}
 	clientInit := []byte{0}
@@ -176,9 +159,6 @@ func handshake(ctx context.Context, connection net.Conn, config SessionConfig) (
 	if err := frame.Validate(); err != nil {
 		return connect.Frame{}, err
 	}
-	if _, err := EncodeJPEG(frame, config.JPEGQuality); err != nil {
-		return connect.Frame{}, fmt.Errorf("initial Tight JPEG: %w", err)
-	}
 	serverInit, err := ServerInit(frame.Width, frame.Height, config.DesktopName)
 	if err != nil {
 		return connect.Frame{}, err
@@ -187,6 +167,57 @@ func handshake(ctx context.Context, connection net.Conn, config SessionConfig) (
 		return connect.Frame{}, err
 	}
 	return frame, nil
+}
+
+func authenticateViewer(connection net.Conn, config SessionConfig) error {
+	if config.relay {
+		if err := writeFull(connection, []byte{1, 1}); err != nil {
+			return err
+		}
+		var selection [1]byte
+		if _, err := io.ReadFull(connection, selection[:]); err != nil {
+			return err
+		}
+		if selection[0] != 1 {
+			return errors.New("unsupported relay security selection")
+		}
+		return writeFull(connection, []byte{0, 0, 0, 0})
+	}
+	if err := writeFull(connection, []byte{1, SecurityVNC}); err != nil {
+		return err
+	}
+	selection := []byte{0}
+	if _, err := io.ReadFull(connection, selection); err != nil {
+		return err
+	}
+	if selection[0] != SecurityVNC {
+		return errors.New("unsupported RFB security selection")
+	}
+	challenge := make([]byte, 16)
+	if _, err := io.ReadFull(config.ChallengeReader, challenge); err != nil {
+		return fmt.Errorf("generate VNC challenge: %w", err)
+	}
+	if err := writeFull(connection, challenge); err != nil {
+		return err
+	}
+	response := make([]byte, 16)
+	if _, err := io.ReadFull(connection, response); err != nil {
+		return err
+	}
+	accepted, err := VerifyVNCResponse(challenge, response, config.Password)
+	if err != nil {
+		return err
+	}
+	if !accepted {
+		if err := sendSecurityFailure(connection, "Authentication failed."); err != nil {
+			return err
+		}
+		return errors.New("VNC authentication failed")
+	}
+	if err := writeFull(connection, []byte{0, 0, 0, 0}); err != nil {
+		return err
+	}
+	return nil
 }
 
 func sendSecurityFailure(writer io.Writer, reason string) error {
@@ -202,10 +233,40 @@ func sendSecurityFailure(writer io.Writer, reason string) error {
 }
 
 func messageLoop(ctx context.Context, connection net.Conn, config SessionConfig, initialFrame connect.Frame) error {
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	var writeMu sync.Mutex
+	send := func(p []byte) error {
+		if len(p) == 0 {
+			return nil
+		}
+		writeMu.Lock()
+		defer writeMu.Unlock()
+		return writeMedia(connection, p, config.MediaTimeout)
+	}
+	files := &fileSession{folder: config.SharedFolder, viewOnly: config.ViewOnly}
+	defer files.close()
+	clipboard := &clipboardSession{source: config.Clipboard, viewOnly: config.ViewOnly}
+	_, _ = clipboard.poll(ctx)
+	nextClipboardPoll := time.Now().Add(500 * time.Millisecond)
+	var audioCancel context.CancelFunc
+	var audioDone <-chan struct{}
+	stopAudio := func() {
+		if audioCancel != nil {
+			audioCancel()
+			<-audioDone
+			audioCancel = nil
+		}
+	}
+	defer stopAudio()
 	width, height := initialFrame.Width, initialFrame.Height
+	layout := initialFrame.DesktopLayout()
+	lastDesktopRevision := initialFrame.DesktopRevision
+	layoutSent := false
 	var encodings Encodings
 	var negotiated bool
 	var lastCursorShape *connect.Cursor
+	var videoState videoSession
 	pressedKeys := make(map[uint32]struct{})
 	var lastPointer connect.PointerEvent
 	defer func() { releaseInput(config.Backend, pressedKeys, lastPointer) }()
@@ -224,15 +285,93 @@ func messageLoop(ctx context.Context, connection net.Conn, config SessionConfig,
 			if err != nil {
 				return err
 			}
+			fileSharingStarted := next.FileSharing && !encodings.FileSharing
 			encodings = next
+			layoutSent = false
 			negotiated = true
 			lastCursorShape = nil
+			clipboard.extended = next.Clipboard
+			if next.Clipboard && config.Clipboard != nil {
+				if err := send(clipboard.capabilities()); err != nil {
+					return err
+				}
+			}
+			if next.FileSharing && config.SharedFolder != nil {
+				if fileSharingStarted {
+					if err := send(config.SharedFolder.capability(config.ViewOnly)); err != nil {
+						return err
+					}
+				}
+			} else {
+				files.close()
+			}
+			if !next.Audio {
+				wasPlaying := audioCancel != nil
+				stopAudio()
+				if wasPlaying {
+					if err := send([]byte{200, 3, 0, 0}); err != nil {
+						return err
+					}
+				}
+			} else if audioDone != nil {
+				select {
+				case <-audioDone:
+					stopAudio()
+				default:
+				}
+			}
+			if next.Audio && config.Audio != nil && audioCancel == nil {
+				audioContext, stop := context.WithCancel(ctx)
+				packets, err := config.Audio.Subscribe(audioContext)
+				if err != nil {
+					stop()
+					continue
+				}
+				if err := send([]byte{200, 1, 1, 2, 0, 0, 187, 128, 0, 0, 0, 2, 0x11, 0x90}); err != nil {
+					stop()
+					for range packets {
+					}
+					return err
+				}
+				done := make(chan struct{})
+				audioCancel, audioDone = stop, done
+				go func() {
+					defer close(done)
+					defer func() {
+						stop()
+						// Packet closure fences the capture process's final reap.
+						for range packets {
+						}
+					}()
+					for {
+						select {
+						case <-audioContext.Done():
+							return
+						case packet, ok := <-packets:
+							if !ok {
+								_ = send([]byte{200, 3, 0, 0})
+								return
+							}
+							if len(packet.Payload) == 0 || len(packet.Payload) > 64<<10 {
+								continue
+							}
+							p := binary.BigEndian.AppendUint32([]byte{200, 2, 0, 0}, packet.TimestampMS)
+							p = binary.BigEndian.AppendUint32(p, uint32(len(packet.Payload)))
+							if err := send(append(p, packet.Payload...)); err != nil && !errors.Is(err, errMediaDropped) {
+								_ = connection.Close()
+								return
+							}
+						}
+					}
+				}()
+			}
 		case 3:
-			if _, err := parseFramebufferRequest(connection, width, height); err != nil {
+			request, err := parseFramebufferRequest(connection, width, height)
+			if err != nil {
 				return err
 			}
-			if !negotiated || !encodings.Tight {
-				return errors.New("the client did not offer Tight encoding")
+			if !negotiated || (!encodings.Tight && !encodings.Raw && !encodings.H264 && !encodings.HEVC) {
+				return errors.New("the client did not offer a supported video encoding")
 			}
 			frame, err := config.Backend.Capture(ctx)
 			if err != nil {
@@ -241,17 +380,40 @@ func messageLoop(ctx context.Context, connection net.Conn, config SessionConfig,
 			if err := frame.Validate(); err != nil {
 				return err
 			}
-			if frame.Width != width || frame.Height != height {
+			nextLayout := frame.DesktopLayout()
+			sizeChanged := frame.Width != width || frame.Height != height
+			layoutChanged := !layout.Equal(nextLayout)
+			if sizeChanged && !encodings.ExtendedDesktopSize && !encodings.DesktopSize {
 				return errors.New("framebuffer size changed without resize negotiation")
 			}
-			payload, err := EncodeJPEG(frame, config.JPEGQuality)
+			if (encodings.ExtendedDesktopSize && (!request.Incremental || !layoutSent || layoutChanged)) || (encodings.DesktopSize && sizeChanged) {
+				reason := 0
+				if request.Incremental && frame.DesktopRevision != lastDesktopRevision {
+					reason = 2
+				}
+				if !encodings.ExtendedDesktopSize {
+					reason = 0
+				}
+				metadata, err := desktopSizeUpdate(nextLayout, encodings.ExtendedDesktopSize, reason, 0)
+				if err != nil {
+					return err
+				}
+				// Control metadata is a separate update and cannot be dropped:
+				// all subsequent pixels and pointer coordinates depend on it.
+				if err := send(metadata); err != nil {
+					return err
+				}
+				layoutSent = true
+				videoState.resetPending = true
+			}
+			layout = nextLayout
+			lastDesktopRevision = frame.DesktopRevision
+			width, height = frame.Width, frame.Height
+			video, err := encodeVideoRectangle(ctx, config, encodings, frame)
 			if err != nil {
 				return err
 			}
-			video, err := tightJPEGRectangle(width, height, payload)
-			if err != nil {
-				return err
-			}
+			nextVideoContext := videoState.prepare(video)
 			rectangles := [][]byte{video}
 			var nextCursorShape *connect.Cursor
 			if source, ok := config.Backend.(connect.CursorCapturer); ok && encodings.cursorEncoding() != 0 {
@@ -283,25 +445,39 @@ func messageLoop(ctx context.Context, connection net.Conn, config SessionConfig,
 			if err != nil {
 				return err
 			}
-			if err := writeMedia(connection, update, config.MediaTimeout); err != nil {
+			if err := send(update); err != nil {
 				if !errors.Is(err, errMediaDropped) {
 					return err
 				}
 				// The media frame was dropped before any bytes reached the wire.
 				// Preserve request/response pacing with a legal empty update. If
 				// even that control response cannot be sent, framing cannot recover.
-				if err := writeMedia(connection, []byte{0, 0, 0, 0}, config.MediaTimeout); err != nil {
+				if err := send([]byte{0, 0, 0, 0}); err != nil {
 					return fmt.Errorf("send empty update after media drop: %w", err)
 				}
 				continue
 			}
+			videoState.sent(nextVideoContext)
 			if nextCursorShape != nil {
 				lastCursorShape = nextCursorShape
+			}
+			if time.Now().After(nextClipboardPoll) {
+				clip, err := clipboard.poll(ctx)
+				nextClipboardPoll = time.Now().Add(500 * time.Millisecond)
+				if err != nil {
+					return err
+				}
+				if err := send(clip); err != nil {
+					return err
+				}
 			}
 		case 4:
 			down, keysym, err := parseKeyEvent(connection)
 			if err != nil {
 				return err
+			}
+			if config.ViewOnly {
+				continue
 			}
 			if down {
 				if _, alreadyPressed := pressedKeys[keysym]; !alreadyPressed && len(pressedKeys) >= maximumPressedKeys {
@@ -321,12 +497,78 @@ func messageLoop(ctx context.Context, connection net.Conn, config SessionConfig,
 			if err != nil {
 				return err
 			}
+			if config.ViewOnly {
+				continue
+			}
 			if err := config.Backend.Pointer(ctx, connect.PointerEvent{ButtonMask: mask, X: x, Y: y}); err != nil {
 				return fmt.Errorf("inject pointer: %w", err)
 			}
 			lastPointer = connect.PointerEvent{ButtonMask: mask, X: x, Y: y}
 		case 6:
-			if err := consumeClientCutText(connection); err != nil {
+			response, err := clipboard.receive(ctx, connection)
+			if err != nil {
+				return err
+			}
+			if err := send(response); err != nil {
+				return err
+			}
+		case 251:
+			requested, err := parseSetDesktopSize(connection)
+			if err != nil {
+				return err
+			}
+			if !encodings.ExtendedDesktopSize {
+				return errors.New("desktop resizing was not negotiated")
+			}
+			status := 0
+			var resizedFrame connect.Frame
+			if requested.Validate() != nil {
+				status = 3
+			} else if config.ViewOnly || !config.AllowResize {
+				status = 1
+			} else if resizer, ok := config.Backend.(connect.DesktopResizer); !ok || !resizer.DesktopResizeSupported() {
+				status = 1
+			} else {
+				resizeContext, cancelResize := context.WithTimeout(ctx, defaultMediaTimeout)
+				resizedFrame, err = resizeDesktopFrame(resizeContext, config.Backend, resizer, requested)
+				cancelResize()
+				if errors.Is(err, connect.ErrResizeProhibited) {
+					status = 1
+				} else if errors.Is(err, connect.ErrResizeUnsupported) {
+					status = 3
+				} else if err != nil {
+					status = 2
+				}
+			}
+			// Failed replies do not change client geometry. If a platform
+			// partially applied a request, the next capture announces its real
+			// layout as a separate server-side change before sending pixels.
+			if status == 0 {
+				layout = resizedFrame.DesktopLayout()
+				width, height = resizedFrame.Width, resizedFrame.Height
+				lastDesktopRevision = resizedFrame.DesktopRevision
+			}
+			response, err := desktopSizeUpdate(layout, true, 1, status)
+			if err != nil {
+				return err
+			}
+			if err := send(response); err != nil {
+				return err
+			}
+			layoutSent = true
+			if status == 0 {
+				videoState.resetPending = true
+			}
+			lastCursorShape = nil
+		case 202:
+			if !encodings.FileSharing || config.SharedFolder == nil {
+				return errors.New("file sharing was not negotiated")
+			}
+			response, err := files.handle(connection)
+			if err != nil {
+				return err
+			}
+			if err := send(response); err != nil {
 				return err
 			}
 		default:
@@ -383,27 +625,6 @@ const (
 	maxLegacyClipboardBytes  = 1 * 1024 * 1024
 	maxExtendedClipboardBody = 4 + maxLegacyClipboardBytes + 65_536
 )
-
-func consumeClientCutText(reader io.Reader) error {
-	header := make([]byte, 7)
-	if _, err := io.ReadFull(reader, header); err != nil {
-		return err
-	}
-	if header[0] != 0 || header[1] != 0 || header[2] != 0 {
-		return errors.New("invalid ClientCutText padding")
-	}
-	length := int64(int32(binary.BigEndian.Uint32(header[3:])))
-	limit := int64(maxLegacyClipboardBytes)
-	if length < 0 {
-		length = -length
-		limit = maxExtendedClipboardBody
-	}
-	if length > limit {
-		return errors.New("ClientCutText payload is too large")
-	}
-	_, err := io.CopyN(io.Discard, reader, length)
-	return err
-}
 
 var errMediaDropped = errors.New("media write deadline expired before transmission")
 

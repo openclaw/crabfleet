@@ -9,16 +9,20 @@ on:
       - "internal/**"
       - "go.mod"
       - "go.sum"
-      - "Dockerfile.ssh-gateway"
       - ".github/workflows/cli.yml"
+      - ".goreleaser.yaml"
+      - "scripts/test-linux-connector.sh"
+      - "scripts/test-linux-audio.sh"
   pull_request:
     paths:
       - "cmd/**"
       - "internal/**"
       - "go.mod"
       - "go.sum"
-      - "Dockerfile.ssh-gateway"
       - ".github/workflows/cli.yml"
+      - ".goreleaser.yaml"
+      - "scripts/test-linux-connector.sh"
+      - "scripts/test-linux-audio.sh"
   workflow_dispatch:
 
 permissions:
@@ -30,7 +34,7 @@ concurrency:
 
 jobs:
   go:
-    name: Go CLI
+    name: Desktop connector
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -47,23 +51,53 @@ jobs:
         run: go mod download
 
       - name: Test
-        run: go test ./...
+        run: go test -race ./...
 
       - name: Vet
         run: go vet ./...
 
-      - name: Build crabfleet
-        run: go build -trimpath -o /tmp/crabfleet ./cmd/crabfleet
-
-      - name: Build SSH gateway
-        run: go build -trimpath -o /tmp/crabbox-ssh-gateway ./cmd/crabbox-ssh-gateway
-
-      - name: Smoke CLI help
+      - name: Build Linux connector
         run: |
-          /tmp/crabfleet --version
-          /tmp/crabfleet --help
-          /tmp/crabfleet new --help
-          /tmp/crabfleet login --help
+          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -o /tmp/crabfleet-connect ./cmd/crabfleet-connect
+          CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -trimpath -o /tmp/crabfleet-connect-arm64 ./cmd/crabfleet-connect
 
-      - name: Build SSH gateway image
-        run: docker build -f Dockerfile.ssh-gateway .
+      - name: Cross-build Windows connector
+        run: |
+          CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -trimpath -o /tmp/crabfleet-connect-amd64.exe ./cmd/crabfleet-connect
+          CGO_ENABLED=0 GOOS=windows GOARCH=arm64 go build -trimpath -o /tmp/crabfleet-connect-arm64.exe ./cmd/crabfleet-connect
+
+      - name: Smoke connector help
+        run: |
+          /tmp/crabfleet-connect --version
+          /tmp/crabfleet-connect --help
+
+  linux-desktop:
+    name: Linux desktop and media
+    runs-on: ubuntu-latest
+    container: archlinux:base
+    timeout-minutes: 15
+    steps:
+      - name: Install desktop test dependencies
+        run: pacman -Syu --noconfirm --needed git go gcc libcap sway wayvnc wev wl-clipboard ffmpeg dbus pulseaudio
+
+      - name: Check out
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Prepare unprivileged headless desktop
+        run: |
+          # Arch grants Sway a realtime capability excluded by Docker's bounding set.
+          # Headless capture needs no capability; leaving it set prevents exec.
+          if [ -n "$(getcap /usr/bin/sway)" ]; then
+            setcap -r /usr/bin/sway
+          fi
+          useradd --create-home proof
+          chown -R proof:proof "$GITHUB_WORKSPACE"
+
+      - name: Verify real Wayland capture, authentication, and input
+        run: runuser -u proof -- sh scripts/test-linux-connector.sh
+
+      - name: Verify media codecs and portal lifecycle
+        run: runuser -u proof -- env CRABFLEET_TEST_MEDIA=1 go test -race ./internal/connect -run 'TestFFmpegLive|TestPortalDBusContract' -v -count=1
+
+      - name: Verify system audio capture and AAC decoding
+        run: runuser -u proof -- sh scripts/test-linux-audio.sh

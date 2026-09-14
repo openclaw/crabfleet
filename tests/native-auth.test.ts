@@ -9,6 +9,7 @@ import {
   NativeAuthService,
   createNativeAuthService,
   nativeAccessScope,
+  connectorAccessScope,
   nativeAccessTokenSeconds,
   nativeDeviceAuthorizationSeconds,
   nativePollIntervalSeconds,
@@ -74,6 +75,7 @@ class MemoryNativeAuthStore implements NativeAuthStore {
   }
 
   async approveDevice(input: {
+    scope?: string;
     linkCodeHash: string;
     subject: string;
     accessTokenHash: string;
@@ -98,7 +100,7 @@ class MemoryNativeAuthStore implements NativeAuthStore {
     });
     this.access.set(input.accessTokenHash, {
       tokenHash: input.accessTokenHash,
-      scope: nativeAccessScope,
+      scope: input.scope ?? nativeAccessScope,
       expiresAt: input.accessTokenExpiresAt,
       githubTokenCiphertext: input.githubTokenCiphertext,
       user,
@@ -160,7 +162,38 @@ class MemoryNativeAuthStore implements NativeAuthStore {
       record.githubTokenCiphertext = null;
     }
   }
+
+  async renewAccessToken(tokenHash: string, now: number, expiresAt: number) {
+    const record = await this.readAccessToken(tokenHash, now);
+    if (!record || record.scope !== connectorAccessScope) return false;
+    record.expiresAt = expiresAt;
+    return true;
+  }
 }
+
+test("connector authorization is explicit, isolated from viewer scope, renewable, and revocable", async () => {
+  const subject = harness();
+  await assert.rejects(subject.service.start("Linux", "192.0.2.1", "admin"), /scope/);
+  const device = await subject.service.start("Linux", "192.0.2.1", connectorAccessScope);
+  const code = new URL(device.verificationUri).pathname.split("/").at(-1)!;
+  assert.equal((await subject.service.link(code)).scope, connectorAccessScope);
+  await subject.service.approve(code, viewer, "github-fixture");
+  const authorized = await subject.service.poll(device.deviceCode);
+  assert.equal(authorized.kind, "authorized");
+  if (authorized.kind !== "authorized") return;
+  const request = new Request("https://fleet.example/api/connector/v1/session", {
+    headers: { authorization: `Bearer ${authorized.accessToken}` },
+  });
+  await assert.rejects(subject.service.authenticate(request), /unauthorized/i);
+  assert.equal(
+    (await subject.service.authenticate(request, connectorAccessScope)).subject,
+    viewer.subject,
+  );
+  subject.setNow(subject.now() + 1000);
+  assert.ok((await subject.service.renewConnector(request)).expiresAt > authorized.expiresAt);
+  await subject.service.revoke(request);
+  await assert.rejects(subject.service.renewConnector(request), /unauthorized/i);
+});
 
 function harness(
   options: {

@@ -13,10 +13,17 @@ const (
 	SecurityVNC = 2
 	SecurityARD = 30
 
-	EncodingTight           int32 = 7
-	EncodingPointerPosition int32 = -232
-	EncodingCursor          int32 = -239
-	EncodingCursorWithAlpha int32 = -314
+	EncodingDesktopSize         int32 = -223
+	EncodingExtendedDesktopSize int32 = -308
+	EncodingTight               int32 = 7
+	EncodingRaw                 int32 = 0
+	EncodingH264                int32 = 50
+	EncodingHEVC                int32 = 0x48455631
+	EncodingAudio               int32 = 0x43414631
+	EncodingClipboard           int32 = -1063131698
+	EncodingPointerPosition     int32 = -232
+	EncodingCursor              int32 = -239
+	EncodingCursorWithAlpha     int32 = -314
 
 	MaxEncodings       = 256
 	MaxDesktopName     = 4096
@@ -35,10 +42,12 @@ var (
 )
 
 type Encodings struct {
-	Tight           bool
-	CursorWithAlpha bool
-	Cursor          bool
-	PointerPosition bool
+	Raw, H264, HEVC, Audio, Clipboard, FileSharing bool
+	Tight                                          bool
+	DesktopSize, ExtendedDesktopSize               bool
+	CursorWithAlpha                                bool
+	Cursor                                         bool
+	PointerPosition                                bool
 }
 
 func (e Encodings) cursorEncoding() int32 {
@@ -100,6 +109,22 @@ func parseSetEncodings(reader io.Reader) (Encodings, error) {
 	var result Encodings
 	for offset := 0; offset < len(payload); offset += 4 {
 		switch int32(binary.BigEndian.Uint32(payload[offset:])) {
+		case EncodingDesktopSize:
+			result.DesktopSize = true
+		case EncodingExtendedDesktopSize:
+			result.ExtendedDesktopSize = true
+		case EncodingRaw:
+			result.Raw = true
+		case EncodingH264:
+			result.H264 = true
+		case EncodingHEVC:
+			result.HEVC = true
+		case EncodingAudio:
+			result.Audio = true
+		case EncodingClipboard:
+			result.Clipboard = true
+		case EncodingFileSharing:
+			result.FileSharing = true
 		case EncodingTight:
 			result.Tight = true
 		case EncodingCursorWithAlpha:

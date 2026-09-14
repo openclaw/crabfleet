@@ -7,7 +7,7 @@ import type { User } from "../models.ts";
 const nativeJsonBodyLimitBytes = 1024;
 
 export type NativeRouteDependencies = {
-  startDevice(clientName: unknown, remoteIp: unknown): Promise<unknown>;
+  startDevice(clientName: unknown, remoteIp: unknown, scope?: unknown): Promise<unknown>;
   pollToken(deviceCode: unknown): Promise<
     | { kind: "pending"; intervalSeconds: number }
     | { kind: "slow_down"; intervalSeconds: number }
@@ -21,10 +21,6 @@ export type NativeRouteDependencies = {
   requireUser(request: Request): Promise<User>;
   revokeToken(request: Request): Promise<void>;
   readFleet(user: User): Promise<unknown>;
-  createNativeVNCGrant(
-    user: User,
-    sessionId: string,
-  ): Promise<{ brokerUrl: string; leaseId: string; ticket: string; expiresAt: number }>;
   deployment: PublicDeploymentConfig;
 };
 
@@ -36,9 +32,13 @@ export async function handleNativeRoute(
 ): Promise<Response | null> {
   if (request.method === "POST" && url.pathname === "/api/native/v1/auth/device") {
     rejectAmbiguousProxyBearer(request, requestAuth);
-    const body = await readNativeJson<{ clientName?: unknown }>(request);
+    const body = await readNativeJson<{ clientName?: unknown; scope?: unknown }>(request);
     return json(
-      await dependencies.startDevice(body.clientName, request.headers.get("cf-connecting-ip")),
+      await dependencies.startDevice(
+        body.clientName,
+        request.headers.get("cf-connecting-ip"),
+        body.scope,
+      ),
       { status: 201 },
     );
   }
@@ -83,20 +83,6 @@ export async function handleNativeRoute(
     requireRole(user, "viewer");
     return json({ fleet: await dependencies.readFleet(user) });
   }
-  if (request.method === "POST" && url.pathname === "/api/native/v1/native-vnc") {
-    rejectAmbiguousProxyBearer(request, requestAuth);
-    const body = await readNativeJson<{ sessionId?: unknown }>(request);
-    if (typeof body.sessionId !== "string" || !/^IS-[1-9][0-9]*$/u.test(body.sessionId)) {
-      throw badRequest("invalid session id");
-    }
-    const user = await dependencies.requireUser(request);
-    requireRole(user, "viewer");
-    const grant = await dependencies.createNativeVNCGrant(user, body.sessionId);
-    return json(
-      { grant: { ...grant, expiresAt: new Date(grant.expiresAt).toISOString() } },
-      { headers: { "cache-control": "no-store" } },
-    );
-  }
   return null;
 }
 
@@ -106,7 +92,7 @@ function rejectAmbiguousProxyBearer(request: Request, requestAuth: TrustedProxyA
   }
 }
 
-async function readNativeJson<T>(request: Request): Promise<T> {
+export async function readNativeJson<T>(request: Request): Promise<T> {
   const contentType = request.headers.get("content-type") ?? "";
   if (!/^application\/json(?:\s*;|$)/iu.test(contentType)) {
     throw badRequest("content-type must be application/json");

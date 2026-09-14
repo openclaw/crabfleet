@@ -69,6 +69,7 @@ struct FleetAPIState: Decodable {
 }
 
 struct FleetAPIDesktopHost: Decodable {
+  let relayOnly: Bool?
   let id: String
   let owner: String
   let name: String
@@ -91,7 +92,8 @@ struct FleetAPIDesktopHost: Decodable {
       quicCertHash: quicCertHash,
       webtransport: webtransport ?? false,
       createdAt: Date(timeIntervalSince1970: createdAt / 1_000),
-      updatedAt: Date(timeIntervalSince1970: updatedAt / 1_000)
+      updatedAt: Date(timeIntervalSince1970: updatedAt / 1_000),
+      relayOnly: relayOnly ?? false
     )
   }
 }
@@ -107,6 +109,7 @@ struct RegisteredDesktopHost: Identifiable, Hashable {
   let webtransport: Bool
   let createdAt: Date
   let updatedAt: Date
+  var relayOnly: Bool = false
 }
 
 struct FleetAPITotals: Decodable {
