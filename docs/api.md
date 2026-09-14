@@ -31,6 +31,8 @@ Open `verificationUri` in a signed-in browser and approve the device. Poll `POST
 
 Approval and completion pages adapt to phone screens; the link can be opened on another device signed into the same deployment. GET never approves a device. POST requires the authenticated browser identity and exact public origin, plus the link-bound CSRF cookie for cookie-authenticated sessions. Expired or already-used links return `410` with an HTML recovery page. An unauthenticated deployment without GitHub login returns `401` with a link to sign in.
 
+Each GitHub-backed native request allows up to 10 seconds for GitHub membership refresh, including team pagination. A timeout returns a retryable `503` without revoking the native credential.
+
 | Method     | Route                       | Authorization                                                      |
 | ---------- | --------------------------- | ------------------------------------------------------------------ |
 | GET        | `/api/native/v1/session`    | Native bearer; returns user and deployment                         |

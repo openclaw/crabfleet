@@ -56,6 +56,8 @@ export function relayDesktopMessage(
     sender.close(1003, "binary messages required");
     return 0;
   }
+  // Empty stream writes carry no RFB data and must not consume uncounted buffer entries.
+  if (message.byteLength === 0) return 0;
   if (message.byteLength > desktopRelayMaximumMessageBytes) {
     sender.close(1009, "relay message exceeds 512 KiB");
     return 0;

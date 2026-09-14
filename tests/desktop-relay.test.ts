@@ -226,6 +226,23 @@ test("desktop relay buffers the server-first banner until a viewer connects", ()
   assert.equal(flushDesktopRelayBuffer(host, viewer), 0);
 });
 
+test("desktop relay ignores empty writes before and after pairing", () => {
+  const host = socket();
+  attachDesktopRelayPeer(host, "host");
+  const attachment = host.attachment;
+  assert.equal(relayDesktopMessage(host, new ArrayBuffer(0), []), 0);
+  assert.equal(host.attachment, attachment);
+
+  const viewer = socket();
+  attachDesktopRelayPeer(viewer, "viewer");
+  assert.equal(relayDesktopMessage(host, new ArrayBuffer(0), [viewer]), 0);
+  assert.deepEqual(viewer.sent, []);
+  const banner = new TextEncoder().encode("RFB 003.008\n").buffer;
+  relayDesktopMessage(host, banner, []);
+  assert.equal(flushDesktopRelayBuffer(host, viewer), 1);
+  assert.deepEqual(viewer.sent, [banner]);
+});
+
 test("desktop relay rejects text and messages over 512 KiB", () => {
   const textSender = socket();
   attachDesktopRelayPeer(textSender, "host");

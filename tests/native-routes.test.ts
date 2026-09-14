@@ -217,6 +217,43 @@ test("native device and token routes require top-level JSON objects", async () =
   }
 });
 
+test("native JSON keeps its byte limit and parser errors with the shared body reader", async () => {
+  const prefix = JSON.stringify({ clientName: "Fixture Mac 🦀" });
+  const body = prefix.padEnd(1024 - (Buffer.byteLength(prefix) - prefix.length), " ");
+  const calls: string[] = [];
+  const accepted = await dispatch(
+    new Request("https://fleet.example/api/native/v1/auth/device", {
+      method: "POST",
+      headers: { "content-type": "application/json; charset=utf-8" },
+      body,
+    }),
+    calls,
+  );
+  assert.equal(accepted?.status, 201);
+  assert.deepEqual(calls, ["start:Fixture Mac 🦀:null"]);
+
+  for (const [value, status, message] of [
+    [body + " ", 413, "request body too large"],
+    [undefined, 400, "invalid json"],
+    ["{", 400, "invalid json"],
+    ["[]", 400, "json body must be an object"],
+  ] as const) {
+    const rejectedCalls: string[] = [];
+    await assert.rejects(
+      dispatch(
+        new Request("https://fleet.example/api/native/v1/auth/device", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: value,
+        }),
+        rejectedCalls,
+      ),
+      { status, message },
+    );
+    assert.deepEqual(rejectedCalls, []);
+  }
+});
+
 function httpStatus(error: unknown): number | undefined {
   return typeof error === "object" && error && "status" in error ? Number(error.status) : undefined;
 }

@@ -1,12 +1,13 @@
-import { sql } from "kysely";
+import { sql, type Selectable } from "kysely";
 
 import { sha256, openSecret, sealSecret } from "./crypto.ts";
-import { database, executeBatch } from "./database.ts";
+import { database, executeBatch, type NativeDeviceAuthorizationTable } from "./database.ts";
 import { browserAppOrigin } from "./deployment.ts";
 import type { RuntimeEnv } from "./env.ts";
 import {
   GitHubApiError,
   refreshGitHubUserWithEvidence,
+  type Fetcher,
   type GitHubUserRefreshEvidence,
 } from "./github.ts";
 import {
@@ -354,14 +355,25 @@ export class NativeAuthService {
   }
 }
 
-export function createNativeAuthService(env: RuntimeEnv): NativeAuthService {
+export function createNativeAuthService(
+  env: RuntimeEnv,
+  fetcher: Fetcher = fetch,
+): NativeAuthService {
   return new NativeAuthService({
     store: new D1NativeAuthStore(env),
     now: Date.now,
     randomSecret: () => crypto.randomUUID() + crypto.randomUUID(),
     seal: (value) => sealSecret(env, value),
     open: (value) => openSecret(env, value),
-    refreshGitHubUser: (token) => refreshGitHubUserWithEvidence(env, token),
+    refreshGitHubUser: (token) => {
+      const deadline = AbortSignal.timeout(10_000);
+      return refreshGitHubUserWithEvidence(env, token, (input, init) =>
+        fetcher(input, {
+          ...init,
+          signal: init?.signal ? AbortSignal.any([init.signal, deadline]) : deadline,
+        }),
+      );
+    },
     reauthorize: (user) => reauthorizeStoredUser(env, user),
     publicOrigin: browserAppOrigin(env),
   });
@@ -601,26 +613,9 @@ class D1NativeAuthStore implements NativeAuthStore {
   }
 }
 
-function deviceRow(record: NativeDeviceAuthorizationRecord) {
-  return {
-    scope: record.scope ?? nativeAccessScope,
-    device_code_hash: record.deviceCodeHash,
-    link_code_hash: record.linkCodeHash,
-    client_name: record.clientName,
-    remote_ip: record.remoteIp,
-    subject: record.subject,
-    access_token_hash: record.accessTokenHash,
-    access_token_ciphertext: record.accessTokenCiphertext,
-    access_token_expires_at: record.accessTokenExpiresAt,
-    expires_at: record.expiresAt,
-    next_poll_at: record.nextPollAt,
-    approved_at: record.approvedAt,
-    consumed_at: record.consumedAt,
-    created_at: record.createdAt,
-  };
-}
-
-function deviceRecord(row: ReturnType<typeof deviceRow>): NativeDeviceAuthorizationRecord {
+function deviceRecord(
+  row: Selectable<NativeDeviceAuthorizationTable>,
+): NativeDeviceAuthorizationRecord {
   return {
     scope: row.scope ?? nativeAccessScope,
     deviceCodeHash: row.device_code_hash,

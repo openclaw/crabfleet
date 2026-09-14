@@ -3,7 +3,6 @@ import test from "node:test";
 
 import {
   badRequest,
-  bearer,
   bearerToken,
   conflict,
   cookie,
@@ -12,13 +11,13 @@ import {
   json,
   notFound,
   readBoundedJson,
+  readBoundedText,
   readJson,
   redirect,
   serviceUnavailable,
   text,
   tooManyRequests,
   unauthorized,
-  wantsMarkdown,
 } from "../src/worker/http.ts";
 
 test("JSON and text responses apply security, cache, and byte-length headers", async () => {
@@ -38,18 +37,57 @@ test("JSON and text responses apply security, cache, and byte-length headers", a
   assert.equal(textResponse.headers.get("content-length"), "6");
 });
 
-test("redirects preserve caller headers and Markdown negotiation is explicit", () => {
+test("redirects preserve caller headers", () => {
   const response = redirect("https://fleet.example/app", { "cache-control": "no-store" });
   assert.equal(response.status, 302);
   assert.equal(response.headers.get("location"), "https://fleet.example/app");
   assert.equal(response.headers.get("cache-control"), "no-store");
-  assert.equal(
-    wantsMarkdown(
-      new Request("https://fleet.example/docs", { headers: { accept: "text/markdown" } }),
-    ),
-    true,
-  );
-  assert.equal(wantsMarkdown(new Request("https://fleet.example/docs")), false);
+});
+
+test("response helpers accept every HeadersInit form with case-insensitive overrides", () => {
+  for (const overrides of [
+    { "Cache-Control": "private", "X-Request-ID": "request-1", "Content-Length": "999" },
+    new Headers({
+      "cache-control": "private",
+      "x-request-id": "request-1",
+      "content-length": "999",
+    }),
+    [
+      ["Cache-Control", "private"],
+      ["X-Request-ID", "request-1"],
+      ["Content-Length", "999"],
+    ],
+  ] as HeadersInit[]) {
+    for (const response of [
+      text("🦀", "text/plain", overrides),
+      json("🦀", { headers: overrides }),
+      redirect("/app", overrides),
+    ]) {
+      assert.equal(response.headers.get("cache-control"), "private");
+      assert.equal(response.headers.get("x-request-id"), "request-1");
+      if (response.status !== 302) {
+        assert.equal(
+          response.headers.get("content-length"),
+          response.headers.get("content-type") === "text/plain" ? "4" : "6",
+        );
+        assert.equal(response.headers.get("x-content-type-options"), "nosniff");
+      }
+    }
+  }
+});
+
+test("response helpers preserve separately supplied cookies", () => {
+  const values = ["session=fixture; HttpOnly", "csrf=fixture; SameSite=Strict"];
+  const tuples: [string, string][] = values.map((value) => ["set-cookie", value]);
+  for (const overrides of [tuples, new Headers(tuples)]) {
+    for (const response of [
+      text("ok", "text/plain", overrides),
+      json({ ok: true }, { headers: overrides }),
+      redirect("/app", overrides),
+    ]) {
+      assert.deepEqual(response.headers.getSetCookie(), values);
+    }
+  }
 });
 
 test("JSON parsing and status errors retain stable messages and status codes", async () => {
@@ -132,6 +170,49 @@ test("bounded JSON parsing rejects declared and streamed bodies before unbounded
   }
 });
 
+test("bounded text enforces byte limits across chunks and releases the stream reader", async () => {
+  const encoded = new TextEncoder().encode("a🦀b");
+  const makeRequest = (maximumChunk: number, onCancel = () => {}) => {
+    let offset = 0;
+    const body = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        if (offset === encoded.length) return controller.close();
+        controller.enqueue(encoded.slice(offset, offset + maximumChunk));
+        offset = Math.min(encoded.length, offset + maximumChunk);
+      },
+      cancel: onCancel,
+    });
+    return new Request("https://fleet.example", {
+      method: "POST",
+      body,
+      duplex: "half",
+    } as RequestInit & { duplex: "half" });
+  };
+  const accepted = makeRequest(2);
+  assert.equal(await readBoundedText(accepted, encoded.length), "a🦀b");
+  assert.equal(accepted.body?.locked, false);
+
+  let cancelled = false;
+  const rejected = makeRequest(2, () => {
+    cancelled = true;
+  });
+  await assert.rejects(
+    readBoundedText(rejected, 3, { tooLargeMessage: "request body too large" }),
+    {
+      status: 413,
+      message: "request body too large",
+    },
+  );
+  assert.equal(cancelled, true);
+  assert.equal(rejected.body?.locked, false);
+  await assert.rejects(
+    readBoundedText(new Request("https://fleet.example"), 16, {
+      emptyBodyMessage: "invalid native authorization form",
+    }),
+    { status: 400, message: "invalid native authorization form" },
+  );
+});
+
 test("JSON parsing rejects integers that cannot round-trip exactly", async () => {
   for (const body of [
     '{"value":9007199254740993}',
@@ -198,8 +279,6 @@ test("bearer and cookie helpers normalize only their owned protocol surface", ()
     ),
     "",
   );
-  assert.equal(bearer("token-value"), "Bearer token-value");
-  assert.equal(bearer(undefined), null);
 
   const request = new Request("https://fleet.example", {
     headers: { cookie: "session=hello%20world; mode=read" },

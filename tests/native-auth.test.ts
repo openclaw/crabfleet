@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { sha256 } from "../src/worker/crypto.ts";
+import { sealSecret, sha256 } from "../src/worker/crypto.ts";
 import type { RuntimeEnv } from "../src/worker/env.ts";
 import { GitHubApiError, type GitHubUserRefreshEvidence } from "../src/worker/github.ts";
 import type { User } from "../src/worker/models.ts";
@@ -518,6 +518,89 @@ test("native token revocation is local even when GitHub refresh is unavailable",
   assert.equal(subject.store.access.get(tokenHash)?.githubTokenCiphertext, null);
   await assert.rejects(subject.service.revoke(request), hasStatus(401));
   assert.equal(refreshCalls, 1);
+});
+
+test("native GitHub refresh shares a retryable deadline across requests and team pages", async (t) => {
+  const env = {
+    CRABBOX_TOKEN_ENCRYPTION_KEY: "native-refresh-test-key",
+  } as RuntimeEnv;
+  const ciphertext = await sealSecret(env, "github-fixture");
+  const queries: string[] = [];
+  env.DB = {
+    prepare(sql: string) {
+      queries.push(sql);
+      return {
+        bind() {
+          return {
+            async all() {
+              assert.match(sql, /from "native_access_tokens" as "t"/);
+              return {
+                results: [
+                  {
+                    ...viewer,
+                    allowed: 1,
+                    teams: JSON.stringify(viewer.teams),
+                    token_hash: "token-hash",
+                    scope: nativeAccessScope,
+                    expires_at: Date.now() + 60_000,
+                    github_token_ciphertext: ciphertext,
+                  },
+                ],
+                meta: { changes: 0 },
+              };
+            },
+          };
+        },
+      };
+    },
+  } as unknown as D1Database;
+
+  for (const stalledPath of ["/user", "/user/teams?per_page=100&page=2"]) {
+    const deadline = new AbortController();
+    const durations: number[] = [];
+    const timeout = t.mock.method(AbortSignal, "timeout", (milliseconds: number) => {
+      durations.push(milliseconds);
+      return deadline.signal;
+    });
+    const paths: string[] = [];
+    const service = createNativeAuthService(env, async (input, init) => {
+      const url = new URL(String(input));
+      const path = url.pathname + url.search;
+      paths.push(path);
+      assert.equal(init?.signal, deadline.signal);
+      if (path === stalledPath) {
+        return new Promise<Response>((_resolve, reject) => {
+          deadline.signal.addEventListener("abort", () => reject(deadline.signal.reason), {
+            once: true,
+          });
+          deadline.abort(new DOMException("Timed out", "TimeoutError"));
+        });
+      }
+      if (url.pathname === "/user/teams") {
+        return Response.json(
+          stalledPath === "/user" ? [] : Array.from({ length: 100 }, () => ({ slug: "core" })),
+        );
+      }
+      if (url.pathname === "/user/emails") return Response.json([]);
+      if (url.pathname.includes("/memberships/")) return Response.json({ state: "active" });
+      return Response.json({ id: 1, login: viewer.login, email: viewer.email, name: viewer.name });
+    });
+
+    await assert.rejects(
+      service.authenticate(
+        new Request("https://fleet.example/api/native/v1/session", {
+          headers: { authorization: `Bearer ${"a".repeat(64)}` },
+        }),
+      ),
+      { status: 503, message: "GitHub membership refresh failed; retry later" },
+    );
+    assert.deepEqual(durations, [10_000]);
+    assert.ok(paths.includes(stalledPath));
+    assert.equal(paths.length, stalledPath === "/user" ? 4 : 5);
+    timeout.mock.restore();
+  }
+  assert.equal(queries.length, 2);
+  assert.ok(queries.every((sql) => sql.startsWith("select ")));
 });
 
 test("native auth pruning removes expired credentials without a new device start", async () => {

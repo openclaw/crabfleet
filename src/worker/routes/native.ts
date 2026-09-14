@@ -1,7 +1,7 @@
 import type { TrustedProxyAuthResult } from "../../trusted-proxy-auth.ts";
 import { requireRole } from "../auth.ts";
 import type { PublicDeploymentConfig } from "../deployment.ts";
-import { badRequest, json, unauthorized } from "../http.ts";
+import { badRequest, json, readBoundedText, unauthorized } from "../http.ts";
 import type { User } from "../models.ts";
 
 const nativeJsonBodyLimitBytes = 1024;
@@ -97,41 +97,12 @@ export async function readNativeJson<T>(request: Request): Promise<T> {
   if (!/^application\/json(?:\s*;|$)/iu.test(contentType)) {
     throw badRequest("content-type must be application/json");
   }
-  const declaredLength = request.headers.get("content-length");
-  if (/^\d+$/u.test(declaredLength ?? "") && Number(declaredLength) > nativeJsonBodyLimitBytes) {
-    await request.body?.cancel().catch(() => undefined);
-    throw requestBodyTooLarge();
-  }
-  if (!request.body) throw badRequest("invalid json");
-
-  const reader = request.body.getReader();
-  const chunks: Uint8Array[] = [];
-  let total = 0;
-  try {
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      if (!value?.byteLength) continue;
-      if (total + value.byteLength > nativeJsonBodyLimitBytes) {
-        await reader.cancel().catch(() => undefined);
-        throw requestBodyTooLarge();
-      }
-      chunks.push(value);
-      total += value.byteLength;
-    }
-  } finally {
-    reader.releaseLock();
-  }
-
-  const body = new Uint8Array(total);
-  let offset = 0;
-  for (const chunk of chunks) {
-    body.set(chunk, offset);
-    offset += chunk.byteLength;
-  }
+  const body = await readBoundedText(request, nativeJsonBodyLimitBytes, {
+    tooLargeMessage: "request body too large",
+  });
   let parsed: unknown;
   try {
-    parsed = JSON.parse(new TextDecoder().decode(body));
+    parsed = JSON.parse(body);
   } catch {
     throw badRequest("invalid json");
   }
@@ -139,8 +110,4 @@ export async function readNativeJson<T>(request: Request): Promise<T> {
     throw badRequest("json body must be an object");
   }
   return parsed as T;
-}
-
-function requestBodyTooLarge(): Error & { status: number } {
-  return Object.assign(new Error("request body too large"), { status: 413 });
 }

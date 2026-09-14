@@ -160,23 +160,29 @@ test("trusted-proxy native approval uses asserted identity and exact Origin with
   assert.equal(post.headers.get("x-frame-options"), "DENY");
   assert.deepEqual(approvals, [`${user.subject}:`]);
 
-  await assert.rejects(
-    handleNativeLink(
-      new Request("https://backend.example/native/link/link-code", {
-        method: "POST",
-        headers: {
-          "content-type": "application/x-www-form-urlencoded",
-          origin: "https://fleet.example",
-        },
-        body: new URLSearchParams({ csrf: "x".repeat(2_000) }),
-      }),
-      "link-code",
-      requestAuth,
-      env,
-      authService,
-    ),
-    (error) => httpStatus(error) === 413,
-  );
+  for (const [body, status, message] of [
+    [new URLSearchParams({ csrf: "x".repeat(2_000) }), 413, "request body too large"],
+    [undefined, 400, "invalid native authorization form"],
+  ] as const) {
+    await assert.rejects(
+      handleNativeLink(
+        new Request("https://backend.example/native/link/link-code", {
+          method: "POST",
+          headers: {
+            "content-type": "application/x-www-form-urlencoded",
+            origin: "https://fleet.example",
+          },
+          body,
+        }),
+        "link-code",
+        requestAuth,
+        env,
+        authService,
+      ),
+      { status, message },
+    );
+  }
+  assert.deepEqual(approvals, [`${user.subject}:`]);
 
   await assert.rejects(
     handleNativeLink(
