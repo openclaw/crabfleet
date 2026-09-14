@@ -1,10 +1,38 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
+import { cp, mkdir, mkdtemp, realpath, rm, symlink } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import test from "node:test";
+import { pathToFileURL } from "node:url";
 
-test("the browser bundle includes its audio worklet and has no missing asset URLs", async () => {
-  execFileSync(process.execPath, ["scripts/generate-assets.mjs"], { stdio: "pipe" });
-  const { APP_HTML, BROWSER_ASSETS } = await import("../src/generated.ts");
+test("browser assets build from paths with spaces and include every worklet", async (t) => {
+  const fixture = await mkdtemp(join(tmpdir(), "crabfleet build "));
+  t.after(() => rm(fixture, { recursive: true, force: true }));
+  await mkdir(join(fixture, "scripts"));
+  await mkdir(join(fixture, "src"));
+  for (const path of [
+    "package.json",
+    "vite.config.mjs",
+    "scripts/generate-assets.mjs",
+    "src/app.html",
+    "src/app",
+    "src/assets",
+  ]) {
+    await cp(new URL(`../${path}`, import.meta.url), join(fixture, path), { recursive: true });
+  }
+  await symlink(
+    await realpath(new URL("../node_modules", import.meta.url)),
+    join(fixture, "node_modules"),
+    "junction",
+  );
+  execFileSync(process.execPath, ["scripts/generate-assets.mjs"], {
+    cwd: fixture,
+    stdio: "pipe",
+  });
+  const { APP_HTML, BROWSER_ASSETS } = await import(
+    pathToFileURL(join(fixture, "src/generated.ts")).href
+  );
   const urls = [...APP_HTML.matchAll(/\/assets\/[A-Za-z0-9_.-]+/g)].map((match) => match[0]);
   assert.ok(
     urls.some((url) => url.includes("audio-worklet")),

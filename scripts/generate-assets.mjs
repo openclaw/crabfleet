@@ -1,15 +1,16 @@
 import { execFile } from "node:child_process";
 import { mkdir, readFile, readdir, writeFile } from "node:fs/promises";
+import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 
 const appBuildRoot = new URL("../dist/app-bundle/", import.meta.url);
 const inlinedAssets = new Set();
 const appPath = new URL("../dist/app-bundle/app.html", import.meta.url);
 await promisify(execFile)(process.execPath, [
-  new URL("../node_modules/vite/bin/vite.js", import.meta.url).pathname,
+  fileURLToPath(new URL("../node_modules/vite/bin/vite.js", import.meta.url)),
   "build",
   "--config",
-  new URL("../vite.config.mjs", import.meta.url).pathname,
+  fileURLToPath(new URL("../vite.config.mjs", import.meta.url)),
 ]);
 const appHtml = await inlineViteAssets(await readAppHtml());
 const browserAssets = {};
