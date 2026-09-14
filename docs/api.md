@@ -36,13 +36,13 @@ Open `verificationUri` in a signed-in browser and approve the device. Poll `POST
 | DELETE     | `/api/native/v1/auth/token` | Revoke the presented native bearer                                 |
 | GET / POST | `/native/link/:code`        | Browser-authenticated approval with origin and confirmation checks |
 
-The fleet envelope contains `generatedAt`, `registryAvailable`, `desktopHosts`, `canonicalUrl`, and `productUrl`. For released Mac clients, it also retains `sessions: []` and `totals` with `active: 0`, `sessions: 0`, and `vnc` equal to the desktop count. There are no workspace sessions or workspace VNC grants.
+The fleet envelope contains `generatedAt`, `registryAvailable`, `desktopHosts`, `canonicalUrl`, and `productUrl`. For released Mac clients, it also retains `sessions: []` and `totals: { "active": 0, "sessions": 0, "vnc": 0 }`. These legacy counters describe retired workspace sessions; use `desktopHosts.length` for the desktop count. There are no workspace sessions or workspace VNC grants.
 
 Each desktop contains `id`, `owner`, `name`, `address`, `port`, `relayOnly`, `quicPort`, `quicCertHash`, `webtransport`, `relayCapable`, `createdAt`, and `updatedAt`. Times are Unix milliseconds. Ownership secrets are omitted from discovery responses.
 
 ## Host registration
 
-Browser-authenticated Mac publication uses:
+Browser-authenticated Mac publication uses the routes below. A native viewer's `fleet:read` token is a discovery credential and does not authorize host registration. The Mac publisher currently receives its browser session through launch configuration; Linux uses the separate connector API.
 
 | Method | Route                              | Action                                       |
 | ------ | ---------------------------------- | -------------------------------------------- |

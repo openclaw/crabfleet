@@ -1,5 +1,5 @@
 ---
-title: Native macOS Client
+title: Mac App
 layout: default
 permalink: /macos-native-client/
 description: "Native Mac VNC viewing, desktop sharing, and integration details."
@@ -7,13 +7,36 @@ description: "Native Mac VNC viewing, desktop sharing, and integration details."
 
 # Crabfleet for macOS
 
-The app lives in `macos/CrabfleetMac` and provides a
-SwiftUI fleet browser, an AppKit-hosted Metal-rendered VNC surface, and an
-app-owned private desktop host for Mac-to-Mac access.
+Crabfleet is a native Mac app for connecting to remote computers and sharing your
+own Mac. Save VNC connections, use Quick Connect, and switch between open desktops.
+Ordinary VNC connections work without a desktop-service account.
+
+## Start here
+
+Follow the [quickstart](/quickstart/) to build and install the signed app at
+`/Applications/Crabfleet.app`. Choose **Use Local VNC Only**, add a computer or use
+**Quick Connect**, and enter its address and VNC credentials. Host names,
+`host:port`, `vnc://` URLs, and bracketed IPv6 addresses are supported.
+
+To host your Mac, run Tailscale on both Macs under the same user identity, choose
+**Share This Mac**, grant Screen Recording, and enable Accessibility if you want
+remote control. Connect from the other Mac using the displayed address and share
+password. Keep the host app running.
+
+Signing in to a desktop service adds discovery. The native `fleet:read` credential
+does not publish your Mac: publication currently needs `CRABFLEET_API_URL` and a
+separate `CRABFLEET_SESSION_COOKIE` browser session supplied in the app's launch
+environment. Published hosts can enable **Allow browser access via Crabfleet**.
+Treat that browser session as a credential; keep it out of shell history, logs,
+and shared files. Direct Mac sharing works without publication.
+
+See [connection modes](/connections/) before choosing native or browser access.
+The rest of this guide covers capabilities, host behavior, and implementation
+details. Source lives in `macos/CrabfleetMac`.
 
 ## Product shape
 
-- Screens-style desktop deck combining saved generic VNC connections and
+- A desktop deck combining saved generic VNC connections and
   shared desktops, with source filters, search, status, and Quick Connect.
 - Fast matched card-to-desktop transition, full-screen focus mode, desktop
   switcher, reconnect controls, and retained framebuffer previews.
@@ -69,8 +92,7 @@ The native viewer can connect to `crabfleet-connect` over a protected VNC path.
 Linux supports X11, Hyprland/wlroots through wayvnc 0.10+, and GNOME/KDE through
 the desktop portal and PipeWire. Its common Go server negotiates H.264/HEVC,
 Tight/JPEG or RAW video, clipboard, opt-in AAC system audio, and FSH1 shared-folder
-transfer. Direct listeners offer VNC password authentication; the old nonfunctional
-ARD offer has been removed so the native viewer selects the working method.
+transfer. Direct listeners offer VNC password authentication.
 
 Use `share --fleet --bind <Tailscale IPv4> --advertise <Tailscale IPv4>` to register
 a direct endpoint for the Mac viewer. Enter the connector's share password.
@@ -81,7 +103,8 @@ VNC endpoint. `--view-only` disables remote input, clipboard writes, and file wr
 The listener defaults to loopback because VNC-DES does not encrypt desktop
 traffic. Use an SSH tunnel or an explicit bind on an already protected private
 network. The [Linux connector guide](linux-connector.md) covers setup, permissions,
-service startup, and validation. The synthetic backend remains explicitly opt-in.
+service startup, and validation. The [Windows connector guide](windows-connector.md)
+covers source builds and its direct-only feature set. The synthetic backend remains explicitly opt-in.
 
 Windows retains its pure-Go GDI primary-display capture and SendInput backend,
 including Unicode text injection and canonical legacy X11 keysym conversion.
@@ -384,7 +407,8 @@ on cancellation while retaining bounded backoff for transient failures.
 
 ### Browser viewer
 
-Fleet lists each owned registration with an **Open in browser** action. The
+The browser companion lists relay-capable registrations under **Your desktops**
+with a **Connect** action. The
 fullscreen Preact viewer speaks RFB 3.8 over the owner-authenticated relay,
 offers feature-probed HEVC, Open H.264, and Tight/JPEG in that order, and never
 changes the host's default BGRA pixel format. HEVC is advertised only when the
@@ -558,8 +582,7 @@ and is never exposed to the app.
 
 The app also accepts a manual host, port, and credential for direct RFB connections.
 Share This Mac connects over the local Tailscale network; registered token-owned shares
-can additionally publish an owner-scoped browser relay. Workspace adapter handoffs are
-no longer provided by the desktop service.
+can additionally publish an owner-scoped browser relay.
 
 ## Build
 

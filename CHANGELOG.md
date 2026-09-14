@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Update desktop documentation with platform-specific setup, direct-versus-relay connection guidance, Windows connector limits, and the current discovery API; remove workspace-era navigation and installation hints, and emit the docs 404 page at the correct path.
+
 - Focus Crabfleet on native VNC and private desktop sharing: remove the Codex board, workspace runtimes, terminals, agent CLI/SSH gateway, and related deployment machinery; retain desktop sign-in, discovery, host publication, and the browser VNC relay.
 
 - Keep Linux HEVC video in the browser-compatible Main profile while preserving independently decodable frames, avoiding an unnecessary H.264 fallback; label shared-desktop keyboard and clipboard controls correctly for Linux as well as Mac hosts.

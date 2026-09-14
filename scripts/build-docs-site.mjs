@@ -16,14 +16,13 @@ const productName = "Crabfleet";
 const productTagline = "Your computers, within reach.";
 const productDescription =
   "Crabfleet is a native VNC app for private desktop sharing, with Mac viewing and Linux and Windows hosts.";
-const installCommand = "open /Applications/Crabfleet.app";
 const codePlaceholder = String.fromCharCode(0);
 const codePlaceholderPattern = new RegExp(`${codePlaceholder}(\\d+)${codePlaceholder}`, "g");
 
 const sections = [
-  ["Start", ["index.md", "quickstart.md", "architecture.md"]],
-  ["Desktops", ["macos-native-client.md", "linux-connector.md"]],
-  ["Reference", ["admin.md", "api.md", "screen-recording-indicator.md"]],
+  ["Start", ["index.md", "quickstart.md", "connections.md"]],
+  ["Desktops", ["macos-native-client.md", "linux-connector.md", "windows-connector.md"]],
+  ["Reference", ["admin.md", "architecture.md", "api.md", "screen-recording-indicator.md"]],
 ];
 
 // Skip these from page generation (internal notes, generated subpages we don't want as their own
@@ -91,14 +90,10 @@ function llmsTxt() {
   const name = typeof productName !== "undefined" ? productName : path.basename(root);
   const description =
     typeof productDescription !== "undefined" ? productDescription : `${name} documentation index.`;
-  const install = docsInstallHint();
   const docPages = docsLlmsPages().map(
     (page) => `- ${page.title}: ${pageUrl(origin, page.outRel)}`,
   );
   const lines = [`# ${name}`, "", description, "", "Canonical documentation:", ...docPages];
-  if (install) {
-    lines.push("", "Install:", `- ${install}`);
-  }
   if (source) {
     lines.push("", `Source: ${source}`);
   }
@@ -132,15 +127,6 @@ function docsSourceUrl() {
   if (typeof repoUrl !== "undefined") return repoUrl;
   if (typeof repoEditBase !== "undefined")
     return repoEditBase.replace(/\/edit\/main\/docs\/?$/, "");
-  return "";
-}
-
-function docsInstallHint() {
-  if (typeof installCommand !== "undefined") return installCommand;
-  if (typeof installLine !== "undefined") return installLine;
-  if (typeof installCmd !== "undefined") return installCmd;
-  if (typeof installSnippet !== "undefined") return installSnippet;
-  if (typeof brewInstall !== "undefined") return brewInstall;
   return "";
 }
 
@@ -216,6 +202,7 @@ function outPath(rel, frontmatter = {}) {
   if (frontmatter.permalink) {
     const permalink = normalizePermalink(frontmatter.permalink);
     if (permalink === "/") return "index.html";
+    if (permalink.endsWith(".html")) return permalink.slice(1);
     return `${permalink.slice(1)}/index.html`;
   }
   if (rel === "index.md") return "index.html";
@@ -469,11 +456,10 @@ function homeHero(page) {
         <h1>${escapeHtml(productTagline)}</h1>
         <p class="lede">${escapeHtml(description)}</p>
         <div class="home-cta">
-          <a class="btn btn-primary" href="${quickstartRel}">Quickstart</a>
-          <a class="btn btn-ghost" href="${repoBase}" rel="noopener">GitHub</a>
+          <a class="btn btn-primary" href="${quickstartRel}">Get started</a>
+          <a class="btn btn-ghost" href="https://crabfleet.openclaw.ai/app/">Open your desktops</a>
         </div>
-        <div class="home-install"><span class="prompt">$</span><code>${escapeHtml(installCommand)}</code></div>
-        <div class="home-services"><span>Native Mac app</span><span>VNC</span><span>Private sharing</span><span>Linux connector</span></div>
+        <div class="home-services"><span>Native Mac app</span><span>VNC</span><span>Private sharing</span><span>Linux &amp; Windows hosts</span></div>
         <p class="muted"><a href="${archRel}">Architecture overview →</a></p>
       </header>`;
 }
@@ -505,7 +491,7 @@ function layout({ page, html, toc, prev, next, sectionName }) {
     : `${page.title} — ${productName}`;
   const description =
     page.frontmatter.description ||
-    (home ? productDescription : `${page.title} — ${productName} CLI documentation.`);
+    (home ? productDescription : `${page.title} — ${productName} remote desktop documentation.`);
   const canonicalUrl = pageCanonicalUrl(page);
   const socialImage = siteBase ? `${siteBase}/crabbox-logo.png` : `${rootPrefix}crabbox-logo.png`;
   const socialMeta = [
@@ -516,9 +502,7 @@ function layout({ page, html, toc, prev, next, sectionName }) {
     ["meta", "property", "og:description", "content", description],
     ["meta", "property", "og:url", "content", canonicalUrl],
     ["meta", "property", "og:image", "content", socialImage],
-    ["meta", "property", "og:image:width", "content", "1200"],
-    ["meta", "property", "og:image:height", "content", "630"],
-    ["meta", "name", "twitter:card", "content", "summary_large_image"],
+    ["meta", "name", "twitter:card", "content", "summary"],
     ["meta", "name", "twitter:title", "content", titleSuffix],
     ["meta", "name", "twitter:description", "content", description],
     ["meta", "name", "twitter:image", "content", socialImage],
@@ -549,11 +533,11 @@ function layout({ page, html, toc, prev, next, sectionName }) {
       <div class="sidebar-head">
         <a class="brand" href="${hrefToOutRel("index.html", page.outRel)}" aria-label="${productName} docs home">
           <img class="mark" src="${rootPrefix}crabbox-logo.png" alt="" width="28" height="28">
-          <span><strong>${escapeHtml(productName)}</strong><small>Control plane docs</small></span>
+          <span><strong>${escapeHtml(productName)}</strong><small>Remote desktop guide</small></span>
         </a>
         ${themeToggleHtml()}
       </div>
-      <label class="search"><span>Search</span><input id="doc-search" type="search" placeholder="cards, runs, admin"></label>
+      <label class="search"><span>Search</span><input id="doc-search" type="search" placeholder="VNC, sharing, setup"></label>
       <nav>${navHtml(page)}</nav>
     </aside>
     <main>

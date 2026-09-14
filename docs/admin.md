@@ -13,7 +13,9 @@ The desktop service uses Cloudflare Workers, D1, and `DesktopRelayDO`. The publi
 
 Configure GitHub OAuth and an allowlist, or a trusted identity proxy. Owners can use **Manage access** in the browser companion to allow GitHub users, teams, or email identities. Desktop registrations remain private to their owner regardless of role.
 
-The native Mac app receives `fleet:read` after browser approval. Linux connectors request `desktop:publish` and can renew that grant while running. Removing an allowlist entry or changing identity-provider configuration invalidates later authorization checks.
+The native Mac app receives `fleet:read` after browser approval. That credential discovers desktops; it does not publish them or replace a direct VNC password. Linux connectors request `desktop:publish` and can renew that grant while running. Mac publication currently uses a separate browser session supplied at launch. Windows does not implement connector account or publication commands.
+
+Removing an allowlist entry or changing identity-provider configuration is rechecked during later authorization. Allowing another account to sign in does not give it access to an existing user's desktops. See [connection modes](/connections/) for direct-network and relay requirements.
 
 ## Configuration
 

@@ -7,7 +7,7 @@ description: "Native viewers, desktop hosts, discovery, and the VNC relay."
 
 # Architecture
 
-Crabfleet's main application is the native macOS VNC viewer and host. Go connectors implement desktop hosting on Linux and Windows. The optional Cloudflare Worker supports desktop identity, discovery, and an authenticated browser relay.
+Crabfleet's main application is the native macOS VNC viewer and host. Go connectors implement desktop hosting on Linux and Windows. The optional Cloudflare Worker supports desktop identity, discovery, and an authenticated browser relay for published Mac and Linux hosts. Windows currently supports direct VNC only. The [connection modes guide](/connections/) describes the user-facing choices.
 
 ```text
 Mac viewer ── RFB over private TCP / pinned QUIC ── Desktop host
@@ -44,4 +44,4 @@ Only the ownership-authenticated relay may use RFB None internally. Direct liste
 
 Browser access supports GitHub membership plus an allowlist, a configured trusted identity proxy, or an owner recovery token. GitHub OAuth requests identity, email, and membership scopes. Native viewer tokens use `fleet:read`; Linux connectors request `desktop:publish` separately. Credentials are scoped to the deployment, expire, and are reauthorized against current membership/access policy.
 
-Cron only prunes expired device authorization state. Crabfleet does not provision agent workspaces, run boards, relay terminals, or inject model credentials.
+The hourly Worker scheduled handler prunes expired native device authorizations and token state. Upgrade considerations for older deployments are documented in [Administration](/admin/).

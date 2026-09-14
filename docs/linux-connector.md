@@ -2,7 +2,7 @@
 title: Linux Connector
 layout: default
 permalink: /linux-connector/
-description: "Linux desktop sharing, Fleet browser relay, clipboard, audio, files, and unattended service startup."
+description: "Share Linux through direct VNC or the Crabfleet browser relay, with clipboard, audio, files, and graphical-login startup."
 ---
 
 # Linux connector
@@ -41,25 +41,27 @@ GNOME or Plasma. Package names and portal feature support vary by distribution.
 `doctor` reports missing helpers; clipboard can be disabled explicitly with
 `--clipboard=false`, and `--video jpeg` needs no FFmpeg.
 
-## Share in Fleet
+## Share in the browser companion
 
 ```sh
-crabfleet-connect login --server https://fleet.example
+crabfleet-connect login --server https://crabfleet.openclaw.ai
 crabfleet-connect share --fleet --name "Linux workstation"
 ```
 
-Approve the connector in the opened browser page. The consent grants management
-of your own desktop registrations, not terminal or general Fleet API access.
-The connector publishes an authenticated WebSocket relay; open its card under
-**Shared desktops** in Fleet. Browser sharing needs only an outbound HTTPS
-connection. The direct VNC listener remains on loopback by default.
+Use your own service origin instead if you run a separate deployment. Approve the
+connector in the opened browser page; your account must be allowed by the service.
+The consent grants publication and management of your own desktop registrations.
+The connector publishes an authenticated WebSocket relay. Sign in to the
+[browser companion](https://crabfleet.openclaw.ai/app/) with the same account and
+select **Your desktops → Connect**. Browser sharing needs only an outbound HTTPS
+connection from the host. The direct VNC listener remains on loopback by default.
 
 Sign-in state lives in `$XDG_CONFIG_HOME/crabfleet-connect/state.json` (normally
 `~/.config/crabfleet-connect/state.json`). The directory is mode 0700 and the
 file is mode 0600. The connector saves a stable desktop identity and the exact
 publication recovery identity before registering, reconnects with bounded
 backoff, and removes its own registration on shutdown. If cleanup cannot reach
-Fleet, the next start retries it. A replacement publication stops this process
+the desktop service, the next start retries it. A replacement publication stops this process
 without deleting the replacement.
 
 Authorization lasts 24 hours and is renewed every five minutes while sharing;
@@ -147,7 +149,7 @@ directory listing to 1,024 entries. Incomplete uploads are removed on disconnect
 
 ## Native or generic VNC viewers
 
-For Fleet's native macOS viewer over Tailscale, advertise the exact private
+For the native macOS viewer over Tailscale, advertise the exact private
 interface you bind:
 
 ```sh
@@ -155,9 +157,10 @@ crabfleet-connect share --fleet --bind 100.64.1.2 --advertise 100.64.1.2
 crabfleet-connect password
 ```
 
-Enter the share password in the native viewer. Without `--advertise`, the Fleet
-card is a browser relay and has no native direct endpoint. Update the Mac viewer
-to recognize these cards. Generic VNC clients negotiate VNC password authentication;
+Use the host's actual Tailscale IPv4 address in both flags and enter the share
+password in the native viewer. Without `--advertise`, the published desktop is
+relay-only and must be opened in the browser. See [connection modes](/connections/)
+for the distinction. Generic VNC clients negotiate VNC password authentication;
 ARD authentication is not offered by this connector.
 
 Direct VNC authentication does not encrypt screen traffic. Use the Tailscale
@@ -168,7 +171,7 @@ ssh -N -L 5901:127.0.0.1:5900 user@linux-host
 ```
 
 Connect the viewer to `127.0.0.1:5901`. `--port` changes the local port. A manual
-share prints its password. Fleet, portal, and service shares retain their password
+share prints its password. Published, portal, and service shares retain their password
 in private state; `password` retrieves it. Other manual shares generate a fresh
 password on each run. `--quiet` keeps passwords out of service logs.
 
@@ -213,7 +216,7 @@ sh scripts/test-linux-audio.sh
 
 The first three commands are the local gates. On Linux, native validation runs
 all Go tests with the race detector and Go vet; macOS app tests require a Mac
-and are reported as not run. No Crabbox login is needed for local validation.
+and are reported as not run. Local validation does not require a desktop-service account.
 
 The Wayland script requires Sway, wayvnc 0.10+, `wev`, and a session bus. It creates
 and cleans up a disposable headless compositor, checks real pixels, rejects a
