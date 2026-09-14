@@ -87,6 +87,96 @@ func TestHelperRejectsWrongPassword(t *testing.T) {
 	}
 }
 
+type failingWriteConn struct {
+	net.Conn
+	failure      error
+	failDeadline bool
+}
+
+func (conn *failingWriteConn) Write(p []byte) (int, error) {
+	if conn.failure == nil {
+		return conn.Conn.Write(p)
+	}
+	n, err := conn.Conn.Write(p[:1])
+	if err != nil {
+		return n, err
+	}
+	return n, conn.failure
+}
+
+func (conn *failingWriteConn) SetWriteDeadline(deadline time.Time) error {
+	if conn.failure != nil && conn.failDeadline {
+		return conn.failure
+	}
+	return conn.Conn.SetWriteDeadline(deadline)
+}
+
+func TestInputWriteFailureClosesHelperAndReleasesInput(t *testing.T) {
+	for _, failDeadline := range []bool{false, true} {
+		for _, pointer := range []bool{false, true} {
+			t.Run(fmt.Sprintf("deadline=%t/pointer=%t", failDeadline, pointer), func(t *testing.T) {
+				t.Parallel()
+				ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+				defer cancel()
+				synthetic, err := connect.NewSynthetic(connect.SyntheticOptions{Width: 2, Height: 2})
+				if err != nil {
+					t.Fatal(err)
+				}
+				server, client := net.Pipe()
+				defer server.Close()
+				helperDone := make(chan struct{})
+				go func() {
+					defer close(helperDone)
+					defer server.Close()
+					_ = rfb.ServeConn(ctx, server, rfb.SessionConfig{Backend: synthetic, Password: "fixture1"})
+				}()
+				conn := &failingWriteConn{Conn: client, failDeadline: failDeadline}
+				backend, err := New(ctx, conn, "fixture1")
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer backend.Close()
+				sendInput := func(ctx context.Context) error {
+					if pointer {
+						return backend.Pointer(ctx, connect.PointerEvent{ButtonMask: 1, X: 1, Y: 1})
+					}
+					return backend.Key(ctx, connect.KeyEvent{Keysym: 'a', Down: true})
+				}
+				canceled, stop := context.WithCancel(ctx)
+				stop()
+				if err := sendInput(canceled); !errors.Is(err, context.Canceled) {
+					t.Fatalf("canceled input: %v", err)
+				}
+				if err := sendInput(ctx); err != nil {
+					t.Fatalf("input after canceled request: %v", err)
+				}
+				conn.failure = errors.New("fixture transport failure")
+				if err := sendInput(ctx); !errors.Is(err, conn.failure) {
+					t.Fatalf("failed input: %v", err)
+				}
+				for _, done := range []<-chan struct{}{backend.done, helperDone} {
+					select {
+					case <-done:
+					case <-ctx.Done():
+						t.Fatal("input write failure left the helper session running")
+					}
+				}
+				events := synthetic.Events()
+				if len(events) != 2 {
+					t.Fatalf("input and release events: %+v", events)
+				}
+				if pointer {
+					if events[1].Pointer == nil || events[1].Pointer.ButtonMask != 0 {
+						t.Fatalf("pointer was not released: %+v", events)
+					}
+				} else if events[1].Key == nil || events[1].Key.Down {
+					t.Fatalf("key was not released: %+v", events)
+				}
+			})
+		}
+	}
+}
+
 // wireBackend isolates server message parsing; authentication and negotiation
 // are exercised above against the common authenticated server.
 func wireBackend(t *testing.T) (*Backend, net.Conn, <-chan []byte) {

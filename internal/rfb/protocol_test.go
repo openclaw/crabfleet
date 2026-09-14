@@ -124,7 +124,7 @@ func TestProtocolRejectsMalformedBounds(t *testing.T) {
 		t.Fatal("accepted too many encodings")
 	}
 	outside := []byte{0, 0, 9, 0, 0, 0, 2, 0, 1}
-	if _, err := parseFramebufferRequest(bytes.NewReader(outside), 10, 10); err != nil {
+	if _, err := parseFramebufferRequest(bytes.NewReader(outside)); err != nil {
 		t.Fatalf("oversized framebuffer request was not cropped: %v", err)
 	}
 	invalidFormat := append([]byte{0, 0, 0}, bgra8888...)

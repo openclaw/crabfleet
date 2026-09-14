@@ -31,29 +31,29 @@ type LinuxX11 struct {
 	closeOnce sync.Once
 	closed    atomic.Bool
 
-	connection      *xgb.Conn
-	root            xproto.Window
-	width           int
-	height          int
-	scanlinePad     int
-	randrVersion    uint32
-	screens         []Screen
-	stride          int
-	bytesPixel      int
-	byteOrder       byte
-	redMask         uint32
-	greenMask       uint32
-	blueMask        uint32
-	segment         shm.Seg
-	shmBytes        []byte
-	keymap          x11Keymap
-	heldKeys        map[byte]struct{}
-	heldKeyStates   map[uint32]x11HeldKeyState
-	modifierRestore []x11ModifierTransition
-	modifierShift   bool
-	modifierMode    bool
-	buttonMask      byte
-	sequence        uint64
+	connection         *xgb.Conn
+	root               xproto.Window
+	width              int
+	height             int
+	scanlinePad        int
+	randrVersion       uint32
+	screens            []Screen
+	stride             int
+	bytesPixel         int
+	byteOrder          byte
+	redMask            uint32
+	greenMask          uint32
+	blueMask           uint32
+	segment            shm.Seg
+	shmBytes           []byte
+	keymap             x11Keymap
+	heldKeys           map[byte]struct{}
+	heldKeyStates      map[uint32]x11HeldKeyState
+	syntheticModifiers []byte
+	modifierShift      bool
+	modifierMode       bool
+	buttonMask         byte
+	sequence           uint64
 }
 
 func NewLinuxX11(display string) (_ *LinuxX11, resultErr error) {
@@ -277,7 +277,7 @@ func (backend *LinuxX11) Key(ctx context.Context, event KeyEvent) error {
 		} else if _, owned := backend.heldKeys[binding.keycode]; !owned {
 			return nil
 		}
-		_ = backend.sendKey(eventType, binding.keycode)
+		backend.sendKey(eventType, binding.keycode)
 		if event.Down {
 			backend.heldKeys[binding.keycode] = struct{}{}
 		} else {
@@ -287,7 +287,7 @@ func (backend *LinuxX11) Key(ctx context.Context, event KeyEvent) error {
 	}
 	if event.Down {
 		if held, exists := backend.heldKeyStates[event.Keysym]; exists {
-			_ = backend.sendKey(xproto.KeyPress, held.keycode)
+			backend.sendKey(xproto.KeyPress, held.keycode)
 			return nil
 		}
 		lockActive := modifierState.mask&xproto.ModMaskLock != 0
@@ -295,10 +295,8 @@ func (backend *LinuxX11) Key(ctx context.Context, event KeyEvent) error {
 		for keycode := range backend.heldKeys {
 			ownedModifiers |= backend.keymap.modifierMasks[keycode]
 		}
-		for _, transition := range backend.modifierRestore {
-			if !transition.down {
-				ownedModifiers |= backend.keymap.modifierMasks[transition.keycode]
-			}
+		for _, keycode := range backend.syntheticModifiers {
+			ownedModifiers |= backend.keymap.modifierMasks[keycode]
 		}
 		const actionableModifiers = uint16(
 			xproto.ModMaskShift | xproto.ModMaskControl |
@@ -325,15 +323,15 @@ func (backend *LinuxX11) Key(ctx context.Context, event KeyEvent) error {
 				return errors.New("simultaneous X11 keys require conflicting modifier levels")
 			}
 		} else {
-			restore, err := backend.applyRequiredModifiers(requiredShift, requiredMode, modifierState)
+			pressed, err := backend.applyRequiredModifiers(requiredShift, requiredMode, modifierState)
 			if err != nil {
 				return fmt.Errorf("XTest key %#x: %w", event.Keysym, err)
 			}
-			backend.modifierRestore = restore
+			backend.syntheticModifiers = pressed
 			backend.modifierShift = requiredShift
 			backend.modifierMode = requiredMode
 		}
-		_ = backend.sendKey(xproto.KeyPress, binding.keycode)
+		backend.sendKey(xproto.KeyPress, binding.keycode)
 		backend.heldKeyStates[event.Keysym] = x11HeldKeyState{keycode: binding.keycode}
 		backend.heldKeys[binding.keycode] = struct{}{}
 		return nil
@@ -342,14 +340,14 @@ func (backend *LinuxX11) Key(ctx context.Context, event KeyEvent) error {
 	if !exists {
 		return nil
 	}
-	_ = backend.sendKey(xproto.KeyRelease, held.keycode)
+	backend.sendKey(xproto.KeyRelease, held.keycode)
 	delete(backend.heldKeyStates, event.Keysym)
 	if !backend.keycodeHeldByNonModifier(held.keycode) {
 		delete(backend.heldKeys, held.keycode)
 	}
 	if len(backend.heldKeyStates) == 0 {
-		backend.restoreModifierTransitions(backend.modifierRestore)
-		backend.modifierRestore = nil
+		backend.releaseSyntheticModifiers(backend.syntheticModifiers)
+		backend.syntheticModifiers = nil
 	}
 	return nil
 }
@@ -414,11 +412,10 @@ func (backend *LinuxX11) cleanupLocked() {
 	}
 }
 
-func (backend *LinuxX11) sendKey(eventType, keycode byte) error {
+func (backend *LinuxX11) sendKey(eventType, keycode byte) {
 	xtest.FakeInput(
 		backend.connection, eventType, keycode, 0, 0, 0, 0, 0,
 	)
-	return nil
 }
 
 func (backend *LinuxX11) isModifier(keycode byte) bool {
@@ -428,11 +425,6 @@ func (backend *LinuxX11) isModifier(keycode byte) bool {
 
 type x11HeldKeyState struct {
 	keycode byte
-}
-
-type x11ModifierTransition struct {
-	keycode byte
-	down    bool
 }
 
 type x11ModifierState struct {
@@ -464,8 +456,8 @@ func (backend *LinuxX11) queryKeycodeDown(keycode byte) (bool, error) {
 func (backend *LinuxX11) applyRequiredModifiers(
 	requiredShift, requiredMode bool,
 	state x11ModifierState,
-) ([]x11ModifierTransition, error) {
-	var restore []x11ModifierTransition
+) ([]byte, error) {
+	var pressed []byte
 	adjust := func(preferred byte, active, required bool) error {
 		if active && !required {
 			return errors.New("active unowned X11 modifier conflicts with requested keysym")
@@ -474,10 +466,8 @@ func (backend *LinuxX11) applyRequiredModifiers(
 			if preferred == 0 {
 				return errors.New("required X11 modifier is unavailable")
 			}
-			if err := backend.sendKey(xproto.KeyPress, preferred); err != nil {
-				return err
-			}
-			restore = append(restore, x11ModifierTransition{keycode: preferred})
+			backend.sendKey(xproto.KeyPress, preferred)
+			pressed = append(pressed, preferred)
 		}
 		return nil
 	}
@@ -486,7 +476,7 @@ func (backend *LinuxX11) applyRequiredModifiers(
 		state.mask&xproto.ModMaskShift != 0,
 		requiredShift,
 	); err != nil {
-		backend.restoreModifierTransitions(restore)
+		backend.releaseSyntheticModifiers(pressed)
 		return nil, err
 	}
 	if err := adjust(
@@ -494,19 +484,15 @@ func (backend *LinuxX11) applyRequiredModifiers(
 		state.mask&backend.keymap.modeMask != 0,
 		requiredMode,
 	); err != nil {
-		backend.restoreModifierTransitions(restore)
+		backend.releaseSyntheticModifiers(pressed)
 		return nil, err
 	}
-	return restore, nil
+	return pressed, nil
 }
 
-func (backend *LinuxX11) restoreModifierTransitions(restore []x11ModifierTransition) {
-	for index := len(restore) - 1; index >= 0; index-- {
-		eventType := byte(xproto.KeyRelease)
-		if restore[index].down {
-			eventType = xproto.KeyPress
-		}
-		_ = backend.sendKey(eventType, restore[index].keycode)
+func (backend *LinuxX11) releaseSyntheticModifiers(pressed []byte) {
+	for index := len(pressed) - 1; index >= 0; index-- {
+		backend.sendKey(xproto.KeyRelease, pressed[index])
 	}
 }
 
@@ -528,7 +514,7 @@ func (backend *LinuxX11) releaseInputBeforeClose() {
 	for keycode := range backend.heldKeys {
 		xtest.FakeInput(backend.connection, xproto.KeyRelease, keycode, 0, 0, 0, 0, 0)
 	}
-	backend.restoreModifierTransitions(backend.modifierRestore)
+	backend.releaseSyntheticModifiers(backend.syntheticModifiers)
 	for bit := 0; bit < 8; bit++ {
 		if backend.buttonMask&(1<<bit) != 0 {
 			xtest.FakeInput(backend.connection, xproto.ButtonRelease, byte(bit+1), 0, 0, 0, 0, 0)
@@ -536,7 +522,7 @@ func (backend *LinuxX11) releaseInputBeforeClose() {
 	}
 	backend.heldKeys = make(map[byte]struct{})
 	backend.heldKeyStates = make(map[uint32]x11HeldKeyState)
-	backend.modifierRestore = nil
+	backend.syntheticModifiers = nil
 	backend.buttonMask = 0
 	connection := backend.connection
 	synced := make(chan struct{})

@@ -118,41 +118,47 @@ func (server *Server) Serve(ctx context.Context, listener net.Listener) error {
 			}
 			return err
 		}
-		// Input may be waiting on the desktop. Keep Close free to unblock it.
-		input := server.inputs.newSession()
-		server.mu.Lock()
-		if input == nil || server.closed || len(server.active) >= server.config.MaxSessions {
-			server.mu.Unlock()
+		sessionConfig, finish, err := server.beginSession(connection)
+		if err != nil {
 			_ = connection.Close()
-			if input != nil {
-				input.release(context.Background())
-			}
 			continue
 		}
-		server.active[connection] = struct{}{}
-		server.wg.Add(1)
-		server.mu.Unlock()
 		go func() {
-			defer server.wg.Done()
+			defer finish()
 			defer connection.Close() //nolint:errcheck // session error is already terminal
-			defer func() {
-				ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
-				defer cancel()
-				input.release(ctx)
-			}()
-			sessionConfig := server.config.Session
-			sessionConfig.ChallengeReader = server.challenge
-			sessionConfig.Backend = &coordinatedBackend{
-				Backend: sessionConfig.Backend,
-				input:   input,
-				capture: server.captures,
-			}
 			_ = ServeConn(sessionContext, connection, sessionConfig)
-			server.mu.Lock()
-			delete(server.active, connection)
-			server.mu.Unlock()
 		}()
 	}
+}
+
+// Direct and relay sessions share admission and teardown. Authentication remains
+// with the caller; only PublishRelay can enable relay security on the config.
+func (server *Server) beginSession(connection net.Conn) (SessionConfig, func(), error) {
+	// Input may be waiting on the desktop. Keep Close free to unblock it.
+	input := server.inputs.newSession()
+	server.mu.Lock()
+	if input == nil || server.closed || len(server.active) >= server.config.MaxSessions {
+		server.mu.Unlock()
+		if input != nil {
+			input.release(context.Background())
+		}
+		return SessionConfig{}, nil, errors.New("connector session limit reached")
+	}
+	server.active[connection] = struct{}{}
+	server.wg.Add(1)
+	server.mu.Unlock()
+	config := server.config.Session
+	config.ChallengeReader = server.challenge
+	config.Backend = &coordinatedBackend{Backend: config.Backend, input: input, capture: server.captures}
+	return config, func() {
+		defer server.wg.Done()
+		server.mu.Lock()
+		delete(server.active, connection)
+		server.mu.Unlock()
+		cleanup, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+		defer cancel()
+		input.release(cleanup)
+	}, nil
 }
 
 func (server *Server) Close() error {

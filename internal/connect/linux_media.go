@@ -120,6 +120,7 @@ func readADTS(r io.Reader) ([]byte, error) {
 
 type CommandClipboard struct {
 	ctx         context.Context
+	cancel      context.CancelFunc
 	read, write []string
 	mu          sync.Mutex
 	stop        context.CancelFunc
@@ -137,11 +138,17 @@ func NewCommandClipboard(ctx context.Context, wayland bool) (*CommandClipboard, 
 			return nil, fmt.Errorf("clipboard sharing requires %s", p)
 		}
 	}
-	return &CommandClipboard{ctx: ctx, read: read, write: write}, nil
+	ctx, cancel := context.WithCancel(ctx)
+	return &CommandClipboard{ctx: ctx, cancel: cancel, read: read, write: write}, nil
 }
 func (c *CommandClipboard) ReadClipboard(ctx context.Context) (string, error) {
+	if c.ctx.Err() != nil {
+		return "", ErrClosed
+	}
 	ctx, cancel := context.WithTimeout(ctx, time.Second)
 	defer cancel()
+	stop := context.AfterFunc(c.ctx, cancel)
+	defer stop()
 	cmd := exec.CommandContext(ctx, c.read[0], c.read[1:]...)
 	cmd.WaitDelay = time.Second
 	out := &BoundedBuffer{Limit: MaxClipboardBytes}
@@ -160,14 +167,13 @@ func (c *CommandClipboard) WriteClipboard(ctx context.Context, text string) erro
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if c.stop != nil {
-		c.stop()
-		<-c.done
-		c.stop = nil
+	if c.ctx.Err() != nil {
+		return ErrClosed
 	}
 	if err := ctx.Err(); err != nil {
 		return err
 	}
+	c.stopOwnerLocked()
 	holderContext, cancel := context.WithCancel(c.ctx)
 	cmd := exec.CommandContext(holderContext, c.write[0], c.write[1:]...)
 	cmd.WaitDelay = time.Second
@@ -176,8 +182,9 @@ func (c *CommandClipboard) WriteClipboard(ctx context.Context, text string) erro
 		cancel()
 		return err
 	}
-	c.stop, c.done = cancel, make(chan error, 1)
-	go func() { c.done <- cmd.Wait() }()
+	done := make(chan error, 1)
+	c.stop, c.done = cancel, done
+	go func() { done <- cmd.Wait() }()
 	deadline := time.NewTimer(time.Second)
 	defer deadline.Stop()
 	ticker := time.NewTicker(20 * time.Millisecond)
@@ -185,21 +192,17 @@ func (c *CommandClipboard) WriteClipboard(ctx context.Context, text string) erro
 	for {
 		select {
 		case err := <-c.done:
-			c.stop = nil
+			c.stop, c.done = nil, nil
 			cancel()
 			if err == nil {
 				return errors.New("clipboard owner exited")
 			}
 			return err
 		case <-ctx.Done():
-			cancel()
-			<-c.done
-			c.stop = nil
+			c.stopOwnerLocked()
 			return ctx.Err()
 		case <-deadline.C:
-			cancel()
-			<-c.done
-			c.stop = nil
+			c.stopOwnerLocked()
 			return errors.New("clipboard ownership timed out")
 		case <-ticker.C:
 			current, err := c.ReadClipboard(ctx)
@@ -210,12 +213,17 @@ func (c *CommandClipboard) WriteClipboard(ctx context.Context, text string) erro
 	}
 }
 func (c *CommandClipboard) Close() error {
+	c.cancel()
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	c.stopOwnerLocked()
+	return nil
+}
+
+func (c *CommandClipboard) stopOwnerLocked() {
 	if c.stop != nil {
 		c.stop()
 		<-c.done
-		c.stop = nil
+		c.stop, c.done = nil, nil
 	}
-	return nil
 }

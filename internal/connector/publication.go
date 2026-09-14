@@ -76,6 +76,9 @@ func (p *Publication) Run(ctx context.Context, publish RelayPublisher) error {
 				return err
 			}
 			token, err = p.Client.Recover(ctx, p.State.HostID, id)
+			if terminalAPIError(err) {
+				return err
+			}
 			if err != nil || token == "" {
 				if err := wait(ctx, delay); err != nil {
 					return nil

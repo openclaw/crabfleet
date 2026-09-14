@@ -366,7 +366,7 @@ func messageLoop(ctx context.Context, connection net.Conn, config SessionConfig,
 				}()
 			}
 		case 3:
-			request, err := parseFramebufferRequest(connection, width, height)
+			request, err := parseFramebufferRequest(connection)
 			if err != nil {
 				return err
 			}

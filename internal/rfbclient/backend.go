@@ -356,7 +356,6 @@ func (b *Backend) ResizeDesktop(ctx context.Context, layout connect.DesktopLayou
 		binary.BigEndian.PutUint32(p[12:], screen.Flags)
 	}
 	if err := b.write(ctx, request); err != nil {
-		_ = b.conn.Close()
 		return err
 	}
 	select {
@@ -454,7 +453,9 @@ func (b *Backend) capture(ctx context.Context, requireCurrent bool) (connect.Fra
 		b.mu.Unlock()
 		if requestNeeded {
 			if err := b.write(ctx, request); err != nil {
-				_ = b.conn.Close()
+				b.mu.Lock()
+				b.pending = false
+				b.mu.Unlock()
 				return connect.Frame{}, err
 			}
 		}
@@ -506,9 +507,16 @@ func (b *Backend) write(ctx context.Context, p []byte) error {
 		deadline = d
 	}
 	if err := b.conn.SetWriteDeadline(deadline); err != nil {
+		_ = b.conn.Close()
 		return err
 	}
-	return writeAll(b.conn, p)
+	if err := writeAll(b.conn, p); err != nil {
+		// A failed message may have reached the helper only in part. Retire
+		// the stream for every caller, including keyboard and pointer input.
+		_ = b.conn.Close()
+		return err
+	}
+	return nil
 }
 func (b *Backend) Close() error { err := b.conn.Close(); <-b.done; return err }
 func writeAll(w io.Writer, p []byte) error {

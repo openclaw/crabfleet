@@ -180,6 +180,10 @@ func (c *Client) Recover(ctx context.Context, id, publication string) (string, e
 		OwnershipToken string `json:"ownershipToken"`
 	}
 	_, _, err := c.request(ctx, "POST", "/api/connector/v1/desktop-hosts/"+url.PathEscape(id)+"/recover", nil, http.Header{"X-Crabfleet-Publication-Id": []string{publication}}, &r)
+	// An empty token means this publication no longer owns the registration.
+	if err == nil && r.OwnershipToken != "" && (len(r.OwnershipToken) < 16 || len(r.OwnershipToken) > 200) {
+		err = errors.New("invalid Fleet ownership response")
+	}
 	return r.OwnershipToken, err
 }
 func (c *Client) Remove(ctx context.Context, id, ownership string) error {

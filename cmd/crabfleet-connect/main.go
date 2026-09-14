@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"net/netip"
 	"os"
 	"os/signal"
 	"runtime"
@@ -118,6 +119,12 @@ func runShare(ctx context.Context, arguments []string, stdout, stderr io.Writer,
 	if *advertise != "" && !*fleet {
 		return errors.New("--advertise requires --fleet")
 	}
+	if *advertise != "" {
+		address, err := netip.ParseAddr(*advertise)
+		if err != nil || !netip.MustParsePrefix("100.64.0.0/10").Contains(address) {
+			return errors.New("advertise must be a Tailscale IPv4 address")
+		}
+	}
 	if *allMonitors && *output != "" {
 		return errors.New("--all-monitors cannot be combined with --output")
 	}
@@ -150,12 +157,12 @@ func runShare(ctx context.Context, arguments []string, stdout, stderr io.Writer,
 		return err
 	}
 	defer cleanup()
-	password, err := generateSharePassword()
-	if err != nil {
-		return err
-	}
-	if options.password != "" {
-		password = options.password
+	password := options.password
+	if password == "" {
+		password, err = generateSharePassword()
+		if err != nil {
+			return err
+		}
 	}
 	hostname, err := os.Hostname()
 	if err != nil || hostname == "" {
