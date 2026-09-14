@@ -21,11 +21,21 @@ func TestFFmpegFixtureProcess(t *testing.T) {
 	if mode == "" {
 		return
 	}
+	var width, height int
+	var encoder string
+	for i, arg := range os.Args {
+		if arg == "-video_size" && i+1 < len(os.Args) {
+			_, _ = fmt.Sscanf(os.Args[i+1], "%dx%d", &width, &height)
+		}
+		if arg == "-c:v" && i+1 < len(os.Args) {
+			encoder = os.Args[i+1]
+		}
+	}
 	attempts, err := os.OpenFile(os.Getenv("CRABFLEET_FFMPEG_ATTEMPTS"), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0600)
 	if err != nil {
 		os.Exit(2)
 	}
-	_, _ = fmt.Fprintln(attempts, "attempt")
+	_, _ = fmt.Fprintf(attempts, "attempt %s %dx%d\n", encoder, width, height)
 	_ = attempts.Close()
 	if mode == "fail" {
 		_, _ = fmt.Fprintln(os.Stderr, "fixture device initialization failed")
@@ -35,11 +45,9 @@ func TestFFmpegFixtureProcess(t *testing.T) {
 		time.Sleep(30 * time.Second)
 		os.Exit(1)
 	}
-	var width, height int
-	for i, arg := range os.Args {
-		if arg == "-video_size" && i+1 < len(os.Args) {
-			_, _ = fmt.Sscanf(os.Args[i+1], "%dx%d", &width, &height)
-		}
+	if mode == "geometry" && strings.HasSuffix(encoder, "_vaapi") && width < 128 {
+		_, _ = fmt.Fprintln(os.Stderr, "fixture unsupported frame geometry")
+		os.Exit(1)
 	}
 	pixels := make([]byte, width*height*4)
 	for index := 0; ; index++ {
@@ -129,7 +137,7 @@ func TestFFmpegVideoRejectsFramesWithoutDisablingEncoder(t *testing.T) {
 	if _, err := v.Encode(context.Background(), solidVideoFrame(64, 48, 0, 180), "unknown"); err == nil {
 		t.Fatal("accepted unknown codec")
 	}
-	if len(v.unavailable) != 0 || len(v.workers) != 0 {
+	if len(v.unavailable) != 0 || len(v.failures) != 0 || len(v.workers) != 0 {
 		t.Fatal("invalid input attempted or disabled an encoder")
 	}
 	assertVideoDirectoriesEmpty(t, runtime)
@@ -140,7 +148,7 @@ func TestFFmpegVideoRejectsFramesWithoutDisablingEncoder(t *testing.T) {
 
 func TestFFmpegVideoFailureIsCachedAndDiagnosed(t *testing.T) {
 	var reports []string
-	v, runtime, attempts := fixtureVideo(t, context.Background(), "fail", VideoOptions{Encoder: "vaapi", Report: func(message string) { reports = append(reports, message) }})
+	v, runtime, attempts := fixtureVideo(t, context.Background(), "fail", VideoOptions{Encoder: "vaapi", Device: "/dev/null", Report: func(message string) { reports = append(reports, message) }})
 	for _, codec := range []string{"h264", "hevc"} {
 		for _, width := range []int{64, 96, 64} {
 			_, err := v.Encode(context.Background(), solidVideoFrame(width, 48, 0, 180), codec)
@@ -150,8 +158,8 @@ func TestFFmpegVideoFailureIsCachedAndDiagnosed(t *testing.T) {
 		}
 	}
 	data, err := os.ReadFile(attempts)
-	if err != nil || strings.Count(string(data), "attempt") != 2 || len(reports) != 2 {
-		t.Fatalf("retried a failed backend or repeated diagnostics: attempts=%q reports=%v err=%v", data, reports, err)
+	if err != nil || strings.Count(string(data), "attempt") != 4 || len(reports) != 2 {
+		t.Fatalf("retried a cached failed size or repeated diagnostics: attempts=%q reports=%v err=%v", data, reports, err)
 	}
 	if len(v.workers) != 0 {
 		t.Fatal("failed workers retained")
@@ -182,7 +190,7 @@ func TestFFmpegVideoCancellationAndTimeout(t *testing.T) {
 			if !errors.Is(err, context.DeadlineExceeded) || time.Since(start) > 4*time.Second {
 				t.Fatalf("blocked writer did not stop within its deadline: %v, %s", err, time.Since(start))
 			}
-			if timeout < time.Second && len(v.unavailable) != 0 {
+			if timeout < time.Second && (len(v.unavailable) != 0 || len(v.failures) != 0) {
 				t.Fatal("caller cancellation disabled the backend")
 			}
 			if len(v.workers) != 0 {
@@ -240,5 +248,92 @@ func TestFFmpegVideoResizeAndIdleCancellation(t *testing.T) {
 	}
 	if err := v.Close(); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestFFmpegVideoRecoversAfterUnsupportedSize(t *testing.T) {
+	for _, selection := range []string{"auto", "vaapi"} {
+		t.Run(selection, func(t *testing.T) {
+			var reports []string
+			v, runtime, attempts := fixtureVideo(t, context.Background(), "geometry", VideoOptions{Encoder: selection, Device: "/dev/null", Report: func(message string) { reports = append(reports, message) }})
+			v.unavailable["hevc/nvenc"] = errors.New("NVIDIA excluded from VAAPI recovery fixture")
+			for _, width := range []int{256, 64, 64, 256, 64, 320} {
+				_, err := v.Encode(context.Background(), solidVideoFrame(width, 192, 0, 180), "hevc")
+				if selection == "vaapi" && width == 64 {
+					if err == nil || !strings.Contains(err.Error(), "unsupported frame geometry") {
+						t.Fatalf("explicit hardware did not reject unsupported size: %v", err)
+					}
+					continue
+				}
+				if err != nil {
+					t.Fatal(err)
+				}
+				backend := "vaapi"
+				if width == 64 {
+					backend = "software"
+				}
+				if len(v.workers) != 1 || v.workers["hevc/"+backend] == nil {
+					t.Fatalf("resize did not select %s or retained old backend: %v", backend, v.workers)
+				}
+			}
+			data, err := os.ReadFile(attempts)
+			if err != nil || strings.Count(string(data), "hevc_vaapi 64x192") != 1 || strings.Count(string(data), "hevc_vaapi 256x192") != 2 {
+				t.Fatalf("failed geometry was retried or working geometry did not recover: %s, %v", data, err)
+			}
+			wantReports := 2
+			if selection == "auto" {
+				wantReports++
+			}
+			if len(reports) != wantReports {
+				t.Fatalf("recovery repeated backend diagnostics: %v", reports)
+			}
+			_ = v.Close()
+			assertVideoDirectoriesEmpty(t, runtime)
+		})
+	}
+}
+
+func TestFFmpegVideoFailedGeometryHistoryIsBounded(t *testing.T) {
+	v, runtime, attempts := fixtureVideo(t, context.Background(), "fail", VideoOptions{Encoder: "vaapi", Device: "/dev/null"})
+	for width := 64; width <= 84; width += 2 {
+		for repeat := 0; repeat < 2; repeat++ {
+			if _, err := v.Encode(context.Background(), solidVideoFrame(width, 48, 0, 180), "hevc"); err == nil {
+				t.Fatal("failed fixture unexpectedly encoded")
+			}
+		}
+		if len(v.failures["hevc/vaapi"]) > maxVideoFailedSizes {
+			t.Fatal("failure history grew without bound")
+		}
+	}
+	data, err := os.ReadFile(attempts)
+	if err != nil || strings.Count(string(data), "attempt") != 11 {
+		t.Fatalf("repeated bad sizes launched extra workers: %s, %v", data, err)
+	}
+	assertVideoDirectoriesEmpty(t, runtime)
+}
+
+func TestFFmpegVideoMissingDeviceNeverLaunchesWorker(t *testing.T) {
+	for _, device := range []string{"missing", "regular-file"} {
+		t.Run(device, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "renderD128")
+			if device == "regular-file" {
+				if err := os.WriteFile(path, nil, 0600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			v, runtime, attempts := fixtureVideo(t, context.Background(), "frame", VideoOptions{Encoder: "vaapi", Device: path})
+			for _, width := range []int{64, 256, 320, 64} {
+				if _, err := v.Encode(context.Background(), solidVideoFrame(width, 192, 0, 180), "hevc"); err == nil {
+					t.Fatal("invalid render device accepted")
+				}
+			}
+			if _, err := os.Stat(attempts); !os.IsNotExist(err) {
+				t.Fatal("missing/non-device render path launched a worker")
+			}
+			if v.unavailable["hevc/vaapi"] == nil || len(v.failures) != 0 {
+				t.Fatal("device-wide failure was classified as a geometry failure")
+			}
+			assertVideoDirectoriesEmpty(t, runtime)
+		})
 	}
 }

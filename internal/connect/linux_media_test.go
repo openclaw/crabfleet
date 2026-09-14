@@ -274,3 +274,69 @@ func TestPulseAudioLiveOutputMonitor(t *testing.T) {
 	}
 	t.Logf("decoded system output tone, peak %d, capture shut down cleanly", peak)
 }
+
+func TestFFmpegLiveIntelHEVCResizeRecovery(t *testing.T) {
+	if os.Getenv("CRABFLEET_TEST_VIDEO_ENCODER") != "vaapi" {
+		t.Skip("opt-in Intel VAAPI HEVC geometry recovery proof")
+	}
+	device := os.Getenv("CRABFLEET_TEST_RENDER_DEVICE")
+	if device == "" {
+		device = "/dev/dri/renderD128"
+	}
+	vendor, err := os.ReadFile(filepath.Join("/sys/class/drm", filepath.Base(device), "device/vendor"))
+	if err != nil || string(bytes.TrimSpace(vendor)) != "0x8086" {
+		t.Skip("this minimum-size fixture requires an Intel render device")
+	}
+	for _, selection := range []string{"auto", "vaapi"} {
+		t.Run(selection, func(t *testing.T) {
+			runtime := t.TempDir()
+			t.Setenv("XDG_RUNTIME_DIR", runtime)
+			var reports []string
+			v, err := NewFFmpegVideo(context.Background(), VideoOptions{Encoder: selection, Device: device, Report: func(message string) { reports = append(reports, message) }})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer v.Close()
+			v.unavailable["hevc/nvenc"] = errors.New("NVIDIA excluded from Intel recovery fixture")
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+			for pass, width := range []int{256, 64, 64, 256, 64, 320} {
+				frame := solidVideoFrame(width, 192, 16, byte(80+pass*20))
+				start := time.Now()
+				payload, err := v.Encode(ctx, frame, "hevc")
+				elapsed := time.Since(start)
+				if selection == "vaapi" && width == 64 {
+					if err == nil {
+						t.Fatal("Intel fixture unexpectedly accepted width below its minimum")
+					}
+					t.Logf("explicit VAAPI rejected width 64 in %s; failure remains geometry-specific", elapsed)
+					continue
+				}
+				if err != nil {
+					t.Fatal(err)
+				}
+				backend := "vaapi"
+				if width == 64 {
+					backend = "software"
+				}
+				if len(v.workers) != 1 || v.workers["hevc/"+backend] == nil {
+					t.Fatalf("expected recovered %s backend with no idle fallback worker", backend)
+				}
+				assertIndependentVideoFrame(t, ctx, payload, frame, "hevc")
+				t.Logf("%s pass %d: %dx192 independently decoded HEVC Main via %s in %s", selection, pass, width, backend, elapsed)
+			}
+			if v.unavailable["hevc/vaapi"] != nil || len(v.failures["hevc/vaapi"]) != 1 {
+				t.Fatal("unsupported size disabled the device or duplicated failure history")
+			}
+			wantReports := 2
+			if selection == "auto" {
+				wantReports++
+			}
+			if len(reports) != wantReports {
+				t.Fatalf("resize recovery spammed reports: %v", reports)
+			}
+			_ = v.Close()
+			assertVideoDirectoriesEmpty(t, runtime)
+		})
+	}
+}

@@ -21,9 +21,17 @@ type FFmpegVideo struct {
 	mu          sync.Mutex
 	workers     map[string]*videoWorker
 	unavailable map[string]error
+	failures    map[string][]videoSizeFailure
 	reported    map[string]bool
 	closed      bool
 	options     VideoOptions
+}
+
+const maxVideoFailedSizes = 4
+
+type videoSizeFailure struct {
+	width, height int
+	err           error
 }
 
 // VideoOptions selects the backend. Auto falls back to software; explicit
@@ -57,7 +65,7 @@ func NewFFmpegVideo(ctx context.Context, options VideoOptions) (*FFmpegVideo, er
 	if err != nil {
 		return nil, errors.New("video encoding requires ffmpeg")
 	}
-	return &FFmpegVideo{ctx: ctx, executable: p, workers: make(map[string]*videoWorker), unavailable: make(map[string]error), reported: make(map[string]bool), options: options}, nil
+	return &FFmpegVideo{ctx: ctx, executable: p, workers: make(map[string]*videoWorker), unavailable: make(map[string]error), failures: make(map[string][]videoSizeFailure), reported: make(map[string]bool), options: options}, nil
 }
 func (v *FFmpegVideo) Encode(ctx context.Context, frame Frame, codec string) ([]byte, error) {
 	if err := frame.Validate(); err != nil {
@@ -97,8 +105,29 @@ func (v *FFmpegVideo) Encode(ctx context.Context, frame Frame, codec string) ([]
 			lastErr = err
 			continue
 		}
+		if err := v.failedSize(key, frame.Width, frame.Height); err != nil {
+			lastErr = err
+			continue
+		}
+		if err := v.checkDevice(encoder); err != nil {
+			lastErr = fmt.Errorf("%s %s: %w", codec, encoder, err)
+			v.unavailable[key] = lastErr
+			if !v.reported[key+"/failure"] {
+				v.reported[key+"/failure"] = true
+				reports = append(reports, fmt.Sprintf("%s; trying the next supported encoder or codec.", lastErr))
+			}
+			continue
+		}
 		payload, err := v.encode(ctx, frame, codec, encoder, key)
 		if err == nil {
+			// A recovered hardware encoder replaces the software fallback;
+			// keep only the selected worker for this codec alive.
+			for other, worker := range v.workers {
+				if other != key && strings.HasPrefix(other, codec+"/") {
+					worker.close()
+					delete(v.workers, other)
+				}
+			}
 			if !v.reported[key] {
 				v.reported[key] = true
 				reports = append(reports, fmt.Sprintf("Video: %s (%s), %dx%d", codec, encoder, frame.Width, frame.Height))
@@ -108,11 +137,56 @@ func (v *FFmpegVideo) Encode(ctx context.Context, frame Frame, codec string) ([]
 		if ctx.Err() != nil || v.ctx.Err() != nil {
 			return nil, err
 		}
-		lastErr = fmt.Errorf("%s %s: %w", codec, encoder, err)
-		v.unavailable[key] = lastErr
-		reports = append(reports, fmt.Sprintf("%s; trying the next supported encoder or codec.", lastErr))
+		lastErr = fmt.Errorf("%s %s at %dx%d: %w", codec, encoder, frame.Width, frame.Height, err)
+		v.rememberFailedSize(key, frame.Width, frame.Height, lastErr)
+		if !v.reported[key+"/failure"] {
+			v.reported[key+"/failure"] = true
+			reports = append(reports, fmt.Sprintf("%s; trying the next supported encoder or codec.", lastErr))
+		}
 	}
 	return nil, fmt.Errorf("video encoder unavailable: %w", lastErr)
+}
+
+// Only filesystem evidence establishes device-wide unavailability. FFmpeg
+// failures can depend on geometry; do not classify its driver-specific text.
+func (v *FFmpegVideo) checkDevice(encoder string) error {
+	var device string
+	switch encoder {
+	case "vaapi":
+		device = v.options.Device
+	case "nvenc":
+		device = "/dev/nvidiactl"
+	default:
+		return nil
+	}
+	info, err := os.Stat(device)
+	if err != nil {
+		return fmt.Errorf("hardware device unavailable: %w", err)
+	}
+	if info.Mode()&os.ModeCharDevice == 0 {
+		return errors.New("hardware device must be a character device")
+	}
+	return nil
+}
+
+func (v *FFmpegVideo) failedSize(key string, width, height int) error {
+	for _, failure := range v.failures[key] {
+		if failure.width == width && failure.height == height {
+			return failure.err
+		}
+	}
+	return nil
+}
+
+func (v *FFmpegVideo) rememberFailedSize(key string, width, height int, err error) {
+	// Repeated bad sizes do not respawn FFmpeg. Bound the history even during
+	// arbitrary resize sequences; a new geometry can still recover the backend.
+	failures := v.failures[key]
+	if len(failures) == maxVideoFailedSizes {
+		copy(failures, failures[1:])
+		failures = failures[:len(failures)-1]
+	}
+	v.failures[key] = append(failures, videoSizeFailure{width: width, height: height, err: err})
 }
 
 func (v *FFmpegVideo) encoders() []string {
