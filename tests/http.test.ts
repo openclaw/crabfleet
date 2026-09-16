@@ -252,13 +252,23 @@ test("JSON parsing accepts exact integer-equivalent numeric forms", async () => 
   }
 });
 
+test("JSON request readers reject non-object roots", async () => {
+  for (const body of ["null", "[]", "[{}]", '"text"', "42", "true", "false"]) {
+    const request = () => new Request("https://fleet.example", { method: "POST", body });
+    for (const read of [() => readJson(request()), () => readBoundedJson(request(), 1024)]) {
+      await assert.rejects(read, { status: 400, message: "json body must be an object" });
+    }
+  }
+});
+
 test("JSON parsing handles deeply nested bounded payloads without exhausting the call stack", async () => {
   const depth = 20_000;
-  const body = `${"[".repeat(depth)}0${"]".repeat(depth)}`;
-  let current = await readBoundedJson<unknown>(
+  const body = `{"nested":${"[".repeat(depth)}0${"]".repeat(depth)}}`;
+  const parsed = await readBoundedJson<{ nested: unknown }>(
     new Request("https://fleet.example", { method: "POST", body }),
     body.length,
   );
+  let current = parsed.nested;
   for (let index = 0; index < depth; index += 1) {
     assert.ok(Array.isArray(current));
     current = current[0];

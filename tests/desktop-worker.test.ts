@@ -98,6 +98,26 @@ test("malformed native sign-in paths return a client error", async () => {
   }
 });
 
+for (const [method, path] of [
+  ["POST", "/api/login/token"],
+  ["POST", "/api/login/dev"],
+  ["PUT", "/api/desktop-hosts/studio"],
+  ["POST", "/api/desktop-hosts/studio?recover=1"],
+  ["POST", "/api/admin/allow"],
+] as const) {
+  test(`${method} ${path} rejects JSON null without a server error`, async () => {
+    const { sqlite, request, login } = setup();
+    try {
+      const cookie = await login("alice");
+      const response = await request(method, path, null, { cookie });
+      assert.equal(response.status, 400);
+      assert.deepEqual(await response.json(), { error: "json body must be an object" });
+    } finally {
+      sqlite.close();
+    }
+  });
+}
+
 test("desktop-only Worker preserves publication ownership, private discovery, and removal", async () => {
   const { sqlite, request, login } = setup();
   try {
