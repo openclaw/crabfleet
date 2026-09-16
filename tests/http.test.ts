@@ -290,6 +290,19 @@ test("bearer and cookie helpers normalize only their owned protocol surface", ()
       ["mode", "read"],
     ],
   );
+  assert.deepEqual(
+    [
+      ...cookies(
+        new Request("https://fleet.example", {
+          headers: { cookie: "ok=hello%20world; bad=%; keep=fine" },
+        }),
+      ),
+    ],
+    [
+      ["ok", "hello world"],
+      ["keep", "fine"],
+    ],
+  );
   assert.equal(
     cookie(request, "session", "hello world", 60),
     "session=hello%20world; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=60",

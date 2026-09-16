@@ -63,6 +63,41 @@ function setup() {
   return { sqlite, env, request, login };
 }
 
+test("malformed cookies do not interrupt authenticated requests or logout", async () => {
+  const { sqlite, request, login } = setup();
+  try {
+    const session = await login("alice");
+    const headers = { cookie: `bad=%; ${session}; invalid=%FF; keep=fine` };
+    const current = await request("GET", "/api/session", undefined, headers);
+    assert.equal(current.status, 200);
+    assert.equal((await current.json()).user.subject, "dev:alice");
+
+    const logout = await request("POST", "/api/logout", undefined, headers);
+    assert.equal(logout.status, 200);
+    assert.equal(
+      (await request("GET", "/api/session", undefined, { cookie: session })).status,
+      401,
+    );
+  } finally {
+    sqlite.close();
+  }
+});
+
+test("malformed native sign-in paths return a client error", async () => {
+  const { sqlite, request } = setup();
+  try {
+    for (const method of ["GET", "POST"]) {
+      for (const code of ["%", "%GG", "%FF", "%E2%82"]) {
+        const response = await request(method, `/native/link/${code}`);
+        assert.equal(response.status, 400, `${method} ${code}`);
+        assert.deepEqual(await response.json(), { error: "invalid path identifier" });
+      }
+    }
+  } finally {
+    sqlite.close();
+  }
+});
+
 test("desktop-only Worker preserves publication ownership, private discovery, and removal", async () => {
   const { sqlite, request, login } = setup();
   try {

@@ -11,6 +11,8 @@ Crabfleet exposes desktop identity, private discovery, host registration, and an
 
 ## Browser identity
 
+Malformed percent-encoded cookie values are ignored independently; valid cookies remain usable for sign-in, authenticated requests, and logout. Malformed percent encoding in `/native/link/:code` returns `400` before looking up the authorization link.
+
 | Method     | Route                     | Result                                                               |
 | ---------- | ------------------------- | -------------------------------------------------------------------- |
 | GET        | `/api/auth`               | Available authentication methods and public deployment configuration |

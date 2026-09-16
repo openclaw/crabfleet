@@ -7,7 +7,7 @@ import {
   type DesktopHostInput,
   type DesktopHostService,
 } from "../desktop-host-service.ts";
-import { badRequest, json, readJson } from "../http.ts";
+import { decodePathIdentifier, json, readJson } from "../http.ts";
 import type { User } from "../models.ts";
 
 export async function handleDesktopHostRoute(
@@ -21,7 +21,7 @@ export async function handleDesktopHostRoute(
     requireRole(user, "viewer");
     const registration = await hosts.register(
       user,
-      decoded(desktopHostMatch[1]),
+      decodePathIdentifier(desktopHostMatch[1]),
       await readJson<DesktopHostInput>(request),
       request.headers.get(desktopHostOwnershipModeHeader) === desktopHostTokenOwnershipMode
         ? desktopHostTokenOwnershipMode
@@ -33,21 +33,15 @@ export async function handleDesktopHostRoute(
   if (request.method === "POST" && desktopHostMatch && url.searchParams.get("recover") === "1") {
     requireRole(user, "viewer");
     const body = await readJson<{ publicationID?: unknown }>(request);
-    return json(await hosts.recover(user, decoded(desktopHostMatch[1]), body.publicationID));
+    return json(
+      await hosts.recover(user, decodePathIdentifier(desktopHostMatch[1]), body.publicationID),
+    );
   }
   if (request.method === "DELETE" && desktopHostMatch) {
     requireRole(user, "viewer");
     const ownershipToken = request.headers.get(desktopHostOwnershipHeader);
-    await hosts.remove(user, decoded(desktopHostMatch[1]), ownershipToken);
+    await hosts.remove(user, decodePathIdentifier(desktopHostMatch[1]), ownershipToken);
     return json({ ok: true });
   }
   return null;
-}
-
-function decoded(value: string | undefined): string {
-  try {
-    return decodeURIComponent(value ?? "");
-  } catch {
-    throw badRequest("invalid path identifier");
-  }
 }
