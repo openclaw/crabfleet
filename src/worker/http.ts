@@ -119,6 +119,9 @@ function parseJson<T>(source: string): T {
   } catch {
     throw badRequest("invalid json");
   }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw badRequest("json body must be an object");
+  }
   assertRoundTrippableJsonIntegerLexemes(source);
   assertRoundTrippableJsonIntegers(parsed);
   return parsed as T;
