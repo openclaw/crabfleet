@@ -29,21 +29,21 @@
     "build:docs": "node scripts/build-docs-site.mjs"
   },
   "dependencies": {
-    "kysely": "^0.29.5",
+    "kysely": "^0.29.6",
     "preact": "^10.29.8"
   },
   "devDependencies": {
-    "@cloudflare/workers-types": "5.20260826.1",
+    "@cloudflare/workers-types": "5.20260921.1",
     "@preact/preset-vite": "^2.10.6",
-    "oxfmt": "^0.65.0",
-    "oxlint": "^1.80.0",
+    "oxfmt": "^0.68.0",
+    "oxlint": "^1.83.0",
     "playwright": "1.63.0",
     "typescript": "^7.0.2",
-    "vite": "^8.2.2",
-    "wrangler": "4.116.0"
+    "vite": "^8.3.0",
+    "wrangler": "4.135.0"
   },
   "engines": {
     "node": ">=24"
   },
-  "packageManager": "pnpm@11.24.0"
+  "packageManager": "pnpm@11.27.1"
 }
