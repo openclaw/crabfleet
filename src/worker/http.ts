@@ -89,7 +89,9 @@ export async function readBoundedText(
   let total = 0;
   try {
     while (true) {
-      const { done, value } = await reader.read();
+      const { done, value } = await reader.read().catch(() => {
+        throw badRequest("invalid json");
+      });
       if (done) break;
       if (!value?.byteLength) continue;
       total += value.byteLength;
