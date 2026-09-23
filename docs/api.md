@@ -7,7 +7,7 @@ description: "Desktop sign-in, discovery, publication, and authenticated VNC rel
 
 # Desktop API
 
-Crabfleet exposes desktop identity, private discovery, host registration, and an opaque RFB relay. JSON endpoints return structured errors with HTTP status codes. JSON request bodies must be objects; `null`, arrays, and primitive roots return `400` before fields are processed. Native request bodies are limited to 1 KiB.
+Crabfleet exposes desktop identity, private discovery, host registration, and an opaque RFB relay. JSON endpoints return structured errors with HTTP status codes. JSON request bodies must be objects; `null`, arrays, and primitive roots return `400` before fields are processed. Native request bodies are limited to 1 KiB. Interrupted request bodies return `400`; bodies exceeding a route's byte limit return `413`.
 
 ## Browser identity
 

@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Return HTTP 400 for interrupted native sign-in, connector registration, and allowlist request bodies while retaining HTTP 413 for oversized uploads.
 - Reject non-object JSON request bodies with HTTP 400 before browser login, desktop registration/recovery, and allowlist handlers read fields, preventing `null` payloads from returning HTTP 500.
 - Skip malformed Cookie values and reject malformed `/native/link/:code` path encodings instead of returning HTTP 500, thanks @SebTardif (#144).
 - Add an experimental independent Rust/egui client for Jump Desktop on Linux and browser WASM, with account/MFA and host authentication, discovery, desktop video, keyboard/pointer input, audio, explicit clipboard transfer, remote cursors, view-only controls, and bounded reconnect; validate Mac and Windows hosts plus Firefox and Edge, with provider/SSO login and broader host compatibility still pending.

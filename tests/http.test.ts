@@ -213,6 +213,31 @@ test("bounded text enforces byte limits across chunks and releases the stream re
   );
 });
 
+test("bounded readers reject interrupted uploads as client errors and release the reader", async () => {
+  for (const read of [readBoundedText, readBoundedJson]) {
+    for (const partial of [false, true]) {
+      let pulled = false;
+      const body = new ReadableStream<Uint8Array>({
+        pull(controller) {
+          if (partial && !pulled) {
+            pulled = true;
+            controller.enqueue(new TextEncoder().encode('{"value":'));
+          } else {
+            controller.error(new Error("request body aborted"));
+          }
+        },
+      });
+      const request = new Request("https://fleet.example", {
+        method: "POST",
+        body,
+        duplex: "half",
+      } as RequestInit & { duplex: "half" });
+      await assert.rejects(read(request, 1024), { status: 400, message: "invalid json" });
+      assert.equal(request.body?.locked, false);
+    }
+  }
+});
+
 test("JSON parsing rejects integers that cannot round-trip exactly", async () => {
   for (const body of [
     '{"value":9007199254740993}',

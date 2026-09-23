@@ -118,6 +118,37 @@ for (const [method, path] of [
   });
 }
 
+test("interrupted native sign-in and allowlist uploads return HTTP 400", async () => {
+  const { sqlite, env, login } = setup();
+  try {
+    const cookie = await login("alice");
+    for (const path of [
+      "/api/native/v1/auth/device",
+      "/api/native/v1/auth/token",
+      "/api/admin/allow",
+    ]) {
+      const body = new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.error(new Error("request body aborted"));
+        },
+      });
+      const response = await worker.fetch(
+        new Request(`http://127.0.0.1:8787${path}`, {
+          method: "POST",
+          headers: { "content-type": "application/json", cookie },
+          body,
+          duplex: "half",
+        } as RequestInit & { duplex: "half" }),
+        env,
+      );
+      assert.equal(response.status, 400, path);
+      assert.deepEqual(await response.json(), { error: "invalid json" });
+    }
+  } finally {
+    sqlite.close();
+  }
+});
+
 test("desktop-only Worker preserves publication ownership, private discovery, and removal", async () => {
   const { sqlite, request, login } = setup();
   try {
