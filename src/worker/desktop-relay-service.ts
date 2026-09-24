@@ -1,7 +1,18 @@
 import type { DesktopRelayRegistrationStore } from "./desktop-host-repository.ts";
-import { desktopHostID, desktopHostOwnershipHeader } from "./desktop-host-service.ts";
+import {
+  desktopHostID,
+  desktopHostOwnershipHeader,
+  isDesktopHostOpaqueID,
+} from "./desktop-host-service.ts";
 import type { RuntimeEnv } from "./env.ts";
-import { badRequest, forbidden, notFound, serviceUnavailable, unauthorized } from "./http.ts";
+import {
+  badRequest,
+  decodePathIdentifier,
+  forbidden,
+  notFound,
+  serviceUnavailable,
+  unauthorized,
+} from "./http.ts";
 import type { User } from "./models.ts";
 import { validateDesktopWebSocketOrigin } from "./desktop-origin.ts";
 import { tenantSubject } from "./tenancy.ts";
@@ -24,7 +35,7 @@ export class DesktopRelayService {
     requireWebSocketUpgrade(request);
     const ownershipToken = request.headers.get(desktopHostOwnershipHeader);
     if (!ownershipToken) throw unauthorized();
-    if (!validOwnershipToken(ownershipToken)) throw forbidden("desktop relay ownership denied");
+    if (!isDesktopHostOpaqueID(ownershipToken)) throw forbidden("desktop relay ownership denied");
     const hostID = desktopHostID(rawHostID);
     const registration = await this.registrations.findTokenRegistration(hostID, ownershipToken);
     if (!registration) throw forbidden("desktop relay ownership denied");
@@ -60,12 +71,7 @@ export class DesktopRelayService {
 export function matchDesktopRelayRoute(url: URL): DesktopRelayRoute | null {
   const match = url.pathname.match(/^\/api\/desktop-hosts\/([^/]+)\/relay\/(host|viewer)$/);
   if (!match) return null;
-  let hostID: string;
-  try {
-    hostID = decodeURIComponent(match[1] ?? "");
-  } catch {
-    throw badRequest("invalid path identifier");
-  }
+  const hostID = decodePathIdentifier(match[1]);
   return { hostID, role: match[2] as DesktopRelayRoute["role"] };
 }
 
@@ -73,15 +79,4 @@ function requireWebSocketUpgrade(request: Request): void {
   if (request.headers.get("upgrade")?.toLowerCase() !== "websocket") {
     throw badRequest("websocket upgrade required");
   }
-}
-
-function validOwnershipToken(value: string): boolean {
-  return (
-    value.length > 0 &&
-    new TextEncoder().encode(value).byteLength <= 200 &&
-    ![...value].some((character) => {
-      const codePoint = character.codePointAt(0) ?? 0;
-      return codePoint <= 0x20 || codePoint === 0x7f;
-    })
-  );
 }

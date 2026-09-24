@@ -229,31 +229,27 @@ function optionalCapability(value: unknown, field: string): boolean {
 
 function desktopHostOwnershipToken(value: unknown): string | null {
   if (value === null || value === undefined) return null;
-  if (
-    typeof value !== "string" ||
-    value.length === 0 ||
-    new TextEncoder().encode(value).byteLength > 200 ||
-    [...value].some((character) => {
-      const codePoint = character.codePointAt(0) ?? 0;
-      return codePoint <= 0x20 || codePoint === 0x7f;
-    })
-  ) {
+  if (!isDesktopHostOpaqueID(value)) {
     throw badRequest("desktop host ownership token is required");
   }
   return value;
 }
 
 function desktopHostPublicationID(value: unknown): string {
-  if (
-    typeof value !== "string" ||
-    value.length === 0 ||
-    new TextEncoder().encode(value).byteLength > 200 ||
-    [...value].some((character) => {
-      const codePoint = character.codePointAt(0) ?? 0;
-      return codePoint <= 0x20 || codePoint === 0x7f;
-    })
-  ) {
+  if (!isDesktopHostOpaqueID(value)) {
     throw badRequest("desktop host publication id is required");
   }
   return value;
+}
+
+export function isDesktopHostOpaqueID(value: unknown): value is string {
+  return (
+    typeof value === "string" &&
+    value.length > 0 &&
+    new TextEncoder().encode(value).byteLength <= 200 &&
+    ![...value].some((character) => {
+      const codePoint = character.codePointAt(0) ?? 0;
+      return codePoint <= 0x20 || codePoint === 0x7f;
+    })
+  );
 }
