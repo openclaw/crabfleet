@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Refresh connector dependencies and require Go 1.26 or later for builds from source.
 - Return HTTP 400 for interrupted native sign-in, connector registration, and allowlist request bodies while retaining HTTP 413 for oversized uploads.
 - Reject non-object JSON request bodies with HTTP 400 before browser login, desktop registration/recovery, and allowlist handlers read fields, preventing `null` payloads from returning HTTP 500.
 - Skip malformed Cookie values and reject malformed `/native/link/:code` path encodings instead of returning HTTP 500, thanks @SebTardif (#144).

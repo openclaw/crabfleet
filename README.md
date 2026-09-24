@@ -39,7 +39,7 @@ CODE_SIGN_IDENTITY="Developer ID Application: OpenClaw Foundation (FWJYW4S8P8)" 
 
 The signing command uses the maintainer's Developer ID; use your own real Developer ID when building locally. Install the resulting `macos/CrabfleetMac/.build/Crabfleet.app` at `/Applications/Crabfleet.app` and reuse that identity and path when rebuilding. Screen Recording allows capture; Accessibility allows remote keyboard and pointer input.
 
-To publish a Linux desktop, run these commands from a checkout inside your graphical session:
+To publish a Linux desktop, use Go 1.26 or later and run these commands from a checkout inside your graphical session:
 
 ```sh
 go build -o ./dist/crabfleet-connect ./cmd/crabfleet-connect
