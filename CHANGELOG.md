@@ -2,29 +2,34 @@
 
 ## Unreleased
 
+## 0.4.0 - 2026-09-24
+
+**Highlights:** Native VNC and private desktop sharing now include a Linux connector, stronger browser session handling, and an experimental Linux/web Jump Desktop client; source builds require Go 1.26 or later.
+
+- Add a Linux desktop connector with X11, Hyprland/wlroots and GNOME/KDE portal capture; scoped Fleet sign-in and reconnecting browser relay; negotiated H.264/HEVC, UTF-8 clipboard, opt-in system audio and confined shared folders; systemd user service/autostart; private persistent state and publication recovery; Linux amd64/arm64 archives and protocol, media and compositor tests. Direct VNC now offers only its implemented password authentication so native viewers no longer select the old ARD stub.
+- Focus Crabfleet on native VNC and private desktop sharing: remove the Codex board, workspace runtimes, terminals, agent CLI/SSH gateway, and related deployment machinery; retain desktop sign-in, discovery, host publication, and the browser VNC relay.
 - Refresh connector dependencies and require Go 1.26 or later for builds from source.
+- Add Linux VAAPI/NVENC video selection with recoverable software fallback, negotiated live desktop sizing with decoder resets and opt-in supported mode changes, simultaneous X11/Wayland/portal monitor sharing, and an administrator-configured SDDM Wayland greeter wrapper with separate authenticated state and bounded helper cleanup.
+- Fence browser media, clipboard, and file operations to their active desktop, release failed or superseded frames, let browser video decoders choose available hardware or software, retain newer folder navigation, and keep quality controls, Disconnect, statistics, and the clipboard usable on narrow screens or when browser storage is blocked; add maintained browser interaction tests.
+- Add an experimental independent Rust/egui client for Jump Desktop on Linux and browser WASM, with account/MFA and host authentication, discovery, desktop video, keyboard/pointer input, audio, explicit clipboard transfer, remote cursors, view-only controls, and bounded reconnect; validate Mac and Windows hosts plus Firefox and Edge, with provider/SSO login and broader host compatibility still pending.
 - Return HTTP 400 for interrupted native sign-in, connector registration, and allowlist request bodies while retaining HTTP 413 for oversized uploads.
 - Reject non-object JSON request bodies with HTTP 400 before browser login, desktop registration/recovery, and allowlist handlers read fields, preventing `null` payloads from returning HTTP 500.
 - Skip malformed Cookie values and reject malformed `/native/link/:code` path encodings instead of returning HTTP 500, thanks @SebTardif (#144).
-- Add an experimental independent Rust/egui client for Jump Desktop on Linux and browser WASM, with account/MFA and host authentication, discovery, desktop video, keyboard/pointer input, audio, explicit clipboard transfer, remote cursors, view-only controls, and bounded reconnect; validate Mac and Windows hosts plus Firefox and Edge, with provider/SSO login and broader host compatibility still pending.
 - Reject checkout paths containing `#` before generating an incomplete browser audio bundle, and bound Cloudflare domain-management requests to 30 seconds.
 - Fix browser asset generation on Windows and in checkout paths containing spaces, thanks @MohammedAlkindi (#130).
 - Update desktop documentation with platform-specific setup, direct-versus-relay connection guidance, Windows connector limits, and the current discovery API; remove workspace-era navigation and installation hints, and emit the docs 404 page at the correct path.
 - Correct wrapped documentation lists and escaped table-of-contents labels, validate local anchors, and remove obsolete site-generation paths while preserving the responsive design.
 - Redesign the public website, documentation, sign-in, and desktop companion with responsive layouts and a shared visual system; put mobile authentication first, retain failed token input, and make connector authorization, completion, and recovery pages work on phone screens.
 - Stop stalled browser sign-in, desktop discovery, and access-management requests after 30 seconds while retaining caller cancellation, thanks @SebTardif (#124).
-- Add Linux VAAPI/NVENC video selection with recoverable software fallback, negotiated live desktop sizing with decoder resets and opt-in supported mode changes, simultaneous X11/Wayland/portal monitor sharing, and an administrator-configured SDDM Wayland greeter wrapper with separate authenticated state and bounded helper cleanup.
 - Consolidate bounded native request parsing and desktop metadata mapping, retain response headers across supported header forms, bound native GitHub membership refresh, and discard empty relay writes without growing pending queues.
-- Focus Crabfleet on native VNC and private desktop sharing: remove the Codex board, workspace runtimes, terminals, agent CLI/SSH gateway, and related deployment machinery; retain desktop sign-in, discovery, host publication, and the browser VNC relay.
-- Fence browser media, clipboard, and file operations to their active desktop, release failed or superseded frames, let browser video decoders choose available hardware or software, retain newer folder navigation, and keep quality controls, Disconnect, statistics, and the clipboard usable on narrow screens or when browser storage is blocked; add maintained browser interaction tests.
 - Keep Linux HEVC video in the browser-compatible Main profile while preserving independently decodable frames, avoiding an unnecessary H.264 fallback; label shared-desktop keyboard and clipboard controls correctly for Linux as well as Mac hosts.
 - Simplify Go desktop session and clipboard ownership, release held input after failed helper writes, reject invalid service addresses before creating state, and stop publication recovery on terminal authorization errors.
 - Run native validation for the current OS with `pnpm test:native`, including Go race tests and vet, plus Swift suites on macOS; make local Linux validation independent of Crabbox authentication or Mac runner access.
 - Remove retired workspace tunnels and grants from the Mac app while retaining saved VNC and registered desktops; simplify media, clipboard, queue, and compression ownership with focused lifecycle regressions.
-- Add a Linux desktop connector with X11, Hyprland/wlroots and GNOME/KDE portal capture; scoped Fleet sign-in and reconnecting browser relay; negotiated H.264/HEVC, UTF-8 clipboard, opt-in system audio and confined shared folders; systemd user service/autostart; private persistent state and publication recovery; Linux amd64/arm64 archives and protocol, media and compositor tests. Direct VNC now offers only its implemented password authentication so native viewers no longer select the old ARD stub.
 - Retry disconnected desktop input cleanup during normal operation, bound retained input sessions, keep shutdown responsive during blocked input, reject interrupted browser file requests, preserve folder sharing across codec fallback, recover synchronous H.264 presentation failures, prevent detached relay peers from closing a replacement pairing, and reject quiet mode on platforms without saved-password retrieval.
 - Bound GitHub OAuth token exchange and membership refresh by one 10-second deadline so stalled GitHub responses stop blocking sign-in, thanks @SebTardif (#127).
 - Stop cancelled Share This Mac cursor reconciliation and release video mailbox waits and their timeout tasks promptly, including cancellation before waiter registration, thanks @SebTardif (#114).
+- Publish release notes directly from the matching changelog section and refuse missing or empty notes.
 
 ## 0.3.1 - 2026-08-28
 
