@@ -60,5 +60,5 @@ jobs:
       - name: Build native viewer and standalone web app
         run: |
           cargo build --locked --manifest-path client/Cargo.toml -p crabfleet-viewer
-          cargo install wasm-bindgen-cli --version 0.2.128 --locked --root client/tools
+          cargo install wasm-bindgen-cli --version 0.2.129 --locked --root client/tools
           bash client/scripts/build-web.sh

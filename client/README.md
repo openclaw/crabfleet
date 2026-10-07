@@ -53,7 +53,7 @@ Install the WASM target and matching local binding generator once:
 
 ```bash
 rustup target add wasm32-unknown-unknown
-cargo install wasm-bindgen-cli --version 0.2.128 --locked --root client/tools
+cargo install wasm-bindgen-cli --version 0.2.129 --locked --root client/tools
 ```
 
 Build and serve the standalone web app:

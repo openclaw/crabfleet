@@ -9,7 +9,7 @@ publish.workspace = true
 [dependencies]
 crabfleet-cloud = { path = "../cloud" }
 axum = { version = "0.8.9", default-features = false, features = ["http1", "tokio", "ws"] }
-tokio = { version = "1.53.1", features = [
+tokio = { version = "1.53.2", features = [
   "rt-multi-thread",
   "macros",
   "net",
