@@ -1,3 +1,4 @@
+import Darwin
 import Foundation
 
 struct AuthenticatedRelayRFBBypass: Sendable {
@@ -13,6 +14,55 @@ protocol RelayWebSocketTasking: AnyObject, Sendable {
 
 extension URLSessionWebSocketTask: RelayWebSocketTasking {}
 
+/// Viewer bytes waiting to be read. Consumed prefixes are copied out and
+/// dropped so a long-lived relay session does not keep every byte it has
+/// already delivered.
+struct RelayIncomingBuffer {
+  private var storage = Data()
+  private var start = 0
+  private let compactMinimumBytes = 64 * 1_024
+
+  var count: Int { storage.count - start }
+
+  var retainedStartIndex: Int { start }
+
+  var retainedAllocationBytes: Int {
+    storage.withUnsafeBytes { raw in
+      guard let base = raw.baseAddress else { return 0 }
+      return malloc_size(base)
+    }
+  }
+
+  mutating func append(_ data: Data) {
+    if shouldCompact { compact() }
+    storage.append(data)
+  }
+
+  mutating func consume(_ count: Int) -> Data {
+    precondition(count >= 0 && count <= self.count)
+    let lower = storage.startIndex + start
+    let result = Data(storage[lower..<(lower + count)])
+    start += count
+    if start == storage.count {
+      storage = Data()
+      start = 0
+    } else if shouldCompact {
+      compact()
+    }
+    return result
+  }
+
+  private var shouldCompact: Bool {
+    start >= compactMinimumBytes && start * 2 >= storage.count
+  }
+
+  private mutating func compact() {
+    guard start > 0 else { return }
+    storage = Data(storage.dropFirst(start))
+    start = 0
+  }
+}
+
 final class RelayWebSocketByteStream: RFBByteStream, @unchecked Sendable {
   nonisolated static let sendChunkBytes = 256 * 1_024
   nonisolated static let maximumMessageBytes = 512 * 1_024
@@ -20,7 +70,7 @@ final class RelayWebSocketByteStream: RFBByteStream, @unchecked Sendable {
   private let task: any RelayWebSocketTasking
   private let sendQueue: RFBSendQueue
   private let lock = NSLock()
-  private var buffered = Data()
+  private var buffered = RelayIncomingBuffer()
 
   init(task: any RelayWebSocketTasking) {
     self.task = task
@@ -81,11 +131,7 @@ final class RelayWebSocketByteStream: RFBByteStream, @unchecked Sendable {
   }
 
   private func consume(_ count: Int) -> Data {
-    withLock {
-      let result = buffered.prefix(count)
-      buffered.removeFirst(count)
-      return Data(result)
-    }
+    withLock { buffered.consume(count) }
   }
 
   private func withLock<T>(_ body: () -> T) -> T {

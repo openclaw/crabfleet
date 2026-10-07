@@ -2459,24 +2459,26 @@ struct PrivateMacShareTests {
     let finishAttempted = DispatchSemaphore(value: 0)
     let finishCompleted = DispatchSemaphore(value: 0)
 
-    DispatchQueue.global().async {
+    // Dedicated threads keep blocked producers from starving the finish operation.
+    Thread.detachNewThread {
       gate.keyEvent(down: true, keysym: 0x61)
       producerFinished.signal()
     }
+    defer { input.allowKeyReturn() }
     #expect(input.waitForKeyEntry())
 
-    DispatchQueue.global().async {
+    Thread.detachNewThread {
       finishAttempted.signal()
       gate.finish()
       finishCompleted.signal()
     }
-    #expect(finishAttempted.wait(timeout: .now() + 1) == .success)
+    #expect(finishAttempted.wait(timeout: .now() + 5) == .success)
     #expect(input.events == [.key(down: true, keysym: 0x61)])
     #expect(finishCompleted.wait(timeout: .now() + 0.01) == .timedOut)
 
     input.allowKeyReturn()
-    #expect(producerFinished.wait(timeout: .now() + 1) == .success)
-    #expect(finishCompleted.wait(timeout: .now() + 1) == .success)
+    #expect(producerFinished.wait(timeout: .now() + 5) == .success)
+    #expect(finishCompleted.wait(timeout: .now() + 5) == .success)
     #expect(input.events == [.key(down: true, keysym: 0x61), .release])
 
     gate.keyEvent(down: false, keysym: 0x61)

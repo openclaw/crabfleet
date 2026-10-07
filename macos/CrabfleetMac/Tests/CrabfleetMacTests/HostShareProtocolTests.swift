@@ -636,6 +636,32 @@ struct RFBHostSessionStreamTests {
   }
 
   @Test
+  func tightFallbackResizesThroughTheSharedGate() async throws {
+    let allowed = TightResizeRecorder(allowResize: true)
+    try await runTightFallback(recorder: allowed)
+    let target = MacScreenCapture.resizedDimensions(
+      requestedWidth: 3_840,
+      requestedHeight: 2_160,
+      sourcePixelWidth: 3_840,
+      sourcePixelHeight: 2_160)
+    #expect(
+      allowed.events
+        == [
+          "begin",
+          "update:\(target.width)x\(target.height)",
+          "finish:\(target.width)x\(target.height)",
+        ])
+
+    let blocked = TightResizeRecorder(allowResize: false)
+    try await runTightFallback(recorder: blocked)
+    #expect(blocked.events == ["begin"])
+
+    let failed = TightResizeRecorder(allowResize: true, failUpdate: true)
+    try await runTightFallback(recorder: failed)
+    #expect(failed.events == ["begin", "update:\(target.width)x\(target.height)", "finish:nilxnil"])
+  }
+
+  @Test
   func handshakeUsesLatestSharedDimensions() async throws {
     var clientHandshake = RFBVersion.serverBanner
     clientHandshake.append(1)  // None security
@@ -1047,6 +1073,79 @@ struct RFBHostSessionStreamTests {
     }
     #expect(finished.value)
   }
+  @Test
+  func stalledViewerClipboardPushesUseTheDeadlineCap() async throws {
+    var incoming = RFBVersion.serverBanner
+    incoming.append(contentsOf: [1, 1])
+    let stall = ClipboardSendStall()
+    let stream = DeadlineQueuedRFBByteStream(incoming: incoming, stall: stall)
+    let clipboard = ScriptedHostClipboard()
+    let finished = ThreadSafeFlag()
+    let descriptor = CapturedDisplayDescriptor(
+      displayID: 1,
+      displayBounds: CGRect(x: 0, y: 0, width: 64, height: 64),
+      frameWidth: 64,
+      frameHeight: 64,
+      sourcePixelWidth: 64,
+      sourcePixelHeight: 64)
+    let session = RFBHostSession(
+      byteStream: stream,
+      capture: MacScreenCapture(),
+      descriptor: descriptor,
+      input: HandshakeRemoteInput(),
+      clipboard: clipboard,
+      remoteAddressOverride: "Crabfleet browser",
+      skipTailnetCheck: true,
+      security: .listener(TestLegacyNoneAuthentication()),
+      desktopName: "Crabfleet clipboard deadline test",
+      handshakeTimeout: .seconds(1),
+      viewOnly: false,
+      audioEnabled: false,
+      qualityMode: .auto,
+      didAuthorize: {},
+      eventHandler: { _ in },
+      didFinish: { _ in finished.set() })
+
+    session.start()
+    defer {
+      stall.release()
+      session.stop()
+    }
+    let clock = ContinuousClock()
+    let attachedDeadline = clock.now.advanced(by: .seconds(2))
+    while !clipboard.isAttached, clock.now < attachedDeadline {
+      try await Task.sleep(for: .milliseconds(10))
+    }
+    #expect(clipboard.isAttached)
+
+    for index in 0..<12 {
+      clipboard.push("clip-\(index)")
+    }
+    let deadline = clock.now.advanced(by: .seconds(5))
+    while stream.completedClipboardSends < 12, clock.now < deadline {
+      try await Task.sleep(for: .milliseconds(10))
+    }
+    #expect(stream.completedClipboardSends == 12)
+    #expect(stall.enteredCount == 1)
+    #expect(await stream.pendingDeadlineSendCount == 2)
+    #expect(!finished.value)
+
+    stall.release()
+    let drainDeadline = clock.now.advanced(by: .seconds(5))
+    while await stream.pendingDeadlineSendCount != 0, clock.now < drainDeadline {
+      try await Task.sleep(for: .milliseconds(10))
+    }
+    #expect(await stream.pendingDeadlineSendCount == 0)
+    clipboard.push("RECOVERED")
+    let recoveryDeadline = clock.now.advanced(by: .seconds(5))
+    while stream.completedClipboardSends < 13, clock.now < recoveryDeadline {
+      try await Task.sleep(for: .milliseconds(10))
+    }
+    #expect(stream.completedClipboardSends == 13)
+    #expect(stall.enteredCount == 2)
+    #expect(!finished.value)
+  }
+
 }
 
 @MainActor
@@ -1548,6 +1647,87 @@ private struct HandshakeRemoteInput: RemoteInputForwarding {
   func pointerEvent(buttonMask: UInt8, x: UInt16, y: UInt16) {}
 }
 
+private final class TightResizeRecorder: @unchecked Sendable {
+  let allowResize: Bool
+  private let lock = NSLock()
+  private var storage: [String] = []
+
+  let failUpdate: Bool
+
+  init(allowResize: Bool, failUpdate: Bool = false) {
+    self.allowResize = allowResize
+    self.failUpdate = failUpdate
+  }
+
+  var events: [String] {
+    lock.lock()
+    defer { lock.unlock() }
+    return storage
+  }
+
+  func begin() -> Bool {
+    lock.lock()
+    storage.append("begin")
+    lock.unlock()
+    return allowResize
+  }
+
+  func finish(width: Int?, height: Int?) {
+    lock.lock()
+    storage.append("finish:\(width.map(String.init) ?? "nil")x\(height.map(String.init) ?? "nil")")
+    lock.unlock()
+  }
+
+  func update(width: Int, height: Int) {
+    lock.lock()
+    storage.append("update:\(width)x\(height)")
+    lock.unlock()
+  }
+}
+
+private func runTightFallback(recorder: TightResizeRecorder) async throws {
+  let descriptor = CapturedDisplayDescriptor(
+    displayID: 1,
+    displayBounds: CGRect(x: 0, y: 0, width: 3_840, height: 2_160),
+    frameWidth: 3_840,
+    frameHeight: 2_160,
+    sourcePixelWidth: 3_840,
+    sourcePixelHeight: 2_160)
+  var incoming = RFBVersion.serverBanner
+  incoming.append(contentsOf: [1, 1])
+  incoming.append(clientSetEncodings([RFBWire.tightEncoding]))
+  let finished = ThreadSafeFlag()
+  let session = RFBHostSession(
+    byteStream: InMemoryRFBByteStream(incoming: incoming),
+    capture: MacScreenCapture(),
+    descriptor: descriptor,
+    input: HandshakeRemoteInput(),
+    clipboard: nil,
+    remoteAddressOverride: "Crabfleet browser",
+    skipTailnetCheck: true,
+    security: .listener(TestLegacyNoneAuthentication()),
+    desktopName: "Crabfleet tight resize test",
+    handshakeTimeout: .seconds(1),
+    viewOnly: false,
+    audioEnabled: false,
+    qualityMode: .auto,
+    captureOutputSizeUpdater: { width, height in
+      recorder.update(width: width, height: height)
+      if recorder.failUpdate { throw PrivateMacShareError.protocolError("synthetic resize failure") }
+    },
+    beginResize: { recorder.begin() },
+    finishResize: { width, height in
+      recorder.finish(width: width, height: height)
+    },
+    didAuthorize: {},
+    eventHandler: { _ in },
+    didFinish: { _ in finished.set() })
+
+  session.start()
+  defer { session.stop() }
+  try await waitForFinish(finished)
+}
+
 private struct SlicedRFBByteStream: RFBByteStream {
   func readExactly(_ count: Int) async throws -> Data {
     let data = Data([0, 42])
@@ -1590,6 +1770,139 @@ private final class ThreadSafeSnapshotBox: @unchecked Sendable {
     lock.lock()
     storage = value
     lock.unlock()
+  }
+}
+
+private final class ScriptedHostClipboard: HostClipboardSyncing, @unchecked Sendable {
+  private let lock = NSLock()
+  private var pusher: (@Sendable (String) -> Void)?
+
+  var isAttached: Bool {
+    lock.lock()
+    defer { lock.unlock() }
+    return pusher != nil
+  }
+
+  func attach(id: UUID, pusher: @escaping @Sendable (String) -> Void) {
+    lock.lock()
+    self.pusher = pusher
+    lock.unlock()
+  }
+
+  func detach(id: UUID) {}
+  func detachAll() {}
+  func receiveClientText(id: UUID, text: String) {}
+  func currentText() -> String? { nil }
+
+  func push(_ text: String) {
+    lock.lock()
+    let pusher = self.pusher
+    lock.unlock()
+    pusher?(text)
+  }
+}
+
+private final class ClipboardSendStall: @unchecked Sendable {
+  private let lock = NSLock()
+  private var waiters: [CheckedContinuation<Void, Never>] = []
+  private var entered = 0
+  private var released = false
+
+  var enteredCount: Int {
+    lock.lock()
+    defer { lock.unlock() }
+    return entered
+  }
+
+  func enter() {
+    lock.lock()
+    entered += 1
+    lock.unlock()
+  }
+
+  func block() async {
+    await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+      lock.lock()
+      if released {
+        lock.unlock()
+        continuation.resume()
+      } else {
+        waiters.append(continuation)
+        lock.unlock()
+      }
+    }
+  }
+
+  func release() {
+    lock.lock()
+    released = true
+    let pending = waiters
+    waiters = []
+    lock.unlock()
+    for continuation in pending {
+      continuation.resume()
+    }
+  }
+}
+
+private final class DeadlineQueuedRFBByteStream: RFBByteStream, @unchecked Sendable {
+  private let queue: RFBSendQueue
+  private let stall: ClipboardSendStall
+  private let lock = NSLock()
+  private var incoming: Data
+  private var completed = 0
+
+  init(incoming: Data, stall: ClipboardSendStall) {
+    self.incoming = incoming
+    self.stall = stall
+    let stall = stall
+    queue = RFBSendQueue { data in
+      guard data.first == 3 else { return }
+      stall.enter()
+      await stall.block()
+    }
+  }
+
+  var completedClipboardSends: Int {
+    lock.lock()
+    defer { lock.unlock() }
+    return completed
+  }
+
+  private func finishedSending(_ data: Data) {
+    guard data.first == 3 else { return }
+    lock.lock()
+    completed += 1
+    lock.unlock()
+  }
+
+  var pendingDeadlineSendCount: Int {
+    get async { await queue.pendingDeadlineSendCount }
+  }
+
+  func readExactly(_ count: Int) async throws -> Data {
+    while true {
+      let chunk: Data? = {
+        lock.lock()
+        defer { lock.unlock() }
+        guard incoming.count >= count else { return nil }
+        let result = incoming.prefix(count)
+        incoming.removeFirst(count)
+        return Data(result)
+      }()
+      if let chunk { return chunk }
+      try await Task.sleep(for: .milliseconds(5))
+    }
+  }
+
+  func send(_ data: Data) async throws {
+    defer { finishedSending(data) }
+    try await queue.send(data, deadline: nil)
+  }
+
+  func send(_ data: Data, deadline: ContinuousClock.Instant?) async throws {
+    defer { finishedSending(data) }
+    try await queue.send(data, deadline: deadline)
   }
 }
 

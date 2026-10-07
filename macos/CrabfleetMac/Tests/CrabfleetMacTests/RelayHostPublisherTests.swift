@@ -5,6 +5,39 @@ import Testing
 
 struct RelayHostPublisherTests {
   @Test
+  func largeConsumeDropsRetainedStorage() {
+    var buffer = RelayIncomingBuffer()
+    let size = 2_000_000
+    buffer.append(Data(count: size))
+    #expect(buffer.retainedStartIndex == 0)
+    #expect(buffer.retainedAllocationBytes >= size)
+
+    let consumed = buffer.consume(1_500_000)
+    #expect(consumed.count == 1_500_000)
+    #expect(buffer.count == 500_000)
+    #expect(buffer.retainedStartIndex == 0)
+    #expect(buffer.retainedAllocationBytes > 0)
+    #expect(buffer.retainedAllocationBytes < 1_000_000)
+
+    _ = buffer.consume(buffer.count)
+    #expect(buffer.count == 0)
+    #expect(buffer.retainedStartIndex == 0)
+    #expect(buffer.retainedAllocationBytes == 0)
+  }
+
+  @Test
+  func smallConsumeKeepsTheUnreadSuffixInPlace() {
+    var buffer = RelayIncomingBuffer()
+    buffer.append(Data(repeating: 7, count: 200_000))
+    let allocation = buffer.retainedAllocationBytes
+    let first = buffer.consume(16)
+    #expect(first == Data(repeating: 7, count: 16))
+    #expect(buffer.count == 199_984)
+    #expect(buffer.retainedStartIndex == 16)
+    #expect(buffer.retainedAllocationBytes == allocation)
+  }
+
+  @Test
   func websocketByteStreamReassemblesReadsAndChunksWrites() async throws {
     let task = RecordingRelayWebSocketTask(incoming: [
       .data(Data([1, 2])),
@@ -137,6 +170,23 @@ struct RelayHostPublisherTests {
     #expect(controller.browserAccessEnabled)
     controller.browserAccessEnabled = false
     #expect(defaults.object(forKey: PrivateMacShareController.browserAccessDefaultsKey) as? Bool == false)
+  }
+
+  @Test
+  func relayReassemblesManySmallReadsAcrossCompaction() async throws {
+    let payload = Data((0..<400_000).map { UInt8($0 % 251) })
+    let task = RecordingRelayWebSocketTask(incoming: [
+      .data(Data(payload.prefix(200_000))),
+      .data(Data(payload.dropFirst(200_000))),
+      .data(Data([42])),
+    ])
+    let stream = RelayWebSocketByteStream(task: task)
+    var reassembled = Data()
+    for _ in 0..<25_000 {
+      reassembled.append(try await stream.readExactly(16))
+    }
+    #expect(reassembled == payload)
+    #expect(try await stream.readExactly(1) == Data([42]))
   }
 }
 
