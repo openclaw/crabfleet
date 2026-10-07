@@ -2,9 +2,9 @@
 set -euo pipefail
 client_root="$(cd "$(dirname "$0")/.." && pwd)"
 runner="$client_root/tools/bin/wasm-bindgen-test-runner"
-if [[ ! -x "$runner" ]] || [[ "$("$runner" --version)" != "wasm-bindgen-test-runner 0.2.128" ]]; then
+if [[ ! -x "$runner" ]] || [[ "$("$runner" --version)" != "wasm-bindgen-test-runner 0.2.129" ]]; then
   echo "Install the matching local test tool:" >&2
-  echo "cargo install wasm-bindgen-cli --version 0.2.128 --locked --root '$client_root/tools'" >&2
+  echo "cargo install wasm-bindgen-cli --version 0.2.129 --locked --root '$client_root/tools'" >&2
   exit 1
 fi
 echo "Open http://127.0.0.1:8094 in a test browser and click the silent-audio button."

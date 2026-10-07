@@ -2,9 +2,9 @@
 set -euo pipefail
 client_root="$(cd "$(dirname "$0")/.." && pwd)"
 bindgen="$client_root/tools/bin/wasm-bindgen"
-if [[ ! -x "$bindgen" ]] || [[ "$("$bindgen" --version)" != "wasm-bindgen 0.2.128" ]]; then
+if [[ ! -x "$bindgen" ]] || [[ "$("$bindgen" --version)" != "wasm-bindgen 0.2.129" ]]; then
   echo "Install the matching local build tool:" >&2
-  echo "cargo install wasm-bindgen-cli --version 0.2.128 --locked --root '$client_root/tools'" >&2
+  echo "cargo install wasm-bindgen-cli --version 0.2.129 --locked --root '$client_root/tools'" >&2
   exit 1
 fi
 cargo build --locked --release --target wasm32-unknown-unknown --manifest-path "$client_root/Cargo.toml" -p crabfleet-viewer --lib

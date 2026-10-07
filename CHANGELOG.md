@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Refresh Worker types and build tools, Rust client WebAssembly bindings and Tokio, and CodeQL while retaining the runtime floors and 48-hour dependency cooldown.
 - Keep Tight fallback from resizing a shared Mac capture without exclusive resize ownership, and release the gate after failed updates, thanks @SebTardif (#152).
 - Release consumed Mac relay bytes without copying the unread tail on every small read, thanks @SebTardif (#151).
 - Bound Mac host clipboard pushes behind stalled viewers and allow fresh updates after recovery, thanks @SebTardif (#153).
