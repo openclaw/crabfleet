@@ -258,7 +258,9 @@ Initial capture is capped at 2560×1600, and either video codec may resize up to
 4096×2304 within the selected display's native pixel size. HEVC setup or encode
 failure retries H.264 before the session falls back to the 15 fps Tight/JPEG
 path; third-party clients never offer the private HEVC number, and the Open
-H.264 wire format remains unchanged.
+H.264 wire format remains unchanged. Tight fallback reduces the shared capture
+to 2560×1600 only when its session holds the exclusive resize gate. While
+another viewer is connected or connecting, it keeps the current shared size.
 
 ScreenCaptureKit dirty rectangles keep ordinary unchanged frames out of the
 latest-wins pixel mailbox. Before sending a 4:4:4 keyframe, the host parses its
@@ -517,8 +519,8 @@ no longer bundles or builds the modified D3DES source.
 - App-owned hosting shares up to four displays through separate Fleet rows and
   listeners, with up to four viewers per display. HEVC and Open H.264 capture at
   60 fps at an initial 2560×1600 cap and resize up to 4096×2304 when only one
-  viewer is connected; Tight/JPEG fallback remains capped at 15 fps and
-  2560×1600.
+  viewer is connected; Tight/JPEG fallback runs at 15 fps and reduces capture
+  to 2560×1600 only when no other viewer is connected or connecting.
 - Audio is host-to-viewer system audio only. Microphone, reverse audio,
   per-application capture, browser playback, and non-AAC codecs are unsupported.
 - A connecting peer must be another device owned by the same Tailscale user.

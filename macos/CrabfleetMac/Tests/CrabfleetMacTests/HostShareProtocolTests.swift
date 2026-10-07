@@ -636,6 +636,32 @@ struct RFBHostSessionStreamTests {
   }
 
   @Test
+  func tightFallbackResizesThroughTheSharedGate() async throws {
+    let allowed = TightResizeRecorder(allowResize: true)
+    try await runTightFallback(recorder: allowed)
+    let target = MacScreenCapture.resizedDimensions(
+      requestedWidth: 3_840,
+      requestedHeight: 2_160,
+      sourcePixelWidth: 3_840,
+      sourcePixelHeight: 2_160)
+    #expect(
+      allowed.events
+        == [
+          "begin",
+          "update:\(target.width)x\(target.height)",
+          "finish:\(target.width)x\(target.height)",
+        ])
+
+    let blocked = TightResizeRecorder(allowResize: false)
+    try await runTightFallback(recorder: blocked)
+    #expect(blocked.events == ["begin"])
+
+    let failed = TightResizeRecorder(allowResize: true, failUpdate: true)
+    try await runTightFallback(recorder: failed)
+    #expect(failed.events == ["begin", "update:\(target.width)x\(target.height)", "finish:nilxnil"])
+  }
+
+  @Test
   func handshakeUsesLatestSharedDimensions() async throws {
     var clientHandshake = RFBVersion.serverBanner
     clientHandshake.append(1)  // None security
@@ -1546,6 +1572,87 @@ private final class RecordingHostRelayWebSocketTask: RelayWebSocketTasking, @unc
 private struct HandshakeRemoteInput: RemoteInputForwarding {
   func keyEvent(down: Bool, keysym: UInt32) {}
   func pointerEvent(buttonMask: UInt8, x: UInt16, y: UInt16) {}
+}
+
+private final class TightResizeRecorder: @unchecked Sendable {
+  let allowResize: Bool
+  private let lock = NSLock()
+  private var storage: [String] = []
+
+  let failUpdate: Bool
+
+  init(allowResize: Bool, failUpdate: Bool = false) {
+    self.allowResize = allowResize
+    self.failUpdate = failUpdate
+  }
+
+  var events: [String] {
+    lock.lock()
+    defer { lock.unlock() }
+    return storage
+  }
+
+  func begin() -> Bool {
+    lock.lock()
+    storage.append("begin")
+    lock.unlock()
+    return allowResize
+  }
+
+  func finish(width: Int?, height: Int?) {
+    lock.lock()
+    storage.append("finish:\(width.map(String.init) ?? "nil")x\(height.map(String.init) ?? "nil")")
+    lock.unlock()
+  }
+
+  func update(width: Int, height: Int) {
+    lock.lock()
+    storage.append("update:\(width)x\(height)")
+    lock.unlock()
+  }
+}
+
+private func runTightFallback(recorder: TightResizeRecorder) async throws {
+  let descriptor = CapturedDisplayDescriptor(
+    displayID: 1,
+    displayBounds: CGRect(x: 0, y: 0, width: 3_840, height: 2_160),
+    frameWidth: 3_840,
+    frameHeight: 2_160,
+    sourcePixelWidth: 3_840,
+    sourcePixelHeight: 2_160)
+  var incoming = RFBVersion.serverBanner
+  incoming.append(contentsOf: [1, 1])
+  incoming.append(clientSetEncodings([RFBWire.tightEncoding]))
+  let finished = ThreadSafeFlag()
+  let session = RFBHostSession(
+    byteStream: InMemoryRFBByteStream(incoming: incoming),
+    capture: MacScreenCapture(),
+    descriptor: descriptor,
+    input: HandshakeRemoteInput(),
+    clipboard: nil,
+    remoteAddressOverride: "Crabfleet browser",
+    skipTailnetCheck: true,
+    security: .listener(TestLegacyNoneAuthentication()),
+    desktopName: "Crabfleet tight resize test",
+    handshakeTimeout: .seconds(1),
+    viewOnly: false,
+    audioEnabled: false,
+    qualityMode: .auto,
+    captureOutputSizeUpdater: { width, height in
+      recorder.update(width: width, height: height)
+      if recorder.failUpdate { throw PrivateMacShareError.protocolError("synthetic resize failure") }
+    },
+    beginResize: { recorder.begin() },
+    finishResize: { width, height in
+      recorder.finish(width: width, height: height)
+    },
+    didAuthorize: {},
+    eventHandler: { _ in },
+    didFinish: { _ in finished.set() })
+
+  session.start()
+  defer { session.stop() }
+  try await waitForFinish(finished)
 }
 
 private struct SlicedRFBByteStream: RFBByteStream {

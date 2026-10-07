@@ -2231,7 +2231,15 @@ final class RFBHostSession: @unchecked Sendable {
       sourcePixelWidth: descriptor.sourcePixelWidth,
       sourcePixelHeight: descriptor.sourcePixelHeight)
     guard target.width != currentWidth || target.height != currentHeight else { return }
+    // The capture is shared. A Tight-only viewer must not shrink it while
+    // another session still depends on the current size.
+    guard beginResize() else { return }
+    var committedWidth: Int?
+    var committedHeight: Int?
+    defer { finishResize(committedWidth, committedHeight) }
     try await captureOutputSizeUpdater(target.width, target.height)
+    committedWidth = target.width
+    committedHeight = target.height
     currentWidth = target.width
     currentHeight = target.height
     input.updateFrameSize(width: currentWidth, height: currentHeight)
