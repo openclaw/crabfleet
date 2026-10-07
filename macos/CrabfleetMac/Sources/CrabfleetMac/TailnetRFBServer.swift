@@ -1691,7 +1691,8 @@ final class RFBHostSession: @unchecked Sendable {
     )
     guard let payload else { return }
     Task {
-      try? await io.send(payload)
+      // Deadline sends share the bounded media queue when a viewer stops reading.
+      try? await io.send(payload, timeout: .milliseconds(100))
     }
   }
 

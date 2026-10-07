@@ -213,6 +213,8 @@ an owner-scoped Crabfleet Worker relay for first-party browser access.
    wins. Text copied on either Mac lands on the other through Extended Clipboard
    UTF-8 when the viewer negotiates it, with ISO-8859-1 cut text as the fallback;
    text that cannot be represented is dropped rather than mangled.
+   Host clipboard pushes use a bounded send queue, so a viewer that stops reading
+   may miss updates. Copy again after the viewer resumes to send a fresh update.
 9. System audio streaming is on by default and can be toggled while sharing.
    Audio attaches only to primary-display sessions and capture starts when the
    first enabled viewer negotiates the Crabfleet audio extension, then stops

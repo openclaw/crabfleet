@@ -4,6 +4,7 @@
 
 - Keep Tight fallback from resizing a shared Mac capture without exclusive resize ownership, and release the gate after failed updates, thanks @SebTardif (#152).
 - Release consumed Mac relay bytes without copying the unread tail on every small read, thanks @SebTardif (#151).
+- Bound Mac host clipboard pushes behind stalled viewers and allow fresh updates after recovery, thanks @SebTardif (#153).
 
 ## 0.4.0 - 2026-09-24
 
