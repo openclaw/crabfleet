@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Run native macOS CI on Xcode 27 while retaining the existing app deployment floors and the supported Swift CodeQL runner; support read-only release snapshot checks.
+- Build with Go 1.27.2 to fix reachable standard-library vulnerabilities while retaining the Go 1.26 source minimum.
 - Refresh Worker types and build tools, Rust client WebAssembly bindings and Tokio, and CodeQL while retaining the runtime floors and 48-hour dependency cooldown.
 - Keep Tight fallback from resizing a shared Mac capture without exclusive resize ownership, and release the gate after failed updates, thanks @SebTardif (#152).
 - Release consumed Mac relay bytes without copying the unread tail on every small read, thanks @SebTardif (#151).
