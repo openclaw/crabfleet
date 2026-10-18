@@ -6,6 +6,10 @@ version comes from the tag through the build linker flags; the private Node
 package and experimental Rust workspace do not use that version. Native Mac
 and Windows binaries are not packaged by this workflow.
 
+To verify the current main source without publishing, dispatch `release.yml`
+on main with the current release `tag` and `dry_run: true`. The read-only job
+builds a GoReleaser snapshot; it does not check out the old tag or publish assets.
+
 1. Run the gates in `AGENTS.md` and review the changes. Use a patch version for
    fixes, or a minor version for features and compatibility requirement changes.
 2. Finalize the changelog as `## X.Y.Z - YYYY-MM-DD` with a highlights lead-in,

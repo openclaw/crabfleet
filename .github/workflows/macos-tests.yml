@@ -25,7 +25,7 @@ concurrency:
 jobs:
   swift:
     name: Native macOS tests
-    runs-on: macos-26
+    runs-on: xcode-27
     timeout-minutes: 20
     steps:
       - name: Check out
