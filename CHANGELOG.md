@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Update Rust client WebPKI and public root certificates to reject disclosed eMudhra incident keys in standard Rustls connections.
+
 ## 0.4.1 - 2026-10-20
 
 **Highlights:** Rebuild with the patched Go toolchain and verify native macOS behavior on Xcode 27.
