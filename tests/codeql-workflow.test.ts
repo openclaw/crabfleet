@@ -33,7 +33,7 @@ test("CodeQL uses pinned actions and least-privilege checkout", () => {
   );
   assert.match(
     workflow,
-    /actions\/setup-go@[0-9a-f]{40}[^\n]*\n\s+with:\s+go-version-file: go\.mod\s+cache-dependency-path: go\.sum/,
+    /actions\/setup-go@[0-9a-f]{40}[^\n]*\n\s+with:\s+go-version: "1\.27\.3"\s+go-version-file: go\.mod\s+cache-dependency-path: go\.sum/,
   );
   assert.doesNotMatch(workflow, /uses:\s+[^@\s]+@(?![0-9a-f]{40}(?:\s|$))/);
 });
