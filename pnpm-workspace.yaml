@@ -10,3 +10,5 @@ allowBuilds:
   esbuild: false
   sharp: false
   workerd: true
+overrides:
+  workerd: 1.20261021.1
