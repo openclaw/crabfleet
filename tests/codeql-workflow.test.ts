@@ -38,10 +38,19 @@ test("CodeQL uses pinned actions and least-privilege checkout", () => {
   assert.doesNotMatch(workflow, /uses:\s+[^@\s]+@(?![0-9a-f]{40}(?:\s|$))/);
 });
 
-test("CodeQL analyzes pull requests, main, schedules, and manual runs", () => {
+test("CodeQL analyzes pull requests, weekly main, and manual runs", () => {
   assert.match(workflow, /^on:$/m);
   assert.match(workflow, /pull_request:\s+branches:\s+- main/);
-  assert.match(workflow, /push:\s+branches:\s+- main/);
-  assert.match(workflow, /schedule:\s+- cron:/);
+  assert.doesNotMatch(workflow, /^  push:/m);
+  assert.match(workflow, /schedule:\s+- cron: "49 4 \* \* 1"/);
   assert.match(workflow, /workflow_dispatch:/);
+  assert.match(
+    workflow,
+    /group: codeql-\$\{\{ github\.workflow \}\}-\$\{\{ github\.event_name \}\}/,
+  );
+  assert.match(
+    workflow,
+    /github\.event_name == 'workflow_dispatch' && github\.run_id \|\| github\.event\.pull_request\.number \|\| github\.ref/,
+  );
+  assert.match(workflow, /cancel-in-progress: \$\{\{ github\.event_name == 'pull_request' \}\}/);
 });
