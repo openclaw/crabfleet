@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Run main CodeQL analysis on the existing weekly schedule instead of every push, preserving PR scans and independent manual runs.
+
 - Update Rust client WebPKI and public root certificates to reject disclosed eMudhra incident keys in standard Rustls connections.
 
 ## 0.4.1 - 2026-10-20
