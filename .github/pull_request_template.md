@@ -1,4 +1,13 @@
 <!--
+Write the title and opening problem statement for people connecting to a remote desktop.
+Name the affected task and the symptom or outcome, not only the implementation.
+Good: fix: explain why a remote desktop connection did not start
+Bad: fix: update the relay error mapping
+For internal-only work, name the actual developer or operator workflow affected;
+do not invent an end-user benefit.
+-->
+
+<!--
 Optional linked context:
 Add a visible `Closes #<issue-number>` or `Related: #<issue-number>` line
 below this comment.
@@ -21,8 +30,18 @@ can help update the branch when needed.
 ## What Problem This Solves
 
 <!--
+In 1-3 plain-language sentences, explain the affected task, what fails or is
+missing, and why it matters. Include the trigger when known. Do not invent a bug
+for other changes. These examples illustrate wording, not an observed defect:
+Good: "People connecting to a remote desktop cannot tell why the connection did not
+start, so they do not know which recovery action to take."
+Bad: "Updates an internal handler and adds a missing check."
+-->
+
+<!--
 Describe the concrete user, product, or operational problem.
-Use one short, plain-language sentence. For fixes, prefer:
+Explain the affected task, what fails or is missing, and why it matters in
+1-3 plain-language sentences. For fixes, prefer:
 "Fixes: <what goes wrong> when <trigger or condition>."
 For other changes, describe the need without inventing a bug.
 Name the affected workflow, not the code-level cause.
@@ -47,6 +66,13 @@ behavior or a material tradeoff. Do not hide risks or required actions in <detai
 -->
 
 ## Evidence
+
+<!--
+Lead with the behavior checked and the observed result in plain language, then
+include exact commands and supporting evidence. Put long logs and commit hashes
+in links or optional <details>. Keep meaningful gaps, risks, and required
+actions visible; do not make readers decode commands to learn what was verified.
+-->
 
 <!--
 Show the most useful proof that this change works. Screenshots, screencasts,
