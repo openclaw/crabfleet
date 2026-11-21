@@ -40,11 +40,14 @@ Bad: "Updates an internal handler and adds a missing check."
 
 <!--
 Describe the concrete user, product, or operational problem.
-Explain the affected task, what fails or is missing, and why it matters in
-1-3 plain-language sentences. For fixes, prefer:
-"Fixes: <what goes wrong> when <trigger or condition>."
-For other changes, describe the need without inventing a bug.
-Name the affected workflow, not the code-level cause.
+In 1–3 plain sentences, say who is affected, what happens today, and why it
+matters to them. For a bug, name the trigger if known. For a feature or internal
+work, describe the need in the actual workflow without inventing harm.
+Could a reader understand the problem without knowing your proposed fix?
+
+Good: "Background checks can use up a new user's model allowance before they've
+asked the assistant to monitor anything."
+Bad: "Turn off periodic checks on fresh installs."
 -->
 
 ## User Impact
