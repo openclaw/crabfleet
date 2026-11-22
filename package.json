@@ -29,15 +29,15 @@
     "build:docs": "node scripts/build-docs-site.mjs"
   },
   "dependencies": {
-    "kysely": "^0.29.6",
+    "kysely": "^0.29.9",
     "preact": "^10.29.8"
   },
   "devDependencies": {
-    "@cloudflare/workers-types": "5.20261005.1",
+    "@cloudflare/workers-types": "5.20261114.1",
     "@preact/preset-vite": "^2.10.6",
-    "oxfmt": "^0.71.0",
-    "oxlint": "^1.86.0",
-    "playwright": "1.63.0",
+    "oxfmt": "^0.78.0",
+    "oxlint": "1.93.0",
+    "playwright": "1.65.1",
     "typescript": "^7.0.2",
     "vite": "^8.3.2",
     "wrangler": "4.147.0"
